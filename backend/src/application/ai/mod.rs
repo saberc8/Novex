@@ -1,2 +1,3 @@
+pub mod capability_service;
 pub mod foundation_service;
 pub mod knowledge_service;
