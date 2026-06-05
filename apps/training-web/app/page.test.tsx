@@ -1,9 +1,19 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import Page from "./page";
+import { createAgentRun } from "@/api/agent";
+import { dryRunTool } from "@/api/capability";
 import { listEvalDatasets, runEval } from "@/api/eval";
 import { askDataset, listDatasets, submitRagFeedback } from "@/api/knowledge";
 import type { DatasetResp } from "@/types/knowledge";
+
+vi.mock("@/api/agent", () => ({
+  createAgentRun: vi.fn()
+}));
+
+vi.mock("@/api/capability", () => ({
+  dryRunTool: vi.fn()
+}));
 
 vi.mock("@/api/eval", () => ({
   listEvalDatasets: vi.fn(),
@@ -17,6 +27,8 @@ vi.mock("@/api/knowledge", () => ({
 }));
 
 const askDatasetMock = vi.mocked(askDataset);
+const createAgentRunMock = vi.mocked(createAgentRun);
+const dryRunToolMock = vi.mocked(dryRunTool);
 const listEvalDatasetsMock = vi.mocked(listEvalDatasets);
 const listDatasetsMock = vi.mocked(listDatasets);
 const runEvalMock = vi.mocked(runEval);
@@ -67,6 +79,33 @@ describe("Training home page", () => {
       id: 99,
       traceId: 42,
       rating: "not_helpful"
+    });
+    createAgentRunMock.mockResolvedValue({
+      runId: 900,
+      traceId: "agent-900",
+      status: "succeeded",
+      intent: "training_quiz",
+      loopKind: "react",
+      selectedToolCode: null,
+      pauseReason: null,
+      finalOutput: "测验已生成：请根据培训资料回答 5 道题。",
+      taskBudget: {
+        maxSteps: 6,
+        maxToolCalls: 0,
+        maxSeconds: 30,
+        maxCostCents: 0
+      },
+      createTime: "2026-06-05 12:00:00",
+      updateTime: "2026-06-05 12:00:01"
+    });
+    dryRunToolMock.mockResolvedValue({
+      auditId: 901,
+      toolCode: "feishu.message.send",
+      status: "succeeded",
+      dryRun: true,
+      response: {
+        message: "dry-run only; no external side effects"
+      }
     });
     listEvalDatasetsMock.mockResolvedValue({
       list: [
@@ -171,5 +210,46 @@ describe("Training home page", () => {
     );
     expect(await screen.findByText("通过 2 / 3")).toBeTruthy();
     expect(await screen.findByText("平均 0.67")).toBeTruthy();
+  });
+
+  it("runs the quiz skill from the customer workbench with a bounded agent budget", async () => {
+    render(<Page />);
+
+    fireEvent.click(screen.getByRole("button", { name: "生成测验" }));
+
+    await waitFor(() =>
+      expect(createAgentRunMock).toHaveBeenCalledWith({
+        input: "为信息安全入职培训生成 5 道测验题",
+        autoApprove: true,
+        budget: {
+          maxSteps: 6,
+          maxToolCalls: 0,
+          maxSeconds: 30,
+          maxCostCents: 0
+        }
+      })
+    );
+    expect(await screen.findByText("测验已生成")).toBeTruthy();
+    expect(await screen.findByText("Run #900")).toBeTruthy();
+    expect(screen.queryByText("ai:tool:dryRun")).toBeNull();
+  });
+
+  it("dry-runs a Feishu training reminder and shows the audit status to employees", async () => {
+    render(<Page />);
+
+    fireEvent.click(screen.getByRole("button", { name: "发送学习提醒" }));
+
+    await waitFor(() =>
+      expect(dryRunToolMock).toHaveBeenCalledWith({
+        toolCode: "feishu.message.send",
+        input: {
+          recipient: "training-team",
+          text: "请完成信息安全入职培训"
+        }
+      })
+    );
+    expect(await screen.findByText("提醒已发送（演练）")).toBeTruthy();
+    expect(await screen.findByText("Audit #901")).toBeTruthy();
+    expect(screen.queryByText("permissionCode")).toBeNull();
   });
 });

@@ -259,7 +259,7 @@ impl AgentService {
                 .await?;
             }
         } else {
-            let final_output = format!("Agent handled {} without tool execution.", plan.intent);
+            let final_output = final_output_for_intent(&plan.intent);
             self.finish_without_tool(user_id, run_id, &final_output)
                 .await?;
             self.refresh_trace_snapshot(user_id, run_id, Value::Null)
@@ -936,6 +936,22 @@ fn intent_code(intent: AgentIntent) -> String {
     .to_owned()
 }
 
+fn final_output_for_intent(intent: &str) -> String {
+    if intent == "training_quiz" {
+        return [
+            "测验已生成：请根据培训资料回答 5 道题。",
+            "1. 客户数据能否复制到个人网盘？",
+            "2. 外发客户数据前需要完成什么审批？",
+            "3. 新员工第一周应完成哪些安全培训？",
+            "4. 发现权限异常或越权访问时应如何处理？",
+            "5. 为什么客户数据处理需要保留访问审计？",
+        ]
+        .join("\n");
+    }
+
+    format!("Agent handled {intent} without tool execution.")
+}
+
 fn loop_kind_code(loop_kind: AgentLoopKind) -> String {
     match loop_kind {
         AgentLoopKind::ReAct => "react",
@@ -1037,5 +1053,15 @@ mod tests {
         .unwrap_err();
 
         assert!(err.to_string().contains("工具调用预算不足"));
+    }
+
+    #[test]
+    fn agent_runtime_training_quiz_outputs_employee_readable_questions() {
+        let output = final_output_for_intent("training_quiz");
+
+        assert!(output.contains("测验已生成"));
+        assert!(output.contains("1."));
+        assert!(output.contains("客户数据"));
+        assert!(!output.contains("without tool"));
     }
 }

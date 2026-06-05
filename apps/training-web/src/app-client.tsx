@@ -9,6 +9,7 @@ import {
   CheckCircle2,
   CircleAlert,
   CircleDashed,
+  ListChecks,
   Quote,
   RotateCw,
   Send,
@@ -16,11 +17,15 @@ import {
   ThumbsDown,
   ThumbsUp
 } from "lucide-react";
+import { createAgentRun } from "@/api/agent";
+import { dryRunTool } from "@/api/capability";
 import { listEvalDatasets, runEval } from "@/api/eval";
 import { askDataset, listDatasets, submitRagFeedback } from "@/api/knowledge";
 import { CitationList, type CitationItem } from "@/components/citation-list";
 import { MetricStrip } from "@/components/metric-strip";
 import { TrainingShell } from "@/components/training-shell";
+import type { AgentRunResp } from "@/types/agent";
+import type { ToolDryRunResp } from "@/types/capability";
 import type { EvalDatasetResp, EvalRunResp } from "@/types/eval";
 import type { DatasetResp, RagAskResp, RagFeedbackRating } from "@/types/knowledge";
 
@@ -130,6 +135,12 @@ export function TrainingAppClient() {
   const [evalRunning, setEvalRunning] = useState(false);
   const [feedbackSubmitting, setFeedbackSubmitting] = useState(false);
   const [feedbackStatus, setFeedbackStatus] = useState("");
+  const [quizRun, setQuizRun] = useState<AgentRunResp | null>(null);
+  const [quizRunning, setQuizRunning] = useState(false);
+  const [quizStatus, setQuizStatus] = useState("");
+  const [reminderResult, setReminderResult] = useState<ToolDryRunResp | null>(null);
+  const [reminderSending, setReminderSending] = useState(false);
+  const [reminderStatus, setReminderStatus] = useState("");
 
   useEffect(() => {
     let mounted = true;
@@ -257,6 +268,57 @@ export function TrainingAppClient() {
       setEvalStatus("fallback");
     } finally {
       setEvalRunning(false);
+    }
+  }
+
+  async function handleGenerateQuiz() {
+    if (quizRunning) {
+      return;
+    }
+
+    setQuizRunning(true);
+    setQuizStatus("");
+    try {
+      const response = await createAgentRun({
+        input: "为信息安全入职培训生成 5 道测验题",
+        autoApprove: true,
+        budget: {
+          maxSteps: 6,
+          maxToolCalls: 0,
+          maxSeconds: 30,
+          maxCostCents: 0
+        }
+      });
+      setQuizRun(response);
+      setQuizStatus("测验已生成");
+    } catch {
+      setQuizStatus("测验生成失败");
+    } finally {
+      setQuizRunning(false);
+    }
+  }
+
+  async function handleSendReminder() {
+    if (reminderSending) {
+      return;
+    }
+
+    setReminderSending(true);
+    setReminderStatus("");
+    try {
+      const response = await dryRunTool({
+        toolCode: "feishu.message.send",
+        input: {
+          recipient: "training-team",
+          text: "请完成信息安全入职培训"
+        }
+      });
+      setReminderResult(response);
+      setReminderStatus("提醒已发送（演练）");
+    } catch {
+      setReminderStatus("提醒发送失败");
+    } finally {
+      setReminderSending(false);
     }
   }
 
@@ -480,17 +542,59 @@ export function TrainingAppClient() {
               <div className="rounded-lg bg-rose-50 p-3 text-rose-800">
                 最近错题集中在客户数据外发和权限申请。
               </div>
+              <button
+                className="inline-flex h-9 w-full items-center justify-center gap-2 rounded-md border border-slate-200 px-3 text-sm font-semibold text-slate-700 hover:bg-slate-50 disabled:text-slate-300"
+                disabled={quizRunning}
+                onClick={() => void handleGenerateQuiz()}
+                type="button"
+              >
+                <ListChecks aria-hidden="true" className="h-4 w-4" />
+                生成测验
+              </button>
+              {quizStatus ? (
+                <div className="rounded-lg border border-slate-200 p-3">
+                  <div className="flex items-center justify-between gap-3">
+                    <span className="text-sm font-medium text-slate-900">{quizStatus}</span>
+                    {quizRun ? (
+                      <span className="rounded-md bg-slate-100 px-2 py-1 text-xs font-medium text-slate-600">
+                        Run #{quizRun.runId}
+                      </span>
+                    ) : null}
+                  </div>
+                  {quizRun?.finalOutput ? (
+                    <div className="mt-2 text-xs leading-5 text-slate-500">
+                      {quizRun.finalOutput}
+                    </div>
+                  ) : null}
+                </div>
+              ) : null}
             </div>
           </section>
 
           <section className="rounded-lg border border-slate-200 bg-white p-4 shadow-sm">
-            <div className="flex items-center gap-2">
-              <Bell aria-hidden="true" className="h-4 w-4 text-teal-700" />
-              <h2 className="text-sm font-semibold text-slate-950">通知状态</h2>
+            <div className="flex items-center justify-between gap-3">
+              <div className="flex items-center gap-2">
+                <Bell aria-hidden="true" className="h-4 w-4 text-teal-700" />
+                <h2 className="text-sm font-semibold text-slate-950">通知状态</h2>
+              </div>
+              {reminderResult ? (
+                <span className="rounded-md bg-slate-100 px-2 py-1 text-xs font-medium text-slate-600">
+                  Audit #{reminderResult.auditId}
+                </span>
+              ) : null}
             </div>
             <div className="mt-3 text-sm leading-6 text-slate-600">
-              飞书学习任务已发送，员工可从通知回到培训工作台继续学习。
+              {reminderStatus || "飞书学习任务已发送，员工可从通知回到培训工作台继续学习。"}
             </div>
+            <button
+              className="mt-3 inline-flex h-9 w-full items-center justify-center gap-2 rounded-md border border-slate-200 px-3 text-sm font-semibold text-slate-700 hover:bg-slate-50 disabled:text-slate-300"
+              disabled={reminderSending}
+              onClick={() => void handleSendReminder()}
+              type="button"
+            >
+              <Bell aria-hidden="true" className="h-4 w-4" />
+              发送学习提醒
+            </button>
           </section>
         </aside>
       </div>
