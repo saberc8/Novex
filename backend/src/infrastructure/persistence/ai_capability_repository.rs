@@ -41,6 +41,52 @@ pub struct CapabilityRecord {
     pub create_time: NaiveDateTime,
 }
 
+#[derive(Debug, Clone, FromRow)]
+pub struct ToolLookupRecord {
+    pub id: i64,
+    pub code: String,
+    pub risk_level: i16,
+    pub permission_code: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ToolAuditFilter<'a> {
+    pub tenant_id: i64,
+    pub tool_code: Option<&'a str>,
+    pub limit: i64,
+    pub offset: i64,
+}
+
+#[derive(Debug, Clone)]
+pub struct ToolAuditSaveRecord {
+    pub id: i64,
+    pub tenant_id: i64,
+    pub tool_id: i64,
+    pub tool_code: String,
+    pub caller_kind: String,
+    pub caller_id: Option<i64>,
+    pub request_payload: Value,
+    pub response_payload: Value,
+    pub status: String,
+    pub dry_run: bool,
+    pub risk_level: i16,
+    pub permission_code: Option<String>,
+    pub error_message: Option<String>,
+    pub user_id: i64,
+    pub now: NaiveDateTime,
+}
+
+#[derive(Debug, Clone, FromRow)]
+pub struct ToolAuditRecord {
+    pub id: i64,
+    pub tool_code: String,
+    pub status: String,
+    pub dry_run: bool,
+    pub risk_level: i16,
+    pub permission_code: String,
+    pub create_time: NaiveDateTime,
+}
+
 impl AiCapabilityRepository {
     pub fn new(db: PgPool) -> Self {
         Self { db }
@@ -75,6 +121,102 @@ impl AiCapabilityRepository {
             .push_bind(filter.offset);
         Ok(query
             .build_query_as::<CapabilityRecord>()
+            .fetch_all(&self.db)
+            .await?)
+    }
+
+    pub async fn find_tool_by_code(
+        &self,
+        tenant_id: i64,
+        tool_code: &str,
+    ) -> Result<Option<ToolLookupRecord>, AppError> {
+        Ok(sqlx::query_as::<_, ToolLookupRecord>(
+            r#"
+SELECT id, code, risk_level, permission_code
+FROM ai_tool
+WHERE tenant_id = $1 AND code = $2 AND status = 1;
+"#,
+        )
+        .bind(tenant_id)
+        .bind(tool_code)
+        .fetch_optional(&self.db)
+        .await?)
+    }
+
+    pub async fn create_tool_call_audit(
+        &self,
+        record: &ToolAuditSaveRecord,
+    ) -> Result<(), AppError> {
+        sqlx::query(
+            r#"
+INSERT INTO ai_tool_call_audit (
+    id, tenant_id, tool_id, tool_code, caller_kind, caller_id, request_payload,
+    response_payload, status, dry_run, risk_level, permission_code, error_message,
+    create_user, create_time
+)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15);
+"#,
+        )
+        .bind(record.id)
+        .bind(record.tenant_id)
+        .bind(record.tool_id)
+        .bind(&record.tool_code)
+        .bind(&record.caller_kind)
+        .bind(record.caller_id)
+        .bind(&record.request_payload)
+        .bind(&record.response_payload)
+        .bind(&record.status)
+        .bind(record.dry_run)
+        .bind(record.risk_level)
+        .bind(&record.permission_code)
+        .bind(&record.error_message)
+        .bind(record.user_id)
+        .bind(record.now)
+        .execute(&self.db)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn count_tool_call_audits(
+        &self,
+        filter: &ToolAuditFilter<'_>,
+    ) -> Result<i64, AppError> {
+        let mut query =
+            QueryBuilder::<Postgres>::new("SELECT COUNT(*) FROM ai_tool_call_audit AS a");
+        query.push(" WHERE 1 = 1");
+        push_tool_audit_filters(&mut query, filter);
+        Ok(query
+            .build_query_scalar::<i64>()
+            .fetch_one(&self.db)
+            .await?)
+    }
+
+    pub async fn list_tool_call_audits(
+        &self,
+        filter: &ToolAuditFilter<'_>,
+    ) -> Result<Vec<ToolAuditRecord>, AppError> {
+        let mut query = QueryBuilder::<Postgres>::new(
+            r#"
+SELECT
+    a.id,
+    a.tool_code,
+    a.status,
+    a.dry_run,
+    a.risk_level,
+    COALESCE(a.permission_code, '') AS permission_code,
+    a.create_time
+FROM ai_tool_call_audit AS a
+"#,
+        );
+        query.push(" WHERE 1 = 1");
+        push_tool_audit_filters(&mut query, filter);
+        query
+            .push(" ORDER BY a.create_time DESC, a.id DESC LIMIT ")
+            .push_bind(filter.limit)
+            .push(" OFFSET ")
+            .push_bind(filter.offset);
+        Ok(query
+            .build_query_as::<ToolAuditRecord>()
             .fetch_all(&self.db)
             .await?)
     }
@@ -221,4 +363,15 @@ fn push_filters(
 
 fn non_empty(value: Option<&str>) -> Option<&str> {
     value.map(str::trim).filter(|value| !value.is_empty())
+}
+
+fn push_tool_audit_filters(query: &mut QueryBuilder<'_, Postgres>, filter: &ToolAuditFilter<'_>) {
+    query
+        .push(" AND a.tenant_id = ")
+        .push_bind(filter.tenant_id);
+    if let Some(tool_code) = non_empty(filter.tool_code) {
+        query
+            .push(" AND a.tool_code = ")
+            .push_bind(tool_code.to_owned());
+    }
 }

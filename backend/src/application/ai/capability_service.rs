@@ -1,14 +1,17 @@
+use chrono::Utc;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{json, Value};
 use sqlx::PgPool;
 
 use crate::{
-    application::system::format_datetime,
+    application::system::{ensure_max_chars, format_datetime},
     infrastructure::persistence::ai_capability_repository::{
         AiCapabilityRepository, CapabilityFilter, CapabilityRecord, CapabilityResource,
+        ToolAuditFilter, ToolAuditRecord, ToolAuditSaveRecord,
     },
     shared::{
         error::AppError,
+        id::next_id,
         pagination::{PageQuery, PageResult, DEFAULT_PAGE},
     },
 };
@@ -73,6 +76,68 @@ pub struct CapabilityItemResp {
     pub status: i16,
     pub risk_level: Option<i16>,
     pub metadata: Value,
+    pub create_time: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolDryRunCommand {
+    #[serde(default)]
+    pub tool_code: String,
+    #[serde(default)]
+    pub input: Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolDryRunResp {
+    pub audit_id: i64,
+    pub tool_code: String,
+    pub status: String,
+    pub dry_run: bool,
+    pub response: Value,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolCallAuditQuery {
+    #[serde(default = "default_page")]
+    pub page: u64,
+    #[serde(default = "default_capability_size")]
+    pub size: u64,
+    #[serde(default)]
+    pub tool_code: Option<String>,
+}
+
+impl Default for ToolCallAuditQuery {
+    fn default() -> Self {
+        Self {
+            page: DEFAULT_PAGE,
+            size: DEFAULT_CAPABILITY_PAGE_SIZE,
+            tool_code: None,
+        }
+    }
+}
+
+impl ToolCallAuditQuery {
+    pub fn page_query(&self) -> PageQuery {
+        PageQuery {
+            page: self.page,
+            size: self.size,
+        }
+        .normalized()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolCallAuditResp {
+    pub id: i64,
+    pub tool_code: String,
+    pub status: String,
+    pub dry_run: bool,
+    pub risk_level: i16,
+    pub permission_code: String,
     pub create_time: String,
 }
 
@@ -144,6 +209,80 @@ impl CapabilityService {
         self.list(CapabilityResource::McpServer, query).await
     }
 
+    pub async fn dry_run_tool(
+        &self,
+        user_id: i64,
+        command: ToolDryRunCommand,
+    ) -> Result<ToolDryRunResp, AppError> {
+        let command = normalize_tool_dry_run_command(command)?;
+        let Some(tool) = self
+            .repo
+            .find_tool_by_code(DEFAULT_TENANT_ID, &command.tool_code)
+            .await?
+        else {
+            return Err(AppError::NotFound);
+        };
+        let audit_id = next_id();
+        let response_payload = json!({
+            "dryRun": true,
+            "toolCode": tool.code,
+            "status": "succeeded",
+            "inputEcho": command.input,
+            "message": "dry-run only; no external side effects"
+        });
+        let now = Utc::now().naive_utc();
+        let record = ToolAuditSaveRecord {
+            id: audit_id,
+            tenant_id: DEFAULT_TENANT_ID,
+            tool_id: tool.id,
+            tool_code: tool.code.clone(),
+            caller_kind: "admin".to_owned(),
+            caller_id: Some(user_id),
+            request_payload: json!({
+                "toolCode": tool.code,
+                "input": response_payload["inputEcho"].clone()
+            }),
+            response_payload: response_payload.clone(),
+            status: "succeeded".to_owned(),
+            dry_run: true,
+            risk_level: tool.risk_level,
+            permission_code: tool.permission_code,
+            error_message: None,
+            user_id,
+            now,
+        };
+        self.repo.create_tool_call_audit(&record).await?;
+
+        Ok(tool_dry_run_response(
+            audit_id,
+            &tool.code,
+            response_payload,
+        ))
+    }
+
+    pub async fn list_tool_audits(
+        &self,
+        query: ToolCallAuditQuery,
+    ) -> Result<PageResult<ToolCallAuditResp>, AppError> {
+        let page = query.page_query();
+        let filter = ToolAuditFilter {
+            tenant_id: DEFAULT_TENANT_ID,
+            tool_code: query.tool_code.as_deref(),
+            limit: page.limit(),
+            offset: page.offset(),
+        };
+        let total = self.repo.count_tool_call_audits(&filter).await?;
+        let list = self
+            .repo
+            .list_tool_call_audits(&filter)
+            .await?
+            .into_iter()
+            .map(ToolCallAuditResp::from)
+            .collect();
+
+        Ok(PageResult::new(list, total))
+    }
+
     async fn list(
         &self,
         resource: CapabilityResource,
@@ -170,6 +309,27 @@ impl CapabilityService {
     }
 }
 
+pub fn normalize_tool_dry_run_command(
+    mut command: ToolDryRunCommand,
+) -> Result<ToolDryRunCommand, AppError> {
+    command.tool_code = command.tool_code.trim().to_owned();
+    if command.tool_code.is_empty() {
+        return Err(AppError::bad_request("工具编码不能为空"));
+    }
+    ensure_max_chars("工具编码", &command.tool_code, 128)?;
+    Ok(command)
+}
+
+fn tool_dry_run_response(audit_id: i64, tool_code: &str, response: Value) -> ToolDryRunResp {
+    ToolDryRunResp {
+        audit_id,
+        tool_code: tool_code.to_owned(),
+        status: "succeeded".to_owned(),
+        dry_run: true,
+        response,
+    }
+}
+
 impl From<CapabilityRecord> for CapabilityItemResp {
     fn from(record: CapabilityRecord) -> Self {
         Self {
@@ -181,6 +341,20 @@ impl From<CapabilityRecord> for CapabilityItemResp {
             status: record.status,
             risk_level: record.risk_level,
             metadata: record.metadata,
+            create_time: format_datetime(record.create_time),
+        }
+    }
+}
+
+impl From<ToolAuditRecord> for ToolCallAuditResp {
+    fn from(record: ToolAuditRecord) -> Self {
+        Self {
+            id: record.id,
+            tool_code: record.tool_code,
+            status: record.status,
+            dry_run: record.dry_run,
+            risk_level: record.risk_level,
+            permission_code: record.permission_code,
             create_time: format_datetime(record.create_time),
         }
     }
@@ -218,5 +392,27 @@ mod tests {
 
         assert_eq!(query.status, Some(1));
         assert_eq!(query.page_query().limit(), 20);
+    }
+
+    #[test]
+    fn tool_dry_run_rejects_blank_tool_code() {
+        let command = ToolDryRunCommand {
+            tool_code: "   ".to_owned(),
+            input: Value::Null,
+        };
+
+        let err = normalize_tool_dry_run_command(command).unwrap_err();
+
+        assert!(err.to_string().contains("工具编码不能为空"));
+    }
+
+    #[test]
+    fn tool_dry_run_response_includes_audit_id_and_status() {
+        let resp = tool_dry_run_response(99, "rag.search", Value::Null);
+
+        assert_eq!(resp.audit_id, 99);
+        assert_eq!(resp.tool_code, "rag.search");
+        assert_eq!(resp.status, "succeeded");
+        assert!(resp.dry_run);
     }
 }

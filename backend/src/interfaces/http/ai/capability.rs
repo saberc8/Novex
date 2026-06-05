@@ -7,6 +7,7 @@ use axum::{
 use crate::{
     application::ai::capability_service::{
         CapabilityItemResp, CapabilityQuery, CapabilityService, CapabilitySummaryResp,
+        ToolCallAuditQuery, ToolCallAuditResp, ToolDryRunCommand, ToolDryRunResp,
     },
     domain::auth::model::CurrentUser,
     interfaces::http::{middleware::permission::require_permission, AppState},
@@ -19,10 +20,17 @@ const CONNECTOR_LIST_PERMISSION: &str = "ai:connector:list";
 const PLUGIN_LIST_PERMISSION: &str = "ai:plugin:list";
 const TRIGGER_LIST_PERMISSION: &str = "ai:trigger:list";
 const MCP_LIST_PERMISSION: &str = "ai:mcp:list";
+const TOOL_DRY_RUN_PERMISSION: &str = "ai:tool:dryRun";
+const TOOL_AUDIT_LIST_PERMISSION: &str = "ai:tool:audit:list";
 
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/ai/capabilities/summary", get(summary))
+        .route(
+            "/ai/capabilities/tools/dry-run",
+            axum::routing::post(dry_run_tool),
+        )
+        .route("/ai/capabilities/tools/audits", get(list_tool_audits))
         .route("/ai/capabilities/tools", get(list_tools))
         .route("/ai/capabilities/connectors", get(list_connectors))
         .route("/ai/capabilities/plugins", get(list_plugins))
@@ -97,6 +105,32 @@ async fn list_mcp_servers(
     )))
 }
 
+async fn dry_run_tool(
+    State(state): State<AppState>,
+    current_user: CurrentUser,
+    Json(command): Json<ToolDryRunCommand>,
+) -> Result<Json<ApiResponse<ToolDryRunResp>>, AppError> {
+    require_permission(&current_user, TOOL_DRY_RUN_PERMISSION)?;
+    let service = CapabilityService::new(state.db);
+
+    Ok(Json(ApiResponse::ok(
+        service.dry_run_tool(current_user.id, command).await?,
+    )))
+}
+
+async fn list_tool_audits(
+    State(state): State<AppState>,
+    current_user: CurrentUser,
+    Query(query): Query<ToolCallAuditQuery>,
+) -> Result<Json<ApiResponse<PageResult<ToolCallAuditResp>>>, AppError> {
+    require_permission(&current_user, TOOL_AUDIT_LIST_PERMISSION)?;
+    let service = CapabilityService::new(state.db);
+
+    Ok(Json(ApiResponse::ok(
+        service.list_tool_audits(query).await?,
+    )))
+}
+
 #[cfg(test)]
 mod tests {
     use axum::{
@@ -150,6 +184,8 @@ mod tests {
         assert_eq!(PLUGIN_LIST_PERMISSION, "ai:plugin:list");
         assert_eq!(TRIGGER_LIST_PERMISSION, "ai:trigger:list");
         assert_eq!(MCP_LIST_PERMISSION, "ai:mcp:list");
+        assert_eq!(TOOL_DRY_RUN_PERMISSION, "ai:tool:dryRun");
+        assert_eq!(TOOL_AUDIT_LIST_PERMISSION, "ai:tool:audit:list");
     }
 
     #[test]
@@ -174,6 +210,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn tool_dry_run_handler_rejects_missing_permission() {
+        let err = dry_run_tool(
+            State(test_state()),
+            user_with_permissions(vec![]),
+            Json(ToolDryRunCommand {
+                tool_code: "rag.search".to_owned(),
+                input: Value::Null,
+            }),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(matches!(err, AppError::Forbidden));
+    }
+
+    #[tokio::test]
+    async fn tool_audit_list_handler_rejects_missing_permission() {
+        let err = list_tool_audits(
+            State(test_state()),
+            user_with_permissions(vec![]),
+            Query(ToolCallAuditQuery::default()),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(matches!(err, AppError::Forbidden));
+    }
+
+    #[tokio::test]
     async fn capability_route_is_registered_and_requires_auth() {
         let db = PgPoolOptions::new()
             .connect_lazy("postgres://postgres:postgres@localhost:5432/avalon_admin")
@@ -187,6 +252,32 @@ mod tests {
                     .uri("/ai/capabilities/summary")
                     .header(header::ACCEPT, "application/json")
                     .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let body = serde_json::from_slice::<Value>(&body).unwrap();
+        assert_eq!(body["code"], "401");
+    }
+
+    #[tokio::test]
+    async fn tool_dry_run_route_is_registered_and_requires_auth() {
+        let db = PgPoolOptions::new()
+            .connect_lazy("postgres://postgres:postgres@localhost:5432/avalon_admin")
+            .unwrap();
+        let jwt = JwtService::new("test-secret".to_owned(), 24);
+        let app = build_router(db, &["http://localhost:4399".to_owned()], jwt).unwrap();
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/ai/capabilities/tools/dry-run")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"toolCode":"rag.search","input":{}}"#))
                     .unwrap(),
             )
             .await
