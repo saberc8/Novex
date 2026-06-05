@@ -18,6 +18,11 @@ class ParserWorkerConfigTest(unittest.TestCase):
         self.assertTrue(config.mineru.configured)
         self.assertEqual(config.mineru.masked_token, "mine****7890")
 
+    def test_defaults_to_type_routed_parser_mode(self):
+        config = load_config({})
+
+        self.assertEqual(config.mode, "type-routed")
+
     def test_masks_short_and_empty_secrets_without_leaking_values(self):
         self.assertEqual(mask_secret(""), "")
         self.assertEqual(mask_secret("abc"), "***")

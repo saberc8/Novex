@@ -17,7 +17,7 @@ Boundaries:
 
 ## M1 Contract
 
-M1 keeps direct text ingestion in the Rust backend for a deterministic local RAG loop. The parser worker contract defines the out-of-process path for PDF, Office, OCR, and layout-aware parsing.
+M1 keeps direct text ingestion in the Rust backend for a deterministic local RAG loop. The parser worker adds the out-of-process path for PDF, Office, OCR, and layout-aware parsing while still preserving native parsing for strongly structured text/table formats.
 
 Contracts live in `contracts/`:
 
@@ -26,12 +26,22 @@ Contracts live in `contracts/`:
 
 The backend remains the authority for `tenantId`, `datasetId`, `documentId`, ACL, parser job status, chunk persistence, embedding, trace, and audit. The worker receives a bounded source reference or inline text and returns normalized `blocks` and candidate `chunks`; it does not write `ai_document`, `ai_document_chunk`, or trace tables directly.
 
-Required result shape:
+Parser strategy follows `docs/ARCHITECTURE.md` section 7.2:
+
+- PDF: submit directly to MinerU.
+- Office: convert with LibreOffice or an injected converter, then submit the normalized PDF to MinerU.
+- Image/scanned document: submit to MinerU/OCR.
+- HTML, Markdown, TXT, code, JSON, and logs: native structured parsing.
+- CSV/TSV/XLSX: table-aware parsing; do not force these through PDF. XLS/XLSX/ODS use a table extractor boundary that emits CSV/TSV-like text before chunking.
+
+Required result shape for backend ingestion:
 
 - `datasetId` and `documentId` identify the target resource.
 - `blocks` preserve layout-level parse output for citation and future UI preview.
-- `chunks` provide deterministic text spans with chunk ids, token counts, and citation payloads.
+- `chunks` provide deterministic text spans with chunk ids, token counts, semantic search text, and citation payloads.
 - `metadata` captures parser name, page count, source hash, and warnings.
+- `status=submitted` is only a parser job submission envelope for asynchronous MinerU work. It is not sent to the backend ingestion endpoint.
+- `status=succeeded` means blocks/chunks are complete and can be posted to the backend.
 
 Backend ingestion endpoint:
 
@@ -52,28 +62,36 @@ Chunk ingestion contract:
 - `segmentType`, `tableHeader`, `imageAccessKeys`, `contentRole`, and `displayCapability` may be supplied by the worker. If omitted, the backend infers them from referenced blocks and chunk text.
 - Chunk-level `metadata` is preserved under `ai_document_chunk.metadata.parserChunkMetadata`; canonical searchable/filterable fields remain in dedicated DB columns and normalized metadata keys.
 
+Worker entry points:
+
+- `parser_worker.parse.parse_request(request)` routes by file type. It returns a completed `succeeded` parse result for native structured formats, or a `submitted` MinerU task envelope for PDF/Office/Image paths.
+- `parser_worker.parse.parse_mineru_markdown_result(request, markdown, mineru_metadata=...)` converts completed MinerU markdown/layout text into the same `succeeded` parsed result contract used by the backend.
+- `parser_worker.parse.parse_local_request(request)` is the native structured parser used for Markdown/TXT/CSV/code/log style inputs and for normalizing MinerU markdown output.
+- XLS/XLSX/ODS support is intentionally an injected extractor boundary in this slice; production wiring should use a spreadsheet reader or LibreOffice CSV export, not PDF conversion.
+
 ## Local MinerU Configuration
 
 MinerU credentials are runtime secrets and must not be committed. Start the worker process with:
 
 ```bash
 export MINERU_TOKEN="<token from OpenXLab/MinerU>"
-export PARSER_WORKER_MODE="mineru"
+export PARSER_WORKER_MODE="type-routed"
 PYTHONPATH=services/parser-worker python3 -m parser_worker.health
 ```
 
 The health command prints only masked credentials, for example:
 
 ```json
-{"mineru":{"configured":true,"timeoutSeconds":120,"token":"eyJ0****Esnw"},"mode":"mineru","service":"parser-worker"}
+{"mineru":{"configured":true,"timeoutSeconds":120,"token":"eyJ0****Esnw"},"mode":"type-routed","service":"parser-worker"}
 ```
 
 Current implementation status:
 
 - Reads `MINERU_TOKEN` and reports safe configuration status.
 - Provides a tested MinerU v4 client wrapper for `POST /api/v4/extract/task` and `GET /api/v4/extract/task/{task_id}`.
-- Keeps text/markdown ingestion in Rust for the deterministic M1 RAG loop.
-- Leaves actual MinerU PDF/OCR network parsing behind the parser-worker contract for the next parser execution slice.
+- Implements a type-routed parser worker boundary: native structured parsing for Markdown/TXT/CSV-style inputs, PDF direct MinerU submission, and Office-to-PDF-to-MinerU submission through an injected converter boundary.
+- Converts completed MinerU markdown/layout output into backend-ready blocks/chunks with section path, page, table header, image access key, and semantic search text metadata.
+- Leaves production LibreOffice conversion, object storage publishing, and MinerU result ZIP download behind injectable boundaries for the next parser execution slice.
 - Unit tests use a fake transport and do not submit documents to MinerU or consume parse quota.
 
 Verification:

@@ -3,7 +3,7 @@ from os import environ
 from typing import Mapping
 
 
-DEFAULT_WORKER_MODE = "local-text"
+DEFAULT_WORKER_MODE = "type-routed"
 DEFAULT_MINERU_TIMEOUT_SECONDS = 120
 
 
@@ -65,4 +65,3 @@ def parse_positive_int(value: str | None, default: int) -> int:
     if parsed <= 0:
         raise ValueError("value must be positive")
     return parsed
-

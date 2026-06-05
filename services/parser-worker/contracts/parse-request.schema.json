@@ -74,6 +74,14 @@
           "type": "boolean",
           "default": true
         },
+        "extractFormula": {
+          "type": "boolean",
+          "default": true
+        },
+        "mineruModelVersion": {
+          "type": ["string", "null"],
+          "default": "vlm"
+        },
         "ocr": {
           "type": "boolean",
           "default": false

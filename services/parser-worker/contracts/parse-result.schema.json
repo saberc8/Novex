@@ -24,7 +24,7 @@
     },
     "status": {
       "type": "string",
-      "enum": ["succeeded", "failed"]
+      "enum": ["submitted", "succeeded", "failed"]
     },
     "error": {
       "type": ["object", "null"],
@@ -87,6 +87,49 @@
               }
             }
           }
+        }
+      }
+    },
+    "normalizedSource": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "type": "string"
+        },
+        "contentType": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "uri": {
+          "type": "string"
+        },
+        "sourceHash": {
+          "type": ["string", "null"]
+        },
+        "converted": {
+          "type": "boolean"
+        },
+        "original": {
+          "type": "object",
+          "additionalProperties": true
+        }
+      }
+    },
+    "mineruTask": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "properties": {
+        "taskId": {
+          "type": "string"
+        },
+        "state": {
+          "type": "string"
+        },
+        "fullZipUrl": {
+          "type": "string"
         }
       }
     },
@@ -199,6 +242,23 @@
         },
         "sourceHash": {
           "type": ["string", "null"]
+        },
+        "strategy": {
+          "type": "string",
+          "enum": ["native_structured", "mineru_pdf", "mineru_layout"]
+        },
+        "pdfFirst": {
+          "type": "boolean"
+        },
+        "sourceName": {
+          "type": ["string", "null"]
+        },
+        "sourceContentType": {
+          "type": ["string", "null"]
+        },
+        "mineru": {
+          "type": "object",
+          "additionalProperties": true
         },
         "warnings": {
           "type": "array",
