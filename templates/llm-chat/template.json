@@ -41,12 +41,12 @@
     {
       "code": "app_admin",
       "name": "Application Admin",
-      "permissions": ["ai:foundation:read", "ai:model:list", "ai:template:list"]
+      "permissions": ["ai:foundation:read", "ai:model:list", "ai:model:chat", "ai:template:list"]
     },
     {
       "code": "chat_user",
       "name": "Chat User",
-      "permissions": ["app:chat:use"]
+      "permissions": ["app:chat:use", "ai:model:chat"]
     }
   ],
   "menus": [

@@ -7,9 +7,16 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sqlx::{FromRow, PgPool};
 
-use crate::shared::error::AppError;
+use crate::{application::system::ensure_max_chars, shared::error::AppError};
 
 const MODEL_HEALTH_TIMEOUT: Duration = Duration::from_secs(20);
+const MODEL_CHAT_TIMEOUT: Duration = Duration::from_secs(60);
+const DEFAULT_MODEL_CHAT_TEMPERATURE: f64 = 0.2;
+const MAX_MODEL_CHAT_TEMPERATURE: f64 = 1.0;
+const DEFAULT_MODEL_CHAT_MAX_TOKENS: u32 = 1024;
+const MAX_MODEL_CHAT_MAX_TOKENS: u32 = 2048;
+const MAX_MODEL_CHAT_MESSAGES: usize = 30;
+const MAX_MODEL_CHAT_CONTENT_CHARS: usize = 12_000;
 
 #[derive(Debug, Clone, Default)]
 pub struct ModelRuntimeService;
@@ -25,6 +32,44 @@ pub struct ModelHealthCheckCommand {
 #[serde(rename_all = "camelCase")]
 pub struct ModelHealthCheckResp {
     pub results: Vec<ModelHealthCheckResult>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelChatCommand {
+    #[serde(default)]
+    pub messages: Vec<ModelChatMessage>,
+    #[serde(default)]
+    pub temperature: Option<f64>,
+    #[serde(default, rename = "maxTokens")]
+    pub max_tokens: Option<u32>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelChatMessage {
+    #[serde(default)]
+    pub role: String,
+    #[serde(default)]
+    pub content: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelChatUsage {
+    pub prompt_tokens: Option<i64>,
+    pub completion_tokens: Option<i64>,
+    pub total_tokens: Option<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelChatResp {
+    pub answer: String,
+    pub route_id: String,
+    pub model: Option<String>,
+    pub latency_ms: u128,
+    pub usage: ModelChatUsage,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -289,6 +334,126 @@ ORDER BY r.priority, r.id
 
         Ok(ModelHealthCheckResp { results })
     }
+
+    pub async fn chat_completion(command: ModelChatCommand) -> Result<ModelChatResp, AppError> {
+        let command = normalize_model_chat_command(command)?;
+        let config = ModelRuntimeConfig::from_env();
+        let route = config
+            .route(ModelRuntimeTarget::Llm)
+            .ok_or_else(|| AppError::bad_request("LLM 模型环境变量未配置完整"))?;
+        let client = reqwest::Client::builder()
+            .timeout(MODEL_CHAT_TIMEOUT)
+            .build()
+            .map_err(|err| AppError::Anyhow(err.into()))?;
+        let payload = model_chat_request_payload(route, &command);
+        let started = Instant::now();
+        let response = client
+            .post(route.endpoint())
+            .bearer_auth(route.api_key())
+            .json(&payload)
+            .send()
+            .await
+            .map_err(|err| AppError::Anyhow(err.into()))?;
+        let status = response.status();
+        let body = response.json::<Value>().await.unwrap_or(Value::Null);
+
+        if !status.is_success() {
+            return Err(AppError::bad_request(format!(
+                "LLM 模型调用失败: HTTP {}",
+                status.as_u16()
+            )));
+        }
+
+        model_chat_response_from_provider(route, body, started.elapsed().as_millis())
+    }
+}
+
+fn normalize_model_chat_command(
+    mut command: ModelChatCommand,
+) -> Result<ModelChatCommand, AppError> {
+    if command.messages.is_empty() {
+        return Err(AppError::bad_request("至少需要一条消息"));
+    }
+    if command.messages.len() > MAX_MODEL_CHAT_MESSAGES {
+        return Err(AppError::bad_request(format!(
+            "消息数量不能超过 {MAX_MODEL_CHAT_MESSAGES}"
+        )));
+    }
+
+    for message in &mut command.messages {
+        message.role = message.role.trim().to_ascii_lowercase();
+        message.content = message.content.trim().to_owned();
+        if !matches!(message.role.as_str(), "system" | "user" | "assistant") {
+            return Err(AppError::bad_request("消息角色不支持"));
+        }
+        if message.content.is_empty() {
+            return Err(AppError::bad_request("消息内容不能为空"));
+        }
+        ensure_max_chars("消息内容", &message.content, MAX_MODEL_CHAT_CONTENT_CHARS)?;
+    }
+
+    command.temperature = Some(
+        command
+            .temperature
+            .unwrap_or(DEFAULT_MODEL_CHAT_TEMPERATURE)
+            .clamp(0.0, MAX_MODEL_CHAT_TEMPERATURE),
+    );
+    command.max_tokens = Some(
+        command
+            .max_tokens
+            .unwrap_or(DEFAULT_MODEL_CHAT_MAX_TOKENS)
+            .clamp(1, MAX_MODEL_CHAT_MAX_TOKENS),
+    );
+
+    Ok(command)
+}
+
+fn model_chat_request_payload(route: &ModelRuntimeRoute, command: &ModelChatCommand) -> Value {
+    let messages = command
+        .messages
+        .iter()
+        .map(|message| {
+            json!({
+                "role": message.role,
+                "content": message.content,
+            })
+        })
+        .collect::<Vec<_>>();
+
+    json!({
+        "model": route.model().unwrap_or_default(),
+        "messages": messages,
+        "temperature": command.temperature.unwrap_or(DEFAULT_MODEL_CHAT_TEMPERATURE),
+        "max_tokens": command.max_tokens.unwrap_or(DEFAULT_MODEL_CHAT_MAX_TOKENS),
+        "stream": false,
+    })
+}
+
+fn model_chat_response_from_provider(
+    route: &ModelRuntimeRoute,
+    body: Value,
+    latency_ms: u128,
+) -> Result<ModelChatResp, AppError> {
+    let answer = body
+        .pointer("/choices/0/message/content")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+        .ok_or_else(|| AppError::bad_request("LLM 响应为空"))?;
+    let usage = body.get("usage").unwrap_or(&Value::Null);
+
+    Ok(ModelChatResp {
+        answer,
+        route_id: route.summary().route_id,
+        model: route.model().map(str::to_owned),
+        latency_ms,
+        usage: ModelChatUsage {
+            prompt_tokens: usage.get("prompt_tokens").and_then(Value::as_i64),
+            completion_tokens: usage.get("completion_tokens").and_then(Value::as_i64),
+            total_tokens: usage.get("total_tokens").and_then(Value::as_i64),
+        },
+    })
 }
 
 fn health_check_targets(target: Option<&str>) -> Result<Vec<ModelRuntimeTarget>, AppError> {
@@ -618,5 +783,111 @@ mod tests {
         let debug = format!("{summary:?}");
         assert!(!debug.contains("LLM_API_KEY"));
         assert!(!debug.contains("env:"));
+    }
+
+    #[test]
+    fn model_chat_command_keeps_supported_roles_and_trims_content() {
+        let command = normalize_model_chat_command(ModelChatCommand {
+            messages: vec![
+                ModelChatMessage {
+                    role: " system ".to_owned(),
+                    content: "  You are Novex.  ".to_owned(),
+                },
+                ModelChatMessage {
+                    role: "user".to_owned(),
+                    content: "  介绍一下 RAG 入库链路  ".to_owned(),
+                },
+            ],
+            temperature: Some(1.5),
+            max_tokens: Some(4096),
+        })
+        .unwrap();
+
+        assert_eq!(command.messages[0].role, "system");
+        assert_eq!(command.messages[0].content, "You are Novex.");
+        assert_eq!(command.messages[1].role, "user");
+        assert_eq!(command.temperature, Some(1.0));
+        assert_eq!(command.max_tokens, Some(2048));
+    }
+
+    #[test]
+    fn model_chat_payload_uses_llm_route_model_and_messages() {
+        let route = llm_test_config()
+            .route(ModelRuntimeTarget::Llm)
+            .unwrap()
+            .clone();
+        let command = normalize_model_chat_command(ModelChatCommand {
+            messages: vec![ModelChatMessage {
+                role: "user".to_owned(),
+                content: "hello".to_owned(),
+            }],
+            temperature: None,
+            max_tokens: None,
+        })
+        .unwrap();
+
+        let payload = model_chat_request_payload(&route, &command);
+
+        assert_eq!(payload["model"], "deepseek-v4-flash");
+        assert_eq!(payload["temperature"], 0.2);
+        assert_eq!(payload["max_tokens"], 1024);
+        assert_eq!(payload["messages"][0]["role"], "user");
+        assert_eq!(payload["messages"][0]["content"], "hello");
+        let debug = format!("{payload:?}");
+        assert!(!debug.contains("sk-fake-llm-secret-508d"));
+    }
+
+    #[test]
+    fn model_chat_response_extracts_answer_usage_and_route_summary() {
+        let route = llm_test_config()
+            .route(ModelRuntimeTarget::Llm)
+            .unwrap()
+            .clone();
+        let body = json!({
+            "choices": [
+                { "message": { "content": "Novex can run pure model chat." } }
+            ],
+            "usage": {
+                "prompt_tokens": 11,
+                "completion_tokens": 7,
+                "total_tokens": 18
+            }
+        });
+
+        let response = model_chat_response_from_provider(&route, body, 42).unwrap();
+
+        assert_eq!(response.answer, "Novex can run pure model chat.");
+        assert_eq!(response.route_id, "runtime.llm");
+        assert_eq!(response.model.as_deref(), Some("deepseek-v4-flash"));
+        assert_eq!(response.latency_ms, 42);
+        assert_eq!(response.usage.prompt_tokens, Some(11));
+        assert_eq!(response.usage.completion_tokens, Some(7));
+        assert_eq!(response.usage.total_tokens, Some(18));
+        assert!(!format!("{response:?}").contains("sk-fake-llm-secret-508d"));
+    }
+
+    #[test]
+    fn model_chat_rejects_empty_or_unsupported_messages() {
+        let err = normalize_model_chat_command(ModelChatCommand::default()).unwrap_err();
+        assert!(err.to_string().contains("至少需要一条消息"));
+
+        let err = normalize_model_chat_command(ModelChatCommand {
+            messages: vec![ModelChatMessage {
+                role: "tool".to_owned(),
+                content: "hello".to_owned(),
+            }],
+            ..ModelChatCommand::default()
+        })
+        .unwrap_err();
+        assert!(err.to_string().contains("消息角色不支持"));
+    }
+
+    fn llm_test_config() -> ModelRuntimeConfig {
+        ModelRuntimeConfig::from_env_map(|key| match key {
+            "LLM_API_KEY" => Some("sk-fake-llm-secret-508d".to_owned()),
+            "LLM_BASE_URL" => Some("https://api.deepseek.com".to_owned()),
+            "LLM_MODEL" => Some("deepseek-v4-flash".to_owned()),
+            _ => None,
+        })
     }
 }

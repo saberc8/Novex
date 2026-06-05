@@ -1,7 +1,9 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { metadata } from "./layout";
 import Page from "./page";
 import { askDataset, listDatasets, submitRagFeedback } from "@/api/knowledge";
+import { chatCompletion } from "@/api/model";
 import type { DatasetResp } from "@/types/knowledge";
 
 vi.mock("@/api/knowledge", () => ({
@@ -10,9 +12,14 @@ vi.mock("@/api/knowledge", () => ({
   submitRagFeedback: vi.fn()
 }));
 
+vi.mock("@/api/model", () => ({
+  chatCompletion: vi.fn()
+}));
+
 const askDatasetMock = vi.mocked(askDataset);
 const listDatasetsMock = vi.mocked(listDatasets);
 const submitRagFeedbackMock = vi.mocked(submitRagFeedback);
+const chatCompletionMock = vi.mocked(chatCompletion);
 
 function dataset(overrides: Partial<DatasetResp> = {}): DatasetResp {
   return {
@@ -60,6 +67,17 @@ describe("Chat web page", () => {
       traceId: 42,
       rating: "citation_issue"
     });
+    chatCompletionMock.mockResolvedValue({
+      answer: "Pure model answer.",
+      routeId: "runtime.llm",
+      model: "deepseek-v4-flash",
+      latencyMs: 42,
+      usage: {
+        promptTokens: 11,
+        completionTokens: 7,
+        totalTokens: 18
+      }
+    });
   });
 
   it("renders a customer-facing knowledge chat workspace", async () => {
@@ -70,6 +88,11 @@ describe("Chat web page", () => {
     expect(screen.getByRole("heading", { name: "Trace" })).toBeTruthy();
     await waitFor(() => expect(listDatasetsMock).toHaveBeenCalledWith({ page: 1, size: 20 }));
     expect((await screen.findAllByText("企业制度知识库")).length).toBeGreaterThan(0);
+  });
+
+  it("uses shared chat template metadata", () => {
+    expect(metadata.title).toBe("Novex Chat");
+    expect(metadata.description).toContain("model and knowledge");
   });
 
   it("asks the selected dataset and renders citations with route metadata", async () => {
@@ -109,5 +132,26 @@ describe("Chat web page", () => {
       })
     );
     expect(await screen.findByText("反馈已保存")).toBeTruthy();
+  });
+
+  it("runs pure model chat from the customer-facing workspace", async () => {
+    render(<Page />);
+
+    fireEvent.click(screen.getByRole("button", { name: "模型对话" }));
+    fireEvent.change(screen.getByLabelText("输入模型问题"), {
+      target: { value: "Explain Novex." }
+    });
+    fireEvent.click(screen.getByRole("button", { name: "发送模型消息" }));
+
+    await waitFor(() =>
+      expect(chatCompletionMock).toHaveBeenCalledWith({
+        messages: [{ role: "user", content: "Explain Novex." }],
+        temperature: 0.2,
+        maxTokens: 1024
+      })
+    );
+    expect(await screen.findByText("Pure model answer.")).toBeTruthy();
+    expect((await screen.findAllByText("runtime.llm · deepseek-v4-flash")).length).toBeGreaterThan(0);
+    expect((await screen.findAllByText("42 ms")).length).toBeGreaterThan(0);
   });
 });

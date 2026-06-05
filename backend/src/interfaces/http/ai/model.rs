@@ -6,7 +6,8 @@ use axum::{
 
 use crate::{
     application::ai::model_service::{
-        ModelHealthCheckCommand, ModelHealthCheckResp, ModelRegistrySummary, ModelRuntimeService,
+        ModelChatCommand, ModelChatResp, ModelHealthCheckCommand, ModelHealthCheckResp,
+        ModelRegistrySummary, ModelRuntimeService,
     },
     domain::auth::model::CurrentUser,
     interfaces::http::{middleware::permission::require_permission, AppState},
@@ -15,12 +16,14 @@ use crate::{
 
 pub const MODEL_LIST_PERMISSION: &str = "ai:model:list";
 pub const MODEL_HEALTH_PERMISSION: &str = "ai:model:healthCheck";
+pub const MODEL_CHAT_PERMISSION: &str = "ai:model:chat";
 
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/ai/models/runtime-config", get(runtime_config))
         .route("/ai/models/registry", get(model_registry))
         .route("/ai/models/health-check", post(health_check))
+        .route("/ai/models/chat", post(chat_completion))
 }
 
 async fn runtime_config(
@@ -53,6 +56,17 @@ async fn health_check(
     )))
 }
 
+async fn chat_completion(
+    current_user: CurrentUser,
+    Json(command): Json<ModelChatCommand>,
+) -> Result<Json<ApiResponse<ModelChatResp>>, AppError> {
+    require_permission(&current_user, MODEL_CHAT_PERMISSION)?;
+
+    Ok(Json(ApiResponse::ok(
+        ModelRuntimeService::chat_completion(command).await?,
+    )))
+}
+
 #[cfg(test)]
 mod tests {
     use axum::{
@@ -66,6 +80,7 @@ mod tests {
 
     use super::*;
     use crate::{
+        application::ai::model_service::ModelChatMessage,
         domain::auth::model::{CurrentUser, RoleContext},
         infrastructure::security::jwt::JwtService,
         interfaces::http::build_router,
@@ -92,9 +107,12 @@ mod tests {
         let seed = include_str!(
             "../../../../migrations/202606050013_seed_ai_model_runtime_permissions.sql"
         );
+        let chat_seed =
+            include_str!("../../../../migrations/202606050019_seed_ai_model_chat_permission.sql");
 
         assert!(seed.contains(MODEL_LIST_PERMISSION));
         assert!(seed.contains(MODEL_HEALTH_PERMISSION));
+        assert!(chat_seed.contains(MODEL_CHAT_PERMISSION));
     }
 
     #[test]
@@ -169,6 +187,24 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn model_chat_handler_rejects_missing_permission_before_network() {
+        let err = chat_completion(
+            user_with_permissions(vec![]),
+            axum::Json(ModelChatCommand {
+                messages: vec![ModelChatMessage {
+                    role: "user".to_owned(),
+                    content: "hello".to_owned(),
+                }],
+                ..ModelChatCommand::default()
+            }),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(matches!(err, AppError::Forbidden));
+    }
+
+    #[tokio::test]
     async fn model_runtime_routes_are_registered_and_require_auth() {
         let db = PgPoolOptions::new()
             .connect_lazy("postgres://postgres:postgres@localhost:5432/avalon_admin")
@@ -207,6 +243,35 @@ mod tests {
                     .uri("/ai/models/registry")
                     .header(header::ACCEPT, "application/json")
                     .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let body = serde_json::from_slice::<Value>(&body).unwrap();
+        assert_eq!(body["code"], "401");
+    }
+
+    #[tokio::test]
+    async fn model_chat_route_is_registered_and_requires_auth() {
+        let db = PgPoolOptions::new()
+            .connect_lazy("postgres://postgres:postgres@localhost:5432/avalon_admin")
+            .unwrap();
+        let jwt = JwtService::new("test-secret".to_owned(), 24);
+        let app = build_router(db, &["http://localhost:4399".to_owned()], jwt).unwrap();
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/ai/models/chat")
+                    .header(header::ACCEPT, "application/json")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        r#"{"messages":[{"role":"user","content":"hello"}]}"#,
+                    ))
                     .unwrap(),
             )
             .await

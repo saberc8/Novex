@@ -536,6 +536,23 @@ mod tests {
     }
 
     #[test]
+    fn delivery_template_manifest_registers_llm_chat_runtime_permission() {
+        let template = get_delivery_template("llm_chat").unwrap();
+        let chat_user = template
+            .roles
+            .iter()
+            .find(|role| role.code == "chat_user")
+            .unwrap();
+
+        assert_eq!(template.frontend_app, "chat-web");
+        assert!(chat_user.permissions.contains(&"app:chat:use".to_owned()));
+        assert!(chat_user.permissions.contains(&"ai:model:chat".to_owned()));
+        assert!(template.smoke_checks.iter().any(|check| {
+            check.workdir == "backend" && check.command.contains("model_service")
+        }));
+    }
+
+    #[test]
     fn delivery_template_manifest_registers_agent_customer_frontend_metadata() {
         let template = get_delivery_template("agent_workspace").unwrap();
         let page_codes = template
