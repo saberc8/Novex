@@ -1,0 +1,11 @@
+[package]
+name = "novex-agent"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+novex-ai-core.workspace = true
+novex-model = { path = "../novex-model" }
+novex-rag = { path = "../novex-rag" }
+novex-tools = { path = "../novex-tools" }
+serde.workspace = true

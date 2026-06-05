@@ -1,0 +1,8 @@
+[package]
+name = "novex-connectors"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+novex-ai-core.workspace = true
+serde.workspace = true

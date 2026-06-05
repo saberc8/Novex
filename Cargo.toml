@@ -2,6 +2,16 @@
 members = [
     "backend",
     "crates/novex-ai-core",
+    "crates/novex-model",
+    "crates/novex-rag",
+    "crates/novex-agent",
+    "crates/novex-tools",
+    "crates/novex-connectors",
+    "crates/novex-mcp",
+    "crates/novex-plugin",
+    "crates/novex-trigger",
+    "crates/novex-memory",
+    "crates/novex-eval",
 ]
 resolver = "2"
 
@@ -10,4 +20,5 @@ version = "0.1.0"
 edition = "2021"
 
 [workspace.dependencies]
+novex-ai-core = { path = "crates/novex-ai-core" }
 serde = { version = "1", features = ["derive"] }

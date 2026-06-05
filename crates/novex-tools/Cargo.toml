@@ -1,0 +1,11 @@
+[package]
+name = "novex-tools"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+novex-ai-core.workspace = true
+novex-connectors = { path = "../novex-connectors" }
+novex-mcp = { path = "../novex-mcp" }
+novex-model = { path = "../novex-model" }
+serde.workspace = true

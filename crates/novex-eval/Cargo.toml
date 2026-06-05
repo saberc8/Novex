@@ -1,0 +1,8 @@
+[package]
+name = "novex-eval"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+novex-ai-core.workspace = true
+serde.workspace = true

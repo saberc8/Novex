@@ -1639,9 +1639,99 @@ dependencies = [
 ]
 
 [[package]]
+name = "novex-agent"
+version = "0.1.0"
+dependencies = [
+ "novex-ai-core",
+ "novex-model",
+ "novex-rag",
+ "novex-tools",
+ "serde",
+]
+
+[[package]]
 name = "novex-ai-core"
 version = "0.1.0"
 dependencies = [
+ "serde",
+]
+
+[[package]]
+name = "novex-connectors"
+version = "0.1.0"
+dependencies = [
+ "novex-ai-core",
+ "serde",
+]
+
+[[package]]
+name = "novex-eval"
+version = "0.1.0"
+dependencies = [
+ "novex-ai-core",
+ "serde",
+]
+
+[[package]]
+name = "novex-mcp"
+version = "0.1.0"
+dependencies = [
+ "novex-ai-core",
+ "serde",
+]
+
+[[package]]
+name = "novex-memory"
+version = "0.1.0"
+dependencies = [
+ "novex-ai-core",
+ "serde",
+]
+
+[[package]]
+name = "novex-model"
+version = "0.1.0"
+dependencies = [
+ "novex-ai-core",
+ "serde",
+]
+
+[[package]]
+name = "novex-plugin"
+version = "0.1.0"
+dependencies = [
+ "novex-ai-core",
+ "novex-connectors",
+ "novex-tools",
+ "novex-trigger",
+ "serde",
+]
+
+[[package]]
+name = "novex-rag"
+version = "0.1.0"
+dependencies = [
+ "novex-ai-core",
+ "novex-model",
+ "serde",
+]
+
+[[package]]
+name = "novex-tools"
+version = "0.1.0"
+dependencies = [
+ "novex-ai-core",
+ "novex-connectors",
+ "novex-mcp",
+ "novex-model",
+ "serde",
+]
+
+[[package]]
+name = "novex-trigger"
+version = "0.1.0"
+dependencies = [
+ "novex-ai-core",
  "serde",
 ]
 

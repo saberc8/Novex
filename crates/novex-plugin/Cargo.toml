@@ -1,0 +1,11 @@
+[package]
+name = "novex-plugin"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+novex-ai-core.workspace = true
+novex-connectors = { path = "../novex-connectors" }
+novex-tools = { path = "../novex-tools" }
+novex-trigger = { path = "../novex-trigger" }
+serde.workspace = true

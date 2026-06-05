@@ -1,0 +1,9 @@
+[package]
+name = "novex-rag"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+novex-ai-core.workspace = true
+novex-model = { path = "../novex-model" }
+serde.workspace = true
