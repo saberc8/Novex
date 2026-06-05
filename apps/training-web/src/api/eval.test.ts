@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { listEvalDatasets, runEval } from "./eval";
+import { listEvalDatasets, listEvalResults, listEvalRuns, runEval } from "./eval";
 
 function okResponse(data: unknown) {
   return Promise.resolve(
@@ -83,6 +83,38 @@ describe("training eval api", () => {
       }),
       body: JSON.stringify({
         datasetCode: "training_regression"
+      })
+    });
+  });
+
+  it("lists recent regression runs by dataset code", async () => {
+    window.localStorage.setItem("novex_token", "token-1");
+
+    await listEvalRuns({ page: 1, size: 5, datasetCode: "training_regression" });
+
+    expect(fetchMock.mock.calls[0]?.[0]).toBe(
+      "http://localhost:4398/ai/evals/runs?page=1&size=5&datasetCode=training_regression"
+    );
+    expect(fetchMock.mock.calls[0]?.[1]).toMatchObject({
+      method: "GET",
+      headers: expect.objectContaining({
+        Authorization: "Bearer token-1"
+      })
+    });
+  });
+
+  it("lists eval case results for a run", async () => {
+    window.localStorage.setItem("novex_token", "token-1");
+
+    await listEvalResults(800, { page: 1, size: 5 });
+
+    expect(fetchMock.mock.calls[0]?.[0]).toBe(
+      "http://localhost:4398/ai/evals/runs/800/results?page=1&size=5"
+    );
+    expect(fetchMock.mock.calls[0]?.[1]).toMatchObject({
+      method: "GET",
+      headers: expect.objectContaining({
+        Authorization: "Bearer token-1"
       })
     });
   });

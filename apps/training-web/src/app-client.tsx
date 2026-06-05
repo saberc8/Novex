@@ -19,14 +19,14 @@ import {
 } from "lucide-react";
 import { createAgentRun } from "@/api/agent";
 import { dryRunTool } from "@/api/capability";
-import { listEvalDatasets, runEval } from "@/api/eval";
+import { listEvalDatasets, listEvalResults, listEvalRuns, runEval } from "@/api/eval";
 import { askDataset, listDatasets, submitRagFeedback } from "@/api/knowledge";
 import { CitationList, type CitationItem } from "@/components/citation-list";
 import { MetricStrip } from "@/components/metric-strip";
 import { TrainingShell } from "@/components/training-shell";
 import type { AgentRunResp } from "@/types/agent";
 import type { ToolDryRunResp } from "@/types/capability";
-import type { EvalDatasetResp, EvalRunResp } from "@/types/eval";
+import type { EvalDatasetResp, EvalResultResp, EvalRunResp } from "@/types/eval";
 import type { DatasetResp, RagAskResp, RagFeedbackRating } from "@/types/knowledge";
 
 const metrics = [
@@ -127,6 +127,8 @@ export function TrainingAppClient() {
   const [selectedDatasetId, setSelectedDatasetId] = useState(fallbackDataset.id);
   const [evalDatasets, setEvalDatasets] = useState<EvalDatasetResp[]>([fallbackEvalDataset]);
   const [evalRun, setEvalRun] = useState<EvalRunResp | null>(null);
+  const [evalRuns, setEvalRuns] = useState<EvalRunResp[]>([]);
+  const [evalResults, setEvalResults] = useState<EvalResultResp[]>([]);
   const [question, setQuestion] = useState("培训什么时候开始？");
   const [answer, setAnswer] = useState<RagAskResp>(fallbackAnswer);
   const [apiStatus, setApiStatus] = useState("fallback");
@@ -159,6 +161,33 @@ export function TrainingAppClient() {
       .catch(() => {
         if (mounted) {
           setApiStatus("fallback");
+        }
+      });
+
+    return () => {
+      mounted = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    let mounted = true;
+
+    listEvalRuns({ page: 1, size: 5, datasetCode: "training_regression" })
+      .then(async (page) => {
+        if (!mounted) {
+          return;
+        }
+        setEvalRuns(page.list);
+        setEvalRun((current) => current ?? page.list[0] ?? null);
+        const firstRun = page.list[0];
+        if (firstRun) {
+          await loadEvalResults(firstRun.runId, () => mounted);
+        }
+        setEvalStatus("live");
+      })
+      .catch(() => {
+        if (mounted) {
+          setEvalStatus("fallback");
         }
       });
 
@@ -263,11 +292,26 @@ export function TrainingAppClient() {
         datasetCode: selectedEvalDataset.code
       });
       setEvalRun(response);
+      setEvalRuns((current) => [response, ...current.filter((run) => run.runId !== response.runId)].slice(0, 5));
+      await loadEvalResults(response.runId, () => true);
       setEvalStatus("live");
     } catch {
       setEvalStatus("fallback");
     } finally {
       setEvalRunning(false);
+    }
+  }
+
+  async function loadEvalResults(runId: number, canUpdate: () => boolean) {
+    try {
+      const page = await listEvalResults(runId, { page: 1, size: 5 });
+      if (canUpdate()) {
+        setEvalResults(page.list);
+      }
+    } catch {
+      if (canUpdate()) {
+        setEvalResults([]);
+      }
     }
   }
 
@@ -522,6 +566,71 @@ export function TrainingAppClient() {
               <RotateCw aria-hidden="true" className="h-4 w-4" />
               运行评测
             </button>
+            <div className="mt-3 rounded-lg border border-slate-200 p-3">
+              <div className="flex items-center justify-between gap-3">
+                <h3 className="text-sm font-semibold text-slate-950">最近回归</h3>
+                {evalRun ? (
+                  <span className="rounded-md bg-slate-100 px-2 py-1 text-xs font-medium text-slate-600">
+                    Run #{evalRun.runId}
+                  </span>
+                ) : null}
+              </div>
+              {evalRun ? (
+                <div className="mt-2 text-xs leading-5 text-slate-500">
+                  {evalRun.status} · {evalRun.passedCases}/{evalRun.totalCases} passed · avg{" "}
+                  {evalRun.averageScore.toFixed(2)}
+                </div>
+              ) : (
+                <div className="mt-2 text-xs leading-5 text-slate-500">暂无回归记录</div>
+              )}
+              {evalRuns.length > 1 ? (
+                <div className="mt-2 flex flex-wrap gap-1">
+                  {evalRuns.slice(0, 3).map((run) => (
+                    <button
+                      className={[
+                        "rounded-md border px-2 py-1 text-xs font-medium",
+                        evalRun?.runId === run.runId
+                          ? "border-teal-200 bg-teal-50 text-teal-900"
+                          : "border-slate-200 text-slate-600 hover:bg-slate-50"
+                      ].join(" ")}
+                      key={run.runId}
+                      onClick={() => {
+                        setEvalRun(run);
+                        void loadEvalResults(run.runId, () => true);
+                      }}
+                      type="button"
+                    >
+                      #{run.runId}
+                    </button>
+                  ))}
+                </div>
+              ) : null}
+              <div className="mt-3 space-y-2">
+                {evalResults.slice(0, 3).map((result) => (
+                  <div
+                    className="flex items-center justify-between gap-3 rounded-md bg-slate-50 px-3 py-2"
+                    key={result.id}
+                  >
+                    <div className="min-w-0">
+                      <div className="truncate text-xs font-semibold text-slate-900">
+                        {result.caseCode}
+                      </div>
+                      <div className="mt-1 text-[11px] text-slate-500">
+                        {result.metricKind} · score {result.score.toFixed(2)}
+                      </div>
+                    </div>
+                    <span
+                      className={[
+                        "shrink-0 rounded-md px-2 py-1 text-xs font-medium",
+                        result.passed ? "bg-emerald-50 text-emerald-700" : "bg-rose-50 text-rose-700"
+                      ].join(" ")}
+                    >
+                      {result.passed ? "通过" : "未通过"}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </div>
           </section>
 
           <section className="rounded-lg border border-slate-200 bg-white p-4 shadow-sm">

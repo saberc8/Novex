@@ -22,6 +22,12 @@ export interface EvalRunCommand {
   datasetCode: string;
 }
 
+export interface EvalRunQuery extends PageQuery {
+  datasetCode?: string;
+}
+
+export type EvalResultQuery = PageQuery;
+
 export interface EvalRunResp {
   runId: number;
   datasetId: number;
@@ -35,4 +41,21 @@ export interface EvalRunResp {
   reportPayload: unknown;
   createTime: string;
   finishedAt?: string | null;
+}
+
+export interface EvalResultResp {
+  id: number;
+  runId: number;
+  caseId: number;
+  caseCode: string;
+  targetKind: string;
+  metricKind: string;
+  score: number;
+  passed: boolean;
+  expectedPayload: unknown;
+  actualPayload: unknown;
+  reason: string;
+  costCents: number;
+  latencyMs: number;
+  createTime: string;
 }

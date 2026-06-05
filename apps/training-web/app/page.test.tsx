@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import Page from "./page";
 import { createAgentRun } from "@/api/agent";
 import { dryRunTool } from "@/api/capability";
-import { listEvalDatasets, runEval } from "@/api/eval";
+import { listEvalDatasets, listEvalResults, listEvalRuns, runEval } from "@/api/eval";
 import { askDataset, listDatasets, submitRagFeedback } from "@/api/knowledge";
 import type { DatasetResp } from "@/types/knowledge";
 
@@ -17,6 +17,8 @@ vi.mock("@/api/capability", () => ({
 
 vi.mock("@/api/eval", () => ({
   listEvalDatasets: vi.fn(),
+  listEvalResults: vi.fn(),
+  listEvalRuns: vi.fn(),
   runEval: vi.fn()
 }));
 
@@ -30,6 +32,8 @@ const askDatasetMock = vi.mocked(askDataset);
 const createAgentRunMock = vi.mocked(createAgentRun);
 const dryRunToolMock = vi.mocked(dryRunTool);
 const listEvalDatasetsMock = vi.mocked(listEvalDatasets);
+const listEvalResultsMock = vi.mocked(listEvalResults);
+const listEvalRunsMock = vi.mocked(listEvalRuns);
 const listDatasetsMock = vi.mocked(listDatasets);
 const runEvalMock = vi.mocked(runEval);
 const submitRagFeedbackMock = vi.mocked(submitRagFeedback);
@@ -123,6 +127,46 @@ describe("Training home page", () => {
       ],
       total: 1
     });
+    listEvalRunsMock.mockResolvedValue({
+      list: [
+        {
+          runId: 810,
+          datasetId: 700,
+          datasetCode: "training_regression",
+          status: "succeeded",
+          totalCases: 3,
+          passedCases: 2,
+          failedCases: 1,
+          averageScore: 0.67,
+          metricBreakdown: { citation_accuracy: 0.67 },
+          reportPayload: {},
+          createTime: "2026-06-05 11:00:00",
+          finishedAt: "2026-06-05 11:00:01"
+        }
+      ],
+      total: 1
+    });
+    listEvalResultsMock.mockResolvedValue({
+      list: [
+        {
+          id: 910,
+          runId: 810,
+          caseId: 710,
+          caseCode: "rag-answer",
+          targetKind: "rag",
+          metricKind: "citation_accuracy",
+          score: 1,
+          passed: true,
+          expectedPayload: {},
+          actualPayload: {},
+          reason: "matched answer and citations",
+          costCents: 0,
+          latencyMs: 12,
+          createTime: "2026-06-05 11:00:01"
+        }
+      ],
+      total: 1
+    });
     runEvalMock.mockResolvedValue({
       runId: 800,
       datasetId: 700,
@@ -210,6 +254,25 @@ describe("Training home page", () => {
     );
     expect(await screen.findByText("通过 2 / 3")).toBeTruthy();
     expect(await screen.findByText("平均 0.67")).toBeTruthy();
+    await waitFor(() => expect(listEvalResultsMock).toHaveBeenCalledWith(800, { page: 1, size: 5 }));
+    expect(await screen.findByText("Run #800")).toBeTruthy();
+  });
+
+  it("loads recent eval runs and shows case result snapshots", async () => {
+    render(<Page />);
+
+    await waitFor(() =>
+      expect(listEvalRunsMock).toHaveBeenCalledWith({
+        page: 1,
+        size: 5,
+        datasetCode: "training_regression"
+      })
+    );
+    await waitFor(() => expect(listEvalResultsMock).toHaveBeenCalledWith(810, { page: 1, size: 5 }));
+    expect(await screen.findByText("最近回归")).toBeTruthy();
+    expect(await screen.findByText("Run #810")).toBeTruthy();
+    expect(await screen.findByText("rag-answer")).toBeTruthy();
+    expect(await screen.findByText("通过")).toBeTruthy();
   });
 
   it("runs the quiz skill from the customer workbench with a bounded agent budget", async () => {
