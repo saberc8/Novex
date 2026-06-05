@@ -1,11 +1,12 @@
 use axum::{
+    extract::State,
     routing::{get, post},
     Json, Router,
 };
 
 use crate::{
     application::ai::model_service::{
-        ModelHealthCheckCommand, ModelHealthCheckResp, ModelRuntimeService,
+        ModelHealthCheckCommand, ModelHealthCheckResp, ModelRegistrySummary, ModelRuntimeService,
     },
     domain::auth::model::CurrentUser,
     interfaces::http::{middleware::permission::require_permission, AppState},
@@ -18,6 +19,7 @@ pub const MODEL_HEALTH_PERMISSION: &str = "ai:model:healthCheck";
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/ai/models/runtime-config", get(runtime_config))
+        .route("/ai/models/registry", get(model_registry))
         .route("/ai/models/health-check", post(health_check))
 }
 
@@ -27,6 +29,17 @@ async fn runtime_config(
     require_permission(&current_user, MODEL_LIST_PERMISSION)?;
 
     Ok(Json(ApiResponse::ok(ModelRuntimeService::runtime_config())))
+}
+
+async fn model_registry(
+    State(state): State<AppState>,
+    current_user: CurrentUser,
+) -> Result<Json<ApiResponse<ModelRegistrySummary>>, AppError> {
+    require_permission(&current_user, MODEL_LIST_PERMISSION)?;
+
+    Ok(Json(ApiResponse::ok(
+        ModelRuntimeService::registry_summary(&state.db).await?,
+    )))
 }
 
 async fn health_check(
@@ -162,6 +175,31 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/ai/models/runtime-config")
+                    .header(header::ACCEPT, "application/json")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let body = serde_json::from_slice::<Value>(&body).unwrap();
+        assert_eq!(body["code"], "401");
+    }
+
+    #[tokio::test]
+    async fn model_registry_route_is_registered_and_requires_auth() {
+        let db = PgPoolOptions::new()
+            .connect_lazy("postgres://postgres:postgres@localhost:5432/avalon_admin")
+            .unwrap();
+        let jwt = JwtService::new("test-secret".to_owned(), 24);
+        let app = build_router(db, &["http://localhost:4399".to_owned()], jwt).unwrap();
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/ai/models/registry")
                     .header(header::ACCEPT, "application/json")
                     .body(Body::empty())
                     .unwrap(),
