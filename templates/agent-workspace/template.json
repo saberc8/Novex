@@ -4,6 +4,38 @@
   "category": "agent",
   "description": "Tool-using workspace template for task automation, approvals, trace inspection, and controlled external actions.",
   "frontendEntry": "apps/agent-workspace",
+  "frontendApp": "agent-workspace",
+  "frontendPages": [
+    {
+      "code": "workspace",
+      "title": "Agent Workspace",
+      "path": "/agent",
+      "navLabel": "Workspace",
+      "permission": "ai:agent:run"
+    },
+    {
+      "code": "approvals",
+      "title": "Approvals",
+      "path": "/agent/approvals",
+      "navLabel": "Approvals",
+      "permission": "ai:agent:resume"
+    },
+    {
+      "code": "traces",
+      "title": "Traces",
+      "path": "/agent/traces",
+      "navLabel": "Traces",
+      "permission": "ai:trace:list"
+    }
+  ],
+  "smokeChecks": [
+    {
+      "code": "agent_runtime_api",
+      "name": "Agent Runtime API Smoke",
+      "workdir": "backend",
+      "command": "cargo test -p backend-rust agent --offline"
+    }
+  ],
   "sort": 3,
   "status": 1,
   "branding": {

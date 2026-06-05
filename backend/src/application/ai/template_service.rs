@@ -59,6 +59,12 @@ pub struct DeliveryTemplate {
     pub category: String,
     pub description: String,
     pub frontend_entry: String,
+    #[serde(default)]
+    pub frontend_app: String,
+    #[serde(default)]
+    pub frontend_pages: Vec<TemplateFrontendPage>,
+    #[serde(default)]
+    pub smoke_checks: Vec<TemplateSmokeCheck>,
     pub sort: i32,
     pub status: i16,
     pub branding: TemplateBranding,
@@ -89,6 +95,25 @@ pub struct TemplateBranding {
     pub logo_text: String,
     pub primary_color: String,
     pub public_url: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TemplateFrontendPage {
+    pub code: String,
+    pub title: String,
+    pub path: String,
+    pub nav_label: String,
+    pub permission: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TemplateSmokeCheck {
+    pub code: String,
+    pub name: String,
+    pub workdir: String,
+    pub command: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -185,6 +210,7 @@ pub struct CustomerTenantConfig {
     pub industry: String,
     pub template_code: String,
     pub frontend_entry: String,
+    pub frontend_app: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -196,6 +222,7 @@ pub struct CustomerPackageResp {
     pub branding: TemplateBranding,
     pub roles: Vec<TemplateRole>,
     pub menus: Vec<TemplateMenu>,
+    pub frontend_pages: Vec<TemplateFrontendPage>,
     pub prompts: Vec<TemplatePrompt>,
     pub skills: Vec<TemplateSkill>,
     pub connectors: Vec<TemplateConnector>,
@@ -203,6 +230,7 @@ pub struct CustomerPackageResp {
     pub triggers: Vec<TemplateTrigger>,
     pub eval_sets: Vec<TemplateEvalSet>,
     pub deployment_checklist: Vec<String>,
+    pub smoke_checks: Vec<TemplateSmokeCheck>,
     pub deployment_steps: Vec<String>,
 }
 
@@ -275,6 +303,7 @@ pub fn build_customer_package(
         industry: non_empty_owned(command.industry).unwrap_or_else(|| template.category.clone()),
         template_code: template.code.clone(),
         frontend_entry: template.frontend_entry.clone(),
+        frontend_app: template.frontend_app.clone(),
     };
     let package_id = format!(
         "pkg_{}_{}",
@@ -290,6 +319,7 @@ pub fn build_customer_package(
         branding,
         roles: template.roles.clone(),
         menus: template.menus.clone(),
+        frontend_pages: template.frontend_pages.clone(),
         prompts: template.prompts.clone(),
         skills: template.skills.clone(),
         connectors: template.connectors.clone(),
@@ -297,6 +327,7 @@ pub fn build_customer_package(
         triggers: template.triggers.clone(),
         eval_sets: template.eval_sets.clone(),
         deployment_checklist: template.deployment_checklist.clone(),
+        smoke_checks: template.smoke_checks.clone(),
         deployment_steps,
     })
 }
@@ -306,6 +337,7 @@ fn validate_template_manifest(template: &DeliveryTemplate) -> Result<(), AppErro
         || template.name.trim().is_empty()
         || template.category.trim().is_empty()
         || template.frontend_entry.trim().is_empty()
+        || template.frontend_app.trim().is_empty()
     {
         return Err(AppError::bad_request("交付模板基础字段不能为空"));
     }
@@ -314,6 +346,8 @@ fn validate_template_manifest(template: &DeliveryTemplate) -> Result<(), AppErro
         || template.eval_sets.is_empty()
         || template.branding.brand_name.trim().is_empty()
         || template.deployment_checklist.is_empty()
+        || template.frontend_pages.is_empty()
+        || template.smoke_checks.is_empty()
     {
         return Err(AppError::bad_request(format!(
             "交付模板缺少必要交付段: {}",
@@ -360,6 +394,12 @@ fn build_deployment_steps(
         ),
     ];
     steps.extend(template.deployment_checklist.iter().cloned());
+    steps.extend(template.smoke_checks.iter().map(|check| {
+        format!(
+            "Run smoke check {} in {}: {}",
+            check.name, check.workdir, check.command
+        )
+    }));
     steps
 }
 
@@ -448,6 +488,26 @@ mod tests {
                 template.code
             );
         }
+    }
+
+    #[test]
+    fn delivery_template_manifest_registers_training_customer_frontend_metadata() {
+        let template = get_delivery_template("training_app").unwrap();
+        let page_codes = template
+            .frontend_pages
+            .iter()
+            .map(|page| page.code.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(template.frontend_app, "training-web");
+        assert_eq!(
+            page_codes,
+            vec!["learn", "ask", "quiz", "records", "notifications"]
+        );
+        assert!(template
+            .smoke_checks
+            .iter()
+            .any(|check| { check.workdir == "apps/training-web" && check.command == "pnpm test" }));
     }
 
     #[test]

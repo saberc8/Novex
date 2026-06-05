@@ -4,6 +4,31 @@
   "category": "chat",
   "description": "Pure model chat template for general assistants, drafting, brainstorming, and lightweight support.",
   "frontendEntry": "apps/chat-web",
+  "frontendApp": "chat-web",
+  "frontendPages": [
+    {
+      "code": "chat",
+      "title": "Model Chat",
+      "path": "/chat",
+      "navLabel": "Chat",
+      "permission": "app:chat:use"
+    },
+    {
+      "code": "history",
+      "title": "Chat History",
+      "path": "/chat/history",
+      "navLabel": "History",
+      "permission": "app:chat:use"
+    }
+  ],
+  "smokeChecks": [
+    {
+      "code": "llm_chat_api",
+      "name": "LLM Chat API Smoke",
+      "workdir": "backend",
+      "command": "cargo test -p backend-rust model_service --offline"
+    }
+  ],
   "sort": 1,
   "status": 1,
   "branding": {

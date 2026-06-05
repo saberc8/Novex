@@ -12,6 +12,21 @@ export interface TemplateBranding {
   publicUrl: string;
 }
 
+export interface TemplateFrontendPage {
+  code: string;
+  title: string;
+  path: string;
+  navLabel: string;
+  permission: string;
+}
+
+export interface TemplateSmokeCheck {
+  code: string;
+  name: string;
+  workdir: string;
+  command: string;
+}
+
 export interface TemplateRole {
   code: string;
   name: string;
@@ -70,6 +85,9 @@ export interface DeliveryTemplateResp {
   category: string;
   description: string;
   frontendEntry: string;
+  frontendApp: string;
+  frontendPages: TemplateFrontendPage[];
+  smokeChecks: TemplateSmokeCheck[];
   sort: number;
   status: number;
   branding: TemplateBranding;
@@ -100,6 +118,7 @@ export interface CustomerTenantConfig {
   industry: string;
   templateCode: string;
   frontendEntry: string;
+  frontendApp: string;
 }
 
 export interface CustomerPackageResp {
@@ -109,6 +128,7 @@ export interface CustomerPackageResp {
   branding: TemplateBranding;
   roles: TemplateRole[];
   menus: TemplateMenu[];
+  frontendPages: TemplateFrontendPage[];
   prompts: TemplatePrompt[];
   skills: TemplateSkill[];
   connectors: TemplateConnector[];
@@ -116,5 +136,6 @@ export interface CustomerPackageResp {
   triggers: TemplateTrigger[];
   evalSets: TemplateEvalSet[];
   deploymentChecklist: string[];
+  smokeChecks: TemplateSmokeCheck[];
   deploymentSteps: string[];
 }

@@ -4,6 +4,58 @@
   "category": "training",
   "description": "Employee training template with knowledge Q&A, quiz workflow, learning records, Feishu reminders, and regression evals.",
   "frontendEntry": "apps/training-web",
+  "frontendApp": "training-web",
+  "frontendPages": [
+    {
+      "code": "learn",
+      "title": "Learning Tasks",
+      "path": "/",
+      "navLabel": "学习",
+      "permission": "app:training:learn"
+    },
+    {
+      "code": "ask",
+      "title": "Knowledge Q&A",
+      "path": "/ask",
+      "navLabel": "问答",
+      "permission": "app:training:ask"
+    },
+    {
+      "code": "quiz",
+      "title": "Quiz",
+      "path": "/quiz",
+      "navLabel": "测验",
+      "permission": "app:training:quiz"
+    },
+    {
+      "code": "records",
+      "title": "Learning Records",
+      "path": "/records",
+      "navLabel": "记录",
+      "permission": "app:training:learn"
+    },
+    {
+      "code": "notifications",
+      "title": "Notifications",
+      "path": "/notifications",
+      "navLabel": "通知",
+      "permission": "app:training:learn"
+    }
+  ],
+  "smokeChecks": [
+    {
+      "code": "training_web_unit",
+      "name": "Training Web Unit Tests",
+      "workdir": "apps/training-web",
+      "command": "pnpm test"
+    },
+    {
+      "code": "training_web_build",
+      "name": "Training Web Build",
+      "workdir": "apps/training-web",
+      "command": "pnpm build"
+    }
+  ],
   "sort": 4,
   "status": 1,
   "branding": {

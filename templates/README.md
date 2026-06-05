@@ -10,14 +10,14 @@ M5 turns the template folder into package artifacts. Each template directory con
 - Prompt and skill setup.
 - Tool, connector, plugin, and trigger configuration.
 - Eval set metadata.
-- Frontend entry and deployment checklist.
+- Frontend entry, frontend app id, C-side page list, smoke checks, and deployment checklist.
 
 Default packages:
 
 - `llm_chat`: pure model chat.
 - `knowledge_base_chat`: RAG chat with citations.
 - `agent_workspace`: tool-using Agent workspace.
-- `training_app`: employee training POC with knowledge, quiz, reminders, and eval.
+- `training_app`: employee training POC with `apps/training-web`, knowledge Q&A, quiz, reminders, and eval.
 
 These manifests are embedded by the backend M5 template API and can also be copied as
 customer delivery artifacts.

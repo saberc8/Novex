@@ -4,6 +4,31 @@
   "category": "knowledge",
   "description": "RAG chat template for policies, product documentation, FAQ, and enterprise knowledge with citations.",
   "frontendEntry": "apps/chat-web",
+  "frontendApp": "chat-web",
+  "frontendPages": [
+    {
+      "code": "ask",
+      "title": "Knowledge Q&A",
+      "path": "/knowledge",
+      "navLabel": "Ask",
+      "permission": "app:knowledge:ask"
+    },
+    {
+      "code": "sources",
+      "title": "Sources",
+      "path": "/knowledge/sources",
+      "navLabel": "Sources",
+      "permission": "ai:knowledge:list"
+    }
+  ],
+  "smokeChecks": [
+    {
+      "code": "knowledge_base_api",
+      "name": "Knowledge Base API Smoke",
+      "workdir": "backend",
+      "command": "cargo test -p backend-rust knowledge --offline"
+    }
+  ],
   "sort": 2,
   "status": 1,
   "branding": {

@@ -10,14 +10,16 @@ Scope:
 Status:
 
 - Next.js app scaffold on port `4401`.
-- POC navigation: learning, ask, quiz, records, notifications.
+- POC navigation and template pages: learning, ask, quiz, records, notifications.
+- Live knowledge Q&A uses `/ai/knowledge/datasets` and `/ai/knowledge/datasets/:id/ask`.
+- Unauthenticated or offline use falls back to bundled demo data.
 - Admin remains the control plane; this app is the customer-facing workspace.
 
 Commands:
 
 ```bash
 pnpm install
-pnpm dev
+NEXT_PUBLIC_API_BASE_URL=http://localhost:4398 pnpm dev
 pnpm typecheck
 pnpm lint
 pnpm test

@@ -180,7 +180,8 @@ export default function AiTemplatesPage() {
               <p className="line-clamp-2 text-xs text-muted-foreground">{template.description}</p>
               <div className="flex flex-wrap gap-2 text-xs text-muted-foreground">
                 <span>{template.roles.length} Roles</span>
-                <span>{template.menus.length} Menus</span>
+                <span>{template.frontendPages.length} Pages</span>
+                <span>{template.smokeChecks.length} Smoke</span>
                 <span>{template.evalSets.length} Evals</span>
               </div>
             </button>
@@ -196,7 +197,7 @@ export default function AiTemplatesPage() {
               <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
                 <span className="inline-flex items-center gap-1">
                   <HardDrive className="size-3.5" />
-                  {selectedTemplate?.frontendEntry ?? "-"}
+                  {selectedTemplate?.frontendApp ?? selectedTemplate?.frontendEntry ?? "-"}
                 </span>
                 <span className="inline-flex items-center gap-1">
                   <Sparkles className="size-3.5" />
@@ -245,9 +246,9 @@ export default function AiTemplatesPage() {
 
             <div className="grid gap-3 sm:grid-cols-2">
               <Metric label="Roles" value={String(packagePreview?.roles.length ?? selectedTemplate?.roles.length ?? "-")} />
-              <Metric label="Menus" value={String(packagePreview?.menus.length ?? selectedTemplate?.menus.length ?? "-")} />
+              <Metric label="Pages" value={String(packagePreview?.frontendPages.length ?? selectedTemplate?.frontendPages.length ?? "-")} />
               <Metric label="Capabilities" value={String(packagePreview ? capabilityCount(packagePreview) : selectedTemplate ? templateCapabilityCount(selectedTemplate) : "-")} />
-              <Metric label="Eval Sets" value={String(packagePreview?.evalSets.length ?? selectedTemplate?.evalSets.length ?? "-")} />
+              <Metric label="Smoke" value={String(packagePreview?.smokeChecks.length ?? selectedTemplate?.smokeChecks.length ?? "-")} />
             </div>
 
             <div className="mt-4 grid gap-2">
@@ -267,7 +268,7 @@ export default function AiTemplatesPage() {
             <div className="mb-3 flex items-center justify-between gap-3">
               <div className="min-w-0">
                 <h2 className="truncate text-sm font-medium">{packagePreview?.packageId ?? "Deployment Preview"}</h2>
-                <p className="text-xs text-muted-foreground">{packagePreview?.tenantConfig.frontendEntry ?? selectedTemplate?.frontendEntry ?? "-"}</p>
+                <p className="text-xs text-muted-foreground">{packagePreview?.tenantConfig.frontendApp ?? selectedTemplate?.frontendApp ?? "-"}</p>
               </div>
               <ListChecks className="size-4 text-muted-foreground" />
             </div>
@@ -277,6 +278,7 @@ export default function AiTemplatesPage() {
               <CapabilityGroup title="Plugins" items={(packagePreview?.plugins ?? selectedTemplate?.plugins ?? []).map((item) => item.name)} />
               <CapabilityGroup title="Triggers" items={(packagePreview?.triggers ?? selectedTemplate?.triggers ?? []).map((item) => item.name)} />
               <CapabilityGroup title="Eval Sets" items={(packagePreview?.evalSets ?? selectedTemplate?.evalSets ?? []).map((item) => `${item.name} (${item.caseCount})`)} />
+              <CapabilityGroup title="Smoke" items={(packagePreview?.smokeChecks ?? selectedTemplate?.smokeChecks ?? []).map((item) => `${item.workdir}: ${item.command}`)} />
             </div>
 
             <div className="mt-4 grid gap-2">
