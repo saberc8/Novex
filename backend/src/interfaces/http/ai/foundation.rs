@@ -102,9 +102,8 @@ mod tests {
 
     #[test]
     fn foundation_control_plane_migration_contains_required_tables() {
-        let migration = include_str!(
-            "../../../../migrations/202606050014_create_foundation_control_plane.sql"
-        );
+        let migration =
+            include_str!("../../../../migrations/202606050014_create_foundation_control_plane.sql");
 
         for table in [
             "sys_tenant",

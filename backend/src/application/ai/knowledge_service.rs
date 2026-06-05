@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
 use chrono::{NaiveDateTime, Utc};
+use novex_model::{ModelRuntimeConfig, ModelRuntimeTarget};
 use novex_rag::{
     build_extractive_answer, chunk_text, keyword_retrieve, parse_plain_text, CitationRef,
     DocumentChunk as RagDocumentChunk, RagAnswer, RetrievalHit,
@@ -42,6 +43,13 @@ const MAX_LOCAL_RETRIEVAL_CHUNKS: i64 = 500;
 const LOCAL_EMBEDDING_ROUTE: &str = "local-keyword";
 const LOCAL_RERANK_ROUTE: &str = "none";
 const LOCAL_ANSWER_ROUTE: &str = "local-extractive";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RagModelRoutes {
+    embedding_model_route: String,
+    rerank_model_route: String,
+    answer_model_route: String,
+}
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -621,6 +629,7 @@ fn rag_trace_record(
     hits: &[IndexedRetrievalHit],
     now: NaiveDateTime,
 ) -> RagTraceSaveRecord {
+    let model_routes = rag_model_routes();
     RagTraceSaveRecord {
         id: trace_id,
         tenant_id: DEFAULT_TENANT_ID,
@@ -629,15 +638,34 @@ fn rag_trace_record(
         answer: answer.answer.clone(),
         answer_strategy: answer.trace.answer_strategy.clone(),
         retrieval_mode: RETRIEVAL_MODE_HYBRID,
-        embedding_model_route: Some(LOCAL_EMBEDDING_ROUTE.to_owned()),
-        rerank_model_route: Some(LOCAL_RERANK_ROUTE.to_owned()),
-        answer_model_route: Some(LOCAL_ANSWER_ROUTE.to_owned()),
+        embedding_model_route: Some(model_routes.embedding_model_route),
+        rerank_model_route: Some(model_routes.rerank_model_route),
+        answer_model_route: Some(model_routes.answer_model_route),
         retrieval_hit_count: hits.len() as i32,
         context_token_count: hits.iter().map(|hit| hit.token_count).sum(),
         output_token_count: tokenish_count(&answer.answer),
         user_id,
         now,
     }
+}
+
+fn rag_model_routes() -> RagModelRoutes {
+    rag_model_routes_from_config(&ModelRuntimeConfig::from_env())
+}
+
+fn rag_model_routes_from_config(config: &ModelRuntimeConfig) -> RagModelRoutes {
+    RagModelRoutes {
+        embedding_model_route: runtime_route_id(config, ModelRuntimeTarget::Embedding)
+            .unwrap_or_else(|| LOCAL_EMBEDDING_ROUTE.to_owned()),
+        rerank_model_route: runtime_route_id(config, ModelRuntimeTarget::Reranker)
+            .unwrap_or_else(|| LOCAL_RERANK_ROUTE.to_owned()),
+        answer_model_route: runtime_route_id(config, ModelRuntimeTarget::Llm)
+            .unwrap_or_else(|| LOCAL_ANSWER_ROUTE.to_owned()),
+    }
+}
+
+fn runtime_route_id(config: &ModelRuntimeConfig, target: ModelRuntimeTarget) -> Option<String> {
+    config.route(target).map(|route| route.summary().route_id)
 }
 
 fn rag_trace_hit_records(
@@ -959,6 +987,48 @@ mod tests {
         assert_eq!(records[0].chunk_id, 11);
         assert_eq!(records[0].rank, 2);
         assert!((records[0].score - 0.75).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn rag_model_routes_use_runtime_config_when_available() {
+        let env = [
+            ("LLM_API_KEY", "sk-fake-llm-secret-508d"),
+            ("LLM_BASE_URL", "https://api.deepseek.com"),
+            ("LLM_MODEL", "deepseek-v4-flash"),
+            ("EMBEDDING_API_KEY", "sk-fake-embedding-secret-ffff"),
+            (
+                "EMBEDDING_BASE_URL",
+                "https://dashscope.aliyuncs.com/compatible-mode/v1",
+            ),
+            ("EMBEDDING_MODEL", "text-embedding-v4"),
+            ("RERANKER_API_KEY", "sk-fake-reranker-secret-ffff"),
+            (
+                "RERANKER_BASE_URL",
+                "https://dashscope.aliyuncs.com/compatible-api/v1",
+            ),
+            ("RERANKER_MODEL", "qwen3-rerank"),
+        ];
+        let config = novex_model::ModelRuntimeConfig::from_env_map(|key| {
+            env.iter()
+                .find_map(|(env_key, value)| (*env_key == key).then(|| (*value).to_owned()))
+        });
+
+        let routes = rag_model_routes_from_config(&config);
+
+        assert_eq!(routes.embedding_model_route, "runtime.embedding");
+        assert_eq!(routes.rerank_model_route, "runtime.reranker");
+        assert_eq!(routes.answer_model_route, "runtime.llm");
+    }
+
+    #[test]
+    fn rag_model_routes_fall_back_to_local_routes_when_runtime_config_missing() {
+        let config = novex_model::ModelRuntimeConfig::from_env_map(|_| None);
+
+        let routes = rag_model_routes_from_config(&config);
+
+        assert_eq!(routes.embedding_model_route, LOCAL_EMBEDDING_ROUTE);
+        assert_eq!(routes.rerank_model_route, LOCAL_RERANK_ROUTE);
+        assert_eq!(routes.answer_model_route, LOCAL_ANSWER_ROUTE);
     }
 
     #[test]
