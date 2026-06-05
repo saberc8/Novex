@@ -46,8 +46,12 @@ Required result shape for backend ingestion:
 Backend ingestion endpoint:
 
 ```text
+POST /ai/knowledge/datasets/{datasetId}/parse-jobs
+GET  /ai/knowledge/datasets/{datasetId}/parse-jobs/{jobId}
 POST /ai/knowledge/datasets/{datasetId}/documents/parsed
 ```
+
+The backend first creates `ai_document` and `ai_parser_job` records through `parse-jobs`, returns a parser-worker request envelope, and keeps the document in parsing/pending state. A completed `succeeded` parse result is posted to `documents/parsed`; if the parser job already exists, the backend finalizes that existing job instead of inserting a duplicate document/job pair.
 
 The backend accepts `{ name, contentType, parserResult }`, validates tenant/dataset/status, writes
 `ai_document`, `ai_parser_job`, `ai_document_block`, and `ai_document_chunk` in one transaction,

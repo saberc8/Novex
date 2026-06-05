@@ -67,6 +67,30 @@ pub struct ChunkRecord {
     pub metadata: Value,
 }
 
+#[derive(Debug, Clone, FromRow)]
+pub struct ParserJobRecord {
+    pub id: i64,
+    pub tenant_id: i64,
+    pub dataset_id: i64,
+    pub document_id: i64,
+    pub job_type: i16,
+    pub status: i16,
+    pub attempt_count: i32,
+    pub error_message: String,
+    pub result_summary: Value,
+    pub document_name: String,
+    pub source_uri: String,
+    pub file_id: Option<i64>,
+    pub content_type: String,
+    pub parse_status: i16,
+    pub ingestion_status: i16,
+    pub chunk_count: i32,
+    pub create_time: NaiveDateTime,
+    pub create_user_string: String,
+    pub update_time: Option<NaiveDateTime>,
+    pub update_user_string: String,
+}
+
 #[derive(Debug, Clone)]
 pub struct DatasetFilter<'a> {
     pub tenant_id: i64,
@@ -82,6 +106,13 @@ pub struct DocumentFilter {
     pub dataset_id: i64,
     pub limit: i64,
     pub offset: i64,
+}
+
+#[derive(Debug, Clone)]
+pub struct ParserJobFilter {
+    pub tenant_id: i64,
+    pub dataset_id: i64,
+    pub job_id: i64,
 }
 
 #[derive(Debug, Clone)]
@@ -461,6 +492,264 @@ WHERE tenant_id = $4 AND id = $5;
         Ok(())
     }
 
+    pub async fn create_document_parse_job(
+        &self,
+        document: &DocumentSaveRecord,
+        parser_job: &ParserJobSaveRecord,
+    ) -> Result<(), AppError> {
+        let mut tx = self.db.begin().await?;
+        sqlx::query(
+            r#"
+INSERT INTO ai_document (
+    id, tenant_id, dataset_id, name, source_uri, file_id, content_type, owner_id,
+    visibility, parse_status, ingestion_status, chunk_count, source_hash, create_user, create_time
+)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15);
+"#,
+        )
+        .bind(document.id)
+        .bind(document.tenant_id)
+        .bind(document.dataset_id)
+        .bind(&document.name)
+        .bind(&document.source_uri)
+        .bind(document.file_id)
+        .bind(&document.content_type)
+        .bind(document.owner_id)
+        .bind(document.visibility)
+        .bind(document.parse_status)
+        .bind(document.ingestion_status)
+        .bind(document.chunk_count)
+        .bind(&document.source_hash)
+        .bind(document.user_id)
+        .bind(document.now)
+        .execute(&mut *tx)
+        .await?;
+
+        sqlx::query(
+            r#"
+INSERT INTO ai_parser_job (
+    id, tenant_id, dataset_id, document_id, job_type, status, result_summary, create_user, create_time
+)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9);
+"#,
+        )
+        .bind(parser_job.id)
+        .bind(parser_job.tenant_id)
+        .bind(parser_job.dataset_id)
+        .bind(parser_job.document_id)
+        .bind(parser_job.job_type)
+        .bind(parser_job.status)
+        .bind(&parser_job.result_summary)
+        .bind(parser_job.user_id)
+        .bind(parser_job.now)
+        .execute(&mut *tx)
+        .await?;
+
+        let result = sqlx::query(
+            r#"
+UPDATE ai_dataset
+SET document_count = document_count + 1,
+    update_user = $1,
+    update_time = $2
+WHERE tenant_id = $3 AND id = $4;
+"#,
+        )
+        .bind(document.user_id)
+        .bind(document.now)
+        .bind(document.tenant_id)
+        .bind(document.dataset_id)
+        .execute(&mut *tx)
+        .await?;
+        ensure_affected(result.rows_affected())?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    pub async fn complete_document_parse_job(
+        &self,
+        document: &DocumentSaveRecord,
+        parser_job: &ParserJobSaveRecord,
+        blocks: &[BlockSaveRecord],
+        chunks: &[ChunkSaveRecord],
+    ) -> Result<(), AppError> {
+        let mut tx = self.db.begin().await?;
+        let result = sqlx::query(
+            r#"
+UPDATE ai_document
+SET name = $1,
+    content_type = $2,
+    parse_status = $3,
+    ingestion_status = $4,
+    chunk_count = $5,
+    source_hash = $6,
+    update_user = $7,
+    update_time = $8
+WHERE tenant_id = $9 AND dataset_id = $10 AND id = $11;
+"#,
+        )
+        .bind(&document.name)
+        .bind(&document.content_type)
+        .bind(document.parse_status)
+        .bind(document.ingestion_status)
+        .bind(document.chunk_count)
+        .bind(&document.source_hash)
+        .bind(document.user_id)
+        .bind(document.now)
+        .bind(document.tenant_id)
+        .bind(document.dataset_id)
+        .bind(document.id)
+        .execute(&mut *tx)
+        .await?;
+        ensure_affected(result.rows_affected())?;
+
+        let result = sqlx::query(
+            r#"
+UPDATE ai_parser_job
+SET status = $1,
+    result_summary = $2,
+    update_user = $3,
+    update_time = $4
+WHERE tenant_id = $5 AND dataset_id = $6 AND document_id = $7 AND id = $8;
+"#,
+        )
+        .bind(parser_job.status)
+        .bind(&parser_job.result_summary)
+        .bind(parser_job.user_id)
+        .bind(parser_job.now)
+        .bind(parser_job.tenant_id)
+        .bind(parser_job.dataset_id)
+        .bind(parser_job.document_id)
+        .bind(parser_job.id)
+        .execute(&mut *tx)
+        .await?;
+        ensure_affected(result.rows_affected())?;
+
+        for block in blocks {
+            sqlx::query(
+                r#"
+INSERT INTO ai_document_block (
+    id, tenant_id, dataset_id, document_id, block_uid, block_index, block_type,
+    text, page_no, section_path, bbox, metadata, create_user, create_time
+)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14);
+"#,
+            )
+            .bind(block.id)
+            .bind(block.tenant_id)
+            .bind(block.dataset_id)
+            .bind(block.document_id)
+            .bind(&block.block_uid)
+            .bind(block.block_index)
+            .bind(&block.block_type)
+            .bind(&block.text)
+            .bind(block.page_no)
+            .bind(&block.section_path)
+            .bind(&block.bbox)
+            .bind(&block.metadata)
+            .bind(block.user_id)
+            .bind(block.now)
+            .execute(&mut *tx)
+            .await?;
+        }
+
+        for chunk in chunks {
+            sqlx::query(
+                r#"
+INSERT INTO ai_document_chunk (
+    id, tenant_id, dataset_id, document_id, chunk_uid, chunk_index, content,
+    semantic_search_text, token_count, citation, segment_type, segment_index, page_no,
+    section_path, content_role, display_capability, metadata, embedding_status,
+    create_user, create_time
+)
+VALUES (
+    $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
+    $11, $12, $13, $14, $15, $16, $17, $18, $19, $20
+);
+"#,
+            )
+            .bind(chunk.id)
+            .bind(chunk.tenant_id)
+            .bind(chunk.dataset_id)
+            .bind(chunk.document_id)
+            .bind(&chunk.chunk_uid)
+            .bind(chunk.chunk_index)
+            .bind(&chunk.content)
+            .bind(&chunk.semantic_search_text)
+            .bind(chunk.token_count)
+            .bind(&chunk.citation)
+            .bind(&chunk.segment_type)
+            .bind(chunk.segment_index)
+            .bind(chunk.page_no)
+            .bind(&chunk.section_path)
+            .bind(&chunk.content_role)
+            .bind(&chunk.display_capability)
+            .bind(&chunk.metadata)
+            .bind(chunk.embedding_status)
+            .bind(chunk.user_id)
+            .bind(chunk.now)
+            .execute(&mut *tx)
+            .await?;
+        }
+
+        let result = sqlx::query(
+            r#"
+UPDATE ai_dataset
+SET chunk_count = chunk_count + $1,
+    update_user = $2,
+    update_time = $3
+WHERE tenant_id = $4 AND id = $5;
+"#,
+        )
+        .bind(document.chunk_count)
+        .bind(document.user_id)
+        .bind(document.now)
+        .bind(document.tenant_id)
+        .bind(document.dataset_id)
+        .execute(&mut *tx)
+        .await?;
+        ensure_affected(result.rows_affected())?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    pub async fn parser_job_exists(
+        &self,
+        tenant_id: i64,
+        dataset_id: i64,
+        document_id: i64,
+        job_id: i64,
+    ) -> Result<bool, AppError> {
+        Ok(sqlx::query_scalar::<_, bool>(
+            r#"
+SELECT EXISTS(
+    SELECT 1
+    FROM ai_parser_job
+    WHERE tenant_id = $1 AND dataset_id = $2 AND document_id = $3 AND id = $4
+);
+"#,
+        )
+        .bind(tenant_id)
+        .bind(dataset_id)
+        .bind(document_id)
+        .bind(job_id)
+        .fetch_one(&self.db)
+        .await?)
+    }
+
+    pub async fn get_parser_job(
+        &self,
+        filter: &ParserJobFilter,
+    ) -> Result<Option<ParserJobRecord>, AppError> {
+        Ok(
+            sqlx::query_as::<_, ParserJobRecord>(parser_job_select_sql())
+                .bind(filter.tenant_id)
+                .bind(filter.dataset_id)
+                .bind(filter.job_id)
+                .fetch_optional(&self.db)
+                .await?,
+        )
+    }
+
     pub async fn list_indexed_chunks(
         &self,
         tenant_id: i64,
@@ -658,6 +947,37 @@ SELECT
 FROM ai_document AS d
 LEFT JOIN sys_user AS cu ON cu.id = d.create_user
 LEFT JOIN sys_user AS uu ON uu.id = d.update_user
+"#
+}
+
+fn parser_job_select_sql() -> &'static str {
+    r#"
+SELECT
+    j.id,
+    j.tenant_id,
+    j.dataset_id,
+    j.document_id,
+    j.job_type,
+    j.status,
+    j.attempt_count,
+    COALESCE(j.error_message, '') AS error_message,
+    j.result_summary,
+    d.name AS document_name,
+    COALESCE(d.source_uri, '') AS source_uri,
+    d.file_id,
+    COALESCE(d.content_type, '') AS content_type,
+    d.parse_status,
+    d.ingestion_status,
+    d.chunk_count,
+    j.create_time,
+    COALESCE(cu.nickname, '') AS create_user_string,
+    j.update_time,
+    COALESCE(uu.nickname, '') AS update_user_string
+FROM ai_parser_job AS j
+JOIN ai_document AS d ON d.tenant_id = j.tenant_id AND d.id = j.document_id
+LEFT JOIN sys_user AS cu ON cu.id = j.create_user
+LEFT JOIN sys_user AS uu ON uu.id = j.update_user
+WHERE j.tenant_id = $1 AND j.dataset_id = $2 AND j.id = $3
 "#
 }
 

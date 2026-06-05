@@ -17,7 +17,8 @@ use crate::{
     infrastructure::persistence::ai_knowledge_repository::{
         AiKnowledgeRepository, BlockSaveRecord, ChunkRecord, ChunkSaveRecord, DatasetFilter,
         DatasetRecord, DatasetSaveRecord, DocumentFilter, DocumentRecord, DocumentSaveRecord,
-        FeedbackSaveRecord, ParserJobSaveRecord, RagTraceHitSaveRecord, RagTraceSaveRecord,
+        FeedbackSaveRecord, ParserJobFilter, ParserJobRecord, ParserJobSaveRecord,
+        RagTraceHitSaveRecord, RagTraceSaveRecord,
     },
     shared::{
         error::AppError,
@@ -34,9 +35,12 @@ const DEFAULT_DOCUMENT_CONTENT_TYPE: &str = "text/plain";
 const DEFAULT_CHUNK_MAX_CHARS: usize = 1200;
 const DEFAULT_CHUNK_OVERLAP_CHARS: usize = 120;
 const DOCUMENT_PARSE_STATUS_PARSED: i16 = 3;
+const DOCUMENT_PARSE_STATUS_PARSING: i16 = 2;
+const DOCUMENT_INGESTION_STATUS_PENDING: i16 = 1;
 const DOCUMENT_INGESTION_STATUS_INDEXED: i16 = 4;
 const PARSER_JOB_TYPE_TEXT: i16 = 1;
 const PARSER_JOB_TYPE_WORKER: i16 = 2;
+const PARSER_JOB_STATUS_SUBMITTED: i16 = 2;
 const PARSER_JOB_STATUS_SUCCEEDED: i16 = 3;
 const CHUNK_EMBEDDING_STATUS_INDEXED: i16 = 4;
 const DEFAULT_RAG_LIMIT: usize = 5;
@@ -173,6 +177,23 @@ pub struct ParsedDocumentUploadCommand {
     #[serde(default = "default_document_content_type")]
     pub content_type: String,
     pub parser_result: ParserWorkerParseResult,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DocumentParseJobCommand {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub file_id: Option<i64>,
+    #[serde(default)]
+    pub source_uri: String,
+    #[serde(default = "default_document_content_type")]
+    pub content_type: String,
+    #[serde(default)]
+    pub source_hash: String,
+    #[serde(default)]
+    pub source_kind: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -346,6 +367,32 @@ pub struct DocumentResp {
     pub ingestion_status: i16,
     pub chunk_count: i32,
     pub source_hash: String,
+    pub create_user_string: String,
+    pub create_time: String,
+    pub update_user_string: String,
+    pub update_time: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ParserJobResp {
+    pub id: i64,
+    pub tenant_id: i64,
+    pub dataset_id: i64,
+    pub document_id: i64,
+    pub job_type: i16,
+    pub status: i16,
+    pub attempt_count: i32,
+    pub error_message: String,
+    pub result_summary: Value,
+    pub document_name: String,
+    pub source_uri: String,
+    pub file_id: Option<i64>,
+    pub content_type: String,
+    pub parse_status: i16,
+    pub ingestion_status: i16,
+    pub chunk_count: i32,
+    pub parser_request: Option<Value>,
     pub create_user_string: String,
     pub create_time: String,
     pub update_user_string: String,
@@ -573,15 +620,140 @@ impl KnowledgeService {
             Utc::now().naive_utc(),
         )?;
         let document_id = parts.document.id;
-        self.repo
-            .create_document_ingestion(
-                &parts.document,
-                &parts.parser_job,
-                &parts.blocks,
-                &parts.chunks,
+        if self
+            .repo
+            .parser_job_exists(
+                DEFAULT_TENANT_ID,
+                dataset_id,
+                parts.document.id,
+                parts.parser_job.id,
             )
-            .await?;
+            .await?
+        {
+            self.repo
+                .complete_document_parse_job(
+                    &parts.document,
+                    &parts.parser_job,
+                    &parts.blocks,
+                    &parts.chunks,
+                )
+                .await?;
+        } else {
+            self.repo
+                .create_document_ingestion(
+                    &parts.document,
+                    &parts.parser_job,
+                    &parts.blocks,
+                    &parts.chunks,
+                )
+                .await?;
+        }
         Ok(document_id)
+    }
+
+    pub async fn create_parse_job(
+        &self,
+        user_id: i64,
+        dataset_id: i64,
+        command: DocumentParseJobCommand,
+    ) -> Result<ParserJobResp, AppError> {
+        if dataset_id <= 0 {
+            return Err(AppError::bad_request("知识库 ID 不合法"));
+        }
+        if !self
+            .repo
+            .dataset_exists(DEFAULT_TENANT_ID, dataset_id)
+            .await?
+        {
+            return Err(AppError::NotFound);
+        }
+        let command = normalize_document_parse_job_command(command)?;
+        let document_id = next_id();
+        let parser_job_id = next_id();
+        let now = Utc::now().naive_utc();
+        let parser_request = parser_worker_request(
+            DEFAULT_TENANT_ID,
+            dataset_id,
+            document_id,
+            parser_job_id,
+            &command,
+        );
+        let document = DocumentSaveRecord {
+            id: document_id,
+            tenant_id: DEFAULT_TENANT_ID,
+            dataset_id,
+            name: command.name.clone(),
+            source_uri: Some(command.source_uri.clone()),
+            file_id: command.file_id,
+            content_type: Some(command.content_type.clone()),
+            owner_id: user_id,
+            visibility: VISIBILITY_PRIVATE,
+            parse_status: DOCUMENT_PARSE_STATUS_PARSING,
+            ingestion_status: DOCUMENT_INGESTION_STATUS_PENDING,
+            chunk_count: 0,
+            source_hash: non_empty_parser_string(&command.source_hash),
+            user_id,
+            now,
+        };
+        let parser_job = ParserJobSaveRecord {
+            id: parser_job_id,
+            tenant_id: DEFAULT_TENANT_ID,
+            dataset_id,
+            document_id,
+            job_type: PARSER_JOB_TYPE_WORKER,
+            status: PARSER_JOB_STATUS_SUBMITTED,
+            result_summary: parser_job_submitted_summary(&command, &parser_request),
+            user_id,
+            now,
+        };
+
+        self.repo
+            .create_document_parse_job(&document, &parser_job)
+            .await?;
+
+        Ok(ParserJobResp {
+            id: parser_job_id,
+            tenant_id: DEFAULT_TENANT_ID,
+            dataset_id,
+            document_id,
+            job_type: PARSER_JOB_TYPE_WORKER,
+            status: PARSER_JOB_STATUS_SUBMITTED,
+            attempt_count: 0,
+            error_message: String::new(),
+            result_summary: parser_job.result_summary,
+            document_name: document.name,
+            source_uri: document.source_uri.unwrap_or_default(),
+            file_id: document.file_id,
+            content_type: document.content_type.unwrap_or_default(),
+            parse_status: document.parse_status,
+            ingestion_status: document.ingestion_status,
+            chunk_count: document.chunk_count,
+            parser_request: Some(parser_request),
+            create_user_string: String::new(),
+            create_time: format_datetime(now),
+            update_user_string: String::new(),
+            update_time: String::new(),
+        })
+    }
+
+    pub async fn get_parse_job(
+        &self,
+        dataset_id: i64,
+        job_id: i64,
+    ) -> Result<ParserJobResp, AppError> {
+        if dataset_id <= 0 || job_id <= 0 {
+            return Err(AppError::bad_request("解析任务 ID 不合法"));
+        }
+        let record = self
+            .repo
+            .get_parser_job(&ParserJobFilter {
+                tenant_id: DEFAULT_TENANT_ID,
+                dataset_id,
+                job_id,
+            })
+            .await?
+            .ok_or(AppError::NotFound)?;
+        Ok(ParserJobResp::from(record))
     }
 
     pub async fn ask_dataset(
@@ -707,6 +879,34 @@ impl From<DocumentRecord> for DocumentResp {
     }
 }
 
+impl From<ParserJobRecord> for ParserJobResp {
+    fn from(record: ParserJobRecord) -> Self {
+        Self {
+            id: record.id,
+            tenant_id: record.tenant_id,
+            dataset_id: record.dataset_id,
+            document_id: record.document_id,
+            job_type: record.job_type,
+            status: record.status,
+            attempt_count: record.attempt_count,
+            error_message: record.error_message,
+            result_summary: record.result_summary,
+            document_name: record.document_name,
+            source_uri: record.source_uri,
+            file_id: record.file_id,
+            content_type: record.content_type,
+            parse_status: record.parse_status,
+            ingestion_status: record.ingestion_status,
+            chunk_count: record.chunk_count,
+            parser_request: None,
+            create_user_string: record.create_user_string,
+            create_time: format_datetime(record.create_time),
+            update_user_string: record.update_user_string,
+            update_time: format_optional_datetime(record.update_time),
+        }
+    }
+}
+
 pub fn normalize_dataset_command(mut command: DatasetCommand) -> Result<DatasetCommand, AppError> {
     command.name = command.name.trim().to_owned();
     command.description = command.description.trim().to_owned();
@@ -748,6 +948,103 @@ pub fn normalize_document_upload_command(
     ensure_max_chars("文档名称", &command.name, 255)?;
     ensure_max_chars("内容类型", &command.content_type, 255)?;
     Ok(command)
+}
+
+pub fn normalize_document_parse_job_command(
+    mut command: DocumentParseJobCommand,
+) -> Result<DocumentParseJobCommand, AppError> {
+    command.name = command.name.trim().to_owned();
+    command.source_uri = command.source_uri.trim().to_owned();
+    command.content_type = command.content_type.trim().to_owned();
+    command.source_hash = command.source_hash.trim().to_owned();
+    command.source_kind = command.source_kind.trim().to_owned();
+    if command.name.is_empty() {
+        return Err(AppError::bad_request("文档名称不能为空"));
+    }
+    if command.file_id.unwrap_or_default() <= 0 && command.source_uri.is_empty() {
+        return Err(AppError::bad_request("文件来源不能为空"));
+    }
+    if command.content_type.is_empty() {
+        command.content_type = mime_guess::from_path(&command.name)
+            .first_or_octet_stream()
+            .essence_str()
+            .to_owned();
+    }
+    if command.source_kind.is_empty() {
+        command.source_kind = infer_parser_source_kind(command.file_id, &command.source_uri);
+    }
+    if !matches!(
+        command.source_kind.as_str(),
+        "inlineText" | "objectStorage" | "localFile" | "remoteUrl"
+    ) {
+        return Err(AppError::bad_request("文件来源类型不合法"));
+    }
+    ensure_max_chars("文档名称", &command.name, 255)?;
+    ensure_max_chars("内容类型", &command.content_type, 255)?;
+    ensure_max_chars("文件来源", &command.source_uri, 2000)?;
+    ensure_max_chars("文件 Hash", &command.source_hash, 256)?;
+    Ok(command)
+}
+
+fn infer_parser_source_kind(file_id: Option<i64>, source_uri: &str) -> String {
+    if file_id.unwrap_or_default() > 0 {
+        "objectStorage".to_owned()
+    } else if source_uri.starts_with("http://") || source_uri.starts_with("https://") {
+        "remoteUrl".to_owned()
+    } else {
+        "localFile".to_owned()
+    }
+}
+
+fn parser_worker_request(
+    tenant_id: i64,
+    dataset_id: i64,
+    document_id: i64,
+    parser_job_id: i64,
+    command: &DocumentParseJobCommand,
+) -> Value {
+    json!({
+        "tenantId": tenant_id,
+        "datasetId": dataset_id,
+        "documentId": document_id,
+        "parserJobId": parser_job_id,
+        "source": {
+            "kind": command.source_kind,
+            "contentType": command.content_type,
+            "name": command.name,
+            "uri": command.source_uri,
+            "fileId": command.file_id,
+            "sourceHash": non_empty_parser_string(&command.source_hash),
+        },
+        "options": {
+            "maxChunkChars": DEFAULT_CHUNK_MAX_CHARS,
+            "chunkOverlapChars": DEFAULT_CHUNK_OVERLAP_CHARS,
+            "extractTables": true,
+            "extractFormula": true,
+            "ocr": false,
+            "mineruModelVersion": "vlm",
+        },
+        "trace": {
+            "requestId": format!("parser-job-{parser_job_id}"),
+        }
+    })
+}
+
+fn parser_job_submitted_summary(
+    command: &DocumentParseJobCommand,
+    parser_request: &Value,
+) -> Value {
+    json!({
+        "parser": "parser-worker",
+        "status": "submitted",
+        "sourceFileName": command.name,
+        "contentType": command.content_type,
+        "sourceKind": command.source_kind,
+        "fileId": command.file_id,
+        "sourceUri": command.source_uri,
+        "sourceHash": non_empty_parser_string(&command.source_hash),
+        "parserRequest": parser_request,
+    })
 }
 
 pub fn normalize_rag_ask_command(mut command: RagAskCommand) -> Result<RagAskCommand, AppError> {
@@ -2037,6 +2334,50 @@ mod tests {
         );
         assert!(chunks[0].semantic_search_text.contains("training.csv"));
         assert!(chunks[0].semantic_search_text.contains("deadline"));
+    }
+
+    #[test]
+    fn normalize_parse_job_command_builds_parser_worker_request_for_uploaded_file() {
+        let command = DocumentParseJobCommand {
+            name: " training.pdf ".to_owned(),
+            file_id: Some(88),
+            source_uri: " /uploads/training.pdf ".to_owned(),
+            content_type: " ".to_owned(),
+            source_hash: " abc123 ".to_owned(),
+            source_kind: " ".to_owned(),
+        };
+
+        let command = normalize_document_parse_job_command(command).unwrap();
+        let request = parser_worker_request(DEFAULT_TENANT_ID, 7, 42, 99, &command);
+
+        assert_eq!(command.name, "training.pdf");
+        assert_eq!(command.content_type, "application/pdf");
+        assert_eq!(command.source_kind, "objectStorage");
+        assert_eq!(request["tenantId"], 1);
+        assert_eq!(request["datasetId"], 7);
+        assert_eq!(request["documentId"], 42);
+        assert_eq!(request["parserJobId"], 99);
+        assert_eq!(request["source"]["kind"], "objectStorage");
+        assert_eq!(request["source"]["fileId"], 88);
+        assert_eq!(request["source"]["uri"], "/uploads/training.pdf");
+        assert_eq!(request["source"]["sourceHash"], "abc123");
+        assert_eq!(request["options"]["maxChunkChars"], DEFAULT_CHUNK_MAX_CHARS);
+        assert_eq!(
+            request["options"]["chunkOverlapChars"],
+            DEFAULT_CHUNK_OVERLAP_CHARS
+        );
+        assert_eq!(request["trace"]["requestId"], "parser-job-99");
+    }
+
+    #[test]
+    fn normalize_parse_job_command_rejects_missing_source() {
+        let err = normalize_document_parse_job_command(DocumentParseJobCommand {
+            name: "training.pdf".to_owned(),
+            ..DocumentParseJobCommand::default()
+        })
+        .unwrap_err();
+
+        assert!(err.to_string().contains("文件来源不能为空"));
     }
 
     #[test]
