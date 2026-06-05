@@ -99,4 +99,45 @@ mod tests {
         let body = serde_json::from_slice::<Value>(&body).unwrap();
         assert_eq!(body["code"], "401");
     }
+
+    #[test]
+    fn foundation_control_plane_migration_contains_required_tables() {
+        let migration = include_str!(
+            "../../../../migrations/202606050014_create_foundation_control_plane.sql"
+        );
+
+        for table in [
+            "sys_tenant",
+            "sys_tenant_user",
+            "sys_tenant_role",
+            "sys_member_group",
+            "sys_member_group_user",
+            "sys_resource_permission",
+            "sys_quota_policy",
+            "sys_usage_meter",
+            "sys_rate_limit_policy",
+            "sys_identity_provider",
+            "sys_external_account",
+            "sys_oauth_state",
+            "sys_secret",
+        ] {
+            assert!(migration.contains(table), "{table} missing from migration");
+        }
+
+        for field in [
+            "tenant_id",
+            "resource_type",
+            "subject_type",
+            "permission_value",
+            "scope_type",
+            "ciphertext",
+            "masked_value",
+            "key_version",
+            "quota_limit",
+            "usage_value",
+            "window_seconds",
+        ] {
+            assert!(migration.contains(field), "{field} missing from migration");
+        }
+    }
 }
