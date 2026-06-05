@@ -48,6 +48,17 @@ pub struct DocumentRecord {
     pub update_user_string: String,
 }
 
+#[derive(Debug, Clone, FromRow)]
+pub struct ChunkRecord {
+    pub id: i64,
+    pub document_id: i64,
+    pub chunk_uid: String,
+    pub chunk_index: i32,
+    pub content: String,
+    pub token_count: i32,
+    pub citation: Value,
+}
+
 #[derive(Debug, Clone)]
 pub struct DatasetFilter<'a> {
     pub tenant_id: i64,
@@ -124,6 +135,40 @@ pub struct ChunkSaveRecord {
     pub citation: Value,
     pub embedding_status: i16,
     pub user_id: i64,
+    pub now: NaiveDateTime,
+}
+
+#[derive(Debug, Clone)]
+pub struct RagTraceSaveRecord {
+    pub id: i64,
+    pub tenant_id: i64,
+    pub dataset_id: i64,
+    pub question: String,
+    pub answer: String,
+    pub answer_strategy: String,
+    pub retrieval_mode: i16,
+    pub embedding_model_route: Option<String>,
+    pub rerank_model_route: Option<String>,
+    pub answer_model_route: Option<String>,
+    pub retrieval_hit_count: i32,
+    pub context_token_count: i32,
+    pub output_token_count: i32,
+    pub user_id: i64,
+    pub now: NaiveDateTime,
+}
+
+#[derive(Debug, Clone)]
+pub struct RagTraceHitSaveRecord {
+    pub id: i64,
+    pub tenant_id: i64,
+    pub trace_id: i64,
+    pub dataset_id: i64,
+    pub document_id: i64,
+    pub chunk_id: i64,
+    pub rank: i32,
+    pub score: f32,
+    pub citation: Value,
+    pub content_preview: String,
     pub now: NaiveDateTime,
 }
 
@@ -321,6 +366,100 @@ WHERE tenant_id = $4 AND id = $5;
         .execute(&mut *tx)
         .await?;
         ensure_affected(result.rows_affected())?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    pub async fn list_indexed_chunks(
+        &self,
+        tenant_id: i64,
+        dataset_id: i64,
+        limit: i64,
+    ) -> Result<Vec<ChunkRecord>, AppError> {
+        Ok(sqlx::query_as::<_, ChunkRecord>(
+            r#"
+SELECT
+    id,
+    document_id,
+    chunk_uid,
+    chunk_index,
+    content,
+    token_count,
+    citation
+FROM ai_document_chunk
+WHERE tenant_id = $1
+  AND dataset_id = $2
+  AND embedding_status = 4
+ORDER BY document_id ASC, chunk_index ASC
+LIMIT $3;
+"#,
+        )
+        .bind(tenant_id)
+        .bind(dataset_id)
+        .bind(limit)
+        .fetch_all(&self.db)
+        .await?)
+    }
+
+    pub async fn create_rag_trace(
+        &self,
+        trace: &RagTraceSaveRecord,
+        hits: &[RagTraceHitSaveRecord],
+    ) -> Result<(), AppError> {
+        let mut tx = self.db.begin().await?;
+        sqlx::query(
+            r#"
+INSERT INTO ai_rag_trace (
+    id, tenant_id, dataset_id, question, answer, answer_strategy, retrieval_mode,
+    embedding_model_route, rerank_model_route, answer_model_route,
+    retrieval_hit_count, context_token_count, output_token_count, create_user, create_time
+)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15);
+"#,
+        )
+        .bind(trace.id)
+        .bind(trace.tenant_id)
+        .bind(trace.dataset_id)
+        .bind(&trace.question)
+        .bind(&trace.answer)
+        .bind(&trace.answer_strategy)
+        .bind(trace.retrieval_mode)
+        .bind(&trace.embedding_model_route)
+        .bind(&trace.rerank_model_route)
+        .bind(&trace.answer_model_route)
+        .bind(trace.retrieval_hit_count)
+        .bind(trace.context_token_count)
+        .bind(trace.output_token_count)
+        .bind(trace.user_id)
+        .bind(trace.now)
+        .execute(&mut *tx)
+        .await?;
+
+        for hit in hits {
+            sqlx::query(
+                r#"
+INSERT INTO ai_rag_trace_hit (
+    id, tenant_id, trace_id, dataset_id, document_id, chunk_id, rank, score,
+    citation, content_preview, create_time
+)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11);
+"#,
+            )
+            .bind(hit.id)
+            .bind(hit.tenant_id)
+            .bind(hit.trace_id)
+            .bind(hit.dataset_id)
+            .bind(hit.document_id)
+            .bind(hit.chunk_id)
+            .bind(hit.rank)
+            .bind(hit.score)
+            .bind(&hit.citation)
+            .bind(&hit.content_preview)
+            .bind(hit.now)
+            .execute(&mut *tx)
+            .await?;
+        }
+
         tx.commit().await?;
         Ok(())
     }
