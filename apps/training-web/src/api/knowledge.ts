@@ -1,8 +1,9 @@
-import { apiRequest } from "@/lib/api";
+import { apiFormRequest, apiRequest } from "@/lib/api";
 import type { PageResult } from "@/types/api";
 import type {
   DatasetQuery,
   DatasetResp,
+  KnowledgeFileUploadResp,
   RagAskCommand,
   RagAskResp,
   RagFeedbackCommand,
@@ -30,4 +31,11 @@ export function submitRagFeedback(data: RagFeedbackCommand) {
     method: "POST",
     body: data
   });
+}
+
+export function uploadKnowledgeFile(datasetId: number, file: File, parentPath = "/knowledge") {
+  const form = new FormData();
+  form.append("file", file, file.name);
+  form.append("parentPath", parentPath);
+  return apiFormRequest<KnowledgeFileUploadResp>(`${DATASET_URL}/${datasetId}/documents/files`, form);
 }

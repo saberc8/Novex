@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { askDataset, listDatasets, submitRagFeedback } from "./knowledge";
+import { askDataset, listDatasets, submitRagFeedback, uploadKnowledgeFile } from "./knowledge";
 import { getAuthToken } from "@/lib/auth";
 
 function okResponse(data: unknown) {
@@ -111,6 +111,81 @@ describe("training knowledge api", () => {
         reason: "答案没有覆盖培训截止时间"
       })
     });
+  });
+
+  it("uploads knowledge files as multipart form data with bearer auth", async () => {
+    window.localStorage.setItem("novex_token", "token-1");
+    fetchMock.mockImplementationOnce(() =>
+      okResponse({
+        file: {
+          id: 88,
+          name: "88.md",
+          originalName: "handbook.md",
+          size: 24,
+          url: "/file/knowledge/88.md",
+          parentPath: "/knowledge",
+          path: "/knowledge/88.md",
+          sha256: "hash",
+          contentType: "text/markdown",
+          metadata: "{}",
+          thumbnailSize: 0,
+          thumbnailName: "",
+          thumbnailMetadata: "",
+          thumbnailUrl: "",
+          extension: "md",
+          type: 4,
+          storageId: 1,
+          storageName: "本地",
+          createUserString: "admin",
+          createTime: "2026-06-05 10:00:00",
+          updateUserString: "",
+          updateTime: ""
+        },
+        parseJob: {
+          id: 99,
+          tenantId: 1,
+          datasetId: 10,
+          documentId: 42,
+          jobType: 2,
+          status: 2,
+          attemptCount: 0,
+          errorMessage: "",
+          resultSummary: {},
+          documentName: "handbook.md",
+          sourceUri: "/file/knowledge/88.md",
+          fileId: 88,
+          contentType: "text/markdown",
+          parseStatus: 2,
+          ingestionStatus: 1,
+          chunkCount: 0,
+          parserRequest: {},
+          createUserString: "",
+          createTime: "2026-06-05 10:00:00",
+          updateUserString: "",
+          updateTime: ""
+        }
+      })
+    );
+    const file = new File(["# Handbook"], "handbook.md", { type: "text/markdown" });
+
+    await uploadKnowledgeFile(10, file);
+
+    const [, init] = fetchMock.mock.calls[0] ?? [];
+    expect(fetchMock.mock.calls[0]?.[0]).toBe(
+      "http://localhost:4398/ai/knowledge/datasets/10/documents/files"
+    );
+    expect(init).toMatchObject({
+      method: "POST",
+      headers: expect.objectContaining({
+        Authorization: "Bearer token-1"
+      })
+    });
+    expect((init?.headers as Record<string, string>)["Content-Type"]).toBeUndefined();
+    expect(init?.body).toBeInstanceOf(FormData);
+    const uploadedFile = (init?.body as FormData).get("file") as File;
+    expect(uploadedFile.name).toBe("handbook.md");
+    expect(uploadedFile.type).toBe("text/markdown");
+    expect((init?.body as FormData).get("parentPath")).toBe("/knowledge");
   });
 
   it("reads auth token safely when browser storage is unavailable", () => {

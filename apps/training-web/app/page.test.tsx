@@ -5,7 +5,7 @@ import { accountLogin, getImageCaptcha } from "@/api/auth";
 import { createAgentRun } from "@/api/agent";
 import { dryRunTool } from "@/api/capability";
 import { listEvalDatasets, listEvalResults, listEvalRuns, runEval } from "@/api/eval";
-import { askDataset, listDatasets, submitRagFeedback } from "@/api/knowledge";
+import { askDataset, listDatasets, submitRagFeedback, uploadKnowledgeFile } from "@/api/knowledge";
 import type { DatasetResp } from "@/types/knowledge";
 
 vi.mock("@/api/auth", () => ({
@@ -31,7 +31,8 @@ vi.mock("@/api/eval", () => ({
 vi.mock("@/api/knowledge", () => ({
   askDataset: vi.fn(),
   listDatasets: vi.fn(),
-  submitRagFeedback: vi.fn()
+  submitRagFeedback: vi.fn(),
+  uploadKnowledgeFile: vi.fn()
 }));
 
 const accountLoginMock = vi.mocked(accountLogin);
@@ -45,6 +46,7 @@ const listEvalRunsMock = vi.mocked(listEvalRuns);
 const listDatasetsMock = vi.mocked(listDatasets);
 const runEvalMock = vi.mocked(runEval);
 const submitRagFeedbackMock = vi.mocked(submitRagFeedback);
+const uploadKnowledgeFileMock = vi.mocked(uploadKnowledgeFile);
 
 function dataset(overrides: Partial<DatasetResp> = {}): DatasetResp {
   return {
@@ -102,6 +104,55 @@ describe("Training home page", () => {
       id: 99,
       traceId: 42,
       rating: "not_helpful"
+    });
+    uploadKnowledgeFileMock.mockResolvedValue({
+      file: {
+        id: 88,
+        name: "88.md",
+        originalName: "handbook.md",
+        size: 24,
+        url: "/file/knowledge/88.md",
+        parentPath: "/knowledge",
+        path: "/knowledge/88.md",
+        sha256: "hash",
+        contentType: "text/markdown",
+        metadata: "{}",
+        thumbnailSize: 0,
+        thumbnailName: "",
+        thumbnailMetadata: "",
+        thumbnailUrl: "",
+        extension: "md",
+        type: 4,
+        storageId: 1,
+        storageName: "本地",
+        createUserString: "admin",
+        createTime: "2026-06-05 10:00:00",
+        updateUserString: "",
+        updateTime: ""
+      },
+      parseJob: {
+        id: 99,
+        tenantId: 1,
+        datasetId: 10,
+        documentId: 42,
+        jobType: 2,
+        status: 2,
+        attemptCount: 0,
+        errorMessage: "",
+        resultSummary: {},
+        documentName: "handbook.md",
+        sourceUri: "/file/knowledge/88.md",
+        fileId: 88,
+        contentType: "text/markdown",
+        parseStatus: 2,
+        ingestionStatus: 1,
+        chunkCount: 0,
+        parserRequest: {},
+        createUserString: "",
+        createTime: "2026-06-05 10:00:00",
+        updateUserString: "",
+        updateTime: ""
+      }
     });
     createAgentRunMock.mockResolvedValue({
       runId: 900,
@@ -278,6 +329,19 @@ describe("Training home page", () => {
       })
     );
     expect(await screen.findByText("已记录反馈")).toBeTruthy();
+  });
+
+  it("uploads training files from the customer workbench and creates a parse job", async () => {
+    render(<Page />);
+
+    await waitFor(() => expect(listDatasetsMock).toHaveBeenCalledWith({ page: 1, size: 20 }));
+    const file = new File(["# Handbook"], "handbook.md", { type: "text/markdown" });
+    fireEvent.change(screen.getByLabelText("上传培训资料"), {
+      target: { files: [file] }
+    });
+
+    await waitFor(() => expect(uploadKnowledgeFileMock).toHaveBeenCalledWith(10, file));
+    expect(await screen.findByText("解析任务 #99 已创建")).toBeTruthy();
   });
 
   it("runs the training regression eval set from the customer workbench", async () => {

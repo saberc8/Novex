@@ -1,6 +1,6 @@
 "use client";
 
-import { type FormEvent, useEffect, useMemo, useState } from "react";
+import { type ChangeEvent, type FormEvent, useEffect, useMemo, useState } from "react";
 import {
   ArrowRight,
   BarChart3,
@@ -16,13 +16,14 @@ import {
   Send,
   ShieldCheck,
   ThumbsDown,
-  ThumbsUp
+  ThumbsUp,
+  Upload
 } from "lucide-react";
 import { accountLogin, getImageCaptcha } from "@/api/auth";
 import { createAgentRun } from "@/api/agent";
 import { dryRunTool } from "@/api/capability";
 import { listEvalDatasets, listEvalResults, listEvalRuns, runEval } from "@/api/eval";
-import { askDataset, listDatasets, submitRagFeedback } from "@/api/knowledge";
+import { askDataset, listDatasets, submitRagFeedback, uploadKnowledgeFile } from "@/api/knowledge";
 import { CitationList, type CitationItem } from "@/components/citation-list";
 import { MetricStrip } from "@/components/metric-strip";
 import { TrainingShell } from "@/components/training-shell";
@@ -150,6 +151,8 @@ export function TrainingAppClient() {
   const [evalRunning, setEvalRunning] = useState(false);
   const [feedbackSubmitting, setFeedbackSubmitting] = useState(false);
   const [feedbackStatus, setFeedbackStatus] = useState("");
+  const [uploadingFile, setUploadingFile] = useState(false);
+  const [uploadStatus, setUploadStatus] = useState("");
   const [quizRun, setQuizRun] = useState<AgentRunResp | null>(null);
   const [quizRunning, setQuizRunning] = useState(false);
   const [quizStatus, setQuizStatus] = useState("");
@@ -444,6 +447,26 @@ export function TrainingAppClient() {
     }
   }
 
+  async function handleTrainingFileUpload(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file || uploadingFile) {
+      return;
+    }
+
+    setUploadingFile(true);
+    setUploadStatus("");
+    try {
+      const response = await uploadKnowledgeFile(selectedDataset.id, file);
+      setUploadStatus(`解析任务 #${response.parseJob.id} 已创建`);
+      setApiStatus("live");
+    } catch {
+      setUploadStatus("上传失败");
+    } finally {
+      setUploadingFile(false);
+    }
+  }
+
   async function handleRunEval() {
     if (evalRunning) {
       return;
@@ -545,6 +568,24 @@ export function TrainingAppClient() {
                 </p>
               </div>
               <div className="flex flex-wrap gap-2">
+                <label
+                  className={[
+                    "inline-flex h-9 cursor-pointer items-center gap-2 rounded-md border px-3 text-sm font-semibold",
+                    uploadingFile
+                      ? "border-slate-200 bg-slate-100 text-slate-400"
+                      : "border-slate-200 text-slate-700 hover:bg-slate-50"
+                  ].join(" ")}
+                >
+                  <Upload aria-hidden="true" className="h-4 w-4" />
+                  上传资料
+                  <input
+                    aria-label="上传培训资料"
+                    className="sr-only"
+                    disabled={uploadingFile}
+                    onChange={(event) => void handleTrainingFileUpload(event)}
+                    type="file"
+                  />
+                </label>
                 <span className="inline-flex items-center gap-2 rounded-md bg-teal-50 px-3 py-2 text-sm font-medium text-teal-800 ring-1 ring-teal-100">
                   <ShieldCheck aria-hidden="true" className="h-4 w-4" />
                   已接入 RBAC
@@ -553,6 +594,11 @@ export function TrainingAppClient() {
                   <Bot aria-hidden="true" className="h-4 w-4" />
                   {apiStatus === "live" ? "Live RAG" : "Fallback"}
                 </span>
+                {uploadStatus ? (
+                  <span className="inline-flex h-9 items-center rounded-md bg-slate-100 px-3 text-sm font-medium text-slate-700">
+                    {uploadStatus}
+                  </span>
+                ) : null}
               </div>
             </div>
           </header>

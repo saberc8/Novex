@@ -1,17 +1,23 @@
 use axum::{
-    extract::{Path, Query, State},
+    extract::{Multipart, Path, Query, State},
     routing::get,
     Json, Router,
 };
+use serde::Serialize;
 
 use crate::{
     application::ai::knowledge_service::{
-        DatasetCommand, DatasetQuery, DatasetResp, DocumentParseJobCommand, DocumentQuery,
-        DocumentResp, DocumentUploadCommand, FeedbackResp, KnowledgeService,
-        ParsedDocumentUploadCommand, ParserJobResp, RagAskCommand, RagAskResp, RagFeedbackCommand,
+        parse_job_command_from_uploaded_file, DatasetCommand, DatasetQuery, DatasetResp,
+        DocumentParseJobCommand, DocumentQuery, DocumentResp, DocumentUploadCommand, FeedbackResp,
+        KnowledgeService, ParsedDocumentUploadCommand, ParserJobResp, RagAskCommand, RagAskResp,
+        RagFeedbackCommand,
     },
+    application::system::file_service::{FileResp, FileService},
     domain::auth::model::CurrentUser,
-    interfaces::http::{middleware::permission::require_permission, AppState},
+    interfaces::http::{
+        middleware::permission::require_permission, system::file::multipart_upload_command,
+        AppState,
+    },
     shared::{error::AppError, pagination::PageResult, response::ApiResponse},
 };
 
@@ -20,6 +26,13 @@ const DATASET_CREATE_PERMISSION: &str = "ai:knowledge:create";
 const DOCUMENT_CREATE_PERMISSION: &str = "ai:knowledge:document:create";
 const DOCUMENT_LIST_PERMISSION: &str = "ai:knowledge:document:list";
 const RAG_ASK_PERMISSION: &str = "ai:knowledge:ask";
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct KnowledgeFileUploadResp {
+    file: FileResp,
+    parse_job: ParserJobResp,
+}
 
 pub fn routes() -> Router<AppState> {
     Router::new()
@@ -38,6 +51,10 @@ pub fn routes() -> Router<AppState> {
         .route(
             "/ai/knowledge/datasets/:dataset_id/documents/parsed",
             axum::routing::post(upload_parsed_document),
+        )
+        .route(
+            "/ai/knowledge/datasets/:dataset_id/documents/files",
+            axum::routing::post(upload_file_document),
         )
         .route(
             "/ai/knowledge/datasets/:dataset_id/parse-jobs/:job_id",
@@ -125,6 +142,28 @@ async fn upload_parsed_document(
             .upload_parsed_document(current_user.id, dataset_id, command)
             .await?,
     )))
+}
+
+async fn upload_file_document(
+    State(state): State<AppState>,
+    current_user: CurrentUser,
+    Path(dataset_id): Path<i64>,
+    multipart: Multipart,
+) -> Result<Json<ApiResponse<KnowledgeFileUploadResp>>, AppError> {
+    require_permission(&current_user, DOCUMENT_CREATE_PERMISSION)?;
+    let upload_command = multipart_upload_command(multipart).await?;
+    let file_service = FileService::new(state.db.clone());
+    let file = file_service.upload(current_user.id, upload_command).await?;
+    let parse_command = parse_job_command_from_uploaded_file(&file)?;
+    let knowledge_service = KnowledgeService::new(state.db);
+    let parse_job = knowledge_service
+        .create_parse_job(current_user.id, dataset_id, parse_command)
+        .await?;
+
+    Ok(Json(ApiResponse::ok(KnowledgeFileUploadResp {
+        file,
+        parse_job,
+    })))
 }
 
 async fn create_parse_job(
@@ -487,6 +526,32 @@ mod tests {
                     .uri("/ai/knowledge/datasets/1/parse-jobs")
                     .header(header::CONTENT_TYPE, "application/json")
                     .body(Body::from(r#"{"name":"handbook.pdf","fileId":10,"sourceUri":"/uploads/handbook.pdf"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let body = serde_json::from_slice::<Value>(&body).unwrap();
+        assert_eq!(body["code"], "401");
+    }
+
+    #[tokio::test]
+    async fn knowledge_file_upload_route_is_registered_and_requires_auth() {
+        let db = PgPoolOptions::new()
+            .connect_lazy("postgres://postgres:postgres@localhost:5432/avalon_admin")
+            .unwrap();
+        let jwt = JwtService::new("test-secret".to_owned(), 24);
+        let app = build_router(db, &["http://localhost:4399".to_owned()], jwt).unwrap();
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/ai/knowledge/datasets/1/documents/files")
+                    .header(header::CONTENT_TYPE, "multipart/form-data; boundary=novex")
+                    .body(Body::from("--novex--\r\n"))
                     .unwrap(),
             )
             .await

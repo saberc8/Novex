@@ -136,7 +136,9 @@ async fn dir_size(
     Ok(Json(ApiResponse::ok(service.dir_size(id).await?)))
 }
 
-async fn multipart_upload_command(mut multipart: Multipart) -> Result<FileUploadCommand, AppError> {
+pub(crate) async fn multipart_upload_command(
+    mut multipart: Multipart,
+) -> Result<FileUploadCommand, AppError> {
     let mut parent_path = String::new();
     let mut original_name = None;
     let mut content_type = String::new();

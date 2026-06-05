@@ -13,7 +13,9 @@ use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 
 use crate::{
-    application::system::{ensure_max_chars, format_datetime, format_optional_datetime},
+    application::system::{
+        ensure_max_chars, file_service::FileResp, format_datetime, format_optional_datetime,
+    },
     infrastructure::persistence::ai_knowledge_repository::{
         AiKnowledgeRepository, BlockSaveRecord, ChunkRecord, ChunkSaveRecord, DatasetFilter,
         DatasetRecord, DatasetSaveRecord, DocumentFilter, DocumentRecord, DocumentSaveRecord,
@@ -984,6 +986,27 @@ pub fn normalize_document_parse_job_command(
     ensure_max_chars("文件来源", &command.source_uri, 2000)?;
     ensure_max_chars("文件 Hash", &command.source_hash, 256)?;
     Ok(command)
+}
+
+pub fn parse_job_command_from_uploaded_file(
+    file: &FileResp,
+) -> Result<DocumentParseJobCommand, AppError> {
+    if file.id <= 0 {
+        return Err(AppError::bad_request("文件 ID 不合法"));
+    }
+    if file.file_type == 0 {
+        return Err(AppError::bad_request("文件夹不能创建解析任务"));
+    }
+    let name = non_empty_parser_string(&file.original_name).unwrap_or_else(|| file.name.clone());
+    let source_uri = non_empty_parser_string(&file.url).unwrap_or_else(|| file.path.clone());
+    normalize_document_parse_job_command(DocumentParseJobCommand {
+        name,
+        file_id: Some(file.id),
+        source_uri,
+        content_type: file.content_type.clone(),
+        source_hash: file.sha256.clone(),
+        source_kind: "objectStorage".to_owned(),
+    })
 }
 
 fn infer_parser_source_kind(file_id: Option<i64>, source_uri: &str) -> String {
@@ -2378,6 +2401,43 @@ mod tests {
         .unwrap_err();
 
         assert!(err.to_string().contains("文件来源不能为空"));
+    }
+
+    #[test]
+    fn parse_job_command_from_uploaded_file_uses_asset_metadata() {
+        let file = crate::application::system::file_service::FileResp {
+            id: 88,
+            name: "88.pdf".to_owned(),
+            original_name: "员工手册.pdf".to_owned(),
+            size: 1024,
+            url: "/file/knowledge/88.pdf".to_owned(),
+            parent_path: "/knowledge".to_owned(),
+            path: "/knowledge/88.pdf".to_owned(),
+            sha256: "file-hash".to_owned(),
+            content_type: "application/pdf".to_owned(),
+            metadata: "{}".to_owned(),
+            thumbnail_size: 0,
+            thumbnail_name: String::new(),
+            thumbnail_metadata: String::new(),
+            thumbnail_url: String::new(),
+            extension: "pdf".to_owned(),
+            file_type: 4,
+            storage_id: 1,
+            storage_name: "本地".to_owned(),
+            create_user_string: "admin".to_owned(),
+            create_time: "2026-06-05 10:00:00".to_owned(),
+            update_user_string: String::new(),
+            update_time: String::new(),
+        };
+
+        let command = parse_job_command_from_uploaded_file(&file).unwrap();
+
+        assert_eq!(command.name, "员工手册.pdf");
+        assert_eq!(command.file_id, Some(88));
+        assert_eq!(command.source_uri, "/file/knowledge/88.pdf");
+        assert_eq!(command.content_type, "application/pdf");
+        assert_eq!(command.source_hash, "file-hash");
+        assert_eq!(command.source_kind, "objectStorage");
     }
 
     #[test]

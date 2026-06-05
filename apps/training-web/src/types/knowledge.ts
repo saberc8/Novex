@@ -22,6 +22,60 @@ export interface DatasetResp {
   updateTime: string;
 }
 
+export interface FileResp {
+  id: number;
+  name: string;
+  originalName: string;
+  size: number;
+  url: string;
+  parentPath: string;
+  path: string;
+  sha256: string;
+  contentType: string;
+  metadata: string;
+  thumbnailSize: number;
+  thumbnailName: string;
+  thumbnailMetadata: string;
+  thumbnailUrl: string;
+  extension: string;
+  type: number;
+  storageId: number;
+  storageName: string;
+  createUserString: string;
+  createTime: string;
+  updateUserString: string;
+  updateTime: string;
+}
+
+export interface ParserJobResp {
+  id: number;
+  tenantId: number;
+  datasetId: number;
+  documentId: number;
+  jobType: number;
+  status: number;
+  attemptCount: number;
+  errorMessage: string;
+  resultSummary: Record<string, unknown>;
+  documentName: string;
+  sourceUri: string;
+  fileId?: number | null;
+  contentType: string;
+  parseStatus: number;
+  ingestionStatus: number;
+  chunkCount: number;
+  parserRequest?: Record<string, unknown> | null;
+  createUserString: string;
+  createTime: string;
+  updateUserString: string;
+  updateTime: string;
+}
+
+export interface KnowledgeFileUploadResp {
+  file: FileResp;
+  parseJob: ParserJobResp;
+}
+
 export interface RagAskCommand {
   question: string;
   limit?: number;
