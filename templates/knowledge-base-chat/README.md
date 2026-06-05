@@ -2,7 +2,8 @@
 
 Default template for RAG Q&A with citations.
 
-M0 contents:
+M5 package:
 
-- Template boundary placeholder.
-- Future knowledge dataset, prompt, citation policy, model route, and eval seed location.
+- Manifest: `template.json`.
+- Frontend entry: `apps/chat-web`.
+- Includes default knowledge roles, menus, citation prompt, web import connector, and RAG regression eval set.

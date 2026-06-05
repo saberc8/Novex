@@ -2,7 +2,8 @@
 
 Default template for pure model chat without a knowledge base.
 
-M0 contents:
+M5 package:
 
-- Template boundary placeholder.
-- Future default prompt, role, menu, model route, and eval seed location.
+- Manifest: `template.json`.
+- Frontend entry: `apps/chat-web`.
+- Includes default chat roles, menus, prompt, skill, branding, and smoke eval set.

@@ -1,0 +1,109 @@
+{
+  "code": "training_app",
+  "name": "Training App",
+  "category": "training",
+  "description": "Employee training template with knowledge Q&A, quiz workflow, learning records, Feishu reminders, and regression evals.",
+  "frontendEntry": "apps/training-web",
+  "sort": 4,
+  "status": 1,
+  "branding": {
+    "brandName": "Novex Academy",
+    "logoText": "TA",
+    "primaryColor": "#db2777",
+    "publicUrl": "https://training.example.com"
+  },
+  "roles": [
+    {
+      "code": "training_admin",
+      "name": "Training Admin",
+      "permissions": ["ai:knowledge:list", "ai:agent:run", "ai:tool:dryRun", "ai:eval:run", "ai:template:init"]
+    },
+    {
+      "code": "trainer",
+      "name": "Trainer",
+      "permissions": ["app:training:manage", "app:training:quiz"]
+    },
+    {
+      "code": "learner",
+      "name": "Learner",
+      "permissions": ["app:training:learn", "app:training:ask"]
+    }
+  ],
+  "menus": [
+    {
+      "code": "training.home",
+      "title": "Training",
+      "path": "/training",
+      "permission": "app:training:learn"
+    },
+    {
+      "code": "training.quiz",
+      "title": "Quiz",
+      "path": "/training/quiz",
+      "permission": "app:training:quiz"
+    },
+    {
+      "code": "training.records",
+      "title": "Records",
+      "path": "/training/records",
+      "permission": "app:training:manage"
+    }
+  ],
+  "prompts": [
+    {
+      "code": "training_quiz_generator",
+      "name": "Training Quiz Generator",
+      "content": "Generate concise quiz questions from approved training knowledge and keep answers grounded in cited material."
+    }
+  ],
+  "skills": [
+    {
+      "code": "training_quiz",
+      "name": "Training Quiz",
+      "description": "Builds quizzes from cited training content."
+    },
+    {
+      "code": "training_reminder",
+      "name": "Training Reminder",
+      "description": "Schedules and sends training reminders through approved messaging tools."
+    }
+  ],
+  "connectors": [
+    {
+      "code": "feishu.message",
+      "name": "Feishu Message",
+      "kind": "feishu",
+      "authType": "token"
+    }
+  ],
+  "plugins": [
+    {
+      "code": "builtin.training-pack",
+      "name": "Built-in Training Pack",
+      "runtime": "builtin_adapter"
+    }
+  ],
+  "triggers": [
+    {
+      "code": "training.reminder.schedule",
+      "name": "Training Reminder Schedule",
+      "sourceType": "schedule",
+      "target": "job"
+    }
+  ],
+  "evalSets": [
+    {
+      "code": "training_regression",
+      "name": "Training Regression",
+      "caseCount": 20,
+      "metrics": ["citation_accuracy", "intent_accuracy", "tool_accuracy"]
+    }
+  ],
+  "deploymentChecklist": [
+    "Create training roles and learner group",
+    "Import training handbook into knowledge base",
+    "Bind Feishu message connector credential",
+    "Configure quiz and reminder skills",
+    "Run training_regression eval set before pilot"
+  ]
+}

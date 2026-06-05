@@ -2,7 +2,8 @@
 
 Default POC customer template for employee training.
 
-M0 contents:
+M5 package:
 
-- Template boundary placeholder.
-- Future training roles, menus, knowledge setup, quiz skill, Feishu notification tool, and eval seed location.
+- Manifest: `template.json`.
+- Frontend entry: `apps/training-web`.
+- Includes training roles, learner menus, quiz and reminder skills, Feishu connector, reminder trigger, and `training_regression` eval set.

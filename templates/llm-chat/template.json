@@ -1,0 +1,72 @@
+{
+  "code": "llm_chat",
+  "name": "LLM Chat",
+  "category": "chat",
+  "description": "Pure model chat template for general assistants, drafting, brainstorming, and lightweight support.",
+  "frontendEntry": "apps/chat-web",
+  "sort": 1,
+  "status": 1,
+  "branding": {
+    "brandName": "Novex Chat",
+    "logoText": "NX",
+    "primaryColor": "#2563eb",
+    "publicUrl": "https://chat.example.com"
+  },
+  "roles": [
+    {
+      "code": "app_admin",
+      "name": "Application Admin",
+      "permissions": ["ai:foundation:read", "ai:model:list", "ai:template:list"]
+    },
+    {
+      "code": "chat_user",
+      "name": "Chat User",
+      "permissions": ["app:chat:use"]
+    }
+  ],
+  "menus": [
+    {
+      "code": "chat.home",
+      "title": "Chat",
+      "path": "/chat",
+      "permission": "app:chat:use"
+    },
+    {
+      "code": "chat.history",
+      "title": "History",
+      "path": "/chat/history",
+      "permission": "app:chat:use"
+    }
+  ],
+  "prompts": [
+    {
+      "code": "llm_chat_default",
+      "name": "Default Chat System Prompt",
+      "content": "You are a concise enterprise assistant. Ask for missing business context before making irreversible recommendations."
+    }
+  ],
+  "skills": [
+    {
+      "code": "general_chat",
+      "name": "General Chat",
+      "description": "Handles direct model conversations without retrieval."
+    }
+  ],
+  "connectors": [],
+  "plugins": [],
+  "triggers": [],
+  "evalSets": [
+    {
+      "code": "llm_chat_smoke",
+      "name": "LLM Chat Smoke",
+      "caseCount": 4,
+      "metrics": ["latency", "cost"]
+    }
+  ],
+  "deploymentChecklist": [
+    "Create tenant and app roles",
+    "Configure chat model route and provider credential",
+    "Apply branding and public URL",
+    "Run llm_chat_smoke eval set"
+  ]
+}

@@ -1,0 +1,79 @@
+{
+  "code": "knowledge_base_chat",
+  "name": "Knowledge Base Chat",
+  "category": "knowledge",
+  "description": "RAG chat template for policies, product documentation, FAQ, and enterprise knowledge with citations.",
+  "frontendEntry": "apps/chat-web",
+  "sort": 2,
+  "status": 1,
+  "branding": {
+    "brandName": "Novex Knowledge",
+    "logoText": "KB",
+    "primaryColor": "#0f766e",
+    "publicUrl": "https://kb.example.com"
+  },
+  "roles": [
+    {
+      "code": "knowledge_admin",
+      "name": "Knowledge Admin",
+      "permissions": ["ai:knowledge:list", "ai:knowledge:create", "ai:rag:ask", "ai:eval:run", "ai:template:list"]
+    },
+    {
+      "code": "knowledge_user",
+      "name": "Knowledge User",
+      "permissions": ["app:knowledge:ask"]
+    }
+  ],
+  "menus": [
+    {
+      "code": "knowledge.ask",
+      "title": "Ask Knowledge",
+      "path": "/knowledge",
+      "permission": "app:knowledge:ask"
+    },
+    {
+      "code": "knowledge.sources",
+      "title": "Sources",
+      "path": "/knowledge/sources",
+      "permission": "ai:knowledge:list"
+    }
+  ],
+  "prompts": [
+    {
+      "code": "kb_chat_answer",
+      "name": "Cited Knowledge Answer",
+      "content": "Answer with grounded citations. If the knowledge base does not contain the answer, say that the answer is not available in the configured sources."
+    }
+  ],
+  "skills": [
+    {
+      "code": "cited_answer",
+      "name": "Cited Answer",
+      "description": "Builds grounded answers from retrieved chunks and citations."
+    }
+  ],
+  "connectors": [
+    {
+      "code": "web.import",
+      "name": "Web Import",
+      "kind": "web",
+      "authType": "none"
+    }
+  ],
+  "plugins": [],
+  "triggers": [],
+  "evalSets": [
+    {
+      "code": "knowledge_base_regression",
+      "name": "Knowledge Base Regression",
+      "caseCount": 8,
+      "metrics": ["citation_accuracy", "retrieval_recall"]
+    }
+  ],
+  "deploymentChecklist": [
+    "Create knowledge datasets and visibility policy",
+    "Configure embedding and answer model routes",
+    "Import source documents",
+    "Run knowledge_base_regression eval set"
+  ]
+}
