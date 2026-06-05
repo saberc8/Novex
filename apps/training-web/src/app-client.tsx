@@ -1,9 +1,12 @@
 "use client";
 
+import { useEffect, useMemo, useState } from "react";
 import { ArrowRight, Bell, Bot, CheckCircle2, CircleDashed, Send, ShieldCheck } from "lucide-react";
+import { askDataset, listDatasets } from "@/api/knowledge";
 import { CitationList, type CitationItem } from "@/components/citation-list";
 import { MetricStrip } from "@/components/metric-strip";
 import { TrainingShell } from "@/components/training-shell";
+import type { DatasetResp, RagAskResp } from "@/types/knowledge";
 
 const metrics = [
   { label: "完成率", value: "68%", detail: "本周提升 12%", tone: "teal" as const },
@@ -33,7 +36,45 @@ const tasks = [
   }
 ];
 
-const citations: CitationItem[] = [
+const fallbackDataset: DatasetResp = {
+  id: 10,
+  tenantId: 1,
+  name: "入职制度知识库",
+  description: "培训资料",
+  ownerId: 1,
+  visibility: 1,
+  status: 1,
+  retrievalMode: 3,
+  documentCount: 2,
+  chunkCount: 18,
+  createUserString: "admin",
+  createTime: "2026-06-05 10:00:00",
+  updateUserString: "",
+  updateTime: ""
+};
+
+const fallbackAnswer: RagAskResp = {
+  traceId: 0,
+  answer: "不能。客户数据必须在受控系统内处理，外发需要审批并保留审计记录。",
+  citations: [
+    {
+      documentId: "20",
+      chunkId: "20:0",
+      pageNo: null,
+      sectionPath: ["信息安全入职手册"]
+    },
+    {
+      documentId: "21",
+      chunkId: "21:3",
+      pageNo: null,
+      sectionPath: ["客户数据处理规范"]
+    }
+  ],
+  retrievalHitCount: 2,
+  answerStrategy: "fixture"
+};
+
+const fallbackCitations: CitationItem[] = [
   {
     title: "信息安全入职手册",
     chunkId: "20:0",
@@ -49,6 +90,77 @@ const citations: CitationItem[] = [
 ];
 
 export function TrainingAppClient() {
+  const [datasets, setDatasets] = useState<DatasetResp[]>([fallbackDataset]);
+  const [selectedDatasetId, setSelectedDatasetId] = useState(fallbackDataset.id);
+  const [question, setQuestion] = useState("培训什么时候开始？");
+  const [answer, setAnswer] = useState<RagAskResp>(fallbackAnswer);
+  const [apiStatus, setApiStatus] = useState("fallback");
+  const [asking, setAsking] = useState(false);
+
+  useEffect(() => {
+    let mounted = true;
+
+    listDatasets({ page: 1, size: 20 })
+      .then((page) => {
+        if (!mounted) {
+          return;
+        }
+        const nextDatasets = page.list.length > 0 ? page.list : [fallbackDataset];
+        const preferred = nextDatasets.find((dataset) => dataset.documentCount > 0) ?? nextDatasets[0];
+        setDatasets(nextDatasets);
+        setSelectedDatasetId(preferred.id);
+        setApiStatus("live");
+      })
+      .catch(() => {
+        if (mounted) {
+          setApiStatus("fallback");
+        }
+      });
+
+    return () => {
+      mounted = false;
+    };
+  }, []);
+
+  const selectedDataset = useMemo(
+    () => datasets.find((dataset) => dataset.id === selectedDatasetId) ?? fallbackDataset,
+    [datasets, selectedDatasetId]
+  );
+
+  const citations = useMemo(() => {
+    if (answer.traceId === 0) {
+      return fallbackCitations;
+    }
+
+    return answer.citations.map((citation) => ({
+      title: citation.sectionPath[0] || `Document ${citation.documentId}`,
+      chunkId: citation.chunkId,
+      excerpt: `Document ${citation.documentId} · ${citation.sectionPath.join(" / ") || "引用片段"}`,
+      score: `trace ${answer.traceId}`
+    }));
+  }, [answer]);
+
+  async function handleAsk() {
+    const trimmed = question.trim();
+    if (!trimmed || asking) {
+      return;
+    }
+
+    setAsking(true);
+    try {
+      const response = await askDataset(selectedDataset.id, {
+        question: trimmed,
+        limit: 5
+      });
+      setAnswer(response);
+      setApiStatus("live");
+    } catch {
+      setApiStatus("fallback");
+    } finally {
+      setAsking(false);
+    }
+  }
+
   return (
     <TrainingShell>
       <div className="grid min-w-0 grid-cols-1 gap-4 p-4 lg:grid-cols-[minmax(0,1fr)_360px] lg:p-6">
@@ -71,7 +183,7 @@ export function TrainingAppClient() {
                 </span>
                 <span className="inline-flex items-center gap-2 rounded-md bg-slate-100 px-3 py-2 text-sm font-medium text-slate-700">
                   <Bot aria-hidden="true" className="h-4 w-4" />
-                  DeepSeek 路由
+                  {apiStatus === "live" ? "Live RAG" : "Fallback"}
                 </span>
               </div>
             </div>
@@ -125,7 +237,7 @@ export function TrainingAppClient() {
               <div className="flex items-center justify-between gap-3">
                 <h2 className="text-sm font-semibold text-slate-950">知识库问答</h2>
                 <span className="rounded-md bg-blue-50 px-2 py-1 text-xs font-medium text-blue-700">
-                  入职制度知识库
+                  {selectedDataset.name}
                 </span>
               </div>
               <div className="mt-4 rounded-lg bg-slate-50 p-4">
@@ -133,19 +245,29 @@ export function TrainingAppClient() {
                   问：客户数据能否复制到个人网盘？
                 </div>
                 <div className="mt-3 rounded-lg bg-white p-3 text-sm leading-6 text-slate-700">
-                  不能。客户数据必须在受控系统内处理，外发需要审批并保留审计记录。
+                  {answer.answer}
+                </div>
+                <div className="mt-2 flex flex-wrap gap-1 text-xs text-slate-500">
+                  <span>Trace #{answer.traceId}</span>
+                  <span>·</span>
+                  <span>{answer.retrievalHitCount} hits</span>
+                  <span>·</span>
+                  <span>{answer.answerStrategy}</span>
                 </div>
               </div>
               <div className="mt-4 flex gap-2">
                 <input
                   aria-label="输入培训问题"
                   className="min-w-0 flex-1 rounded-lg border border-slate-200 px-3 py-2 text-sm outline-none focus:border-teal-500"
-                  defaultValue="培训什么时候开始？"
+                  onChange={(event) => setQuestion(event.target.value)}
+                  value={question}
                 />
                 <button
-                  className="inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-teal-700 text-white hover:bg-teal-800"
+                  className="inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-teal-700 text-white hover:bg-teal-800 disabled:bg-slate-300"
                   type="button"
                   aria-label="发送问题"
+                  disabled={asking}
+                  onClick={handleAsk}
                 >
                   <Send aria-hidden="true" className="h-4 w-4" />
                 </button>

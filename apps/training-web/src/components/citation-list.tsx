@@ -23,8 +23,10 @@ export function CitationList({ citations }: { citations: CitationItem[] }) {
               <FileText aria-hidden="true" className="mt-0.5 h-4 w-4 shrink-0 text-teal-700" />
               <div className="min-w-0">
                 <div className="truncate text-sm font-medium text-slate-900">{citation.title}</div>
-                <div className="mt-1 text-xs text-slate-500">
-                  {citation.chunkId} · {citation.score}
+                <div className="mt-1 flex flex-wrap gap-1 text-xs text-slate-500">
+                  <span>{citation.chunkId}</span>
+                  <span>·</span>
+                  <span>{citation.score}</span>
                 </div>
               </div>
             </div>
