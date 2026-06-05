@@ -50,3 +50,29 @@ export interface DocumentResp {
   updateUserString: string;
   updateTime: string;
 }
+
+export interface DocumentUploadCommand {
+  name: string;
+  content: string;
+  contentType?: string;
+}
+
+export interface RagAskCommand {
+  question: string;
+  limit?: number;
+}
+
+export interface CitationResp {
+  documentId: string;
+  chunkId: string;
+  pageNo?: number | null;
+  sectionPath: string[];
+}
+
+export interface RagAskResp {
+  traceId: number;
+  answer: string;
+  citations: CitationResp[];
+  retrievalHitCount: number;
+  answerStrategy: string;
+}

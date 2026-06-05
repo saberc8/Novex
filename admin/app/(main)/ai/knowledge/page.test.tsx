@@ -2,13 +2,21 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import type { ReactNode } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import KnowledgePage from "./page";
-import { createDataset, listDatasets, listDocuments } from "@/api/ai/knowledge";
+import {
+  askDataset,
+  createDataset,
+  listDatasets,
+  listDocuments,
+  uploadTextDocument
+} from "@/api/ai/knowledge";
 import type { DatasetResp, DocumentResp } from "@/types/ai";
 
 vi.mock("@/api/ai/knowledge", () => ({
+  askDataset: vi.fn(),
   createDataset: vi.fn(),
   listDatasets: vi.fn(),
-  listDocuments: vi.fn()
+  listDocuments: vi.fn(),
+  uploadTextDocument: vi.fn()
 }));
 
 vi.mock("@/components/permission/permission-gate", () => ({
@@ -25,6 +33,8 @@ vi.mock("sonner", () => ({
 const createDatasetMock = vi.mocked(createDataset);
 const listDatasetsMock = vi.mocked(listDatasets);
 const listDocumentsMock = vi.mocked(listDocuments);
+const uploadTextDocumentMock = vi.mocked(uploadTextDocument);
+const askDatasetMock = vi.mocked(askDataset);
 
 function dataset(overrides: Partial<DatasetResp>): DatasetResp {
   return {
@@ -78,6 +88,21 @@ describe("KnowledgePage", () => {
       total: 2
     });
     listDocumentsMock.mockResolvedValue({ list: [document({ id: 20 })], total: 1 });
+    uploadTextDocumentMock.mockResolvedValue(88);
+    askDatasetMock.mockResolvedValue({
+      traceId: 42,
+      answer: "Training starts on Monday.",
+      citations: [
+        {
+          documentId: "20",
+          chunkId: "20:0",
+          pageNo: null,
+          sectionPath: []
+        }
+      ],
+      retrievalHitCount: 1,
+      answerStrategy: "extractive"
+    });
   });
 
   it("keeps dataset and document panels aligned and loads documents for the selected dataset", async () => {
@@ -118,5 +143,46 @@ describe("KnowledgePage", () => {
         retrievalMode: 3
       })
     );
+  });
+
+  it("uploads text into the selected dataset", async () => {
+    render(<KnowledgePage />);
+
+    await screen.findByTestId("dataset-card-10");
+    fireEvent.change(screen.getByPlaceholderText("文档名称"), {
+      target: { value: "入职手册.txt" }
+    });
+    fireEvent.change(screen.getByPlaceholderText("文本或 Markdown"), {
+      target: { value: "Training starts on Monday." }
+    });
+    fireEvent.click(screen.getByRole("button", { name: "上传文档" }));
+
+    await waitFor(() =>
+      expect(uploadTextDocumentMock).toHaveBeenCalledWith(10, {
+        name: "入职手册.txt",
+        content: "Training starts on Monday.",
+        contentType: "text/plain"
+      })
+    );
+  });
+
+  it("asks the selected dataset and displays citations", async () => {
+    render(<KnowledgePage />);
+
+    await screen.findByTestId("dataset-card-10");
+    fireEvent.change(screen.getByPlaceholderText("输入测试问题"), {
+      target: { value: "培训什么时候开始？" }
+    });
+    fireEvent.click(screen.getByRole("button", { name: "提问" }));
+
+    await waitFor(() =>
+      expect(askDatasetMock).toHaveBeenCalledWith(10, {
+        question: "培训什么时候开始？",
+        limit: 5
+      })
+    );
+    expect(await screen.findByText("Training starts on Monday.")).toBeTruthy();
+    expect(await screen.findByText("20:0")).toBeTruthy();
+    expect(await screen.findByText("Trace #42")).toBeTruthy();
   });
 });

@@ -1,5 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { createDataset, listDatasets, listDocuments } from "@/api/ai/knowledge";
+import {
+  askDataset,
+  createDataset,
+  listDatasets,
+  listDocuments,
+  uploadTextDocument
+} from "@/api/ai/knowledge";
 
 function okResponse(data: unknown = true) {
   return Promise.resolve(
@@ -40,6 +46,12 @@ describe("knowledge api wrappers", () => {
       retrievalMode: 3
     });
     await listDocuments(7, { page: 1, size: 10 });
+    await uploadTextDocument(7, {
+      name: "handbook.txt",
+      content: "Training starts on Monday.",
+      contentType: "text/plain"
+    });
+    await askDataset(7, { question: "When does training start?", limit: 3 });
 
     expect(fetchMock.mock.calls[0]?.[0]).toBe(
       "http://localhost:4398/ai/knowledge/datasets?page=2&size=20&name=handbook&status=1"
@@ -58,5 +70,21 @@ describe("knowledge api wrappers", () => {
     expect(fetchMock.mock.calls[2]?.[0]).toBe(
       "http://localhost:4398/ai/knowledge/datasets/7/documents?page=1&size=10"
     );
+    expect(fetchMock.mock.calls[3]?.[0]).toBe(
+      "http://localhost:4398/ai/knowledge/datasets/7/documents/text"
+    );
+    expect(fetchMock.mock.calls[3]?.[1]).toMatchObject({
+      method: "POST",
+      body: JSON.stringify({
+        name: "handbook.txt",
+        content: "Training starts on Monday.",
+        contentType: "text/plain"
+      })
+    });
+    expect(fetchMock.mock.calls[4]?.[0]).toBe("http://localhost:4398/ai/knowledge/datasets/7/ask");
+    expect(fetchMock.mock.calls[4]?.[1]).toMatchObject({
+      method: "POST",
+      body: JSON.stringify({ question: "When does training start?", limit: 3 })
+    });
   });
 });

@@ -1,10 +1,16 @@
 "use client";
 
 import type { ColumnDef } from "@tanstack/react-table";
-import { Database, FilePlus2, FileText, RefreshCw, Save, Search, X } from "lucide-react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { Database, FilePlus2, FileText, RefreshCw, Save, Search, Send, Upload, X } from "lucide-react";
+import { useCallback, useEffect, useMemo, useState, type FormEvent } from "react";
 import { toast } from "sonner";
-import { createDataset, listDatasets, listDocuments } from "@/api/ai/knowledge";
+import {
+  askDataset,
+  createDataset,
+  listDatasets,
+  listDocuments,
+  uploadTextDocument
+} from "@/api/ai/knowledge";
 import { PermissionGate } from "@/components/permission/permission-gate";
 import { DataTable } from "@/components/table/data-table";
 import { Badge } from "@/components/ui/badge";
@@ -26,7 +32,7 @@ import {
   SelectValue
 } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
-import type { DatasetCommand, DatasetResp, DocumentResp } from "@/types/ai";
+import type { DatasetCommand, DatasetResp, DocumentResp, RagAskResp } from "@/types/ai";
 
 const DEFAULT_DATASET_COMMAND: DatasetCommand = {
   name: "",
@@ -46,6 +52,12 @@ export default function AiKnowledgePage() {
   const [documentLoading, setDocumentLoading] = useState(false);
   const [createOpen, setCreateOpen] = useState(false);
   const [createSubmitting, setCreateSubmitting] = useState(false);
+  const [uploadName, setUploadName] = useState("");
+  const [uploadContent, setUploadContent] = useState("");
+  const [uploadSubmitting, setUploadSubmitting] = useState(false);
+  const [askQuestion, setAskQuestion] = useState("");
+  const [askResult, setAskResult] = useState<RagAskResp | null>(null);
+  const [askSubmitting, setAskSubmitting] = useState(false);
 
   const loadDatasets = useCallback(async () => {
     setDatasetLoading(true);
@@ -99,6 +111,10 @@ export default function AiKnowledgePage() {
     void loadDocuments();
   }, [loadDocuments]);
 
+  useEffect(() => {
+    setAskResult(null);
+  }, [selectedDataset?.id]);
+
   const documentColumns = useMemo<ColumnDef<DocumentResp>[]>(
     () => [
       {
@@ -147,6 +163,57 @@ export default function AiKnowledgePage() {
       toast.error(error instanceof Error ? error.message : "知识库创建失败");
     } finally {
       setCreateSubmitting(false);
+    }
+  }
+
+  async function submitUpload(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!selectedDataset) {
+      toast.error("请选择知识库");
+      return;
+    }
+    const name = uploadName.trim();
+    const content = uploadContent.trim();
+    if (!name || !content) {
+      toast.error("请输入文档名称和内容");
+      return;
+    }
+    setUploadSubmitting(true);
+    try {
+      await uploadTextDocument(selectedDataset.id, {
+        name,
+        content,
+        contentType: "text/plain"
+      });
+      setUploadName("");
+      setUploadContent("");
+      await Promise.all([loadDatasets(), loadDocuments()]);
+      toast.success("文档已上传");
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "文档上传失败");
+    } finally {
+      setUploadSubmitting(false);
+    }
+  }
+
+  async function submitAsk(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!selectedDataset) {
+      toast.error("请选择知识库");
+      return;
+    }
+    const question = askQuestion.trim();
+    if (!question) {
+      toast.error("请输入问题");
+      return;
+    }
+    setAskSubmitting(true);
+    try {
+      setAskResult(await askDataset(selectedDataset.id, { question, limit: 5 }));
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "问答失败");
+    } finally {
+      setAskSubmitting(false);
     }
   }
 
@@ -235,6 +302,69 @@ export default function AiKnowledgePage() {
             <RefreshCw />
             刷新
           </Button>
+        </div>
+        <div className="grid gap-4 lg:grid-cols-2">
+          <PermissionGate permissions={["ai:knowledge:document:create"]}>
+            <form className="grid gap-3 rounded-lg border bg-background p-4" onSubmit={submitUpload}>
+              <div className="flex items-center justify-between gap-3">
+                <h3 className="text-sm font-medium">文本上传</h3>
+                <Badge variant="outline">text/plain</Badge>
+              </div>
+              <Field label="文档名称">
+                <Input
+                  value={uploadName}
+                  placeholder="文档名称"
+                  onChange={(event) => setUploadName(event.target.value)}
+                />
+              </Field>
+              <Field label="内容">
+                <Textarea
+                  value={uploadContent}
+                  className="min-h-32"
+                  placeholder="文本或 Markdown"
+                  onChange={(event) => setUploadContent(event.target.value)}
+                />
+              </Field>
+              <Button type="submit" className="w-fit" disabled={!selectedDataset || uploadSubmitting}>
+                <Upload />
+                上传文档
+              </Button>
+            </form>
+          </PermissionGate>
+
+          <PermissionGate permissions={["ai:knowledge:ask"]}>
+            <form className="grid gap-3 rounded-lg border bg-background p-4" onSubmit={submitAsk}>
+              <div className="flex items-center justify-between gap-3">
+                <h3 className="text-sm font-medium">检索问答</h3>
+                {askResult ? <Badge variant="outline">Trace #{askResult.traceId}</Badge> : null}
+              </div>
+              <Field label="问题">
+                <Input
+                  value={askQuestion}
+                  placeholder="输入测试问题"
+                  onChange={(event) => setAskQuestion(event.target.value)}
+                />
+              </Field>
+              <Button type="submit" className="w-fit" disabled={!selectedDataset || askSubmitting}>
+                <Send />
+                提问
+              </Button>
+              {askResult ? (
+                <div className="grid gap-3 rounded-md border bg-muted/20 p-3 text-sm">
+                  <div className="whitespace-pre-wrap leading-6">{askResult.answer}</div>
+                  {askResult.citations.length ? (
+                    <div className="flex flex-wrap gap-2">
+                      {askResult.citations.map((citation) => (
+                        <Badge key={`${citation.documentId}-${citation.chunkId}`} variant="secondary">
+                          {citation.chunkId}
+                        </Badge>
+                      ))}
+                    </div>
+                  ) : null}
+                </div>
+              ) : null}
+            </form>
+          </PermissionGate>
         </div>
         <DataTable
           columns={documentColumns}
