@@ -52,8 +52,10 @@ The health command prints only masked credentials, for example:
 Current implementation status:
 
 - Reads `MINERU_TOKEN` and reports safe configuration status.
+- Provides a tested MinerU v4 client wrapper for `POST /api/v4/extract/task` and `GET /api/v4/extract/task/{task_id}`.
 - Keeps text/markdown ingestion in Rust for the deterministic M1 RAG loop.
 - Leaves actual MinerU PDF/OCR network parsing behind the parser-worker contract for the next parser execution slice.
+- Unit tests use a fake transport and do not submit documents to MinerU or consume parse quota.
 
 Verification:
 
