@@ -121,9 +121,6 @@ mod tests {
         assert_eq!(DatasetStatus::default(), DatasetStatus::Draft);
         assert_eq!(ResourceVisibility::default(), ResourceVisibility::Private);
         assert_eq!(RetrievalMode::default(), RetrievalMode::Hybrid);
-        assert_eq!(
-            DocumentParseStatus::default(),
-            DocumentParseStatus::Pending
-        );
+        assert_eq!(DocumentParseStatus::default(), DocumentParseStatus::Pending);
     }
 }

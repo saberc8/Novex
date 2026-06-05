@@ -21,8 +21,8 @@ use crate::{
     shared::{error::AppError, response::ApiResponse},
 };
 
-pub mod auth;
 pub mod ai;
+pub mod auth;
 pub mod captcha;
 pub mod common;
 pub mod extractor;
