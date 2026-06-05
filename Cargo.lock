@@ -1681,6 +1681,7 @@ version = "0.1.0"
 dependencies = [
  "novex-ai-core",
  "serde",
+ "serde_json",
 ]
 
 [[package]]

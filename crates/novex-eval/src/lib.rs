@@ -35,7 +35,7 @@ pub struct EvalCaseInput {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", default)]
 pub struct EvalCaseExpected {
     pub answer_contains: Vec<String>,
     pub citations: Vec<String>,
@@ -44,7 +44,7 @@ pub struct EvalCaseExpected {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", default)]
 pub struct EvalCaseActual {
     pub answer: Option<String>,
     pub citations: Vec<String>,
@@ -245,6 +245,7 @@ pub fn module() -> FoundationModule {
 mod tests {
     use super::*;
     use novex_ai_core::FoundationStatus;
+    use serde_json::json;
 
     #[test]
     fn module_describes_eval_boundary() {
@@ -300,6 +301,26 @@ mod tests {
         assert!(!score.passed);
         assert_eq!(score.metric, EvalMetricKind::IntentAccuracy);
         assert_eq!(score.score, 0.0);
+    }
+
+    #[test]
+    fn eval_runtime_expected_payload_defaults_fields_for_intent_and_tool_cases() {
+        let intent_expected = serde_json::from_value::<EvalCaseExpected>(json!({
+            "intent": "rag_question"
+        }))
+        .unwrap();
+        let tool_expected = serde_json::from_value::<EvalCaseExpected>(json!({
+            "toolCode": "feishu.message.send"
+        }))
+        .unwrap();
+
+        assert_eq!(intent_expected.answer_contains, Vec::<String>::new());
+        assert_eq!(intent_expected.citations, Vec::<String>::new());
+        assert_eq!(intent_expected.intent.as_deref(), Some("rag_question"));
+        assert_eq!(
+            tool_expected.tool_code.as_deref(),
+            Some("feishu.message.send")
+        );
     }
 
     #[test]
