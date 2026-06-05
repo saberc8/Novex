@@ -13,7 +13,7 @@ export class ApiClientError extends Error {
 export interface RequestOptions {
   method?: "GET" | "POST";
   body?: unknown;
-  query?: Record<string, string | number | undefined>;
+  query?: object;
 }
 
 export async function apiRequest<T>(path: string, options: RequestOptions = {}): Promise<T> {
@@ -46,15 +46,24 @@ export async function apiRequest<T>(path: string, options: RequestOptions = {}):
   return envelope.data;
 }
 
-export function apiUrl(path: string, query?: Record<string, string | number | undefined>) {
+export function apiUrl(path: string, query?: object) {
   const base = process.env.NEXT_PUBLIC_API_BASE_URL || DEFAULT_API_BASE_URL;
   const url = new URL(path, base);
 
   Object.entries(query ?? {}).forEach(([key, value]) => {
-    if (value !== undefined) {
-      url.searchParams.set(key, String(value));
-    }
+    appendQuery(url, key, value);
   });
 
   return url.toString();
+}
+
+function appendQuery(url: URL, key: string, value: unknown) {
+  if (value === undefined || value === null || value === "") {
+    return;
+  }
+  if (Array.isArray(value)) {
+    value.forEach((item) => appendQuery(url, key, item));
+    return;
+  }
+  url.searchParams.append(key, String(value));
 }
