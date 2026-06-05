@@ -1,4 +1,5 @@
 use chrono::NaiveDateTime;
+use serde_json::Value;
 use sqlx::{FromRow, PgPool, Postgres, QueryBuilder};
 
 use crate::shared::error::AppError;
@@ -74,6 +75,54 @@ pub struct DatasetSaveRecord<'a> {
     pub visibility: i16,
     pub status: i16,
     pub retrieval_mode: i16,
+    pub user_id: i64,
+    pub now: NaiveDateTime,
+}
+
+#[derive(Debug, Clone)]
+pub struct DocumentSaveRecord {
+    pub id: i64,
+    pub tenant_id: i64,
+    pub dataset_id: i64,
+    pub name: String,
+    pub source_uri: Option<String>,
+    pub file_id: Option<i64>,
+    pub content_type: Option<String>,
+    pub owner_id: i64,
+    pub visibility: i16,
+    pub parse_status: i16,
+    pub ingestion_status: i16,
+    pub chunk_count: i32,
+    pub source_hash: Option<String>,
+    pub user_id: i64,
+    pub now: NaiveDateTime,
+}
+
+#[derive(Debug, Clone)]
+pub struct ParserJobSaveRecord {
+    pub id: i64,
+    pub tenant_id: i64,
+    pub dataset_id: i64,
+    pub document_id: i64,
+    pub job_type: i16,
+    pub status: i16,
+    pub result_summary: Value,
+    pub user_id: i64,
+    pub now: NaiveDateTime,
+}
+
+#[derive(Debug, Clone)]
+pub struct ChunkSaveRecord {
+    pub id: i64,
+    pub tenant_id: i64,
+    pub dataset_id: i64,
+    pub document_id: i64,
+    pub chunk_uid: String,
+    pub chunk_index: i32,
+    pub content: String,
+    pub token_count: i32,
+    pub citation: Value,
+    pub embedding_status: i16,
     pub user_id: i64,
     pub now: NaiveDateTime,
 }
@@ -173,6 +222,108 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10);
             .fetch_all(&self.db)
             .await?)
     }
+
+    pub async fn create_document_ingestion(
+        &self,
+        document: &DocumentSaveRecord,
+        parser_job: &ParserJobSaveRecord,
+        chunks: &[ChunkSaveRecord],
+    ) -> Result<(), AppError> {
+        let mut tx = self.db.begin().await?;
+        sqlx::query(
+            r#"
+INSERT INTO ai_document (
+    id, tenant_id, dataset_id, name, source_uri, file_id, content_type, owner_id,
+    visibility, parse_status, ingestion_status, chunk_count, source_hash, create_user, create_time
+)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15);
+"#,
+        )
+        .bind(document.id)
+        .bind(document.tenant_id)
+        .bind(document.dataset_id)
+        .bind(&document.name)
+        .bind(&document.source_uri)
+        .bind(document.file_id)
+        .bind(&document.content_type)
+        .bind(document.owner_id)
+        .bind(document.visibility)
+        .bind(document.parse_status)
+        .bind(document.ingestion_status)
+        .bind(document.chunk_count)
+        .bind(&document.source_hash)
+        .bind(document.user_id)
+        .bind(document.now)
+        .execute(&mut *tx)
+        .await?;
+
+        sqlx::query(
+            r#"
+INSERT INTO ai_parser_job (
+    id, tenant_id, dataset_id, document_id, job_type, status, result_summary, create_user, create_time
+)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9);
+"#,
+        )
+        .bind(parser_job.id)
+        .bind(parser_job.tenant_id)
+        .bind(parser_job.dataset_id)
+        .bind(parser_job.document_id)
+        .bind(parser_job.job_type)
+        .bind(parser_job.status)
+        .bind(&parser_job.result_summary)
+        .bind(parser_job.user_id)
+        .bind(parser_job.now)
+        .execute(&mut *tx)
+        .await?;
+
+        for chunk in chunks {
+            sqlx::query(
+                r#"
+INSERT INTO ai_document_chunk (
+    id, tenant_id, dataset_id, document_id, chunk_uid, chunk_index, content, token_count,
+    citation, embedding_status, create_user, create_time
+)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12);
+"#,
+            )
+            .bind(chunk.id)
+            .bind(chunk.tenant_id)
+            .bind(chunk.dataset_id)
+            .bind(chunk.document_id)
+            .bind(&chunk.chunk_uid)
+            .bind(chunk.chunk_index)
+            .bind(&chunk.content)
+            .bind(chunk.token_count)
+            .bind(&chunk.citation)
+            .bind(chunk.embedding_status)
+            .bind(chunk.user_id)
+            .bind(chunk.now)
+            .execute(&mut *tx)
+            .await?;
+        }
+
+        let result = sqlx::query(
+            r#"
+UPDATE ai_dataset
+SET document_count = document_count + 1,
+    chunk_count = chunk_count + $1,
+    update_user = $2,
+    update_time = $3
+WHERE tenant_id = $4 AND id = $5;
+"#,
+        )
+        .bind(document.chunk_count)
+        .bind(document.user_id)
+        .bind(document.now)
+        .bind(document.tenant_id)
+        .bind(document.dataset_id)
+        .execute(&mut *tx)
+        .await?;
+        ensure_affected(result.rows_affected())?;
+        tx.commit().await?;
+        Ok(())
+    }
 }
 
 fn push_dataset_filters(query: &mut QueryBuilder<'_, Postgres>, filter: &DatasetFilter<'_>) {
@@ -248,4 +399,12 @@ LEFT JOIN sys_user AS uu ON uu.id = d.update_user
 
 fn non_empty(value: Option<&str>) -> Option<&str> {
     value.map(str::trim).filter(|value| !value.is_empty())
+}
+
+fn ensure_affected(rows_affected: u64) -> Result<(), AppError> {
+    if rows_affected == 0 {
+        Err(AppError::NotFound)
+    } else {
+        Ok(())
+    }
 }

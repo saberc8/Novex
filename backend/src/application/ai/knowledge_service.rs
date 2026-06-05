@@ -1,12 +1,15 @@
 use chrono::Utc;
+use novex_rag::{chunk_text, parse_plain_text, DocumentChunk as RagDocumentChunk};
 use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 
 use crate::{
     application::system::{ensure_max_chars, format_datetime, format_optional_datetime},
     infrastructure::persistence::ai_knowledge_repository::{
-        AiKnowledgeRepository, DatasetFilter, DatasetRecord, DatasetSaveRecord, DocumentFilter,
-        DocumentRecord,
+        AiKnowledgeRepository, ChunkSaveRecord, DatasetFilter, DatasetRecord, DatasetSaveRecord,
+        DocumentFilter, DocumentRecord, DocumentSaveRecord, ParserJobSaveRecord,
     },
     shared::{
         error::AppError,
@@ -19,6 +22,14 @@ const DEFAULT_TENANT_ID: i64 = 1;
 const DATASET_STATUS_DRAFT: i16 = 1;
 const VISIBILITY_PRIVATE: i16 = 1;
 const RETRIEVAL_MODE_HYBRID: i16 = 3;
+const DEFAULT_DOCUMENT_CONTENT_TYPE: &str = "text/plain";
+const DEFAULT_CHUNK_MAX_CHARS: usize = 24;
+const DEFAULT_CHUNK_OVERLAP_CHARS: usize = 4;
+const DOCUMENT_PARSE_STATUS_PARSED: i16 = 3;
+const DOCUMENT_INGESTION_STATUS_INDEXED: i16 = 4;
+const PARSER_JOB_TYPE_TEXT: i16 = 1;
+const PARSER_JOB_STATUS_SUCCEEDED: i16 = 3;
+const CHUNK_EMBEDDING_STATUS_INDEXED: i16 = 4;
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -103,6 +114,27 @@ impl DocumentQuery {
             size: self.size,
         }
         .normalized()
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DocumentUploadCommand {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub content: String,
+    #[serde(default = "default_document_content_type")]
+    pub content_type: String,
+}
+
+impl Default for DocumentUploadCommand {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            content: String::new(),
+            content_type: DEFAULT_DOCUMENT_CONTENT_TYPE.to_owned(),
+        }
     }
 }
 
@@ -226,6 +258,82 @@ impl KnowledgeService {
             .collect();
         Ok(PageResult::new(list, total))
     }
+
+    pub async fn upload_text_document(
+        &self,
+        user_id: i64,
+        dataset_id: i64,
+        command: DocumentUploadCommand,
+    ) -> Result<i64, AppError> {
+        if dataset_id <= 0 {
+            return Err(AppError::bad_request("知识库 ID 不合法"));
+        }
+        if !self
+            .repo
+            .dataset_exists(DEFAULT_TENANT_ID, dataset_id)
+            .await?
+        {
+            return Err(AppError::NotFound);
+        }
+        let command = normalize_document_upload_command(command)?;
+        let document_id = next_id();
+        let chunks = document_upload_chunks(document_id, &command);
+        let now = Utc::now().naive_utc();
+        let document = DocumentSaveRecord {
+            id: document_id,
+            tenant_id: DEFAULT_TENANT_ID,
+            dataset_id,
+            name: command.name.clone(),
+            source_uri: None,
+            file_id: None,
+            content_type: Some(command.content_type.clone()),
+            owner_id: user_id,
+            visibility: VISIBILITY_PRIVATE,
+            parse_status: DOCUMENT_PARSE_STATUS_PARSED,
+            ingestion_status: DOCUMENT_INGESTION_STATUS_INDEXED,
+            chunk_count: chunks.len() as i32,
+            source_hash: Some(sha256_hex(&command.content)),
+            user_id,
+            now,
+        };
+        let parser_job = ParserJobSaveRecord {
+            id: next_id(),
+            tenant_id: DEFAULT_TENANT_ID,
+            dataset_id,
+            document_id,
+            job_type: PARSER_JOB_TYPE_TEXT,
+            status: PARSER_JOB_STATUS_SUCCEEDED,
+            result_summary: json!({
+                "parser": "novex-rag-local-text",
+                "lineCount": command.content.lines().filter(|line| !line.trim().is_empty()).count(),
+                "chunkCount": chunks.len()
+            }),
+            user_id,
+            now,
+        };
+        let chunk_records = chunks
+            .into_iter()
+            .map(|chunk| ChunkSaveRecord {
+                id: next_id(),
+                tenant_id: DEFAULT_TENANT_ID,
+                dataset_id,
+                document_id,
+                chunk_uid: chunk.chunk_id,
+                chunk_index: chunk.chunk_index as i32,
+                content: chunk.text,
+                token_count: chunk.token_count as i32,
+                citation: citation_value(&chunk.citation),
+                embedding_status: CHUNK_EMBEDDING_STATUS_INDEXED,
+                user_id,
+                now,
+            })
+            .collect::<Vec<_>>();
+
+        self.repo
+            .create_document_ingestion(&document, &parser_job, &chunk_records)
+            .await?;
+        Ok(document_id)
+    }
 }
 
 impl From<DatasetRecord> for DatasetResp {
@@ -296,6 +404,53 @@ pub fn normalize_dataset_command(mut command: DatasetCommand) -> Result<DatasetC
     Ok(command)
 }
 
+pub fn normalize_document_upload_command(
+    mut command: DocumentUploadCommand,
+) -> Result<DocumentUploadCommand, AppError> {
+    command.name = command.name.trim().to_owned();
+    command.content = command.content.trim().to_owned();
+    command.content_type = command.content_type.trim().to_owned();
+    if command.content_type.is_empty() {
+        command.content_type = DEFAULT_DOCUMENT_CONTENT_TYPE.to_owned();
+    }
+    if command.name.is_empty() {
+        return Err(AppError::bad_request("文档名称不能为空"));
+    }
+    if command.content.is_empty() {
+        return Err(AppError::bad_request("文档内容不能为空"));
+    }
+    ensure_max_chars("文档名称", &command.name, 255)?;
+    ensure_max_chars("内容类型", &command.content_type, 255)?;
+    Ok(command)
+}
+
+fn document_upload_chunks(
+    document_id: i64,
+    command: &DocumentUploadCommand,
+) -> Vec<RagDocumentChunk> {
+    let parsed = parse_plain_text(document_id.to_string(), &command.content);
+    chunk_text(
+        &parsed,
+        DEFAULT_CHUNK_MAX_CHARS,
+        DEFAULT_CHUNK_OVERLAP_CHARS,
+    )
+}
+
+fn citation_value(citation: &novex_rag::CitationRef) -> Value {
+    json!({
+        "documentId": citation.document_id,
+        "chunkId": citation.chunk_id,
+        "pageNo": citation.page_no,
+        "sectionPath": citation.section_path,
+    })
+}
+
+fn sha256_hex(value: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(value.as_bytes());
+    format!("{:x}", hasher.finalize())
+}
+
 fn dataset_save_record<'a>(
     id: i64,
     user_id: i64,
@@ -338,6 +493,10 @@ fn default_visibility() -> i16 {
 
 fn default_retrieval_mode() -> i16 {
     RETRIEVAL_MODE_HYBRID
+}
+
+fn default_document_content_type() -> String {
+    DEFAULT_DOCUMENT_CONTENT_TYPE.to_owned()
 }
 
 #[cfg(test)]
@@ -383,5 +542,50 @@ mod tests {
 
         assert_eq!(page.offset(), 0);
         assert_eq!(page.limit(), 100);
+    }
+
+    #[test]
+    fn normalize_document_upload_rejects_empty_content() {
+        let command = DocumentUploadCommand {
+            name: "手册".to_owned(),
+            content: "   ".to_owned(),
+            ..DocumentUploadCommand::default()
+        };
+
+        let err = normalize_document_upload_command(command).unwrap_err();
+
+        assert!(err.to_string().contains("文档内容不能为空"));
+    }
+
+    #[test]
+    fn normalize_document_upload_trims_metadata_and_defaults_content_type() {
+        let command = DocumentUploadCommand {
+            name: "  入职手册.md  ".to_owned(),
+            content: "  入职培训第一天开始。  ".to_owned(),
+            ..DocumentUploadCommand::default()
+        };
+
+        let command = normalize_document_upload_command(command).unwrap();
+
+        assert_eq!(command.name, "入职手册.md");
+        assert_eq!(command.content, "入职培训第一天开始。");
+        assert_eq!(command.content_type, "text/plain");
+    }
+
+    #[test]
+    fn document_upload_chunks_are_stable_for_document_id() {
+        let command = DocumentUploadCommand {
+            name: "handbook.txt".to_owned(),
+            content: "Alpha beta gamma delta epsilon zeta eta theta.".to_owned(),
+            ..DocumentUploadCommand::default()
+        };
+        let command = normalize_document_upload_command(command).unwrap();
+
+        let chunks = document_upload_chunks(42, &command);
+
+        assert!(chunks.len() > 1);
+        assert_eq!(chunks[0].document_id, "42");
+        assert_eq!(chunks[0].chunk_id, "42:0");
+        assert_eq!(chunks[0].chunk_index, 0);
     }
 }
