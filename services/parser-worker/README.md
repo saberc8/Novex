@@ -33,6 +33,17 @@ Required result shape:
 - `chunks` provide deterministic text spans with chunk ids, token counts, and citation payloads.
 - `metadata` captures parser name, page count, source hash, and warnings.
 
+Backend ingestion endpoint:
+
+```text
+POST /ai/knowledge/datasets/{datasetId}/documents/parsed
+```
+
+The backend accepts `{ name, contentType, parserResult }`, validates tenant/dataset/status, writes
+`ai_document`, `ai_parser_job`, `ai_document_block`, and `ai_document_chunk` in one transaction,
+and regenerates `semanticSearchText` from the parser chunks plus source file, section path, table
+header, page, bbox, and block references. The worker still never writes database tables directly.
+
 ## Local MinerU Configuration
 
 MinerU credentials are runtime secrets and must not be committed. Start the worker process with:

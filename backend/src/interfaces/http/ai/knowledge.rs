@@ -7,8 +7,8 @@ use axum::{
 use crate::{
     application::ai::knowledge_service::{
         DatasetCommand, DatasetQuery, DatasetResp, DocumentQuery, DocumentResp,
-        DocumentUploadCommand, FeedbackResp, KnowledgeService, RagAskCommand, RagAskResp,
-        RagFeedbackCommand,
+        DocumentUploadCommand, FeedbackResp, KnowledgeService, ParsedDocumentUploadCommand,
+        RagAskCommand, RagAskResp, RagFeedbackCommand,
     },
     domain::auth::model::CurrentUser,
     interfaces::http::{middleware::permission::require_permission, AppState},
@@ -34,6 +34,10 @@ pub fn routes() -> Router<AppState> {
         .route(
             "/ai/knowledge/datasets/:dataset_id/documents/text",
             axum::routing::post(upload_text_document),
+        )
+        .route(
+            "/ai/knowledge/datasets/:dataset_id/documents/parsed",
+            axum::routing::post(upload_parsed_document),
         )
         .route(
             "/ai/knowledge/datasets/:dataset_id/documents",
@@ -99,6 +103,22 @@ async fn upload_text_document(
     )))
 }
 
+async fn upload_parsed_document(
+    State(state): State<AppState>,
+    current_user: CurrentUser,
+    Path(dataset_id): Path<i64>,
+    Json(command): Json<ParsedDocumentUploadCommand>,
+) -> Result<Json<ApiResponse<i64>>, AppError> {
+    require_permission(&current_user, DOCUMENT_CREATE_PERMISSION)?;
+    let service = KnowledgeService::new(state.db);
+
+    Ok(Json(ApiResponse::ok(
+        service
+            .upload_parsed_document(current_user.id, dataset_id, command)
+            .await?,
+    )))
+}
+
 async fn ask_dataset_handler(
     State(state): State<AppState>,
     current_user: CurrentUser,
@@ -146,8 +166,8 @@ mod tests {
     use super::*;
     use crate::{
         application::ai::knowledge_service::{
-            DatasetCommand, DatasetQuery, DocumentQuery, DocumentUploadCommand, RagAskCommand,
-            RagFeedbackCommand,
+            DatasetCommand, DatasetQuery, DocumentQuery, DocumentUploadCommand,
+            ParsedDocumentUploadCommand, RagAskCommand, RagFeedbackCommand,
         },
         domain::auth::model::{CurrentUser, RoleContext},
         infrastructure::security::jwt::JwtService,
@@ -247,6 +267,48 @@ mod tests {
                 content: "hello".to_owned(),
                 ..DocumentUploadCommand::default()
             }),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(matches!(err, AppError::Forbidden));
+    }
+
+    #[tokio::test]
+    async fn parsed_document_upload_handler_rejects_missing_permission() {
+        let command = serde_json::from_value::<ParsedDocumentUploadCommand>(serde_json::json!({
+            "name": "handbook.pdf",
+            "contentType": "application/pdf",
+            "parserResult": {
+                "tenantId": 1,
+                "datasetId": 1,
+                "documentId": 42,
+                "parserJobId": 99,
+                "status": "succeeded",
+                "blocks": [],
+                "chunks": [
+                    {
+                        "chunkUid": "42:0",
+                        "chunkIndex": 0,
+                        "text": "入职培训第一天开始。",
+                        "tokenCount": 3,
+                        "citation": {
+                            "documentId": "42",
+                            "chunkId": "42:0",
+                            "sectionPath": []
+                        }
+                    }
+                ],
+                "metadata": {"parser": "mineru", "warnings": []}
+            }
+        }))
+        .unwrap();
+
+        let err = upload_parsed_document(
+            State(test_state()),
+            user_with_permissions(vec![]),
+            Path(1),
+            Json(command),
         )
         .await
         .unwrap_err();

@@ -3,8 +3,9 @@ use std::collections::HashMap;
 use chrono::{NaiveDateTime, Utc};
 use novex_model::{ModelRuntimeConfig, ModelRuntimeTarget};
 use novex_rag::{
-    build_extractive_answer, chunk_document, keyword_retrieve, parse_document_content, CitationRef,
-    DocumentChunk as RagDocumentChunk, RagAnswer, RetrievalHit,
+    build_extractive_answer, build_semantic_search_text, chunk_document, keyword_retrieve,
+    parse_document_content, BoundingBox, ChunkMetadata, ChunkSegmentType, CitationRef, ContentRole,
+    DisplayCapability, DocumentChunk as RagDocumentChunk, RagAnswer, RetrievalHit,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -14,9 +15,9 @@ use sqlx::PgPool;
 use crate::{
     application::system::{ensure_max_chars, format_datetime, format_optional_datetime},
     infrastructure::persistence::ai_knowledge_repository::{
-        AiKnowledgeRepository, ChunkRecord, ChunkSaveRecord, DatasetFilter, DatasetRecord,
-        DatasetSaveRecord, DocumentFilter, DocumentRecord, DocumentSaveRecord, FeedbackSaveRecord,
-        ParserJobSaveRecord, RagTraceHitSaveRecord, RagTraceSaveRecord,
+        AiKnowledgeRepository, BlockSaveRecord, ChunkRecord, ChunkSaveRecord, DatasetFilter,
+        DatasetRecord, DatasetSaveRecord, DocumentFilter, DocumentRecord, DocumentSaveRecord,
+        FeedbackSaveRecord, ParserJobSaveRecord, RagTraceHitSaveRecord, RagTraceSaveRecord,
     },
     shared::{
         error::AppError,
@@ -35,6 +36,7 @@ const DEFAULT_CHUNK_OVERLAP_CHARS: usize = 120;
 const DOCUMENT_PARSE_STATUS_PARSED: i16 = 3;
 const DOCUMENT_INGESTION_STATUS_INDEXED: i16 = 4;
 const PARSER_JOB_TYPE_TEXT: i16 = 1;
+const PARSER_JOB_TYPE_WORKER: i16 = 2;
 const PARSER_JOB_STATUS_SUCCEEDED: i16 = 3;
 const CHUNK_EMBEDDING_STATUS_INDEXED: i16 = 4;
 const DEFAULT_RAG_LIMIT: usize = 5;
@@ -165,6 +167,109 @@ impl Default for DocumentUploadCommand {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct ParsedDocumentUploadCommand {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default = "default_document_content_type")]
+    pub content_type: String,
+    pub parser_result: ParserWorkerParseResult,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ParserWorkerParseResult {
+    #[serde(default)]
+    pub tenant_id: i64,
+    #[serde(default)]
+    pub dataset_id: i64,
+    #[serde(default)]
+    pub document_id: i64,
+    #[serde(default)]
+    pub parser_job_id: i64,
+    #[serde(default)]
+    pub status: String,
+    #[serde(default)]
+    pub error: Option<Value>,
+    #[serde(default)]
+    pub blocks: Vec<ParserWorkerBlock>,
+    #[serde(default)]
+    pub chunks: Vec<ParserWorkerChunk>,
+    #[serde(default)]
+    pub metadata: ParserWorkerMetadata,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ParserWorkerBlock {
+    #[serde(default)]
+    pub block_id: String,
+    #[serde(default, rename = "type")]
+    pub block_type: String,
+    #[serde(default)]
+    pub text: String,
+    #[serde(default)]
+    pub page_no: Option<i32>,
+    #[serde(default)]
+    pub section_path: Vec<String>,
+    #[serde(default)]
+    pub bbox: Option<ParserWorkerBbox>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ParserWorkerBbox {
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ParserWorkerChunk {
+    #[serde(default)]
+    pub chunk_uid: String,
+    #[serde(default)]
+    pub chunk_index: usize,
+    #[serde(default)]
+    pub text: String,
+    #[serde(default)]
+    pub token_count: usize,
+    pub citation: ParserWorkerChunkCitation,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ParserWorkerChunkCitation {
+    #[serde(default)]
+    pub document_id: String,
+    #[serde(default)]
+    pub chunk_id: String,
+    #[serde(default)]
+    pub page_no: Option<i32>,
+    #[serde(default)]
+    pub section_path: Vec<String>,
+    #[serde(default)]
+    pub block_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ParserWorkerMetadata {
+    #[serde(default)]
+    pub parser: Option<String>,
+    #[serde(default)]
+    pub page_count: Option<i32>,
+    #[serde(default)]
+    pub line_count: Option<i32>,
+    #[serde(default)]
+    pub source_hash: Option<String>,
+    #[serde(default)]
+    pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct RagAskCommand {
     #[serde(default)]
     pub question: String,
@@ -265,6 +370,14 @@ struct IndexedRagChunk {
     chunk_db_id: i64,
     document_id: i64,
     chunk: RagDocumentChunk,
+}
+
+#[derive(Debug, Clone)]
+struct ParsedDocumentIngestionParts {
+    document: DocumentSaveRecord,
+    parser_job: ParserJobSaveRecord,
+    blocks: Vec<BlockSaveRecord>,
+    chunks: Vec<ChunkSaveRecord>,
 }
 
 #[derive(Debug, Clone)]
@@ -416,7 +529,43 @@ impl KnowledgeService {
         );
 
         self.repo
-            .create_document_ingestion(&document, &parser_job, &chunk_records)
+            .create_document_ingestion(&document, &parser_job, &[], &chunk_records)
+            .await?;
+        Ok(document_id)
+    }
+
+    pub async fn upload_parsed_document(
+        &self,
+        user_id: i64,
+        dataset_id: i64,
+        command: ParsedDocumentUploadCommand,
+    ) -> Result<i64, AppError> {
+        if dataset_id <= 0 {
+            return Err(AppError::bad_request("知识库 ID 不合法"));
+        }
+        if !self
+            .repo
+            .dataset_exists(DEFAULT_TENANT_ID, dataset_id)
+            .await?
+        {
+            return Err(AppError::NotFound);
+        }
+
+        let parts = parsed_document_ingestion_parts(
+            DEFAULT_TENANT_ID,
+            dataset_id,
+            user_id,
+            command,
+            Utc::now().naive_utc(),
+        )?;
+        let document_id = parts.document.id;
+        self.repo
+            .create_document_ingestion(
+                &parts.document,
+                &parts.parser_job,
+                &parts.blocks,
+                &parts.chunks,
+            )
             .await?;
         Ok(document_id)
     }
@@ -690,6 +839,509 @@ fn parser_job_result_summary(
             "emptyCount": empty_semantic_count,
         }
     })
+}
+
+fn parsed_document_ingestion_parts(
+    tenant_id: i64,
+    dataset_id: i64,
+    user_id: i64,
+    command: ParsedDocumentUploadCommand,
+    now: NaiveDateTime,
+) -> Result<ParsedDocumentIngestionParts, AppError> {
+    let command = normalize_parsed_document_upload_command(dataset_id, command)?;
+    let result = &command.parser_result;
+    let document_id = result.document_id;
+    let rag_chunks = parser_result_chunks(&command)?;
+    let document = DocumentSaveRecord {
+        id: document_id,
+        tenant_id,
+        dataset_id,
+        name: command.name.clone(),
+        source_uri: None,
+        file_id: None,
+        content_type: Some(command.content_type.clone()),
+        owner_id: user_id,
+        visibility: VISIBILITY_PRIVATE,
+        parse_status: DOCUMENT_PARSE_STATUS_PARSED,
+        ingestion_status: DOCUMENT_INGESTION_STATUS_INDEXED,
+        chunk_count: rag_chunks.len() as i32,
+        source_hash: parsed_source_hash(&command),
+        user_id,
+        now,
+    };
+    let parser_job = ParserJobSaveRecord {
+        id: result.parser_job_id,
+        tenant_id,
+        dataset_id,
+        document_id,
+        job_type: PARSER_JOB_TYPE_WORKER,
+        status: PARSER_JOB_STATUS_SUCCEEDED,
+        result_summary: parser_result_summary(&command, &rag_chunks),
+        user_id,
+        now,
+    };
+    let blocks =
+        parser_block_save_records(tenant_id, dataset_id, document_id, &command, user_id, now);
+    let chunks = parser_chunk_save_records(
+        tenant_id,
+        dataset_id,
+        document_id,
+        &command,
+        rag_chunks,
+        user_id,
+        now,
+    );
+
+    Ok(ParsedDocumentIngestionParts {
+        document,
+        parser_job,
+        blocks,
+        chunks,
+    })
+}
+
+fn normalize_parsed_document_upload_command(
+    dataset_id: i64,
+    mut command: ParsedDocumentUploadCommand,
+) -> Result<ParsedDocumentUploadCommand, AppError> {
+    command.name = command.name.trim().to_owned();
+    command.content_type = command.content_type.trim().to_owned();
+    if command.content_type.is_empty() {
+        command.content_type = DEFAULT_DOCUMENT_CONTENT_TYPE.to_owned();
+    }
+    command.parser_result.status = command.parser_result.status.trim().to_ascii_lowercase();
+    if command.name.is_empty() {
+        return Err(AppError::bad_request("文档名称不能为空"));
+    }
+    ensure_max_chars("文档名称", &command.name, 255)?;
+    ensure_max_chars("内容类型", &command.content_type, 255)?;
+    if command.parser_result.tenant_id != DEFAULT_TENANT_ID {
+        return Err(AppError::bad_request("解析结果租户不匹配"));
+    }
+    if command.parser_result.dataset_id != dataset_id {
+        return Err(AppError::bad_request("解析结果知识库不匹配"));
+    }
+    if command.parser_result.document_id <= 0 {
+        return Err(AppError::bad_request("解析结果文档 ID 不合法"));
+    }
+    if command.parser_result.parser_job_id <= 0 {
+        return Err(AppError::bad_request("解析任务 ID 不合法"));
+    }
+    if command.parser_result.status != "succeeded" {
+        return Err(AppError::bad_request("解析结果未成功"));
+    }
+    if command.parser_result.chunks.is_empty() {
+        return Err(AppError::bad_request("解析结果 chunk 不能为空"));
+    }
+    for chunk in &mut command.parser_result.chunks {
+        chunk.chunk_uid = chunk.chunk_uid.trim().to_owned();
+        chunk.text = chunk.text.trim().to_owned();
+        chunk.citation.document_id = chunk.citation.document_id.trim().to_owned();
+        chunk.citation.chunk_id = chunk.citation.chunk_id.trim().to_owned();
+        if chunk.chunk_uid.is_empty() {
+            return Err(AppError::bad_request("解析结果 chunkUid 不能为空"));
+        }
+        if chunk.text.is_empty() {
+            return Err(AppError::bad_request("解析结果 chunk 文本不能为空"));
+        }
+    }
+    for block in &mut command.parser_result.blocks {
+        block.block_id = block.block_id.trim().to_owned();
+        block.block_type = normalize_parser_block_type(&block.block_type);
+        block.text = block.text.trim().to_owned();
+    }
+    Ok(command)
+}
+
+fn parser_result_chunks(
+    command: &ParsedDocumentUploadCommand,
+) -> Result<Vec<RagDocumentChunk>, AppError> {
+    let result = &command.parser_result;
+    let block_index = result
+        .blocks
+        .iter()
+        .enumerate()
+        .filter(|(_, block)| !block.block_id.is_empty())
+        .map(|(index, block)| (block.block_id.as_str(), (index, block)))
+        .collect::<HashMap<_, _>>();
+
+    let mut chunks = Vec::with_capacity(result.chunks.len());
+    for parser_chunk in &result.chunks {
+        let referenced_blocks = parser_chunk
+            .citation
+            .block_ids
+            .iter()
+            .filter_map(|block_id| block_index.get(block_id.as_str()).copied())
+            .collect::<Vec<_>>();
+        let segment_type = parser_chunk_segment_type(&referenced_blocks);
+        let page_no = parser_chunk.citation.page_no.or_else(|| {
+            referenced_blocks
+                .iter()
+                .find_map(|(_, block)| block.page_no)
+        });
+        let section_path = if parser_chunk.citation.section_path.is_empty() {
+            referenced_blocks
+                .iter()
+                .find_map(|(_, block)| {
+                    (!block.section_path.is_empty()).then(|| block.section_path.clone())
+                })
+                .unwrap_or_default()
+        } else {
+            parser_chunk.citation.section_path.clone()
+        };
+        let bbox = referenced_blocks
+            .iter()
+            .find_map(|(_, block)| block.bbox.as_ref())
+            .and_then(parser_bbox);
+        let table_header = if segment_type == ChunkSegmentType::Table {
+            parser_table_header(&parser_chunk.text)
+        } else {
+            vec![]
+        };
+        let image_access_keys = parser_image_access_keys(&referenced_blocks);
+        let segment_index = referenced_blocks
+            .first()
+            .map(|(index, _)| *index)
+            .unwrap_or(parser_chunk.chunk_index);
+        let display_capability = parser_display_capability(segment_type, page_no, bbox.as_ref());
+        let metadata = ChunkMetadata {
+            source_title: None,
+            source_file_name: Some(command.name.clone()),
+            source_content_type: Some(command.content_type.clone()),
+            segment_type,
+            segment_index,
+            page_no,
+            section_path: section_path.clone(),
+            table_header,
+            image_access_keys,
+            bbox,
+            content_role: infer_parser_content_role(&section_path, &parser_chunk.text),
+            display_capability,
+        };
+        let semantic_search_text = build_semantic_search_text(&parser_chunk.text, &metadata);
+        let token_count = if parser_chunk.token_count > 0 {
+            parser_chunk.token_count
+        } else {
+            tokenish_count(&semantic_search_text).max(0) as usize
+        };
+        let citation = CitationRef {
+            document_id: non_empty_parser_string(&parser_chunk.citation.document_id)
+                .unwrap_or_else(|| result.document_id.to_string()),
+            chunk_id: non_empty_parser_string(&parser_chunk.citation.chunk_id)
+                .unwrap_or_else(|| parser_chunk.chunk_uid.clone()),
+            page_no,
+            section_path,
+        };
+
+        chunks.push(RagDocumentChunk {
+            document_id: result.document_id.to_string(),
+            chunk_id: parser_chunk.chunk_uid.clone(),
+            chunk_index: parser_chunk.chunk_index,
+            text: parser_chunk.text.clone(),
+            semantic_search_text,
+            token_count,
+            citation,
+            metadata,
+        });
+    }
+
+    Ok(chunks)
+}
+
+fn parser_block_save_records(
+    tenant_id: i64,
+    dataset_id: i64,
+    document_id: i64,
+    command: &ParsedDocumentUploadCommand,
+    user_id: i64,
+    now: NaiveDateTime,
+) -> Vec<BlockSaveRecord> {
+    command
+        .parser_result
+        .blocks
+        .iter()
+        .enumerate()
+        .filter(|(_, block)| !block.block_id.is_empty())
+        .map(|(index, block)| BlockSaveRecord {
+            id: next_id(),
+            tenant_id,
+            dataset_id,
+            document_id,
+            block_uid: block.block_id.clone(),
+            block_index: index as i32,
+            block_type: block.block_type.clone(),
+            text: block.text.clone(),
+            page_no: block.page_no,
+            section_path: json!(block.section_path),
+            bbox: block
+                .bbox
+                .as_ref()
+                .map(parser_bbox_value)
+                .unwrap_or_else(|| json!({})),
+            metadata: json!({
+                "parser": parser_name(&command.parser_result.metadata),
+                "sourceFileName": command.name,
+                "sourceContentType": command.content_type,
+            }),
+            user_id,
+            now,
+        })
+        .collect()
+}
+
+fn parser_chunk_save_records(
+    tenant_id: i64,
+    dataset_id: i64,
+    document_id: i64,
+    command: &ParsedDocumentUploadCommand,
+    chunks: Vec<RagDocumentChunk>,
+    user_id: i64,
+    now: NaiveDateTime,
+) -> Vec<ChunkSaveRecord> {
+    let block_ids_by_chunk = command
+        .parser_result
+        .chunks
+        .iter()
+        .map(|chunk| (chunk.chunk_uid.as_str(), chunk.citation.block_ids.clone()))
+        .collect::<HashMap<_, _>>();
+    chunks
+        .into_iter()
+        .map(|chunk| {
+            let metadata = chunk.metadata.clone();
+            let mut metadata_value = chunk_metadata_value(&metadata);
+            if let Some(object) = metadata_value.as_object_mut() {
+                object.insert(
+                    "parser".to_owned(),
+                    json!(parser_name(&command.parser_result.metadata)),
+                );
+                object.insert("parserChunkUid".to_owned(), json!(chunk.chunk_id.clone()));
+                object.insert(
+                    "parserBlockIds".to_owned(),
+                    json!(block_ids_by_chunk
+                        .get(chunk.chunk_id.as_str())
+                        .cloned()
+                        .unwrap_or_default()),
+                );
+            }
+            ChunkSaveRecord {
+                id: next_id(),
+                tenant_id,
+                dataset_id,
+                document_id,
+                chunk_uid: chunk.chunk_id,
+                chunk_index: chunk.chunk_index as i32,
+                content: chunk.text,
+                semantic_search_text: chunk.semantic_search_text,
+                token_count: chunk.token_count as i32,
+                citation: citation_value(&chunk.citation),
+                segment_type: metadata.segment_type.as_str().to_owned(),
+                segment_index: metadata.segment_index as i32,
+                page_no: metadata.page_no,
+                section_path: json!(metadata.section_path),
+                content_role: metadata.content_role.as_str().to_owned(),
+                display_capability: metadata.display_capability.as_str().to_owned(),
+                metadata: metadata_value,
+                embedding_status: CHUNK_EMBEDDING_STATUS_INDEXED,
+                user_id,
+                now,
+            }
+        })
+        .collect()
+}
+
+fn parser_result_summary(
+    command: &ParsedDocumentUploadCommand,
+    chunks: &[RagDocumentChunk],
+) -> Value {
+    let mut segment_type_counts = serde_json::Map::new();
+    let mut min_semantic_chars: Option<usize> = None;
+    let mut max_semantic_chars = 0usize;
+    for chunk in chunks {
+        let key = chunk.metadata.segment_type.as_str();
+        let count = segment_type_counts
+            .get(key)
+            .and_then(Value::as_u64)
+            .unwrap_or(0)
+            + 1;
+        segment_type_counts.insert(key.to_owned(), json!(count));
+        let semantic_chars = chunk.semantic_search_text.chars().count();
+        min_semantic_chars = Some(
+            min_semantic_chars
+                .map(|current| current.min(semantic_chars))
+                .unwrap_or(semantic_chars),
+        );
+        max_semantic_chars = max_semantic_chars.max(semantic_chars);
+    }
+    let metadata = &command.parser_result.metadata;
+    json!({
+        "parser": parser_name(metadata),
+        "status": command.parser_result.status,
+        "sourceFileName": command.name,
+        "contentType": command.content_type,
+        "pageCount": metadata.page_count,
+        "lineCount": metadata.line_count,
+        "sourceHash": metadata.source_hash,
+        "warnings": metadata.warnings,
+        "blockCount": command.parser_result.blocks.len(),
+        "chunkCount": chunks.len(),
+        "embeddingInput": "semanticSearchText",
+        "segmentTypeCounts": Value::Object(segment_type_counts),
+        "semanticSearchText": {
+            "minChars": min_semantic_chars.unwrap_or(0),
+            "maxChars": max_semantic_chars,
+        }
+    })
+}
+
+fn parsed_source_hash(command: &ParsedDocumentUploadCommand) -> Option<String> {
+    non_empty_parser_string(
+        command
+            .parser_result
+            .metadata
+            .source_hash
+            .as_deref()
+            .unwrap_or(""),
+    )
+    .or_else(|| {
+        let text = command
+            .parser_result
+            .chunks
+            .iter()
+            .map(|chunk| chunk.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        (!text.trim().is_empty()).then(|| sha256_hex(&text))
+    })
+}
+
+fn parser_chunk_segment_type(blocks: &[(usize, &ParserWorkerBlock)]) -> ChunkSegmentType {
+    if blocks.iter().any(|(_, block)| block.block_type == "table") {
+        ChunkSegmentType::Table
+    } else if blocks.iter().any(|(_, block)| block.block_type == "image") {
+        ChunkSegmentType::Image
+    } else {
+        ChunkSegmentType::Text
+    }
+}
+
+fn parser_table_header(text: &str) -> Vec<String> {
+    text.lines()
+        .next()
+        .map(|line| {
+            let delimiter = if line.contains('\t') {
+                '\t'
+            } else if line.contains('|') && !line.contains(',') {
+                '|'
+            } else {
+                ','
+            };
+            line.split(delimiter)
+                .map(|cell| cell.trim().trim_matches('|').to_owned())
+                .filter(|cell| !cell.is_empty())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn parser_image_access_keys(blocks: &[(usize, &ParserWorkerBlock)]) -> Vec<String> {
+    blocks
+        .iter()
+        .filter(|(_, block)| block.block_type == "image")
+        .filter_map(|(_, block)| {
+            if block.block_id.starts_with("img/") || block.block_id.starts_with("image/") {
+                Some(block.block_id.clone())
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+fn infer_parser_content_role(section_path: &[String], text: &str) -> ContentRole {
+    let haystack = format!("{} {text}", section_path.join(" ")).to_ascii_lowercase();
+    if haystack.contains("faq") || haystack.contains("问答") || haystack.contains("常见问题")
+    {
+        ContentRole::SummaryFaq
+    } else if haystack.contains("test")
+        || haystack.contains("测试")
+        || haystack.contains("示例")
+        || haystack.contains("example")
+    {
+        ContentRole::TestCase
+    } else {
+        ContentRole::Canonical
+    }
+}
+
+fn parser_display_capability(
+    segment_type: ChunkSegmentType,
+    page_no: Option<i32>,
+    bbox: Option<&BoundingBox>,
+) -> DisplayCapability {
+    if page_no.is_some() || bbox.is_some() {
+        DisplayCapability::PreciseAnchor
+    } else if segment_type == ChunkSegmentType::Table {
+        DisplayCapability::RowOnly
+    } else {
+        DisplayCapability::TextOnly
+    }
+}
+
+fn normalize_parser_block_type(value: &str) -> String {
+    match value.trim() {
+        "title" | "paragraph" | "table" | "image" | "list" | "code" | "pageBreak" => {
+            value.trim().to_owned()
+        }
+        _ => "paragraph".to_owned(),
+    }
+}
+
+fn parser_bbox(bbox: &ParserWorkerBbox) -> Option<BoundingBox> {
+    Some(BoundingBox {
+        x: f64_to_i32(bbox.x)?,
+        y: f64_to_i32(bbox.y)?,
+        width: f64_to_i32(bbox.width)?,
+        height: f64_to_i32(bbox.height)?,
+    })
+}
+
+fn parser_bbox_value(bbox: &ParserWorkerBbox) -> Value {
+    parser_bbox(bbox)
+        .map(|bbox| {
+            json!({
+                "x": bbox.x,
+                "y": bbox.y,
+                "width": bbox.width,
+                "height": bbox.height,
+            })
+        })
+        .unwrap_or_else(|| json!({}))
+}
+
+fn f64_to_i32(value: f64) -> Option<i32> {
+    if !value.is_finite() || value < i32::MIN as f64 || value > i32::MAX as f64 {
+        return None;
+    }
+    Some(value.round() as i32)
+}
+
+fn parser_name(metadata: &ParserWorkerMetadata) -> String {
+    metadata
+        .parser
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("parser-worker")
+        .to_owned()
+}
+
+fn non_empty_parser_string(value: &str) -> Option<String> {
+    let value = value.trim();
+    if value.is_empty() {
+        None
+    } else {
+        Some(value.to_owned())
+    }
 }
 
 fn chunk_save_records(
@@ -1295,6 +1947,140 @@ mod tests {
             "section_path",
             "content_role",
             "display_capability",
+        ] {
+            assert!(migration.contains(column), "missing {column}");
+        }
+    }
+
+    #[test]
+    fn parser_result_ingestion_preserves_blocks_and_chunk_search_contract() {
+        let command = serde_json::from_value::<ParsedDocumentUploadCommand>(serde_json::json!({
+            "name": "salary-policy.pdf",
+            "contentType": "application/pdf",
+            "parserResult": {
+                "tenantId": 1,
+                "datasetId": 7,
+                "documentId": 42,
+                "parserJobId": 99,
+                "status": "succeeded",
+                "blocks": [
+                    {
+                        "blockId": "tbl-1",
+                        "type": "table",
+                        "text": "岗位,补贴\n工程师,100",
+                        "pageNo": 5,
+                        "sectionPath": ["薪酬政策"],
+                        "bbox": {"x": 10, "y": 20, "width": 300, "height": 120}
+                    }
+                ],
+                "chunks": [
+                    {
+                        "chunkUid": "42:0",
+                        "chunkIndex": 0,
+                        "text": "岗位,补贴\n工程师,100",
+                        "tokenCount": 4,
+                        "citation": {
+                            "documentId": "42",
+                            "chunkId": "42:0",
+                            "pageNo": 5,
+                            "sectionPath": ["薪酬政策"],
+                            "blockIds": ["tbl-1"]
+                        }
+                    }
+                ],
+                "metadata": {
+                    "parser": "mineru",
+                    "pageCount": 8,
+                    "lineCount": 20,
+                    "sourceHash": "abc123",
+                    "warnings": ["table confidence low"]
+                }
+            }
+        }))
+        .unwrap();
+        let now = Utc::now().naive_utc();
+
+        let parts = parsed_document_ingestion_parts(DEFAULT_TENANT_ID, 7, 9, command, now).unwrap();
+
+        assert_eq!(parts.document.id, 42);
+        assert_eq!(parts.document.name, "salary-policy.pdf");
+        assert_eq!(parts.document.source_hash.as_deref(), Some("abc123"));
+        assert_eq!(parts.parser_job.id, 99);
+        assert_eq!(parts.parser_job.result_summary["parser"], "mineru");
+        assert_eq!(parts.blocks.len(), 1);
+        assert_eq!(parts.blocks[0].block_uid, "tbl-1");
+        assert_eq!(parts.blocks[0].block_type, "table");
+        assert_eq!(parts.blocks[0].page_no, Some(5));
+        assert_eq!(
+            parts.blocks[0].section_path,
+            serde_json::json!(["薪酬政策"])
+        );
+        assert_eq!(parts.blocks[0].bbox["width"], 300);
+        assert_eq!(parts.chunks.len(), 1);
+        assert_eq!(parts.chunks[0].chunk_uid, "42:0");
+        assert_eq!(parts.chunks[0].segment_type, "table");
+        assert_eq!(parts.chunks[0].segment_index, 0);
+        assert_eq!(parts.chunks[0].page_no, Some(5));
+        assert_eq!(
+            parts.chunks[0].section_path,
+            serde_json::json!(["薪酬政策"])
+        );
+        assert_eq!(
+            parts.chunks[0].metadata["parserBlockIds"],
+            serde_json::json!(["tbl-1"])
+        );
+        assert_eq!(parts.chunks[0].metadata["bbox"]["height"], 120);
+        assert!(parts.chunks[0]
+            .semantic_search_text
+            .contains("salary-policy.pdf"));
+        assert!(parts.chunks[0].semantic_search_text.contains("薪酬政策"));
+        assert!(parts.chunks[0].semantic_search_text.contains("岗位 补贴"));
+    }
+
+    #[test]
+    fn parser_result_rejects_failed_or_empty_chunk_payloads() {
+        let failed = serde_json::from_value::<ParsedDocumentUploadCommand>(serde_json::json!({
+            "name": "broken.pdf",
+            "contentType": "application/pdf",
+            "parserResult": {
+                "tenantId": 1,
+                "datasetId": 7,
+                "documentId": 42,
+                "parserJobId": 99,
+                "status": "failed",
+                "error": {"code": "mineru_failed", "message": "parse failed", "retryable": false},
+                "blocks": [],
+                "chunks": [],
+                "metadata": {"parser": "mineru", "warnings": []}
+            }
+        }))
+        .unwrap();
+
+        let err = parsed_document_ingestion_parts(
+            DEFAULT_TENANT_ID,
+            7,
+            9,
+            failed,
+            Utc::now().naive_utc(),
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("解析结果未成功"));
+    }
+
+    #[test]
+    fn document_block_migration_defines_layout_block_store() {
+        let migration =
+            include_str!("../../../migrations/202606050020_create_ai_document_block.sql");
+
+        for column in [
+            "ai_document_block",
+            "block_uid",
+            "block_index",
+            "block_type",
+            "page_no",
+            "section_path",
+            "bbox",
         ] {
             assert!(migration.contains(column), "missing {column}");
         }

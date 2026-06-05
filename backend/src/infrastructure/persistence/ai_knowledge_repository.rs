@@ -131,6 +131,24 @@ pub struct ParserJobSaveRecord {
 }
 
 #[derive(Debug, Clone)]
+pub struct BlockSaveRecord {
+    pub id: i64,
+    pub tenant_id: i64,
+    pub dataset_id: i64,
+    pub document_id: i64,
+    pub block_uid: String,
+    pub block_index: i32,
+    pub block_type: String,
+    pub text: String,
+    pub page_no: Option<i32>,
+    pub section_path: Value,
+    pub bbox: Value,
+    pub metadata: Value,
+    pub user_id: i64,
+    pub now: NaiveDateTime,
+}
+
+#[derive(Debug, Clone)]
 pub struct ChunkSaveRecord {
     pub id: i64,
     pub tenant_id: i64,
@@ -303,6 +321,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10);
         &self,
         document: &DocumentSaveRecord,
         parser_job: &ParserJobSaveRecord,
+        blocks: &[BlockSaveRecord],
         chunks: &[ChunkSaveRecord],
     ) -> Result<(), AppError> {
         let mut tx = self.db.begin().await?;
@@ -352,6 +371,34 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9);
         .bind(parser_job.now)
         .execute(&mut *tx)
         .await?;
+
+        for block in blocks {
+            sqlx::query(
+                r#"
+INSERT INTO ai_document_block (
+    id, tenant_id, dataset_id, document_id, block_uid, block_index, block_type,
+    text, page_no, section_path, bbox, metadata, create_user, create_time
+)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14);
+"#,
+            )
+            .bind(block.id)
+            .bind(block.tenant_id)
+            .bind(block.dataset_id)
+            .bind(block.document_id)
+            .bind(&block.block_uid)
+            .bind(block.block_index)
+            .bind(&block.block_type)
+            .bind(&block.text)
+            .bind(block.page_no)
+            .bind(&block.section_path)
+            .bind(&block.bbox)
+            .bind(&block.metadata)
+            .bind(block.user_id)
+            .bind(block.now)
+            .execute(&mut *tx)
+            .await?;
+        }
 
         for chunk in chunks {
             sqlx::query(
