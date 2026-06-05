@@ -7,4 +7,6 @@ Scope:
 - Agent runs, tool execution visibility, approvals, trace views, and task history.
 - Uses Novex Run Graph, Tool Registry, MCP, connectors, memory, and eval surfaces.
 
-M0 status: placeholder. No Next.js app is scaffolded yet.
+M3 status: Next.js workspace scaffolded. It provides a customer-facing run surface for
+creating Agent runs, inspecting workflow events, approving paused runs, cancelling
+active runs, reviewing tool permissions, and seeing final output.
