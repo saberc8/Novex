@@ -84,6 +84,49 @@ mod tests {
         assert!(seed.contains(MODEL_HEALTH_PERMISSION));
     }
 
+    #[test]
+    fn model_registry_migration_contains_required_tables_and_fields() {
+        let migration =
+            include_str!("../../../../migrations/202606050015_create_ai_model_registry.sql");
+
+        for table in [
+            "ai_model_provider",
+            "ai_model_deployment",
+            "ai_model_profile",
+            "ai_model_credential",
+            "ai_model_route",
+            "ai_model_health_check",
+            "ai_model_usage",
+        ] {
+            assert!(migration.contains(table), "{table} missing from migration");
+        }
+
+        for field in [
+            "provider_type",
+            "endpoint",
+            "network_zone",
+            "credential_ref",
+            "model_kind",
+            "capabilities",
+            "limits",
+            "embedding_spec",
+            "rerank_spec",
+            "cost_spec",
+            "fallback_policy",
+            "route_purpose",
+            "model_profile_id",
+            "latency_ms",
+            "cost_cents",
+        ] {
+            assert!(migration.contains(field), "{field} missing from migration");
+        }
+
+        assert!(
+            !migration.contains("sk-"),
+            "model registry migration must not seed raw API keys"
+        );
+    }
+
     #[tokio::test]
     async fn runtime_config_handler_rejects_missing_permission() {
         let err = runtime_config(user_with_permissions(vec![]))
