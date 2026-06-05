@@ -1,0 +1,97 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://novex.local/schemas/parser-worker/parse-request.schema.json",
+  "title": "Novex Parser Worker Parse Request",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["tenantId", "datasetId", "documentId", "parserJobId", "source"],
+  "properties": {
+    "tenantId": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "datasetId": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "documentId": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "parserJobId": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "contentType"],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": ["inlineText", "objectStorage", "localFile", "remoteUrl"]
+        },
+        "contentType": {
+          "type": "string",
+          "minLength": 1
+        },
+        "name": {
+          "type": "string"
+        },
+        "uri": {
+          "type": "string"
+        },
+        "fileId": {
+          "type": ["integer", "null"],
+          "minimum": 1
+        },
+        "content": {
+          "type": "string"
+        },
+        "sourceHash": {
+          "type": ["string", "null"]
+        }
+      }
+    },
+    "options": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "language": {
+          "type": ["string", "null"]
+        },
+        "maxChunkChars": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 1200
+        },
+        "chunkOverlapChars": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 120
+        },
+        "extractTables": {
+          "type": "boolean",
+          "default": true
+        },
+        "ocr": {
+          "type": "boolean",
+          "default": false
+        }
+      }
+    },
+    "trace": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "requestId": {
+          "type": "string"
+        },
+        "deadlineMs": {
+          "type": ["integer", "null"],
+          "minimum": 1
+        }
+      }
+    }
+  }
+}

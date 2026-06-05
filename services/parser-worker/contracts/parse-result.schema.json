@@ -1,0 +1,174 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://novex.local/schemas/parser-worker/parse-result.schema.json",
+  "title": "Novex Parser Worker Parse Result",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["tenantId", "datasetId", "documentId", "parserJobId", "status", "blocks", "chunks", "metadata"],
+  "properties": {
+    "tenantId": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "datasetId": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "documentId": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "parserJobId": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "status": {
+      "type": "string",
+      "enum": ["succeeded", "failed"]
+    },
+    "error": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        },
+        "retryable": {
+          "type": "boolean",
+          "default": false
+        }
+      }
+    },
+    "blocks": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["blockId", "type", "text"],
+        "properties": {
+          "blockId": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string",
+            "enum": ["title", "paragraph", "table", "image", "list", "code", "pageBreak"]
+          },
+          "text": {
+            "type": "string"
+          },
+          "pageNo": {
+            "type": ["integer", "null"],
+            "minimum": 1
+          },
+          "sectionPath": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "bbox": {
+            "type": ["object", "null"],
+            "additionalProperties": false,
+            "properties": {
+              "x": {
+                "type": "number"
+              },
+              "y": {
+                "type": "number"
+              },
+              "width": {
+                "type": "number"
+              },
+              "height": {
+                "type": "number"
+              }
+            }
+          }
+        }
+      }
+    },
+    "chunks": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["chunkUid", "chunkIndex", "text", "tokenCount", "citation"],
+        "properties": {
+          "chunkUid": {
+            "type": "string"
+          },
+          "chunkIndex": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "text": {
+            "type": "string",
+            "minLength": 1
+          },
+          "tokenCount": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "citation": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["documentId", "chunkId", "sectionPath"],
+            "properties": {
+              "documentId": {
+                "type": "string"
+              },
+              "chunkId": {
+                "type": "string"
+              },
+              "pageNo": {
+                "type": ["integer", "null"],
+                "minimum": 1
+              },
+              "sectionPath": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "blockIds": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "metadata": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "parser": {
+          "type": "string"
+        },
+        "pageCount": {
+          "type": ["integer", "null"],
+          "minimum": 0
+        },
+        "lineCount": {
+          "type": ["integer", "null"],
+          "minimum": 0
+        },
+        "sourceHash": {
+          "type": ["string", "null"]
+        },
+        "warnings": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  }
+}
