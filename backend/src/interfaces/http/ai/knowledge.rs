@@ -13,6 +13,10 @@ use crate::{
     shared::{error::AppError, pagination::PageResult, response::ApiResponse},
 };
 
+const DATASET_LIST_PERMISSION: &str = "ai:knowledge:list";
+const DATASET_CREATE_PERMISSION: &str = "ai:knowledge:create";
+const DOCUMENT_LIST_PERMISSION: &str = "ai:knowledge:document:list";
+
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route(
@@ -30,7 +34,7 @@ async fn list_datasets(
     current_user: CurrentUser,
     Query(query): Query<DatasetQuery>,
 ) -> Result<Json<ApiResponse<PageResult<DatasetResp>>>, AppError> {
-    require_permission(&current_user, "ai:knowledge:get")?;
+    require_permission(&current_user, DATASET_LIST_PERMISSION)?;
     let service = KnowledgeService::new(state.db);
 
     Ok(Json(ApiResponse::ok(service.list_datasets(query).await?)))
@@ -41,7 +45,7 @@ async fn create_dataset(
     current_user: CurrentUser,
     Json(command): Json<DatasetCommand>,
 ) -> Result<Json<ApiResponse<i64>>, AppError> {
-    require_permission(&current_user, "ai:knowledge:create")?;
+    require_permission(&current_user, DATASET_CREATE_PERMISSION)?;
     let service = KnowledgeService::new(state.db);
 
     Ok(Json(ApiResponse::ok(
@@ -55,7 +59,7 @@ async fn list_documents(
     Path(dataset_id): Path<i64>,
     Query(query): Query<DocumentQuery>,
 ) -> Result<Json<ApiResponse<PageResult<DocumentResp>>>, AppError> {
-    require_permission(&current_user, "ai:knowledge:document:list")?;
+    require_permission(&current_user, DOCUMENT_LIST_PERMISSION)?;
     let service = KnowledgeService::new(state.db);
 
     Ok(Json(ApiResponse::ok(
@@ -109,6 +113,11 @@ mod tests {
             }],
             permissions: permissions.into_iter().map(str::to_owned).collect(),
         }
+    }
+
+    #[test]
+    fn dataset_list_permission_matches_seeded_menu_permission() {
+        assert_eq!(DATASET_LIST_PERMISSION, "ai:knowledge:list");
     }
 
     #[tokio::test]
