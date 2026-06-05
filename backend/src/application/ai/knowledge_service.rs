@@ -402,11 +402,7 @@ impl KnowledgeService {
             document_id,
             job_type: PARSER_JOB_TYPE_TEXT,
             status: PARSER_JOB_STATUS_SUCCEEDED,
-            result_summary: json!({
-                "parser": "novex-rag-local-text",
-                "lineCount": command.content.lines().filter(|line| !line.trim().is_empty()).count(),
-                "chunkCount": chunks.len()
-            }),
+            result_summary: parser_job_result_summary(&command, &chunks),
             user_id,
             now,
         };
@@ -645,6 +641,55 @@ fn document_upload_chunks(
         DEFAULT_CHUNK_MAX_CHARS,
         DEFAULT_CHUNK_OVERLAP_CHARS,
     )
+}
+
+fn parser_job_result_summary(
+    command: &DocumentUploadCommand,
+    chunks: &[RagDocumentChunk],
+) -> Value {
+    let mut segment_type_counts = serde_json::Map::new();
+    let mut min_semantic_chars: Option<usize> = None;
+    let mut max_semantic_chars = 0usize;
+    let mut empty_semantic_count = 0usize;
+
+    for chunk in chunks {
+        let key = chunk.metadata.segment_type.as_str();
+        let count = segment_type_counts
+            .get(key)
+            .and_then(Value::as_u64)
+            .unwrap_or(0)
+            + 1;
+        segment_type_counts.insert(key.to_owned(), json!(count));
+
+        let semantic_chars = chunk.semantic_search_text.chars().count();
+        if semantic_chars == 0 {
+            empty_semantic_count += 1;
+        }
+        min_semantic_chars = Some(
+            min_semantic_chars
+                .map(|current| current.min(semantic_chars))
+                .unwrap_or(semantic_chars),
+        );
+        max_semantic_chars = max_semantic_chars.max(semantic_chars);
+    }
+
+    json!({
+        "parser": "novex-rag-local-structured",
+        "chunker": "file-type-default",
+        "embeddingInput": "semanticSearchText",
+        "sourceFileName": command.name,
+        "contentType": command.content_type,
+        "lineCount": command.content.lines().filter(|line| !line.trim().is_empty()).count(),
+        "chunkCount": chunks.len(),
+        "maxChunkChars": DEFAULT_CHUNK_MAX_CHARS,
+        "overlapChars": DEFAULT_CHUNK_OVERLAP_CHARS,
+        "segmentTypeCounts": Value::Object(segment_type_counts),
+        "semanticSearchText": {
+            "minChars": min_semantic_chars.unwrap_or(0),
+            "maxChars": max_semantic_chars,
+            "emptyCount": empty_semantic_count,
+        }
+    })
 }
 
 fn chunk_save_records(
@@ -1186,6 +1231,55 @@ mod tests {
         assert_eq!(records[0].content_role, "canonical");
         assert_eq!(records[0].display_capability, "precise_anchor");
         assert_eq!(records[0].metadata["sourceFileName"], "handbook.md");
+    }
+
+    #[test]
+    fn parser_job_summary_describes_chunking_and_semantic_search_contract() {
+        let command = normalize_document_upload_command(DocumentUploadCommand {
+            name: "training.csv".to_owned(),
+            content: "employee,deadline,status\nAlice,Friday,done\nBob,Monday,pending".to_owned(),
+            content_type: "text/csv".to_owned(),
+        })
+        .unwrap();
+        let chunks = document_upload_chunks(42, &command);
+
+        let summary = parser_job_result_summary(&command, &chunks);
+
+        assert_eq!(summary["parser"], "novex-rag-local-structured");
+        assert_eq!(summary["chunker"], "file-type-default");
+        assert_eq!(summary["embeddingInput"], "semanticSearchText");
+        assert_eq!(summary["maxChunkChars"], DEFAULT_CHUNK_MAX_CHARS);
+        assert_eq!(summary["overlapChars"], DEFAULT_CHUNK_OVERLAP_CHARS);
+        assert_eq!(summary["segmentTypeCounts"]["table"], chunks.len());
+        assert!(summary["semanticSearchText"]["maxChars"]
+            .as_u64()
+            .is_some_and(|count| count > 0));
+    }
+
+    #[test]
+    fn chunk_save_records_keep_image_anchor_metadata() {
+        let command = normalize_document_upload_command(DocumentUploadCommand {
+            name: "architecture.md".to_owned(),
+            content: "# 检索链路\n[[page: 2]]\n[[image: key=img/search-flow.png bbox=10,20,300,180 caption=系统架构图显示 hybrid recall 和 rerank 链路]]".to_owned(),
+            content_type: "text/markdown".to_owned(),
+        })
+        .unwrap();
+        let chunks = document_upload_chunks(42, &command);
+        let now = Utc::now().naive_utc();
+
+        let records = chunk_save_records(1, 7, 42, chunks, 9, now);
+
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].segment_type, "image");
+        assert_eq!(records[0].page_no, Some(2));
+        assert_eq!(
+            records[0].metadata["imageAccessKeys"],
+            serde_json::json!(["img/search-flow.png"])
+        );
+        assert_eq!(records[0].metadata["bbox"]["width"], 300);
+        assert!(records[0]
+            .semantic_search_text
+            .contains("系统架构图显示 hybrid recall"));
     }
 
     #[test]

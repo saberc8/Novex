@@ -212,6 +212,24 @@ impl SourceBlock {
             bbox: None,
         }
     }
+
+    pub fn image(
+        text: impl Into<String>,
+        page_no: Option<i32>,
+        section_path: Vec<String>,
+        image_access_keys: Vec<String>,
+        bbox: Option<BoundingBox>,
+    ) -> Self {
+        Self {
+            text: text.into(),
+            segment_type: ChunkSegmentType::Image,
+            page_no,
+            section_path,
+            table_header: vec![],
+            image_access_keys,
+            bbox,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -490,6 +508,12 @@ fn parse_text_blocks(text: &str) -> Vec<SourceBlock> {
             continue;
         }
 
+        if let Some(block) = image_marker(trimmed, page_no, &section_path) {
+            push_text_paragraph(&mut blocks, &mut paragraph, page_no, &section_path);
+            blocks.push(block);
+            continue;
+        }
+
         paragraph.push(trimmed.to_owned());
     }
 
@@ -554,6 +578,85 @@ fn page_marker(line: &str) -> Option<i32> {
     digits.parse::<i32>().ok().filter(|page| *page > 0)
 }
 
+fn image_marker(
+    line: &str,
+    current_page_no: Option<i32>,
+    section_path: &[String],
+) -> Option<SourceBlock> {
+    let trimmed = line.trim();
+    let lower = trimmed.to_ascii_lowercase();
+    if !lower.starts_with("[[image:") || !trimmed.ends_with("]]") {
+        return None;
+    }
+
+    let payload = trimmed.get("[[image:".len()..trimmed.len().saturating_sub(2))?;
+    let image_key = marker_field(payload, &["key", "image_key", "access_key"]);
+    let caption = marker_tail_field(payload, "caption")
+        .or_else(|| marker_tail_field(payload, "alt"))
+        .or_else(|| image_key.clone())
+        .unwrap_or_else(|| "Image evidence".to_owned());
+    let page_no = marker_field(payload, &["page", "page_no"])
+        .and_then(|value| value.parse::<i32>().ok())
+        .filter(|page| *page > 0)
+        .or(current_page_no);
+    let bbox = marker_field(payload, &["bbox", "coordinates"]).and_then(|value| parse_bbox(&value));
+    let image_access_keys = image_key.into_iter().collect::<Vec<_>>();
+
+    Some(SourceBlock::image(
+        caption,
+        page_no,
+        section_path.to_vec(),
+        image_access_keys,
+        bbox,
+    ))
+}
+
+fn marker_field(payload: &str, names: &[&str]) -> Option<String> {
+    payload.split_whitespace().find_map(|token| {
+        let (name, value) = token.split_once('=')?;
+        if names
+            .iter()
+            .any(|expected| name.eq_ignore_ascii_case(expected))
+        {
+            let value = value.trim().trim_matches('"').trim_matches('\'');
+            if value.is_empty() {
+                None
+            } else {
+                Some(value.to_owned())
+            }
+        } else {
+            None
+        }
+    })
+}
+
+fn marker_tail_field(payload: &str, name: &str) -> Option<String> {
+    let key = format!("{name}=");
+    let start = payload.to_ascii_lowercase().find(&key)?;
+    let value = payload.get(start + key.len()..)?.trim();
+    if value.is_empty() {
+        None
+    } else {
+        Some(value.trim_matches('"').trim_matches('\'').to_owned())
+    }
+}
+
+fn parse_bbox(value: &str) -> Option<BoundingBox> {
+    let numbers = value
+        .split(',')
+        .filter_map(|part| part.trim().parse::<i32>().ok())
+        .collect::<Vec<_>>();
+    if numbers.len() != 4 {
+        return None;
+    }
+    Some(BoundingBox {
+        x: numbers[0],
+        y: numbers[1],
+        width: numbers[2],
+        height: numbers[3],
+    })
+}
+
 fn split_table_block(block: &SourceBlock, max_chars: usize) -> Vec<String> {
     let lines = block
         .text
@@ -569,6 +672,15 @@ fn split_table_block(block: &SourceBlock, max_chars: usize) -> Vec<String> {
     let mut chunks = Vec::new();
     let mut current = header_line.to_owned();
     for row in lines.iter().skip(1) {
+        let single_row_chunk = format!("{header_line}\n{row}");
+        if single_row_chunk.chars().count() > max_chars {
+            if current != header_line {
+                chunks.push(std::mem::replace(&mut current, header_line.to_owned()));
+            }
+            chunks.extend(split_oversized_table_row(header_line, row, max_chars));
+            continue;
+        }
+
         let candidate = format!("{current}\n{row}");
         if current != header_line && candidate.chars().count() > max_chars {
             chunks.push(std::mem::replace(&mut current, header_line.to_owned()));
@@ -581,19 +693,10 @@ fn split_table_block(block: &SourceBlock, max_chars: usize) -> Vec<String> {
             current.push_str(row);
         }
     }
-    if !current.trim().is_empty() {
+    if current != header_line || lines.len() == 1 {
         chunks.push(current);
     }
     chunks
-        .into_iter()
-        .flat_map(|chunk| {
-            if chunk.chars().count() <= max_chars {
-                vec![chunk]
-            } else {
-                split_text_block(&chunk, max_chars, 0)
-            }
-        })
-        .collect()
 }
 
 fn split_text_block(text: &str, max_chars: usize, overlap_chars: usize) -> Vec<String> {
@@ -602,6 +705,100 @@ fn split_text_block(text: &str, max_chars: usize, overlap_chars: usize) -> Vec<S
         return vec![];
     }
 
+    if text.chars().count() <= max_chars {
+        return vec![text.to_owned()];
+    }
+
+    let sentence_units = split_sentence_units(text);
+    if sentence_units.len() > 1 {
+        let mut chunks = Vec::new();
+        let mut current = String::new();
+        for sentence in sentence_units {
+            if sentence.chars().count() > max_chars {
+                if !current.is_empty() {
+                    chunks.push(std::mem::take(&mut current));
+                }
+                chunks.extend(split_by_chars(&sentence, max_chars, overlap_chars));
+                continue;
+            }
+
+            if current.is_empty() {
+                current = sentence;
+                continue;
+            }
+
+            let candidate = join_text_units(&current, &sentence);
+            if candidate.chars().count() <= max_chars {
+                current = candidate;
+            } else {
+                chunks.push(std::mem::replace(&mut current, sentence));
+            }
+        }
+        if !current.is_empty() {
+            chunks.push(current);
+        }
+        return chunks;
+    }
+
+    split_by_chars(text, max_chars, overlap_chars)
+}
+
+fn split_oversized_table_row(header_line: &str, row: &str, max_chars: usize) -> Vec<String> {
+    let prefix = format!("{header_line}\n");
+    let prefix_len = prefix.chars().count();
+    let row_budget = max_chars.saturating_sub(prefix_len).max(1);
+    split_by_chars(row, row_budget, 0)
+        .into_iter()
+        .map(|part| format!("{prefix}{part}"))
+        .collect()
+}
+
+fn split_sentence_units(text: &str) -> Vec<String> {
+    let chars = text.chars().collect::<Vec<_>>();
+    let mut units = Vec::new();
+    let mut current = String::new();
+
+    for (index, character) in chars.iter().enumerate() {
+        current.push(*character);
+        if is_sentence_boundary(&chars, index) {
+            let unit = current.trim();
+            if !unit.is_empty() {
+                units.push(unit.to_owned());
+            }
+            current.clear();
+        }
+    }
+
+    let unit = current.trim();
+    if !unit.is_empty() {
+        units.push(unit.to_owned());
+    }
+    units
+}
+
+fn is_sentence_boundary(chars: &[char], index: usize) -> bool {
+    let character = chars[index];
+    if matches!(character, '。' | '！' | '？' | '!' | '?') {
+        return true;
+    }
+    if character != '.' {
+        return false;
+    }
+    chars
+        .get(index + 1)
+        .map(|next| next.is_whitespace())
+        .unwrap_or(true)
+}
+
+fn join_text_units(left: &str, right: &str) -> String {
+    if left.ends_with('\n') || right.starts_with('\n') {
+        format!("{left}{right}")
+    } else {
+        format!("{left} {right}")
+    }
+}
+
+fn split_by_chars(text: &str, max_chars: usize, overlap_chars: usize) -> Vec<String> {
     let chars = text.chars().collect::<Vec<_>>();
     let step = max_chars.saturating_sub(overlap_chars).max(1);
     let mut chunks = Vec::new();
@@ -998,6 +1195,77 @@ mod tests {
         assert!(chunks[0].text.contains("employee,deadline,status"));
         assert!(chunks[0].semantic_search_text.contains("training.csv"));
         assert!(chunks[0].semantic_search_text.contains("deadline"));
+    }
+
+    #[test]
+    fn chunk_document_prefers_sentence_boundaries_for_text_blocks() {
+        let parsed = parse_document_content(
+            "doc-sentences",
+            "policy.txt",
+            "text/plain",
+            "Training starts on Monday. Mentors review progress every Friday. Expenses are approved by finance.",
+        );
+
+        let chunks = chunk_document(&parsed, 48, 0);
+
+        assert!(chunks.len() >= 2);
+        assert_eq!(chunks[0].text, "Training starts on Monday.");
+        assert_eq!(chunks[1].text, "Mentors review progress every Friday.");
+        assert!(chunks.iter().all(|chunk| !chunk.text.ends_with("Frid")));
+    }
+
+    #[test]
+    fn chunk_document_keeps_table_header_when_large_row_is_split() {
+        let parsed = parse_document_content(
+            "doc-large-table",
+            "faq.csv",
+            "text/csv",
+            "question,answer,status\nHow to onboard,Complete security training before meeting the mentor and filing the first progress report,active",
+        );
+
+        let chunks = chunk_document(&parsed, 64, 0);
+
+        assert!(chunks.len() > 1);
+        assert!(chunks
+            .iter()
+            .all(|chunk| chunk.text.starts_with("question,answer,status\n")));
+        assert!(chunks
+            .iter()
+            .all(|chunk| chunk.metadata.table_header == vec!["question", "answer", "status"]));
+        assert!(chunks.iter().all(|chunk| chunk
+            .semantic_search_text
+            .contains("question answer status")));
+    }
+
+    #[test]
+    fn parse_document_content_extracts_image_marker_anchor_metadata() {
+        let parsed = parse_document_content(
+            "doc-image",
+            "architecture.md",
+            "text/markdown",
+            "# 检索链路\n[[page: 2]]\n[[image: key=img/search-flow.png bbox=10,20,300,180 caption=系统架构图显示 hybrid recall 和 rerank 链路]]",
+        );
+
+        let chunks = chunk_document(&parsed, 200, 0);
+
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].metadata.segment_type, ChunkSegmentType::Image);
+        assert_eq!(chunks[0].metadata.page_no, Some(2));
+        assert_eq!(
+            chunks[0].metadata.image_access_keys,
+            vec!["img/search-flow.png"]
+        );
+        assert_eq!(
+            chunks[0].metadata.bbox,
+            Some(BoundingBox {
+                x: 10,
+                y: 20,
+                width: 300,
+                height: 180,
+            })
+        );
+        assert!(chunks[0].semantic_search_text.contains("系统架构图"));
+        assert!(chunks[0].semantic_search_text.contains("检索链路"));
     }
 
     #[test]
