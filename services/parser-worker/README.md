@@ -32,3 +32,31 @@ Required result shape:
 - `blocks` preserve layout-level parse output for citation and future UI preview.
 - `chunks` provide deterministic text spans with chunk ids, token counts, and citation payloads.
 - `metadata` captures parser name, page count, source hash, and warnings.
+
+## Local MinerU Configuration
+
+MinerU credentials are runtime secrets and must not be committed. Start the worker process with:
+
+```bash
+export MINERU_TOKEN="<token from OpenXLab/MinerU>"
+export PARSER_WORKER_MODE="mineru"
+PYTHONPATH=services/parser-worker python3 -m parser_worker.health
+```
+
+The health command prints only masked credentials, for example:
+
+```json
+{"mineru":{"configured":true,"timeoutSeconds":120,"token":"eyJ0****Esnw"},"mode":"mineru","service":"parser-worker"}
+```
+
+Current implementation status:
+
+- Reads `MINERU_TOKEN` and reports safe configuration status.
+- Keeps text/markdown ingestion in Rust for the deterministic M1 RAG loop.
+- Leaves actual MinerU PDF/OCR network parsing behind the parser-worker contract for the next parser execution slice.
+
+Verification:
+
+```bash
+PYTHONPATH=services/parser-worker python3 -m unittest discover -s services/parser-worker/tests
+```
