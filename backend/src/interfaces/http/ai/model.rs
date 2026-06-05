@@ -1,0 +1,134 @@
+use axum::{
+    routing::{get, post},
+    Json, Router,
+};
+
+use crate::{
+    application::ai::model_service::{
+        ModelHealthCheckCommand, ModelHealthCheckResp, ModelRuntimeService,
+    },
+    domain::auth::model::CurrentUser,
+    interfaces::http::{middleware::permission::require_permission, AppState},
+    shared::{error::AppError, response::ApiResponse},
+};
+
+pub const MODEL_LIST_PERMISSION: &str = "ai:model:list";
+pub const MODEL_HEALTH_PERMISSION: &str = "ai:model:healthCheck";
+
+pub fn routes() -> Router<AppState> {
+    Router::new()
+        .route("/ai/models/runtime-config", get(runtime_config))
+        .route("/ai/models/health-check", post(health_check))
+}
+
+async fn runtime_config(
+    current_user: CurrentUser,
+) -> Result<Json<ApiResponse<novex_model::ModelRuntimeSummary>>, AppError> {
+    require_permission(&current_user, MODEL_LIST_PERMISSION)?;
+
+    Ok(Json(ApiResponse::ok(ModelRuntimeService::runtime_config())))
+}
+
+async fn health_check(
+    current_user: CurrentUser,
+    Json(command): Json<ModelHealthCheckCommand>,
+) -> Result<Json<ApiResponse<ModelHealthCheckResp>>, AppError> {
+    require_permission(&current_user, MODEL_HEALTH_PERMISSION)?;
+
+    Ok(Json(ApiResponse::ok(
+        ModelRuntimeService::health_check(command).await?,
+    )))
+}
+
+#[cfg(test)]
+mod tests {
+    use axum::{
+        body::Body,
+        http::{header, Request, StatusCode},
+    };
+    use http_body_util::BodyExt;
+    use serde_json::Value;
+    use sqlx::postgres::PgPoolOptions;
+    use tower::ServiceExt;
+
+    use super::*;
+    use crate::{
+        domain::auth::model::{CurrentUser, RoleContext},
+        infrastructure::security::jwt::JwtService,
+        interfaces::http::build_router,
+        shared::error::AppError,
+    };
+
+    fn user_with_permissions(permissions: Vec<&str>) -> CurrentUser {
+        CurrentUser {
+            id: 1,
+            username: "tester".to_owned(),
+            dept_id: 1,
+            roles: vec![RoleContext {
+                id: 2,
+                name: "普通用户".to_owned(),
+                code: "general".to_owned(),
+                data_scope: 4,
+            }],
+            permissions: permissions.into_iter().map(str::to_owned).collect(),
+        }
+    }
+
+    #[test]
+    fn model_runtime_permission_seed_contains_route_permissions() {
+        let seed = include_str!(
+            "../../../../migrations/202606050013_seed_ai_model_runtime_permissions.sql"
+        );
+
+        assert!(seed.contains(MODEL_LIST_PERMISSION));
+        assert!(seed.contains(MODEL_HEALTH_PERMISSION));
+    }
+
+    #[tokio::test]
+    async fn runtime_config_handler_rejects_missing_permission() {
+        let err = runtime_config(user_with_permissions(vec![]))
+            .await
+            .unwrap_err();
+
+        assert!(matches!(err, AppError::Forbidden));
+    }
+
+    #[tokio::test]
+    async fn health_check_handler_rejects_missing_permission_before_network() {
+        let err = health_check(
+            user_with_permissions(vec![]),
+            axum::Json(ModelHealthCheckCommand {
+                target: Some("all".to_owned()),
+            }),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(matches!(err, AppError::Forbidden));
+    }
+
+    #[tokio::test]
+    async fn model_runtime_routes_are_registered_and_require_auth() {
+        let db = PgPoolOptions::new()
+            .connect_lazy("postgres://postgres:postgres@localhost:5432/avalon_admin")
+            .unwrap();
+        let jwt = JwtService::new("test-secret".to_owned(), 24);
+        let app = build_router(db, &["http://localhost:4399".to_owned()], jwt).unwrap();
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/ai/models/runtime-config")
+                    .header(header::ACCEPT, "application/json")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let body = serde_json::from_slice::<Value>(&body).unwrap();
+        assert_eq!(body["code"], "401");
+    }
+}
