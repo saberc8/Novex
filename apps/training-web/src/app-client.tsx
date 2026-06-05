@@ -1,12 +1,24 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { ArrowRight, Bell, Bot, CheckCircle2, CircleDashed, Send, ShieldCheck } from "lucide-react";
-import { askDataset, listDatasets } from "@/api/knowledge";
+import {
+  ArrowRight,
+  Bell,
+  Bot,
+  CheckCircle2,
+  CircleAlert,
+  CircleDashed,
+  Quote,
+  Send,
+  ShieldCheck,
+  ThumbsDown,
+  ThumbsUp
+} from "lucide-react";
+import { askDataset, listDatasets, submitRagFeedback } from "@/api/knowledge";
 import { CitationList, type CitationItem } from "@/components/citation-list";
 import { MetricStrip } from "@/components/metric-strip";
 import { TrainingShell } from "@/components/training-shell";
-import type { DatasetResp, RagAskResp } from "@/types/knowledge";
+import type { DatasetResp, RagAskResp, RagFeedbackRating } from "@/types/knowledge";
 
 const metrics = [
   { label: "完成率", value: "68%", detail: "本周提升 12%", tone: "teal" as const },
@@ -96,6 +108,8 @@ export function TrainingAppClient() {
   const [answer, setAnswer] = useState<RagAskResp>(fallbackAnswer);
   const [apiStatus, setApiStatus] = useState("fallback");
   const [asking, setAsking] = useState(false);
+  const [feedbackSubmitting, setFeedbackSubmitting] = useState(false);
+  const [feedbackStatus, setFeedbackStatus] = useState("");
 
   useEffect(() => {
     let mounted = true;
@@ -154,10 +168,32 @@ export function TrainingAppClient() {
       });
       setAnswer(response);
       setApiStatus("live");
+      setFeedbackStatus("");
     } catch {
       setApiStatus("fallback");
     } finally {
       setAsking(false);
+    }
+  }
+
+  async function handleFeedback(rating: RagFeedbackRating) {
+    if (answer.traceId <= 0 || feedbackSubmitting) {
+      return;
+    }
+
+    setFeedbackSubmitting(true);
+    setFeedbackStatus("");
+    try {
+      await submitRagFeedback({
+        traceId: answer.traceId,
+        rating,
+        reason: "training-answer-feedback"
+      });
+      setFeedbackStatus("已记录反馈");
+    } catch {
+      setFeedbackStatus("反馈提交失败");
+    } finally {
+      setFeedbackSubmitting(false);
     }
   }
 
@@ -253,6 +289,44 @@ export function TrainingAppClient() {
                   <span>{answer.retrievalHitCount} hits</span>
                   <span>·</span>
                   <span>{answer.answerStrategy}</span>
+                </div>
+                <div className="mt-3 flex flex-wrap items-center gap-2">
+                  <button
+                    aria-label="有帮助"
+                    className="inline-flex h-8 items-center gap-1 rounded-md border border-slate-200 px-2 text-xs font-medium text-slate-600 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50"
+                    disabled={answer.traceId <= 0 || feedbackSubmitting}
+                    onClick={() => void handleFeedback("helpful")}
+                    type="button"
+                  >
+                    <ThumbsUp aria-hidden="true" className="h-3.5 w-3.5" />
+                    有帮助
+                  </button>
+                  <button
+                    aria-label="答案不准确"
+                    className="inline-flex h-8 items-center gap-1 rounded-md border border-slate-200 px-2 text-xs font-medium text-slate-600 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50"
+                    disabled={answer.traceId <= 0 || feedbackSubmitting}
+                    onClick={() => void handleFeedback("not_helpful")}
+                    type="button"
+                  >
+                    <ThumbsDown aria-hidden="true" className="h-3.5 w-3.5" />
+                    答案不准确
+                  </button>
+                  <button
+                    aria-label="引用问题"
+                    className="inline-flex h-8 items-center gap-1 rounded-md border border-slate-200 px-2 text-xs font-medium text-slate-600 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50"
+                    disabled={answer.traceId <= 0 || feedbackSubmitting}
+                    onClick={() => void handleFeedback("citation_issue")}
+                    type="button"
+                  >
+                    <Quote aria-hidden="true" className="h-3.5 w-3.5" />
+                    引用问题
+                  </button>
+                  {feedbackStatus ? (
+                    <span className="inline-flex h-8 items-center gap-1 rounded-md bg-slate-100 px-2 text-xs font-medium text-slate-600">
+                      <CircleAlert aria-hidden="true" className="h-3.5 w-3.5" />
+                      {feedbackStatus}
+                    </span>
+                  ) : null}
                 </div>
               </div>
               <div className="mt-4 flex gap-2">

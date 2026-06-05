@@ -41,3 +41,17 @@ export interface RagAskResp {
   retrievalHitCount: number;
   answerStrategy: string;
 }
+
+export type RagFeedbackRating = "helpful" | "not_helpful" | "citation_issue";
+
+export interface RagFeedbackCommand {
+  traceId: number;
+  rating: RagFeedbackRating;
+  reason?: string;
+}
+
+export interface RagFeedbackResp {
+  id: number;
+  traceId: number;
+  rating: RagFeedbackRating;
+}

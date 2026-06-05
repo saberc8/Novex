@@ -1,16 +1,18 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import Page from "./page";
-import { askDataset, listDatasets } from "@/api/knowledge";
+import { askDataset, listDatasets, submitRagFeedback } from "@/api/knowledge";
 import type { DatasetResp } from "@/types/knowledge";
 
 vi.mock("@/api/knowledge", () => ({
   askDataset: vi.fn(),
-  listDatasets: vi.fn()
+  listDatasets: vi.fn(),
+  submitRagFeedback: vi.fn()
 }));
 
 const askDatasetMock = vi.mocked(askDataset);
 const listDatasetsMock = vi.mocked(listDatasets);
+const submitRagFeedbackMock = vi.mocked(submitRagFeedback);
 
 function dataset(overrides: Partial<DatasetResp> = {}): DatasetResp {
   return {
@@ -53,6 +55,11 @@ describe("Training home page", () => {
       retrievalHitCount: 1,
       answerStrategy: "extractive"
     });
+    submitRagFeedbackMock.mockResolvedValue({
+      id: 99,
+      traceId: 42,
+      rating: "not_helpful"
+    });
   });
 
   it("renders the customer-facing training workbench sections", () => {
@@ -84,5 +91,24 @@ describe("Training home page", () => {
     expect(await screen.findByText("Live answer from RAG.")).toBeTruthy();
     expect(await screen.findByText("20:0")).toBeTruthy();
     expect(await screen.findByText("Trace #42")).toBeTruthy();
+  });
+
+  it("submits RAG answer feedback for the latest live trace", async () => {
+    render(<Page />);
+
+    await waitFor(() => expect(listDatasetsMock).toHaveBeenCalledWith({ page: 1, size: 20 }));
+    fireEvent.click(screen.getByLabelText("发送问题"));
+    expect(await screen.findByText("Live answer from RAG.")).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "答案不准确" }));
+
+    await waitFor(() =>
+      expect(submitRagFeedbackMock).toHaveBeenCalledWith({
+        traceId: 42,
+        rating: "not_helpful",
+        reason: "training-answer-feedback"
+      })
+    );
+    expect(await screen.findByText("已记录反馈")).toBeTruthy();
   });
 });

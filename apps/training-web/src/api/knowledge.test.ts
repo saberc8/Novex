@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { askDataset, listDatasets } from "./knowledge";
+import { askDataset, listDatasets, submitRagFeedback } from "./knowledge";
 import { getAuthToken } from "@/lib/auth";
 
 function okResponse(data: unknown) {
@@ -78,6 +78,37 @@ describe("training knowledge api", () => {
       body: JSON.stringify({
         question: "培训什么时候开始？",
         limit: 5
+      })
+    });
+  });
+
+  it("submits RAG feedback with trace id and rating", async () => {
+    window.localStorage.setItem("novex_token", "token-1");
+    fetchMock.mockImplementationOnce(() =>
+      okResponse({
+        id: 99,
+        traceId: 42,
+        rating: "not_helpful"
+      })
+    );
+
+    await submitRagFeedback({
+      traceId: 42,
+      rating: "not_helpful",
+      reason: "答案没有覆盖培训截止时间"
+    });
+
+    expect(fetchMock.mock.calls[0]?.[0]).toBe("http://localhost:4398/ai/knowledge/feedback");
+    expect(fetchMock.mock.calls[0]?.[1]).toMatchObject({
+      method: "POST",
+      headers: expect.objectContaining({
+        Authorization: "Bearer token-1",
+        "Content-Type": "application/json"
+      }),
+      body: JSON.stringify({
+        traceId: 42,
+        rating: "not_helpful",
+        reason: "答案没有覆盖培训截止时间"
       })
     });
   });
