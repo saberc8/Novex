@@ -29,8 +29,8 @@ const DATASET_STATUS_DRAFT: i16 = 1;
 const VISIBILITY_PRIVATE: i16 = 1;
 const RETRIEVAL_MODE_HYBRID: i16 = 3;
 const DEFAULT_DOCUMENT_CONTENT_TYPE: &str = "text/plain";
-const DEFAULT_CHUNK_MAX_CHARS: usize = 24;
-const DEFAULT_CHUNK_OVERLAP_CHARS: usize = 4;
+const DEFAULT_CHUNK_MAX_CHARS: usize = 1200;
+const DEFAULT_CHUNK_OVERLAP_CHARS: usize = 120;
 const DOCUMENT_PARSE_STATUS_PARSED: i16 = 3;
 const DOCUMENT_INGESTION_STATUS_INDEXED: i16 = 4;
 const PARSER_JOB_TYPE_TEXT: i16 = 1;
@@ -885,7 +885,7 @@ mod tests {
     fn document_upload_chunks_are_stable_for_document_id() {
         let command = DocumentUploadCommand {
             name: "handbook.txt".to_owned(),
-            content: "Alpha beta gamma delta epsilon zeta eta theta.".to_owned(),
+            content: "Alpha beta gamma delta epsilon zeta eta theta. ".repeat(40),
             ..DocumentUploadCommand::default()
         };
         let command = normalize_document_upload_command(command).unwrap();
@@ -959,5 +959,21 @@ mod tests {
         assert_eq!(records[0].chunk_id, 11);
         assert_eq!(records[0].rank, 2);
         assert!((records[0].score - 0.75).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn rag_ask_default_chunks_keep_sentence_context() {
+        let command = normalize_document_upload_command(DocumentUploadCommand {
+            name: "onboarding.txt".to_owned(),
+            content: "Training starts on Monday. Mentors review progress every Friday.".to_owned(),
+            ..DocumentUploadCommand::default()
+        })
+        .unwrap();
+        let chunks = document_upload_chunks(42, &command);
+        let hits = keyword_retrieve("When does training start?", &chunks, 5);
+
+        let answer = build_extractive_answer("When does training start?", &hits);
+
+        assert!(answer.answer.contains("Training starts on Monday."));
     }
 }
