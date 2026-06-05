@@ -108,6 +108,44 @@
             "type": "string",
             "minLength": 1
           },
+          "semanticSearchText": {
+            "type": "string",
+            "description": "Optional parser-provided retrieval text. Backend still prepends source file, section path, and table header hints."
+          },
+          "segmentType": {
+            "type": "string",
+            "enum": ["text", "table", "image"],
+            "description": "Optional explicit segment type. When omitted, backend infers it from referenced blocks."
+          },
+          "tableHeader": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Optional table headers used to improve embedding and BM25 input."
+          },
+          "imageAccessKeys": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Optional object-storage access keys for image evidence attached to this chunk."
+          },
+          "contentRole": {
+            "type": "string",
+            "enum": ["canonical", "summary_faq", "test_case"],
+            "description": "Optional role hint for retrieval policy and ranking corrections."
+          },
+          "displayCapability": {
+            "type": "string",
+            "enum": ["precise_anchor", "row_only", "text_only"],
+            "description": "Optional display hint for citation rendering."
+          },
+          "metadata": {
+            "type": "object",
+            "description": "Optional parser-specific chunk metadata. Backend stores it under metadata.parserChunkMetadata.",
+            "additionalProperties": true
+          },
           "tokenCount": {
             "type": "integer",
             "minimum": 0

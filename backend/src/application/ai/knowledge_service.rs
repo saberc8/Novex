@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use chrono::{NaiveDateTime, Utc};
 use novex_model::{ModelRuntimeConfig, ModelRuntimeTarget};
@@ -233,6 +233,20 @@ pub struct ParserWorkerChunk {
     pub chunk_index: usize,
     #[serde(default)]
     pub text: String,
+    #[serde(default)]
+    pub semantic_search_text: String,
+    #[serde(default)]
+    pub segment_type: String,
+    #[serde(default)]
+    pub table_header: Vec<String>,
+    #[serde(default)]
+    pub image_access_keys: Vec<String>,
+    #[serde(default)]
+    pub content_role: String,
+    #[serde(default)]
+    pub display_capability: String,
+    #[serde(default)]
+    pub metadata: Value,
     #[serde(default)]
     pub token_count: usize,
     pub citation: ParserWorkerChunkCitation,
@@ -933,24 +947,88 @@ fn normalize_parsed_document_upload_command(
     if command.parser_result.chunks.is_empty() {
         return Err(AppError::bad_request("解析结果 chunk 不能为空"));
     }
+    for block in &mut command.parser_result.blocks {
+        block.block_id = block.block_id.trim().to_owned();
+        block.block_type = normalize_parser_block_type(&block.block_type);
+        block.text = block.text.trim().to_owned();
+        normalize_parser_string_list(&mut block.section_path);
+    }
+
+    let known_block_ids = command
+        .parser_result
+        .blocks
+        .iter()
+        .filter(|block| !block.block_id.is_empty())
+        .map(|block| block.block_id.as_str())
+        .collect::<HashSet<_>>();
+    let mut chunk_uids = HashSet::new();
+    let mut chunk_indexes = HashSet::new();
+
     for chunk in &mut command.parser_result.chunks {
         chunk.chunk_uid = chunk.chunk_uid.trim().to_owned();
         chunk.text = chunk.text.trim().to_owned();
+        chunk.semantic_search_text = chunk.semantic_search_text.trim().to_owned();
+        chunk.segment_type = chunk.segment_type.trim().to_ascii_lowercase();
+        chunk.content_role = chunk.content_role.trim().to_ascii_lowercase();
+        chunk.display_capability = chunk.display_capability.trim().to_ascii_lowercase();
+        normalize_parser_string_list(&mut chunk.table_header);
+        normalize_parser_string_list(&mut chunk.image_access_keys);
         chunk.citation.document_id = chunk.citation.document_id.trim().to_owned();
         chunk.citation.chunk_id = chunk.citation.chunk_id.trim().to_owned();
+        normalize_parser_string_list(&mut chunk.citation.section_path);
+        normalize_parser_string_list(&mut chunk.citation.block_ids);
         if chunk.chunk_uid.is_empty() {
             return Err(AppError::bad_request("解析结果 chunkUid 不能为空"));
         }
         if chunk.text.is_empty() {
             return Err(AppError::bad_request("解析结果 chunk 文本不能为空"));
         }
-    }
-    for block in &mut command.parser_result.blocks {
-        block.block_id = block.block_id.trim().to_owned();
-        block.block_type = normalize_parser_block_type(&block.block_type);
-        block.text = block.text.trim().to_owned();
+        if !chunk_uids.insert(chunk.chunk_uid.clone()) {
+            return Err(AppError::bad_request("解析结果 chunkUid 重复"));
+        }
+        if !chunk_indexes.insert(chunk.chunk_index) {
+            return Err(AppError::bad_request("解析结果 chunkIndex 重复"));
+        }
+        if !chunk.segment_type.is_empty()
+            && parser_segment_type_value(&chunk.segment_type).is_none()
+        {
+            return Err(AppError::bad_request("解析结果 segmentType 不合法"));
+        }
+        if !chunk.content_role.is_empty()
+            && parser_content_role_value(&chunk.content_role).is_none()
+        {
+            return Err(AppError::bad_request("解析结果 contentRole 不合法"));
+        }
+        if !chunk.display_capability.is_empty()
+            && parser_display_capability_value(&chunk.display_capability).is_none()
+        {
+            return Err(AppError::bad_request("解析结果 displayCapability 不合法"));
+        }
+        for block_id in &chunk.citation.block_ids {
+            if !known_block_ids.contains(block_id.as_str()) {
+                return Err(AppError::bad_request(
+                    "解析结果 blockIds 引用了不存在的 block",
+                ));
+            }
+        }
     }
     Ok(command)
+}
+
+fn normalize_parser_string_list(items: &mut Vec<String>) {
+    let mut seen = HashSet::new();
+    *items = items
+        .iter()
+        .map(|item| item.trim())
+        .filter(|item| !item.is_empty())
+        .filter_map(|item| {
+            if seen.insert(item.to_owned()) {
+                Some(item.to_owned())
+            } else {
+                None
+            }
+        })
+        .collect();
 }
 
 fn parser_result_chunks(
@@ -973,7 +1051,8 @@ fn parser_result_chunks(
             .iter()
             .filter_map(|block_id| block_index.get(block_id.as_str()).copied())
             .collect::<Vec<_>>();
-        let segment_type = parser_chunk_segment_type(&referenced_blocks);
+        let segment_type =
+            parser_chunk_segment_type(&parser_chunk.segment_type, &referenced_blocks)?;
         let page_no = parser_chunk.citation.page_no.or_else(|| {
             referenced_blocks
                 .iter()
@@ -993,17 +1072,27 @@ fn parser_result_chunks(
             .iter()
             .find_map(|(_, block)| block.bbox.as_ref())
             .and_then(parser_bbox);
-        let table_header = if segment_type == ChunkSegmentType::Table {
+        let table_header = if !parser_chunk.table_header.is_empty() {
+            parser_chunk.table_header.clone()
+        } else if segment_type == ChunkSegmentType::Table {
             parser_table_header(&parser_chunk.text)
         } else {
             vec![]
         };
-        let image_access_keys = parser_image_access_keys(&referenced_blocks);
+        let image_access_keys = merge_parser_lists(
+            &parser_chunk.image_access_keys,
+            &parser_image_access_keys(&referenced_blocks),
+        );
         let segment_index = referenced_blocks
             .first()
             .map(|(index, _)| *index)
             .unwrap_or(parser_chunk.chunk_index);
-        let display_capability = parser_display_capability(segment_type, page_no, bbox.as_ref());
+        let display_capability = parser_display_capability(
+            &parser_chunk.display_capability,
+            segment_type,
+            page_no,
+            bbox.as_ref(),
+        )?;
         let metadata = ChunkMetadata {
             source_title: None,
             source_file_name: Some(command.name.clone()),
@@ -1015,10 +1104,16 @@ fn parser_result_chunks(
             table_header,
             image_access_keys,
             bbox,
-            content_role: infer_parser_content_role(&section_path, &parser_chunk.text),
+            content_role: parser_content_role(
+                &parser_chunk.content_role,
+                &section_path,
+                &parser_chunk.text,
+            )?,
             display_capability,
         };
-        let semantic_search_text = build_semantic_search_text(&parser_chunk.text, &metadata);
+        let semantic_input = non_empty_parser_string(&parser_chunk.semantic_search_text)
+            .unwrap_or_else(|| parser_chunk.text.clone());
+        let semantic_search_text = build_semantic_search_text(&semantic_input, &metadata);
         let token_count = if parser_chunk.token_count > 0 {
             parser_chunk.token_count
         } else {
@@ -1098,11 +1193,11 @@ fn parser_chunk_save_records(
     user_id: i64,
     now: NaiveDateTime,
 ) -> Vec<ChunkSaveRecord> {
-    let block_ids_by_chunk = command
+    let parser_chunk_by_uid = command
         .parser_result
         .chunks
         .iter()
-        .map(|chunk| (chunk.chunk_uid.as_str(), chunk.citation.block_ids.clone()))
+        .map(|chunk| (chunk.chunk_uid.as_str(), chunk))
         .collect::<HashMap<_, _>>();
     chunks
         .into_iter()
@@ -1117,11 +1212,19 @@ fn parser_chunk_save_records(
                 object.insert("parserChunkUid".to_owned(), json!(chunk.chunk_id.clone()));
                 object.insert(
                     "parserBlockIds".to_owned(),
-                    json!(block_ids_by_chunk
+                    json!(parser_chunk_by_uid
                         .get(chunk.chunk_id.as_str())
-                        .cloned()
+                        .map(|parser_chunk| parser_chunk.citation.block_ids.clone())
                         .unwrap_or_default()),
                 );
+                if let Some(parser_chunk) = parser_chunk_by_uid.get(chunk.chunk_id.as_str()) {
+                    if !parser_chunk.metadata.is_null() {
+                        object.insert(
+                            "parserChunkMetadata".to_owned(),
+                            parser_chunk.metadata.clone(),
+                        );
+                    }
+                }
             }
             ChunkSaveRecord {
                 id: next_id(),
@@ -1214,14 +1317,48 @@ fn parsed_source_hash(command: &ParsedDocumentUploadCommand) -> Option<String> {
     })
 }
 
-fn parser_chunk_segment_type(blocks: &[(usize, &ParserWorkerBlock)]) -> ChunkSegmentType {
-    if blocks.iter().any(|(_, block)| block.block_type == "table") {
-        ChunkSegmentType::Table
-    } else if blocks.iter().any(|(_, block)| block.block_type == "image") {
-        ChunkSegmentType::Image
-    } else {
-        ChunkSegmentType::Text
+fn parser_chunk_segment_type(
+    explicit_value: &str,
+    blocks: &[(usize, &ParserWorkerBlock)],
+) -> Result<ChunkSegmentType, AppError> {
+    if let Some(segment_type) = parser_segment_type_value(explicit_value) {
+        return Ok(segment_type);
     }
+
+    if blocks.iter().any(|(_, block)| block.block_type == "table") {
+        Ok(ChunkSegmentType::Table)
+    } else if blocks.iter().any(|(_, block)| block.block_type == "image") {
+        Ok(ChunkSegmentType::Image)
+    } else {
+        Ok(ChunkSegmentType::Text)
+    }
+}
+
+fn parser_segment_type_value(value: &str) -> Option<ChunkSegmentType> {
+    match value.trim() {
+        "" => None,
+        "table" => Some(ChunkSegmentType::Table),
+        "image" => Some(ChunkSegmentType::Image),
+        "text" | "title" | "paragraph" | "list" | "code" | "formula" | "caption" => {
+            Some(ChunkSegmentType::Text)
+        }
+        _ => None,
+    }
+}
+
+fn merge_parser_lists(left: &[String], right: &[String]) -> Vec<String> {
+    let mut seen = HashSet::new();
+    left.iter()
+        .chain(right.iter())
+        .filter_map(|item| {
+            let item = item.trim();
+            if item.is_empty() || !seen.insert(item.to_owned()) {
+                None
+            } else {
+                Some(item.to_owned())
+            }
+        })
+        .collect()
 }
 
 fn parser_table_header(text: &str) -> Vec<String> {
@@ -1257,6 +1394,28 @@ fn parser_image_access_keys(blocks: &[(usize, &ParserWorkerBlock)]) -> Vec<Strin
         .collect()
 }
 
+fn parser_content_role(
+    explicit_value: &str,
+    section_path: &[String],
+    text: &str,
+) -> Result<ContentRole, AppError> {
+    if let Some(content_role) = parser_content_role_value(explicit_value) {
+        return Ok(content_role);
+    }
+
+    Ok(infer_parser_content_role(section_path, text))
+}
+
+fn parser_content_role_value(value: &str) -> Option<ContentRole> {
+    match value.trim() {
+        "" => None,
+        "canonical" => Some(ContentRole::Canonical),
+        "summary_faq" => Some(ContentRole::SummaryFaq),
+        "test_case" => Some(ContentRole::TestCase),
+        _ => None,
+    }
+}
+
 fn infer_parser_content_role(section_path: &[String], text: &str) -> ContentRole {
     let haystack = format!("{} {text}", section_path.join(" ")).to_ascii_lowercase();
     if haystack.contains("faq") || haystack.contains("问答") || haystack.contains("常见问题")
@@ -1274,6 +1433,29 @@ fn infer_parser_content_role(section_path: &[String], text: &str) -> ContentRole
 }
 
 fn parser_display_capability(
+    explicit_value: &str,
+    segment_type: ChunkSegmentType,
+    page_no: Option<i32>,
+    bbox: Option<&BoundingBox>,
+) -> Result<DisplayCapability, AppError> {
+    if let Some(display_capability) = parser_display_capability_value(explicit_value) {
+        return Ok(display_capability);
+    }
+
+    Ok(infer_parser_display_capability(segment_type, page_no, bbox))
+}
+
+fn parser_display_capability_value(value: &str) -> Option<DisplayCapability> {
+    match value.trim() {
+        "" => None,
+        "precise_anchor" => Some(DisplayCapability::PreciseAnchor),
+        "row_only" => Some(DisplayCapability::RowOnly),
+        "text_only" => Some(DisplayCapability::TextOnly),
+        _ => None,
+    }
+}
+
+fn infer_parser_display_capability(
     segment_type: ChunkSegmentType,
     page_no: Option<i32>,
     bbox: Option<&BoundingBox>,
@@ -1289,9 +1471,8 @@ fn parser_display_capability(
 
 fn normalize_parser_block_type(value: &str) -> String {
     match value.trim() {
-        "title" | "paragraph" | "table" | "image" | "list" | "code" | "pageBreak" => {
-            value.trim().to_owned()
-        }
+        "title" | "paragraph" | "table" | "image" | "list" | "code" | "formula" | "caption"
+        | "pageBreak" => value.trim().to_owned(),
         _ => "paragraph".to_owned(),
     }
 }
@@ -2035,6 +2216,141 @@ mod tests {
             .contains("salary-policy.pdf"));
         assert!(parts.chunks[0].semantic_search_text.contains("薪酬政策"));
         assert!(parts.chunks[0].semantic_search_text.contains("岗位 补贴"));
+    }
+
+    #[test]
+    fn parser_result_ingestion_uses_explicit_chunk_search_metadata() {
+        let command = serde_json::from_value::<ParsedDocumentUploadCommand>(serde_json::json!({
+            "name": "org-policy.pdf",
+            "contentType": "application/pdf",
+            "parserResult": {
+                "tenantId": 1,
+                "datasetId": 7,
+                "documentId": 42,
+                "parserJobId": 99,
+                "status": "succeeded",
+                "blocks": [
+                    {
+                        "blockId": "p-1",
+                        "type": "paragraph",
+                        "text": "原始 OCR 噪声 fallback",
+                        "pageNo": 2,
+                        "sectionPath": ["组织管理"]
+                    }
+                ],
+                "chunks": [
+                    {
+                        "chunkUid": "42:0",
+                        "chunkIndex": 0,
+                        "text": "原始 OCR 噪声 fallback",
+                        "semanticSearchText": "组织架构 团队权限 审批责任",
+                        "segmentType": "table",
+                        "tableHeader": ["团队", "权限", "审批人"],
+                        "imageAccessKeys": [" img/org-chart.png ", "img/org-chart.png"],
+                        "contentRole": "summary_faq",
+                        "displayCapability": "row_only",
+                        "metadata": {"confidence": 0.92, "origin": "mineru-layout"},
+                        "tokenCount": 0,
+                        "citation": {
+                            "documentId": "42",
+                            "chunkId": "42:0",
+                            "blockIds": [" p-1 "],
+                            "sectionPath": []
+                        }
+                    }
+                ],
+                "metadata": {
+                    "parser": "mineru",
+                    "warnings": []
+                }
+            }
+        }))
+        .unwrap();
+
+        let parts = parsed_document_ingestion_parts(
+            DEFAULT_TENANT_ID,
+            7,
+            9,
+            command,
+            Utc::now().naive_utc(),
+        )
+        .unwrap();
+
+        let chunk = &parts.chunks[0];
+        assert_eq!(chunk.segment_type, "table");
+        assert_eq!(chunk.content_role, "summary_faq");
+        assert_eq!(chunk.display_capability, "row_only");
+        assert_eq!(chunk.page_no, Some(2));
+        assert_eq!(chunk.section_path, serde_json::json!(["组织管理"]));
+        assert_eq!(
+            chunk.metadata["tableHeader"],
+            serde_json::json!(["团队", "权限", "审批人"])
+        );
+        assert_eq!(
+            chunk.metadata["imageAccessKeys"],
+            serde_json::json!(["img/org-chart.png"])
+        );
+        assert_eq!(chunk.metadata["parserChunkMetadata"]["confidence"], 0.92);
+        assert!(chunk.semantic_search_text.contains("org-policy.pdf"));
+        assert!(chunk.semantic_search_text.contains("组织管理"));
+        assert!(chunk.semantic_search_text.contains("团队 权限 审批人"));
+        assert!(chunk
+            .semantic_search_text
+            .contains("组织架构 团队权限 审批责任"));
+        assert!(!chunk.semantic_search_text.contains("原始 OCR 噪声"));
+        assert!(chunk.token_count > 0);
+    }
+
+    #[test]
+    fn parser_result_rejects_unknown_block_references() {
+        let command = serde_json::from_value::<ParsedDocumentUploadCommand>(serde_json::json!({
+            "name": "broken-block.pdf",
+            "contentType": "application/pdf",
+            "parserResult": {
+                "tenantId": 1,
+                "datasetId": 7,
+                "documentId": 42,
+                "parserJobId": 99,
+                "status": "succeeded",
+                "blocks": [
+                    {
+                        "blockId": "p-1",
+                        "type": "paragraph",
+                        "text": "有效段落"
+                    }
+                ],
+                "chunks": [
+                    {
+                        "chunkUid": "42:0",
+                        "chunkIndex": 0,
+                        "text": "有效段落",
+                        "tokenCount": 3,
+                        "citation": {
+                            "documentId": "42",
+                            "chunkId": "42:0",
+                            "sectionPath": [],
+                            "blockIds": ["missing-block"]
+                        }
+                    }
+                ],
+                "metadata": {
+                    "parser": "mineru",
+                    "warnings": []
+                }
+            }
+        }))
+        .unwrap();
+
+        let err = parsed_document_ingestion_parts(
+            DEFAULT_TENANT_ID,
+            7,
+            9,
+            command,
+            Utc::now().naive_utc(),
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("blockIds"));
     }
 
     #[test]

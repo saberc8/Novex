@@ -44,6 +44,14 @@ The backend accepts `{ name, contentType, parserResult }`, validates tenant/data
 and regenerates `semanticSearchText` from the parser chunks plus source file, section path, table
 header, page, bbox, and block references. The worker still never writes database tables directly.
 
+Chunk ingestion contract:
+
+- `chunkUid` and `chunkIndex` must be unique within a parser result.
+- `citation.blockIds`, when present, must reference existing `blocks[*].blockId` values.
+- `semanticSearchText` is optional; when present, the backend uses it as the main retrieval body and still adds source file, section path, and table header hints before saving.
+- `segmentType`, `tableHeader`, `imageAccessKeys`, `contentRole`, and `displayCapability` may be supplied by the worker. If omitted, the backend infers them from referenced blocks and chunk text.
+- Chunk-level `metadata` is preserved under `ai_document_chunk.metadata.parserChunkMetadata`; canonical searchable/filterable fields remain in dedicated DB columns and normalized metadata keys.
+
 ## Local MinerU Configuration
 
 MinerU credentials are runtime secrets and must not be committed. Start the worker process with:
