@@ -1,3 +1,4 @@
+pub mod ai_knowledge_repository;
 pub mod dept_repository;
 pub mod log_repository;
 pub mod online_repository;
