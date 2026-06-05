@@ -1,7 +1,9 @@
 import unittest
+from io import BytesIO
+from zipfile import ZipFile
 
 from parser_worker.mineru_client import MineruTask
-from parser_worker.runner import execute_parse_job
+from parser_worker.runner import complete_mineru_parse_job, execute_parse_job, extract_mineru_markdown_from_zip
 
 
 class ParserWorkerRunnerTest(unittest.TestCase):
@@ -100,6 +102,97 @@ class ParserWorkerRunnerTest(unittest.TestCase):
         self.assertEqual(poster.calls, [])
         self.assertEqual(mineru.created_urls, ["https://objects.example.com/handbook.pdf"])
 
+    def test_extract_mineru_markdown_prefers_auto_full_md_from_zip(self):
+        zip_bytes = build_zip_bytes(
+            {
+                "images/ignored.txt": "not markdown",
+                "nested/auto.md": "# Wrong\n",
+                "result/auto_full.md": "# 薪酬政策\n[[page: 5]]\n正文",
+            }
+        )
+
+        markdown = extract_mineru_markdown_from_zip(zip_bytes)
+
+        self.assertIn("# 薪酬政策", markdown)
+        self.assertIn("[[page: 5]]", markdown)
+
+    def test_complete_done_mineru_task_downloads_zip_and_posts_parsed_document(self):
+        poster = FakePoster()
+        mineru = FakeMineruClient(
+            completed=MineruTask(
+                task_id="task-1",
+                state="done",
+                full_zip_url="https://cdn.example.com/result.zip",
+            )
+        )
+        zip_fetcher = FakeZipFetcher(
+            {
+                "https://cdn.example.com/result.zip": build_zip_bytes(
+                    {"auto_full.md": "# 薪酬政策\n[[page: 5]]\n| 岗位 | 补贴 |\n| --- | --- |\n| 工程师 | 100 |\n"}
+                )
+            }
+        )
+
+        result = complete_mineru_parse_job(
+            {
+                "tenantId": 1,
+                "datasetId": 7,
+                "documentId": 42,
+                "parserJobId": 99,
+                "source": {
+                    "kind": "remoteUrl",
+                    "contentType": "application/pdf",
+                    "name": "salary-policy.pdf",
+                    "uri": "https://objects.example.com/salary-policy.pdf",
+                },
+            },
+            task_id="task-1",
+            backend_base_url="http://backend.local",
+            backend_token="token-1",
+            mineru_client=mineru,
+            zip_fetcher=zip_fetcher,
+            http_post=poster,
+        )
+
+        self.assertEqual(result["status"], "succeeded")
+        self.assertEqual(result["callbackStatus"], "posted")
+        self.assertEqual(mineru.polled_task_ids, ["task-1"])
+        self.assertEqual(zip_fetcher.urls, ["https://cdn.example.com/result.zip"])
+        payload = poster.calls[0]["json"]
+        self.assertEqual(payload["name"], "salary-policy.pdf")
+        self.assertEqual(payload["parserResult"]["metadata"]["parser"], "mineru")
+        self.assertEqual(payload["parserResult"]["metadata"]["mineru"]["taskId"], "task-1")
+        self.assertEqual(payload["parserResult"]["parserJobId"], 99)
+        self.assertGreater(len(payload["parserResult"]["chunks"]), 0)
+
+    def test_complete_pending_mineru_task_defers_callback(self):
+        poster = FakePoster()
+        mineru = FakeMineruClient(completed=MineruTask(task_id="task-2", state="pending"))
+
+        result = complete_mineru_parse_job(
+            {
+                "tenantId": 1,
+                "datasetId": 7,
+                "documentId": 42,
+                "parserJobId": 99,
+                "source": {
+                    "kind": "remoteUrl",
+                    "contentType": "application/pdf",
+                    "name": "handbook.pdf",
+                    "uri": "https://objects.example.com/handbook.pdf",
+                },
+            },
+            task_id="task-2",
+            backend_base_url="http://backend.local",
+            backend_token="token-1",
+            mineru_client=mineru,
+            http_post=poster,
+        )
+
+        self.assertEqual(result["status"], "submitted")
+        self.assertEqual(result["callbackStatus"], "deferred")
+        self.assertEqual(poster.calls, [])
+
 
 class FakePoster:
     def __init__(self):
@@ -121,12 +214,36 @@ class FakeFetcher:
 
 
 class FakeMineruClient:
-    def __init__(self):
+    def __init__(self, completed=None):
         self.created_urls = []
+        self.completed = completed
+        self.polled_task_ids = []
 
     def create_extract_task(self, source_url, **_kwargs):
         self.created_urls.append(source_url)
         return MineruTask(task_id="task-1", state="pending", full_zip_url="")
+
+    def get_extract_task(self, task_id):
+        self.polled_task_ids.append(task_id)
+        return self.completed
+
+
+class FakeZipFetcher:
+    def __init__(self, bytes_by_url):
+        self.bytes_by_url = bytes_by_url
+        self.urls = []
+
+    def __call__(self, url):
+        self.urls.append(url)
+        return self.bytes_by_url[url]
+
+
+def build_zip_bytes(files):
+    buffer = BytesIO()
+    with ZipFile(buffer, "w") as archive:
+        for name, content in files.items():
+            archive.writestr(name, content)
+    return buffer.getvalue()
 
 
 if __name__ == "__main__":

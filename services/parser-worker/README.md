@@ -70,6 +70,7 @@ Chunk ingestion contract:
 Worker entry points:
 
 - `parser_worker.runner.execute_parse_job(request, backend_base_url=..., backend_token=...)` prepares backend asset references, runs `parse_request`, and posts `status=succeeded` results back to `documents/parsed`.
+- `parser_worker.runner.complete_mineru_parse_job(request, task_id=..., mineru_client=...)` polls a submitted MinerU task, downloads the completed `full_zip_url`, extracts the preferred markdown result, converts it through `parse_mineru_markdown_result`, and posts the completed parse result back to `documents/parsed`.
 - `parser_worker.parse.parse_request(request)` routes by file type. It returns a completed `succeeded` parse result for native structured formats, or a `submitted` MinerU task envelope for PDF/Office/Image paths.
 - `parser_worker.parse.parse_mineru_markdown_result(request, markdown, mineru_metadata=...)` converts completed MinerU markdown/layout text into the same `succeeded` parsed result contract used by the backend.
 - `parser_worker.parse.parse_local_request(request)` is the native structured parser used for Markdown/TXT/CSV/code/log style inputs and for normalizing MinerU markdown output.
@@ -83,7 +84,7 @@ export PARSER_BACKEND_TOKEN="<backend JWT or service token>"
 cat parse-request.json | PYTHONPATH=services/parser-worker python3 -m parser_worker.runner
 ```
 
-For uploaded text-like assets (`/file/...` Markdown, TXT, CSV, JSON, code, logs), the runner resolves relative backend file URLs, fetches the source text, converts the source to an inline parser request, then posts completed chunks. For PDF, Office, and image paths, the runner returns `callbackStatus=deferred` after MinerU submission; the follow-up slice still needs MinerU polling and ZIP/markdown result download before final callback.
+For uploaded text-like assets (`/file/...` Markdown, TXT, CSV, JSON, code, logs), the runner resolves relative backend file URLs, fetches the source text, converts the source to an inline parser request, then posts completed chunks. For PDF, Office, and image paths, the first runner step returns `callbackStatus=deferred` after MinerU submission. A follow-up call to `complete_mineru_parse_job` handles a done MinerU task by downloading the ZIP result, selecting `auto_full.md` / `full.md` / `result.md` when present, chunking the markdown, and callbacking the backend. Pending tasks remain deferred.
 
 ## Local MinerU Configuration
 
@@ -106,9 +107,9 @@ Current implementation status:
 - Reads `MINERU_TOKEN` and reports safe configuration status.
 - Provides a tested MinerU v4 client wrapper for `POST /api/v4/extract/task` and `GET /api/v4/extract/task/{task_id}`.
 - Implements a type-routed parser worker boundary: native structured parsing for Markdown/TXT/CSV-style inputs, PDF direct MinerU submission, and Office-to-PDF-to-MinerU submission through an injected converter boundary.
-- Adds a runner boundary that can execute backend parser requests and callback completed native structured parse results to the Rust ingestion endpoint.
+- Adds a runner boundary that can execute backend parser requests, callback completed native structured parse results, and finalize completed MinerU ZIP/markdown task results to the Rust ingestion endpoint.
 - Converts completed MinerU markdown/layout output into backend-ready blocks/chunks with section path, page, table header, image access key, and semantic search text metadata.
-- Leaves production LibreOffice conversion, object storage publishing, MinerU task polling, and MinerU result ZIP download behind injectable boundaries for the next parser execution slice.
+- Leaves production LibreOffice conversion, object storage publishing, durable queue scheduling, and operational retry/dead-letter policy behind injectable boundaries for the next parser execution slice.
 - Unit tests use a fake transport and do not submit documents to MinerU or consume parse quota.
 
 Verification:

@@ -1,14 +1,16 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from io import BytesIO
 from os import environ
 from typing import Any, Mapping
 from urllib.parse import urljoin, urlparse
 from urllib.request import Request, urlopen
+from zipfile import ZipFile
 import json
 import sys
 
-from parser_worker.parse import is_native_structured_source, parse_request
+from parser_worker.parse import is_native_structured_source, parse_mineru_markdown_result, parse_request
 
 
 def execute_parse_job(
@@ -60,6 +62,83 @@ def execute_parse_job(
         "preparedRequest": prepared_request,
         "parserResult": parser_result,
     }
+
+
+def complete_mineru_parse_job(
+    request: Mapping[str, Any],
+    *,
+    task_id: str,
+    backend_base_url: str,
+    backend_token: str = "",
+    mineru_client,
+    zip_fetcher=None,
+    http_post=None,
+) -> dict[str, Any]:
+    task = mineru_client.get_extract_task(task_id)
+    state = str(task.state or "").strip().lower()
+    if state != "done":
+        return {
+            "status": "failed" if state in ("failed", "error") else "submitted",
+            "callbackStatus": "failed_no_callback" if state in ("failed", "error") else "deferred",
+            "mineruTask": mineru_task_payload(task),
+            "callback": None,
+            "parserResult": None,
+        }
+    if not str(task.full_zip_url or "").strip():
+        raise ValueError("completed MinerU task is missing full_zip_url")
+
+    zip_fetcher = zip_fetcher or default_zip_fetcher
+    markdown = extract_mineru_markdown_from_zip(zip_fetcher(task.full_zip_url))
+    parser_result = parse_mineru_markdown_result(
+        request,
+        markdown,
+        mineru_metadata={
+            "taskId": task.task_id,
+            "state": task.state,
+            "fullZipUrl": task.full_zip_url,
+        },
+    )
+    payload = parsed_document_payload(request, parser_result)
+    callback = post_parsed_document(
+        dataset_id=positive_int(request.get("datasetId"), "datasetId"),
+        payload=payload,
+        backend_base_url=backend_base_url,
+        backend_token=backend_token,
+        http_post=http_post,
+    )
+    return {
+        "status": parser_result.get("status"),
+        "callbackStatus": "posted",
+        "mineruTask": mineru_task_payload(task),
+        "callback": callback,
+        "parserResult": parser_result,
+    }
+
+
+def extract_mineru_markdown_from_zip(zip_bytes: bytes) -> str:
+    candidates: list[tuple[int, str, str]] = []
+    with ZipFile(BytesIO(zip_bytes)) as archive:
+        for name in archive.namelist():
+            lowered = name.lower()
+            if not lowered.endswith((".md", ".markdown")):
+                continue
+            content = archive.read(name).decode("utf-8").strip()
+            if not content:
+                continue
+            candidates.append((markdown_priority(lowered), name, content))
+    if not candidates:
+        raise ValueError("MinerU result zip does not contain markdown")
+    candidates.sort(key=lambda item: (item[0], item[1]))
+    return candidates[0][2]
+
+
+def markdown_priority(name: str) -> int:
+    basename = name.rsplit("/", 1)[-1]
+    if basename in ("auto_full.md", "full.md", "result.md"):
+        return 0
+    if basename.endswith(".md"):
+        return 1
+    return 2
 
 
 def prepare_parse_request(
@@ -140,6 +219,20 @@ def default_source_fetcher(backend_token: str = ""):
             return raw.decode(charset)
 
     return fetch
+
+
+def default_zip_fetcher(url: str) -> bytes:
+    with urlopen(url, timeout=120) as response:
+        return response.read()
+
+
+def mineru_task_payload(task) -> dict[str, Any]:
+    return {
+        "taskId": task.task_id,
+        "state": task.state,
+        "fullZipUrl": task.full_zip_url,
+        "errMsg": task.err_msg,
+    }
 
 
 def absolute_backend_url(value: str, backend_base_url: str) -> str:
