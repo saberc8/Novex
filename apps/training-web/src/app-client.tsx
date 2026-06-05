@@ -3,21 +3,25 @@
 import { useEffect, useMemo, useState } from "react";
 import {
   ArrowRight,
+  BarChart3,
   Bell,
   Bot,
   CheckCircle2,
   CircleAlert,
   CircleDashed,
   Quote,
+  RotateCw,
   Send,
   ShieldCheck,
   ThumbsDown,
   ThumbsUp
 } from "lucide-react";
+import { listEvalDatasets, runEval } from "@/api/eval";
 import { askDataset, listDatasets, submitRagFeedback } from "@/api/knowledge";
 import { CitationList, type CitationItem } from "@/components/citation-list";
 import { MetricStrip } from "@/components/metric-strip";
 import { TrainingShell } from "@/components/training-shell";
+import type { EvalDatasetResp, EvalRunResp } from "@/types/eval";
 import type { DatasetResp, RagAskResp, RagFeedbackRating } from "@/types/knowledge";
 
 const metrics = [
@@ -101,13 +105,29 @@ const fallbackCitations: CitationItem[] = [
   }
 ];
 
+const fallbackEvalDataset: EvalDatasetResp = {
+  id: 700,
+  code: "training_regression",
+  name: "Training Regression",
+  description: "Training regression smoke set",
+  targetScope: "training",
+  status: 1,
+  metadata: {},
+  caseCount: 20,
+  createTime: "2026-06-05 10:00:00"
+};
+
 export function TrainingAppClient() {
   const [datasets, setDatasets] = useState<DatasetResp[]>([fallbackDataset]);
   const [selectedDatasetId, setSelectedDatasetId] = useState(fallbackDataset.id);
+  const [evalDatasets, setEvalDatasets] = useState<EvalDatasetResp[]>([fallbackEvalDataset]);
+  const [evalRun, setEvalRun] = useState<EvalRunResp | null>(null);
   const [question, setQuestion] = useState("培训什么时候开始？");
   const [answer, setAnswer] = useState<RagAskResp>(fallbackAnswer);
   const [apiStatus, setApiStatus] = useState("fallback");
+  const [evalStatus, setEvalStatus] = useState("fallback");
   const [asking, setAsking] = useState(false);
+  const [evalRunning, setEvalRunning] = useState(false);
   const [feedbackSubmitting, setFeedbackSubmitting] = useState(false);
   const [feedbackStatus, setFeedbackStatus] = useState("");
 
@@ -136,10 +156,34 @@ export function TrainingAppClient() {
     };
   }, []);
 
+  useEffect(() => {
+    let mounted = true;
+
+    listEvalDatasets({ page: 1, size: 20, code: "training_regression" })
+      .then((page) => {
+        if (!mounted) {
+          return;
+        }
+        setEvalDatasets(page.list.length > 0 ? page.list : [fallbackEvalDataset]);
+        setEvalStatus("live");
+      })
+      .catch(() => {
+        if (mounted) {
+          setEvalStatus("fallback");
+        }
+      });
+
+    return () => {
+      mounted = false;
+    };
+  }, []);
+
   const selectedDataset = useMemo(
     () => datasets.find((dataset) => dataset.id === selectedDatasetId) ?? fallbackDataset,
     [datasets, selectedDatasetId]
   );
+
+  const selectedEvalDataset = evalDatasets[0] ?? fallbackEvalDataset;
 
   const citations = useMemo(() => {
     if (answer.traceId === 0) {
@@ -194,6 +238,25 @@ export function TrainingAppClient() {
       setFeedbackStatus("反馈提交失败");
     } finally {
       setFeedbackSubmitting(false);
+    }
+  }
+
+  async function handleRunEval() {
+    if (evalRunning) {
+      return;
+    }
+
+    setEvalRunning(true);
+    try {
+      const response = await runEval({
+        datasetCode: selectedEvalDataset.code
+      });
+      setEvalRun(response);
+      setEvalStatus("live");
+    } catch {
+      setEvalStatus("fallback");
+    } finally {
+      setEvalRunning(false);
     }
   }
 
@@ -352,6 +415,52 @@ export function TrainingAppClient() {
 
         <aside className="space-y-4">
           <CitationList citations={citations} />
+
+          <section className="rounded-lg border border-slate-200 bg-white p-4 shadow-sm">
+            <div className="flex items-center justify-between gap-3">
+              <div className="flex items-center gap-2">
+                <BarChart3 aria-hidden="true" className="h-4 w-4 text-teal-700" />
+                <h2 className="text-sm font-semibold text-slate-950">质量回归</h2>
+              </div>
+              <span className="rounded-md bg-slate-100 px-2 py-1 text-xs font-medium text-slate-600">
+                {evalStatus === "live" ? "Eval ready" : "Fallback"}
+              </span>
+            </div>
+            <div className="mt-3 rounded-lg bg-slate-50 p-3">
+              <div className="text-xs font-medium uppercase tracking-wide text-slate-500">
+                {selectedEvalDataset.name}
+              </div>
+              <div className="mt-1 text-sm font-semibold text-slate-950">
+                {selectedEvalDataset.code}
+              </div>
+              <div className="mt-1 text-xs text-slate-500">{selectedEvalDataset.caseCount} cases</div>
+            </div>
+            {evalRun ? (
+              <div className="mt-3 grid grid-cols-2 gap-2">
+                <div className="rounded-lg border border-slate-200 p-3">
+                  <div className="text-xs text-slate-500">结果</div>
+                  <div className="mt-1 text-sm font-semibold text-slate-950">
+                    通过 {evalRun.passedCases} / {evalRun.totalCases}
+                  </div>
+                </div>
+                <div className="rounded-lg border border-slate-200 p-3">
+                  <div className="text-xs text-slate-500">均分</div>
+                  <div className="mt-1 text-sm font-semibold text-slate-950">
+                    平均 {evalRun.averageScore.toFixed(2)}
+                  </div>
+                </div>
+              </div>
+            ) : null}
+            <button
+              className="mt-3 inline-flex h-9 w-full items-center justify-center gap-2 rounded-md border border-slate-200 px-3 text-sm font-semibold text-slate-700 hover:bg-slate-50 disabled:text-slate-300"
+              disabled={evalRunning}
+              onClick={() => void handleRunEval()}
+              type="button"
+            >
+              <RotateCw aria-hidden="true" className="h-4 w-4" />
+              运行评测
+            </button>
+          </section>
 
           <section className="rounded-lg border border-slate-200 bg-white p-4 shadow-sm">
             <div className="flex items-center justify-between gap-3">

@@ -1,8 +1,14 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import Page from "./page";
+import { listEvalDatasets, runEval } from "@/api/eval";
 import { askDataset, listDatasets, submitRagFeedback } from "@/api/knowledge";
 import type { DatasetResp } from "@/types/knowledge";
+
+vi.mock("@/api/eval", () => ({
+  listEvalDatasets: vi.fn(),
+  runEval: vi.fn()
+}));
 
 vi.mock("@/api/knowledge", () => ({
   askDataset: vi.fn(),
@@ -11,7 +17,9 @@ vi.mock("@/api/knowledge", () => ({
 }));
 
 const askDatasetMock = vi.mocked(askDataset);
+const listEvalDatasetsMock = vi.mocked(listEvalDatasets);
 const listDatasetsMock = vi.mocked(listDatasets);
+const runEvalMock = vi.mocked(runEval);
 const submitRagFeedbackMock = vi.mocked(submitRagFeedback);
 
 function dataset(overrides: Partial<DatasetResp> = {}): DatasetResp {
@@ -59,6 +67,36 @@ describe("Training home page", () => {
       id: 99,
       traceId: 42,
       rating: "not_helpful"
+    });
+    listEvalDatasetsMock.mockResolvedValue({
+      list: [
+        {
+          id: 700,
+          code: "training_regression",
+          name: "Training Regression",
+          description: "Training regression smoke set",
+          targetScope: "training",
+          status: 1,
+          metadata: {},
+          caseCount: 3,
+          createTime: "2026-06-05 12:00:00"
+        }
+      ],
+      total: 1
+    });
+    runEvalMock.mockResolvedValue({
+      runId: 800,
+      datasetId: 700,
+      datasetCode: "training_regression",
+      status: "succeeded",
+      totalCases: 3,
+      passedCases: 2,
+      failedCases: 1,
+      averageScore: 0.67,
+      metricBreakdown: { citation_accuracy: 0.67 },
+      reportPayload: {},
+      createTime: "2026-06-05 12:00:00",
+      finishedAt: "2026-06-05 12:00:01"
     });
   });
 
@@ -110,5 +148,28 @@ describe("Training home page", () => {
       })
     );
     expect(await screen.findByText("已记录反馈")).toBeTruthy();
+  });
+
+  it("runs the training regression eval set from the customer workbench", async () => {
+    render(<Page />);
+
+    await waitFor(() =>
+      expect(listEvalDatasetsMock).toHaveBeenCalledWith({
+        page: 1,
+        size: 20,
+        code: "training_regression"
+      })
+    );
+    expect(await screen.findByText("training_regression")).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "运行评测" }));
+
+    await waitFor(() =>
+      expect(runEvalMock).toHaveBeenCalledWith({
+        datasetCode: "training_regression"
+      })
+    );
+    expect(await screen.findByText("通过 2 / 3")).toBeTruthy();
+    expect(await screen.findByText("平均 0.67")).toBeTruthy();
   });
 });

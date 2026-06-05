@@ -508,6 +508,14 @@ mod tests {
             .smoke_checks
             .iter()
             .any(|check| { check.workdir == "apps/training-web" && check.command == "pnpm test" }));
+        let training_admin = template
+            .roles
+            .iter()
+            .find(|role| role.code == "training_admin")
+            .unwrap();
+        for permission in ["ai:eval:list", "ai:eval:run", "ai:eval:report"] {
+            assert!(training_admin.permissions.contains(&permission.to_owned()));
+        }
     }
 
     #[test]

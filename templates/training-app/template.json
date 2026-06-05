@@ -68,7 +68,7 @@
     {
       "code": "training_admin",
       "name": "Training Admin",
-      "permissions": ["ai:knowledge:list", "ai:agent:run", "ai:tool:dryRun", "ai:eval:run", "ai:template:init"]
+      "permissions": ["ai:knowledge:list", "ai:agent:run", "ai:tool:dryRun", "ai:eval:list", "ai:eval:run", "ai:eval:report", "ai:template:init"]
     },
     {
       "code": "trainer",
