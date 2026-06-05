@@ -23,6 +23,12 @@
   ],
   "smokeChecks": [
     {
+      "code": "chat_web_frontend",
+      "name": "Chat Web Frontend Smoke",
+      "workdir": "apps/chat-web",
+      "command": "pnpm test"
+    },
+    {
       "code": "knowledge_base_api",
       "name": "Knowledge Base API Smoke",
       "workdir": "backend",

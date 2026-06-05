@@ -511,6 +511,23 @@ mod tests {
     }
 
     #[test]
+    fn delivery_template_manifest_registers_chat_customer_frontend_metadata() {
+        let template = get_delivery_template("knowledge_base_chat").unwrap();
+        let page_codes = template
+            .frontend_pages
+            .iter()
+            .map(|page| page.code.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(template.frontend_app, "chat-web");
+        assert_eq!(page_codes, vec!["ask", "sources"]);
+        assert!(template
+            .smoke_checks
+            .iter()
+            .any(|check| { check.workdir == "apps/chat-web" && check.command == "pnpm test" }));
+    }
+
+    #[test]
     fn customer_package_generation_merges_customer_branding() {
         let package = build_customer_package(CustomerPackageCommand {
             template_code: "training_app".to_owned(),

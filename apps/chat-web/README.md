@@ -1,10 +1,9 @@
 # Chat Web
 
-Default customer-facing LLM chat application template.
+Default customer-facing knowledge chat template.
 
 Scope:
 
-- General chat UI backed by Novex auth and API clients.
+- General knowledge Q&A UI backed by Novex auth and API clients.
+- Dataset selection, cited answers, trace/model route display, and answer feedback.
 - Tenant/app branding and model route configuration are supplied by the control plane.
-
-M0 status: placeholder. No Next.js app is scaffolded yet.
