@@ -101,6 +101,9 @@ mod tests {
     fn model_registry_migration_contains_required_tables_and_fields() {
         let migration =
             include_str!("../../../../migrations/202606050015_create_ai_model_registry.sql");
+        let sanitize_migration = include_str!(
+            "../../../../migrations/202606050016_sanitize_model_registry_masked_credentials.sql"
+        );
 
         for table in [
             "ai_model_provider",
@@ -138,6 +141,8 @@ mod tests {
             !migration.contains("sk-"),
             "model registry migration must not seed raw API keys"
         );
+        assert!(sanitize_migration.contains("masked_value = 'configured'"));
+        assert!(sanitize_migration.contains("masked_value LIKE 'env:%'"));
     }
 
     #[tokio::test]

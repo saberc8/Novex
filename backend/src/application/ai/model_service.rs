@@ -266,7 +266,7 @@ ORDER BY r.priority, r.id
                     model_profile_id: row.model_profile_id,
                     priority: row.priority,
                     status: row.status,
-                    masked_credential: row.masked_value,
+                    masked_credential: public_masked_credential(row.masked_value),
                 })
                 .collect(),
         }
@@ -481,6 +481,25 @@ fn sanitize_error_message(message: &str, route: &ModelRuntimeRoute) -> String {
     message.replace(route.api_key(), &mask_api_key(route.api_key()))
 }
 
+fn public_masked_credential(masked_value: Option<String>) -> Option<String> {
+    let value = masked_value?;
+    let value = value.trim();
+    if value.is_empty() {
+        return None;
+    }
+
+    let upper = value.to_ascii_uppercase();
+    if value.starts_with("env:") || upper.contains("_API_KEY") || upper.contains("SECRET") {
+        return Some("configured".to_owned());
+    }
+
+    if value.starts_with("sk-") && !value.contains("****") {
+        return Some(mask_api_key(value));
+    }
+
+    Some(value.to_owned())
+}
+
 #[cfg(test)]
 mod tests {
     use novex_model::{ModelRuntimeConfig, ModelRuntimeTarget};
@@ -568,6 +587,33 @@ mod tests {
         assert_eq!(
             summary.routes[0].masked_credential.as_deref(),
             Some("sk-****508d")
+        );
+        let debug = format!("{summary:?}");
+        assert!(!debug.contains("LLM_API_KEY"));
+        assert!(!debug.contains("env:"));
+    }
+
+    #[test]
+    fn model_registry_summary_sanitizes_env_mask_placeholders() {
+        let summary = ModelRuntimeService::registry_summary_from_rows(
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            vec![ModelRouteRegistryRow {
+                id: 30,
+                code: "runtime.llm.chat".to_owned(),
+                route_purpose: "chat".to_owned(),
+                model_profile_id: 20,
+                priority: 100,
+                status: 1,
+                credential_ref: Some("env:LLM_API_KEY".to_owned()),
+                masked_value: Some("env:LLM_API_KEY".to_owned()),
+            }],
+        );
+
+        assert_eq!(
+            summary.routes[0].masked_credential.as_deref(),
+            Some("configured")
         );
         let debug = format!("{summary:?}");
         assert!(!debug.contains("LLM_API_KEY"));
