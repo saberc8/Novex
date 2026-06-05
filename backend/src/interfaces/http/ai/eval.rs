@@ -160,6 +160,23 @@ mod tests {
         assert_eq!(EVAL_REPORT_PERMISSION, "ai:eval:report");
     }
 
+    #[test]
+    fn eval_runtime_permission_seed_contains_all_route_permissions() {
+        let seed = include_str!("../../../../migrations/202606050011_seed_ai_eval_permissions.sql");
+
+        for permission in [
+            EVAL_LIST_PERMISSION,
+            EVAL_RUN_PERMISSION,
+            EVAL_CASE_LIST_PERMISSION,
+            EVAL_REPORT_PERMISSION,
+        ] {
+            assert!(
+                seed.contains(permission),
+                "missing permission seed: {permission}"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn eval_dataset_list_handler_rejects_missing_permission() {
         let err = list_datasets(
