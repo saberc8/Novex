@@ -2,6 +2,7 @@
 
 import {
   CheckCircle2,
+  Copy,
   HardDrive,
   ListChecks,
   PackageCheck,
@@ -127,6 +128,21 @@ export default function AiTemplatesPage() {
       toast.error(error instanceof Error ? error.message : "Customer Package 生成失败");
     } finally {
       setSubmitting(false);
+    }
+  }
+
+  async function copyPackageJson() {
+    if (!packagePreview) {
+      return;
+    }
+    try {
+      if (!navigator.clipboard?.writeText) {
+        throw new Error("Clipboard unavailable");
+      }
+      await navigator.clipboard.writeText(JSON.stringify(packagePreview, null, 2));
+      toast.success("Package JSON copied");
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Package JSON 复制失败");
     }
   }
 
@@ -270,7 +286,14 @@ export default function AiTemplatesPage() {
                 <h2 className="truncate text-sm font-medium">{packagePreview?.packageId ?? "Deployment Preview"}</h2>
                 <p className="text-xs text-muted-foreground">{packagePreview?.tenantConfig.frontendApp ?? selectedTemplate?.frontendApp ?? "-"}</p>
               </div>
-              <ListChecks className="size-4 text-muted-foreground" />
+              {packagePreview ? (
+                <Button type="button" variant="outline" size="sm" onClick={() => void copyPackageJson()}>
+                  <Copy />
+                  Copy JSON
+                </Button>
+              ) : (
+                <ListChecks className="size-4 text-muted-foreground" />
+              )}
             </div>
 
             <div className="grid gap-3">
