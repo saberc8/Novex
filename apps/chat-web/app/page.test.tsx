@@ -153,6 +153,13 @@ describe("Chat web page", () => {
     render(<Page />);
 
     fireEvent.click(screen.getByRole("button", { name: "模型对话" }));
+    const file = new File(["# Handbook\nUse the current onboarding guide."], "handbook.md", {
+      type: "text/markdown"
+    });
+    fireEvent.change(screen.getByLabelText("添加模型上下文文件"), {
+      target: { files: [file] }
+    });
+    expect(await screen.findByText("handbook.md")).toBeTruthy();
     fireEvent.change(screen.getByLabelText("输入模型问题"), {
       target: { value: "Explain Novex." }
     });
@@ -160,7 +167,15 @@ describe("Chat web page", () => {
 
     await waitFor(() =>
       expect(chatCompletionMock).toHaveBeenCalledWith({
+        conversationId: undefined,
         messages: [{ role: "user", content: "Explain Novex." }],
+        fileContexts: [
+          {
+            name: "handbook.md",
+            contentType: "text/markdown",
+            content: "# Handbook\nUse the current onboarding guide."
+          }
+        ],
         temperature: 0.2,
         maxTokens: 1024
       })

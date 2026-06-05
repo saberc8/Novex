@@ -49,6 +49,13 @@ describe("chat model api", () => {
 
     await chatCompletion({
       messages: [{ role: "user", content: "Explain Novex." }],
+      fileContexts: [
+        {
+          name: "handbook.md",
+          contentType: "text/markdown",
+          content: "# Handbook"
+        }
+      ],
       temperature: 0.2,
       maxTokens: 1024
     });
@@ -62,6 +69,13 @@ describe("chat model api", () => {
       }),
       body: JSON.stringify({
         messages: [{ role: "user", content: "Explain Novex." }],
+        fileContexts: [
+          {
+            name: "handbook.md",
+            contentType: "text/markdown",
+            content: "# Handbook"
+          }
+        ],
         temperature: 0.2,
         maxTokens: 1024
       })

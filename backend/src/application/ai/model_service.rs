@@ -22,6 +22,8 @@ const DEFAULT_MODEL_CHAT_MAX_TOKENS: u32 = 1024;
 const MAX_MODEL_CHAT_MAX_TOKENS: u32 = 2048;
 const MAX_MODEL_CHAT_MESSAGES: usize = 30;
 const MAX_MODEL_CHAT_CONTENT_CHARS: usize = 12_000;
+const MAX_MODEL_CHAT_FILE_CONTEXTS: usize = 3;
+const MAX_MODEL_CHAT_FILE_CONTEXT_CHARS: usize = 20_000;
 const DEFAULT_TENANT_ID: i64 = 1;
 const MODEL_CHAT_HISTORY_LIMIT: i64 = 30;
 const MODEL_CHAT_TITLE_CHARS: usize = 60;
@@ -51,6 +53,8 @@ pub struct ModelChatCommand {
     #[serde(default)]
     pub messages: Vec<ModelChatMessage>,
     #[serde(default)]
+    pub file_contexts: Vec<ModelChatFileContext>,
+    #[serde(default)]
     pub temperature: Option<f64>,
     #[serde(default, rename = "maxTokens")]
     pub max_tokens: Option<u32>,
@@ -61,6 +65,17 @@ pub struct ModelChatCommand {
 pub struct ModelChatMessage {
     #[serde(default)]
     pub role: String,
+    #[serde(default)]
+    pub content: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelChatFileContext {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub content_type: String,
     #[serde(default)]
     pub content: String,
 }
@@ -545,6 +560,28 @@ fn normalize_model_chat_command(
         }
         ensure_max_chars("消息内容", &message.content, MAX_MODEL_CHAT_CONTENT_CHARS)?;
     }
+    if command.file_contexts.len() > MAX_MODEL_CHAT_FILE_CONTEXTS {
+        return Err(AppError::bad_request(format!(
+            "文件上下文不能超过 {MAX_MODEL_CHAT_FILE_CONTEXTS} 个"
+        )));
+    }
+    for file in &mut command.file_contexts {
+        file.name = file.name.trim().to_owned();
+        file.content_type = file.content_type.trim().to_owned();
+        file.content = file.content.trim().to_owned();
+        if file.name.is_empty() {
+            return Err(AppError::bad_request("文件名称不能为空"));
+        }
+        if file.content_type.is_empty() {
+            file.content_type = "text/plain".to_owned();
+        }
+        if file.content.is_empty() {
+            return Err(AppError::bad_request("文件内容不能为空"));
+        }
+        ensure_max_chars("文件名称", &file.name, 255)?;
+        ensure_max_chars("文件内容类型", &file.content_type, 128)?;
+        ensure_max_chars("文件内容", &file.content, MAX_MODEL_CHAT_FILE_CONTEXT_CHARS)?;
+    }
 
     command.temperature = Some(
         command
@@ -563,16 +600,25 @@ fn normalize_model_chat_command(
 }
 
 fn model_chat_request_payload(route: &ModelRuntimeRoute, command: &ModelChatCommand) -> Value {
-    let messages = command
-        .messages
-        .iter()
-        .map(|message| {
-            json!({
-                "role": message.role,
-                "content": message.content,
+    let mut messages = Vec::new();
+    if !command.file_contexts.is_empty() {
+        messages.push(json!({
+            "role": "system",
+            "content": model_chat_file_context_prompt(&command.file_contexts),
+        }));
+    }
+    messages.extend(
+        command
+            .messages
+            .iter()
+            .map(|message| {
+                json!({
+                    "role": message.role,
+                    "content": message.content,
+                })
             })
-        })
-        .collect::<Vec<_>>();
+            .collect::<Vec<_>>(),
+    );
 
     json!({
         "model": route.model().unwrap_or_default(),
@@ -581,6 +627,19 @@ fn model_chat_request_payload(route: &ModelRuntimeRoute, command: &ModelChatComm
         "max_tokens": command.max_tokens.unwrap_or(DEFAULT_MODEL_CHAT_MAX_TOKENS),
         "stream": false,
     })
+}
+
+fn model_chat_file_context_prompt(files: &[ModelChatFileContext]) -> String {
+    let mut sections = vec![
+        "Use the following user-provided file context when it is relevant. If the files do not contain enough evidence, say so.".to_owned(),
+    ];
+    for file in files {
+        sections.push(format!(
+            "[File: {} | {}]\n{}",
+            file.name, file.content_type, file.content
+        ));
+    }
+    sections.join("\n\n")
 }
 
 fn model_chat_response_from_provider(
@@ -671,6 +730,7 @@ fn model_chat_history_records(
                 metadata: json!({
                     "source": "ai.models.chat",
                     "messageCount": command.messages.len(),
+                    "fileContexts": model_chat_file_context_metadata(&command.file_contexts),
                 }),
                 user_id,
                 now,
@@ -694,6 +754,19 @@ fn model_chat_history_records(
             },
         ],
     })
+}
+
+fn model_chat_file_context_metadata(files: &[ModelChatFileContext]) -> Vec<Value> {
+    files
+        .iter()
+        .map(|file| {
+            json!({
+                "name": file.name,
+                "contentType": file.content_type,
+                "charCount": file.content.chars().count(),
+            })
+        })
+        .collect()
 }
 
 fn latest_user_message(command: &ModelChatCommand) -> Option<&ModelChatMessage> {
@@ -1284,6 +1357,66 @@ mod tests {
     }
 
     #[test]
+    fn model_chat_command_normalizes_file_contexts() {
+        let command = normalize_model_chat_command(ModelChatCommand {
+            messages: vec![ModelChatMessage {
+                role: "user".to_owned(),
+                content: "总结这个文件".to_owned(),
+            }],
+            file_contexts: vec![ModelChatFileContext {
+                name: "  handbook.md  ".to_owned(),
+                content_type: "  text/markdown  ".to_owned(),
+                content: "  # 入职手册\n第一天完成安全培训。  ".to_owned(),
+            }],
+            ..ModelChatCommand::default()
+        })
+        .unwrap();
+
+        assert_eq!(command.file_contexts.len(), 1);
+        assert_eq!(command.file_contexts[0].name, "handbook.md");
+        assert_eq!(command.file_contexts[0].content_type, "text/markdown");
+        assert_eq!(
+            command.file_contexts[0].content,
+            "# 入职手册\n第一天完成安全培训。"
+        );
+    }
+
+    #[test]
+    fn model_chat_payload_injects_file_context_before_user_messages() {
+        let route = llm_test_config()
+            .route(ModelRuntimeTarget::Llm)
+            .unwrap()
+            .clone();
+        let command = normalize_model_chat_command(ModelChatCommand {
+            messages: vec![ModelChatMessage {
+                role: "user".to_owned(),
+                content: "总结这个文件".to_owned(),
+            }],
+            file_contexts: vec![ModelChatFileContext {
+                name: "handbook.md".to_owned(),
+                content_type: "text/markdown".to_owned(),
+                content: "# 入职手册\n第一天完成安全培训。".to_owned(),
+            }],
+            ..ModelChatCommand::default()
+        })
+        .unwrap();
+
+        let payload = model_chat_request_payload(&route, &command);
+
+        assert_eq!(payload["messages"][0]["role"], "system");
+        assert!(payload["messages"][0]["content"]
+            .as_str()
+            .unwrap()
+            .contains("[File: handbook.md | text/markdown]"));
+        assert!(payload["messages"][0]["content"]
+            .as_str()
+            .unwrap()
+            .contains("第一天完成安全培训。"));
+        assert_eq!(payload["messages"][1]["role"], "user");
+        assert_eq!(payload["messages"][1]["content"], "总结这个文件");
+    }
+
+    #[test]
     fn model_chat_response_extracts_answer_usage_and_route_summary() {
         let route = llm_test_config()
             .route(ModelRuntimeTarget::Llm)
@@ -1329,6 +1462,11 @@ mod tests {
                     content: "  介绍一下模型对话历史能力  ".to_owned(),
                 },
             ],
+            file_contexts: vec![ModelChatFileContext {
+                name: "roadmap.md".to_owned(),
+                content_type: "text/markdown".to_owned(),
+                content: "# Roadmap\nM1 会话历史".to_owned(),
+            }],
             ..ModelChatCommand::default()
         })
         .unwrap();
@@ -1357,6 +1495,22 @@ mod tests {
         assert_eq!(records.messages.len(), 2);
         assert_eq!(records.messages[0].role, "user");
         assert_eq!(records.messages[0].content, "介绍一下模型对话历史能力");
+        assert_eq!(
+            records.messages[0].metadata["fileContexts"][0]["name"],
+            "roadmap.md"
+        );
+        assert_eq!(
+            records.messages[0].metadata["fileContexts"][0]["contentType"],
+            "text/markdown"
+        );
+        assert_eq!(
+            records.messages[0].metadata["fileContexts"][0]["charCount"],
+            17
+        );
+        assert!(!records.messages[0]
+            .metadata
+            .to_string()
+            .contains("M1 会话历史"));
         assert_eq!(records.messages[1].role, "assistant");
         assert_eq!(records.messages[1].route_id.as_deref(), Some("runtime.llm"));
         assert_eq!(records.messages[1].token_count, 7);

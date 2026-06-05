@@ -7,18 +7,20 @@ import {
   FileText,
   History,
   MessageSquare,
+  Paperclip,
   Quote,
   Search,
   Send,
   ShieldCheck,
   Sparkles,
   ThumbsDown,
-  ThumbsUp
+  ThumbsUp,
+  X
 } from "lucide-react";
 import { askDataset, listDatasets, submitRagFeedback } from "@/api/knowledge";
 import { chatCompletion, listChatConversations } from "@/api/model";
 import type { CitationResp, DatasetResp, RagAskResp, RagFeedbackRating } from "@/types/knowledge";
-import type { ModelChatConversationResp, ModelChatResp } from "@/types/model";
+import type { ModelChatConversationResp, ModelChatFileContext, ModelChatResp } from "@/types/model";
 
 const fallbackDataset: DatasetResp = {
   id: 10,
@@ -76,6 +78,7 @@ export function ChatAppClient() {
   const [modelAnswer, setModelAnswer] = useState<ModelChatResp>(fallbackModelAnswer);
   const [modelConversationId, setModelConversationId] = useState<number | null>(null);
   const [modelConversations, setModelConversations] = useState<ModelChatConversationResp[]>([]);
+  const [modelFileContexts, setModelFileContexts] = useState<ModelChatFileContext[]>([]);
   const [apiStatus, setApiStatus] = useState("fallback");
   const [asking, setAsking] = useState(false);
   const [modelAsking, setModelAsking] = useState(false);
@@ -156,6 +159,7 @@ export function ChatAppClient() {
       const response = await chatCompletion({
         conversationId: modelConversationId ?? undefined,
         messages: [{ role: "user", content: trimmed }],
+        fileContexts: modelFileContexts.length > 0 ? modelFileContexts : undefined,
         temperature: 0.2,
         maxTokens: 1024
       });
@@ -168,6 +172,22 @@ export function ChatAppClient() {
     } finally {
       setModelAsking(false);
     }
+  }
+
+  async function handleModelFileChange(files: FileList | null) {
+    if (!files || files.length === 0) {
+      return;
+    }
+
+    const selected = Array.from(files).slice(0, 3);
+    const contexts = await Promise.all(
+      selected.map(async (file) => ({
+        name: file.name,
+        contentType: file.type || "text/plain",
+        content: await file.text()
+      }))
+    );
+    setModelFileContexts(contexts);
   }
 
   async function handleFeedback(rating: RagFeedbackRating) {
@@ -315,7 +335,41 @@ export function ChatAppClient() {
             </div>
 
             <div className="border-t border-slate-200 p-4">
+              {mode === "model" && modelFileContexts.length > 0 ? (
+                <div className="mb-3 flex flex-wrap gap-2">
+                  {modelFileContexts.map((file) => (
+                    <span
+                      className="inline-flex max-w-full items-center gap-2 rounded-md border border-slate-200 bg-slate-50 px-2 py-1 text-xs font-medium text-slate-700"
+                      key={file.name}
+                    >
+                      <FileText aria-hidden="true" className="h-3.5 w-3.5 shrink-0 text-teal-700" />
+                      <span className="truncate">{file.name}</span>
+                      <button
+                        aria-label={`移除 ${file.name}`}
+                        className="inline-flex h-5 w-5 items-center justify-center rounded text-slate-500 hover:bg-slate-200"
+                        onClick={() => setModelFileContexts((current) => current.filter((item) => item.name !== file.name))}
+                        type="button"
+                      >
+                        <X aria-hidden="true" className="h-3.5 w-3.5" />
+                      </button>
+                    </span>
+                  ))}
+                </div>
+              ) : null}
               <div className="flex gap-2">
+                {mode === "model" ? (
+                  <label className="inline-flex h-10 w-10 shrink-0 cursor-pointer items-center justify-center rounded-lg border border-slate-200 bg-white text-slate-600 hover:bg-slate-50">
+                    <Paperclip aria-hidden="true" className="h-4 w-4" />
+                    <input
+                      accept=".txt,.md,.csv,.json,.log,text/*,application/json"
+                      aria-label="添加模型上下文文件"
+                      className="sr-only"
+                      multiple
+                      onChange={(event) => void handleModelFileChange(event.target.files)}
+                      type="file"
+                    />
+                  </label>
+                ) : null}
                 <input
                   aria-label={mode === "knowledge" ? "输入知识库问题" : "输入模型问题"}
                   className="min-w-0 flex-1 rounded-lg border border-slate-200 px-3 py-2 text-sm outline-none focus:border-teal-500"

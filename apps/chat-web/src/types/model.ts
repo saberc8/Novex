@@ -5,9 +5,16 @@ export interface ModelChatMessage {
   content: string;
 }
 
+export interface ModelChatFileContext {
+  name: string;
+  contentType: string;
+  content: string;
+}
+
 export interface ModelChatCommand {
   conversationId?: number;
   messages: ModelChatMessage[];
+  fileContexts?: ModelChatFileContext[];
   temperature?: number;
   maxTokens?: number;
 }
