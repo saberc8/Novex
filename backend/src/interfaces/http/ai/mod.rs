@@ -7,6 +7,7 @@ pub mod capability;
 pub mod eval;
 pub mod foundation;
 pub mod knowledge;
+pub mod template;
 
 pub fn routes() -> Router<AppState> {
     Router::new()
@@ -15,4 +16,5 @@ pub fn routes() -> Router<AppState> {
         .merge(eval::routes())
         .merge(foundation::routes())
         .merge(knowledge::routes())
+        .merge(template::routes())
 }
