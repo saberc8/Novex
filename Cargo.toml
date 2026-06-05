@@ -21,4 +21,14 @@ edition = "2021"
 
 [workspace.dependencies]
 novex-ai-core = { path = "crates/novex-ai-core" }
+novex-agent = { path = "crates/novex-agent" }
+novex-connectors = { path = "crates/novex-connectors" }
+novex-eval = { path = "crates/novex-eval" }
+novex-mcp = { path = "crates/novex-mcp" }
+novex-memory = { path = "crates/novex-memory" }
+novex-model = { path = "crates/novex-model" }
+novex-plugin = { path = "crates/novex-plugin" }
+novex-rag = { path = "crates/novex-rag" }
+novex-tools = { path = "crates/novex-tools" }
+novex-trigger = { path = "crates/novex-trigger" }
 serde = { version = "1", features = ["derive"] }

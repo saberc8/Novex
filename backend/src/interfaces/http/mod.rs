@@ -22,6 +22,7 @@ use crate::{
 };
 
 pub mod auth;
+pub mod ai;
 pub mod captcha;
 pub mod common;
 pub mod extractor;
@@ -73,6 +74,7 @@ pub fn build_router_with_scheduler_http_safety(
         .route("/health", get(health))
         .route("/ready", get(ready))
         .merge(auth::routes())
+        .merge(ai::routes())
         .merge(captcha::routes())
         .merge(common::routes())
         .merge(monitor::log::routes())

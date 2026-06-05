@@ -8,7 +8,7 @@ pub enum FoundationStatus {
     Skeleton,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FoundationModule {
     pub id: &'static str,
