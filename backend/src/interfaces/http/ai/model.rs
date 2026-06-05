@@ -57,13 +57,15 @@ async fn health_check(
 }
 
 async fn chat_completion(
+    State(state): State<AppState>,
     current_user: CurrentUser,
     Json(command): Json<ModelChatCommand>,
 ) -> Result<Json<ApiResponse<ModelChatResp>>, AppError> {
     require_permission(&current_user, MODEL_CHAT_PERMISSION)?;
 
     Ok(Json(ApiResponse::ok(
-        ModelRuntimeService::chat_completion(command).await?,
+        ModelRuntimeService::chat_completion_with_usage(&state.db, current_user.id, command)
+            .await?,
     )))
 }
 
@@ -86,6 +88,17 @@ mod tests {
         interfaces::http::build_router,
         shared::error::AppError,
     };
+
+    fn test_state() -> AppState {
+        AppState {
+            db: PgPoolOptions::new()
+                .connect_lazy("postgres://postgres:postgres@localhost:5432/avalon_admin")
+                .unwrap(),
+            jwt: JwtService::new("test-secret".to_owned(), 24),
+            captcha: Default::default(),
+            scheduler_http_safety: Default::default(),
+        }
+    }
 
     fn user_with_permissions(permissions: Vec<&str>) -> CurrentUser {
         CurrentUser {
@@ -189,6 +202,7 @@ mod tests {
     #[tokio::test]
     async fn model_chat_handler_rejects_missing_permission_before_network() {
         let err = chat_completion(
+            State(test_state()),
             user_with_permissions(vec![]),
             axum::Json(ModelChatCommand {
                 messages: vec![ModelChatMessage {

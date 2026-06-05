@@ -1,5 +1,6 @@
 use std::time::{Duration, Instant};
 
+use chrono::{NaiveDateTime, Utc};
 use novex_model::{
     mask_api_key, ModelRuntimeConfig, ModelRuntimeRoute, ModelRuntimeSummary, ModelRuntimeTarget,
 };
@@ -7,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sqlx::{FromRow, PgPool};
 
-use crate::{application::system::ensure_max_chars, shared::error::AppError};
+use crate::{application::system::ensure_max_chars, shared::error::AppError, shared::id::next_id};
 
 const MODEL_HEALTH_TIMEOUT: Duration = Duration::from_secs(20);
 const MODEL_CHAT_TIMEOUT: Duration = Duration::from_secs(60);
@@ -189,6 +190,20 @@ pub struct ModelRouteRegistryRow {
     pub masked_value: Option<String>,
 }
 
+#[derive(Debug, Clone)]
+struct ModelUsageSaveRecord {
+    pub id: i64,
+    pub tenant_id: i64,
+    pub usage_kind: String,
+    pub prompt_tokens: i64,
+    pub completion_tokens: i64,
+    pub total_tokens: i64,
+    pub latency_ms: Option<i64>,
+    pub metadata: Value,
+    pub user_id: i64,
+    pub now: NaiveDateTime,
+}
+
 impl ModelRuntimeService {
     pub fn runtime_config_summary(config: ModelRuntimeConfig) -> ModelRuntimeSummary {
         config.summary()
@@ -336,36 +351,51 @@ ORDER BY r.priority, r.id
     }
 
     pub async fn chat_completion(command: ModelChatCommand) -> Result<ModelChatResp, AppError> {
-        let command = normalize_model_chat_command(command)?;
-        let config = ModelRuntimeConfig::from_env();
-        let route = config
-            .route(ModelRuntimeTarget::Llm)
-            .ok_or_else(|| AppError::bad_request("LLM 模型环境变量未配置完整"))?;
-        let client = reqwest::Client::builder()
-            .timeout(MODEL_CHAT_TIMEOUT)
-            .build()
-            .map_err(|err| AppError::Anyhow(err.into()))?;
-        let payload = model_chat_request_payload(route, &command);
-        let started = Instant::now();
-        let response = client
-            .post(route.endpoint())
-            .bearer_auth(route.api_key())
-            .json(&payload)
-            .send()
-            .await
-            .map_err(|err| AppError::Anyhow(err.into()))?;
-        let status = response.status();
-        let body = response.json::<Value>().await.unwrap_or(Value::Null);
-
-        if !status.is_success() {
-            return Err(AppError::bad_request(format!(
-                "LLM 模型调用失败: HTTP {}",
-                status.as_u16()
-            )));
-        }
-
-        model_chat_response_from_provider(route, body, started.elapsed().as_millis())
+        execute_chat_completion(command).await
     }
+
+    pub async fn chat_completion_with_usage(
+        db: &PgPool,
+        user_id: i64,
+        command: ModelChatCommand,
+    ) -> Result<ModelChatResp, AppError> {
+        let response = execute_chat_completion(command).await?;
+        let record = model_chat_usage_record(user_id, &response, Utc::now().naive_utc());
+        record_model_chat_usage(db, &record).await?;
+        Ok(response)
+    }
+}
+
+async fn execute_chat_completion(command: ModelChatCommand) -> Result<ModelChatResp, AppError> {
+    let command = normalize_model_chat_command(command)?;
+    let config = ModelRuntimeConfig::from_env();
+    let route = config
+        .route(ModelRuntimeTarget::Llm)
+        .ok_or_else(|| AppError::bad_request("LLM 模型环境变量未配置完整"))?;
+    let client = reqwest::Client::builder()
+        .timeout(MODEL_CHAT_TIMEOUT)
+        .build()
+        .map_err(|err| AppError::Anyhow(err.into()))?;
+    let payload = model_chat_request_payload(route, &command);
+    let started = Instant::now();
+    let response = client
+        .post(route.endpoint())
+        .bearer_auth(route.api_key())
+        .json(&payload)
+        .send()
+        .await
+        .map_err(|err| AppError::Anyhow(err.into()))?;
+    let status = response.status();
+    let body = response.json::<Value>().await.unwrap_or(Value::Null);
+
+    if !status.is_success() {
+        return Err(AppError::bad_request(format!(
+            "LLM 模型调用失败: HTTP {}",
+            status.as_u16()
+        )));
+    }
+
+    model_chat_response_from_provider(route, body, started.elapsed().as_millis())
 }
 
 fn normalize_model_chat_command(
@@ -454,6 +484,77 @@ fn model_chat_response_from_provider(
             total_tokens: usage.get("total_tokens").and_then(Value::as_i64),
         },
     })
+}
+
+fn model_chat_usage_record(
+    user_id: i64,
+    response: &ModelChatResp,
+    now: NaiveDateTime,
+) -> ModelUsageSaveRecord {
+    ModelUsageSaveRecord {
+        id: next_id(),
+        tenant_id: 1,
+        usage_kind: "chat".to_owned(),
+        prompt_tokens: response.usage.prompt_tokens.unwrap_or(0).max(0),
+        completion_tokens: response.usage.completion_tokens.unwrap_or(0).max(0),
+        total_tokens: response.usage.total_tokens.unwrap_or(0).max(0),
+        latency_ms: Some(u128_to_i64(response.latency_ms)),
+        metadata: json!({
+            "routeId": response.route_id,
+            "model": response.model,
+            "target": "llm",
+            "source": "ai.models.chat"
+        }),
+        user_id,
+        now,
+    }
+}
+
+async fn record_model_chat_usage(
+    db: &PgPool,
+    record: &ModelUsageSaveRecord,
+) -> Result<(), AppError> {
+    sqlx::query(
+        r#"
+WITH selected_route AS (
+    SELECT id, model_profile_id
+    FROM ai_model_route
+    WHERE tenant_id = $2
+      AND route_purpose = 'chat'
+      AND status = 1
+    ORDER BY priority ASC, id ASC
+    LIMIT 1
+)
+INSERT INTO ai_model_usage (
+    id, tenant_id, route_id, model_profile_id, run_id, usage_kind,
+    prompt_tokens, completion_tokens, total_tokens, request_count, vector_count,
+    cost_cents, latency_ms, metadata, create_user, create_time
+)
+VALUES (
+    $1, $2,
+    (SELECT id FROM selected_route),
+    (SELECT model_profile_id FROM selected_route),
+    NULL, $3, $4, $5, $6, 1, 0, 0, $7, $8, $9, $10
+);
+"#,
+    )
+    .bind(record.id)
+    .bind(record.tenant_id)
+    .bind(&record.usage_kind)
+    .bind(record.prompt_tokens)
+    .bind(record.completion_tokens)
+    .bind(record.total_tokens)
+    .bind(record.latency_ms)
+    .bind(&record.metadata)
+    .bind(record.user_id)
+    .bind(record.now)
+    .execute(db)
+    .await?;
+    Ok(())
+}
+
+fn u128_to_i64(value: u128) -> i64 {
+    value.min(i64::MAX as u128) as i64
 }
 
 fn health_check_targets(target: Option<&str>) -> Result<Vec<ModelRuntimeTarget>, AppError> {
@@ -864,6 +965,39 @@ mod tests {
         assert_eq!(response.usage.completion_tokens, Some(7));
         assert_eq!(response.usage.total_tokens, Some(18));
         assert!(!format!("{response:?}").contains("sk-fake-llm-secret-508d"));
+    }
+
+    #[test]
+    fn model_chat_usage_record_maps_tokens_latency_and_route_without_content() {
+        let now = chrono::NaiveDateTime::parse_from_str("2026-06-05 10:00:00", "%Y-%m-%d %H:%M:%S")
+            .unwrap();
+        let response = ModelChatResp {
+            answer: "Do not persist this answer".to_owned(),
+            route_id: "runtime.llm".to_owned(),
+            model: Some("deepseek-v4-flash".to_owned()),
+            latency_ms: 42,
+            usage: ModelChatUsage {
+                prompt_tokens: Some(11),
+                completion_tokens: Some(7),
+                total_tokens: Some(18),
+            },
+        };
+
+        let record = model_chat_usage_record(99, &response, now);
+
+        assert_eq!(record.tenant_id, 1);
+        assert_eq!(record.user_id, 99);
+        assert_eq!(record.usage_kind, "chat");
+        assert_eq!(record.prompt_tokens, 11);
+        assert_eq!(record.completion_tokens, 7);
+        assert_eq!(record.total_tokens, 18);
+        assert_eq!(record.latency_ms, Some(42));
+        assert_eq!(record.metadata["routeId"], "runtime.llm");
+        assert_eq!(record.metadata["model"], "deepseek-v4-flash");
+        assert!(!record
+            .metadata
+            .to_string()
+            .contains("Do not persist this answer"));
     }
 
     #[test]
