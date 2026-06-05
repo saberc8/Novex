@@ -447,6 +447,18 @@ fn default_enabled_status() -> Option<i16> {
 mod tests {
     use super::*;
 
+    fn template_readme(code: &str) -> &'static str {
+        match code {
+            "llm_chat" => include_str!("../../../../templates/llm-chat/README.md"),
+            "knowledge_base_chat" => {
+                include_str!("../../../../templates/knowledge-base-chat/README.md")
+            }
+            "agent_workspace" => include_str!("../../../../templates/agent-workspace/README.md"),
+            "training_app" => include_str!("../../../../templates/training-app/README.md"),
+            _ => "",
+        }
+    }
+
     #[test]
     fn delivery_templates_include_all_m5_defaults() {
         let templates = delivery_templates().unwrap();
@@ -566,6 +578,40 @@ mod tests {
         assert!(template.smoke_checks.iter().any(|check| {
             check.workdir == "apps/agent-workspace" && check.command == "pnpm test"
         }));
+    }
+
+    #[test]
+    fn delivery_template_readmes_list_frontend_pages_and_smoke_checks() {
+        for template in delivery_templates().unwrap() {
+            let readme = template_readme(&template.code);
+            assert!(
+                readme.contains("Frontend pages"),
+                "{} README missing frontend page section",
+                template.code
+            );
+            assert!(
+                readme.contains("Smoke checks"),
+                "{} README missing smoke check section",
+                template.code
+            );
+            for page in &template.frontend_pages {
+                assert!(
+                    readme.contains(&page.path) && readme.contains(&page.permission),
+                    "{} README missing page {} ({})",
+                    template.code,
+                    page.path,
+                    page.permission
+                );
+            }
+            for check in &template.smoke_checks {
+                assert!(
+                    readme.contains(&check.workdir) && readme.contains(&check.command),
+                    "{} README missing smoke check {}",
+                    template.code,
+                    check.code
+                );
+            }
+        }
     }
 
     #[test]
