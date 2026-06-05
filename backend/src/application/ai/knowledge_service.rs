@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use chrono::{NaiveDateTime, Utc};
 use novex_model::{ModelRuntimeConfig, ModelRuntimeTarget};
 use novex_rag::{
-    build_extractive_answer, chunk_text, keyword_retrieve, parse_plain_text, CitationRef,
+    build_extractive_answer, chunk_document, keyword_retrieve, parse_document_content, CitationRef,
     DocumentChunk as RagDocumentChunk, RagAnswer, RetrievalHit,
 };
 use serde::{Deserialize, Serialize};
@@ -15,8 +15,8 @@ use crate::{
     application::system::{ensure_max_chars, format_datetime, format_optional_datetime},
     infrastructure::persistence::ai_knowledge_repository::{
         AiKnowledgeRepository, ChunkRecord, ChunkSaveRecord, DatasetFilter, DatasetRecord,
-        DatasetSaveRecord, DocumentFilter, DocumentRecord, DocumentSaveRecord, ParserJobSaveRecord,
-        RagTraceHitSaveRecord, RagTraceSaveRecord,
+        DatasetSaveRecord, DocumentFilter, DocumentRecord, DocumentSaveRecord, FeedbackSaveRecord,
+        ParserJobSaveRecord, RagTraceHitSaveRecord, RagTraceSaveRecord,
     },
     shared::{
         error::AppError,
@@ -43,6 +43,11 @@ const MAX_LOCAL_RETRIEVAL_CHUNKS: i64 = 500;
 const LOCAL_EMBEDDING_ROUTE: &str = "local-keyword";
 const LOCAL_RERANK_ROUTE: &str = "none";
 const LOCAL_ANSWER_ROUTE: &str = "local-extractive";
+const FEEDBACK_STATUS_OPEN: i16 = 1;
+const FEEDBACK_RESOURCE_RAG_TRACE: &str = "rag_trace";
+const FEEDBACK_RATING_HELPFUL: &str = "helpful";
+const FEEDBACK_RATING_NOT_HELPFUL: &str = "not_helpful";
+const FEEDBACK_RATING_CITATION_ISSUE: &str = "citation_issue";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct RagModelRoutes {
@@ -176,6 +181,17 @@ impl Default for RagAskCommand {
     }
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RagFeedbackCommand {
+    #[serde(default)]
+    pub trace_id: i64,
+    #[serde(default)]
+    pub rating: String,
+    #[serde(default)]
+    pub reason: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DatasetResp {
@@ -234,6 +250,14 @@ pub struct RagAskResp {
     pub citations: Vec<CitationResp>,
     pub retrieval_hit_count: usize,
     pub answer_strategy: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FeedbackResp {
+    pub id: i64,
+    pub trace_id: i64,
+    pub rating: String,
 }
 
 #[derive(Debug, Clone)]
@@ -386,23 +410,14 @@ impl KnowledgeService {
             user_id,
             now,
         };
-        let chunk_records = chunks
-            .into_iter()
-            .map(|chunk| ChunkSaveRecord {
-                id: next_id(),
-                tenant_id: DEFAULT_TENANT_ID,
-                dataset_id,
-                document_id,
-                chunk_uid: chunk.chunk_id,
-                chunk_index: chunk.chunk_index as i32,
-                content: chunk.text,
-                token_count: chunk.token_count as i32,
-                citation: citation_value(&chunk.citation),
-                embedding_status: CHUNK_EMBEDDING_STATUS_INDEXED,
-                user_id,
-                now,
-            })
-            .collect::<Vec<_>>();
+        let chunk_records = chunk_save_records(
+            DEFAULT_TENANT_ID,
+            dataset_id,
+            document_id,
+            chunks,
+            user_id,
+            now,
+        );
 
         self.repo
             .create_document_ingestion(&document, &parser_job, &chunk_records)
@@ -456,6 +471,35 @@ impl KnowledgeService {
         self.repo.create_rag_trace(&trace, &trace_hits).await?;
 
         Ok(rag_ask_response(trace_id, answer))
+    }
+
+    pub async fn submit_rag_feedback(
+        &self,
+        user_id: i64,
+        command: RagFeedbackCommand,
+    ) -> Result<FeedbackResp, AppError> {
+        let command = normalize_rag_feedback_command(command)?;
+        let feedback_id = next_id();
+        let record = FeedbackSaveRecord {
+            id: feedback_id,
+            tenant_id: DEFAULT_TENANT_ID,
+            resource_type: FEEDBACK_RESOURCE_RAG_TRACE.to_owned(),
+            resource_id: command.trace_id.to_string(),
+            trace_id: Some(command.trace_id.to_string()),
+            rating: command.rating.clone(),
+            reason: command.reason.clone(),
+            metadata: rag_feedback_metadata(&command),
+            status: FEEDBACK_STATUS_OPEN,
+            user_id,
+            now: Utc::now().naive_utc(),
+        };
+
+        self.repo.create_feedback(&record).await?;
+        Ok(FeedbackResp {
+            id: feedback_id,
+            trace_id: command.trace_id,
+            rating: command.rating,
+        })
     }
 }
 
@@ -560,16 +604,85 @@ pub fn normalize_rag_ask_command(mut command: RagAskCommand) -> Result<RagAskCom
     Ok(command)
 }
 
+pub fn normalize_rag_feedback_command(
+    mut command: RagFeedbackCommand,
+) -> Result<RagFeedbackCommand, AppError> {
+    command.rating = command.rating.trim().to_ascii_lowercase();
+    command.reason = command.reason.trim().to_owned();
+    if command.trace_id <= 0 {
+        return Err(AppError::bad_request("Trace ID 不合法"));
+    }
+    if !matches!(
+        command.rating.as_str(),
+        FEEDBACK_RATING_HELPFUL | FEEDBACK_RATING_NOT_HELPFUL | FEEDBACK_RATING_CITATION_ISSUE
+    ) {
+        return Err(AppError::bad_request("反馈类型不合法"));
+    }
+    ensure_max_chars("反馈原因", &command.reason, 1000)?;
+    Ok(command)
+}
+
+fn rag_feedback_metadata(command: &RagFeedbackCommand) -> Value {
+    json!({
+        "rating": command.rating,
+        "reasonLength": command.reason.chars().count(),
+        "source": "training-web"
+    })
+}
+
 fn document_upload_chunks(
     document_id: i64,
     command: &DocumentUploadCommand,
 ) -> Vec<RagDocumentChunk> {
-    let parsed = parse_plain_text(document_id.to_string(), &command.content);
-    chunk_text(
+    let parsed = parse_document_content(
+        document_id.to_string(),
+        &command.name,
+        &command.content_type,
+        &command.content,
+    );
+    chunk_document(
         &parsed,
         DEFAULT_CHUNK_MAX_CHARS,
         DEFAULT_CHUNK_OVERLAP_CHARS,
     )
+}
+
+fn chunk_save_records(
+    tenant_id: i64,
+    dataset_id: i64,
+    document_id: i64,
+    chunks: Vec<RagDocumentChunk>,
+    user_id: i64,
+    now: NaiveDateTime,
+) -> Vec<ChunkSaveRecord> {
+    chunks
+        .into_iter()
+        .map(|chunk| {
+            let metadata = chunk.metadata.clone();
+            ChunkSaveRecord {
+                id: next_id(),
+                tenant_id,
+                dataset_id,
+                document_id,
+                chunk_uid: chunk.chunk_id,
+                chunk_index: chunk.chunk_index as i32,
+                content: chunk.text,
+                semantic_search_text: chunk.semantic_search_text,
+                token_count: chunk.token_count as i32,
+                citation: citation_value(&chunk.citation),
+                segment_type: metadata.segment_type.as_str().to_owned(),
+                segment_index: metadata.segment_index as i32,
+                page_no: metadata.page_no,
+                section_path: json!(metadata.section_path),
+                content_role: metadata.content_role.as_str().to_owned(),
+                display_capability: metadata.display_capability.as_str().to_owned(),
+                metadata: chunk_metadata_value(&metadata),
+                embedding_status: CHUNK_EMBEDDING_STATUS_INDEXED,
+                user_id,
+                now,
+            }
+        })
+        .collect()
 }
 
 fn indexed_rag_chunks(records: Vec<ChunkRecord>) -> Vec<IndexedRagChunk> {
@@ -578,6 +691,7 @@ fn indexed_rag_chunks(records: Vec<ChunkRecord>) -> Vec<IndexedRagChunk> {
         .map(|record| {
             let citation =
                 citation_from_value(record.document_id, &record.chunk_uid, &record.citation);
+            let metadata = chunk_metadata_from_record(&record);
             IndexedRagChunk {
                 chunk_db_id: record.id,
                 document_id: record.document_id,
@@ -586,8 +700,10 @@ fn indexed_rag_chunks(records: Vec<ChunkRecord>) -> Vec<IndexedRagChunk> {
                     chunk_id: record.chunk_uid,
                     chunk_index: record.chunk_index.max(0) as usize,
                     text: record.content,
+                    semantic_search_text: record.semantic_search_text,
                     token_count: record.token_count.max(0) as usize,
                     citation,
+                    metadata,
                 },
             }
         })
@@ -715,6 +831,10 @@ fn citation_value(citation: &novex_rag::CitationRef) -> Value {
     })
 }
 
+fn chunk_metadata_value(metadata: &novex_rag::ChunkMetadata) -> Value {
+    serde_json::to_value(metadata).unwrap_or_else(|_| json!({}))
+}
+
 fn citation_from_value(document_id: i64, chunk_uid: &str, value: &Value) -> CitationRef {
     let document_id = value
         .get("documentId")
@@ -747,6 +867,97 @@ fn citation_from_value(document_id: i64, chunk_uid: &str, value: &Value) -> Cita
         chunk_id,
         page_no,
         section_path,
+    }
+}
+
+fn chunk_metadata_from_record(record: &ChunkRecord) -> novex_rag::ChunkMetadata {
+    novex_rag::ChunkMetadata {
+        source_title: metadata_string(&record.metadata, "sourceTitle"),
+        source_file_name: metadata_string(&record.metadata, "sourceFileName"),
+        source_content_type: metadata_string(&record.metadata, "sourceContentType"),
+        segment_type: segment_type_from_str(&record.segment_type),
+        segment_index: record.segment_index.max(0) as usize,
+        page_no: record.page_no.or_else(|| {
+            record
+                .metadata
+                .get("pageNo")
+                .and_then(Value::as_i64)
+                .and_then(|value| i32::try_from(value).ok())
+        }),
+        section_path: string_array_from_value(&record.section_path).unwrap_or_else(|| {
+            record
+                .metadata
+                .get("sectionPath")
+                .and_then(string_array_from_value)
+                .unwrap_or_default()
+        }),
+        table_header: record
+            .metadata
+            .get("tableHeader")
+            .and_then(string_array_from_value)
+            .unwrap_or_default(),
+        image_access_keys: record
+            .metadata
+            .get("imageAccessKeys")
+            .and_then(string_array_from_value)
+            .unwrap_or_default(),
+        bbox: record.metadata.get("bbox").and_then(bbox_from_value),
+        content_role: content_role_from_str(&record.content_role),
+        display_capability: display_capability_from_str(&record.display_capability),
+    }
+}
+
+fn metadata_string(metadata: &Value, key: &str) -> Option<String> {
+    metadata.get(key).and_then(Value::as_str).map(str::to_owned)
+}
+
+fn string_array_from_value(value: &Value) -> Option<Vec<String>> {
+    value.as_array().map(|items| {
+        items
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::to_owned)
+            .collect()
+    })
+}
+
+fn bbox_from_value(value: &Value) -> Option<novex_rag::BoundingBox> {
+    let object = value.as_object()?;
+    Some(novex_rag::BoundingBox {
+        x: json_i32(object.get("x"))?,
+        y: json_i32(object.get("y"))?,
+        width: json_i32(object.get("width"))?,
+        height: json_i32(object.get("height"))?,
+    })
+}
+
+fn json_i32(value: Option<&Value>) -> Option<i32> {
+    value
+        .and_then(Value::as_i64)
+        .and_then(|value| i32::try_from(value).ok())
+}
+
+fn segment_type_from_str(value: &str) -> novex_rag::ChunkSegmentType {
+    match value {
+        "table" => novex_rag::ChunkSegmentType::Table,
+        "image" => novex_rag::ChunkSegmentType::Image,
+        _ => novex_rag::ChunkSegmentType::Text,
+    }
+}
+
+fn content_role_from_str(value: &str) -> novex_rag::ContentRole {
+    match value {
+        "summary_faq" => novex_rag::ContentRole::SummaryFaq,
+        "test_case" => novex_rag::ContentRole::TestCase,
+        _ => novex_rag::ContentRole::Canonical,
+    }
+}
+
+fn display_capability_from_str(value: &str) -> novex_rag::DisplayCapability {
+    match value {
+        "precise_anchor" => novex_rag::DisplayCapability::PreciseAnchor,
+        "row_only" => novex_rag::DisplayCapability::RowOnly,
+        _ => novex_rag::DisplayCapability::TextOnly,
     }
 }
 
@@ -927,6 +1138,75 @@ mod tests {
     }
 
     #[test]
+    fn document_upload_chunks_apply_file_type_chunker_and_search_metadata() {
+        let command = DocumentUploadCommand {
+            name: "training.csv".to_owned(),
+            content: "employee,deadline,status\nAlice,Friday,done\nBob,Monday,pending".to_owned(),
+            content_type: "text/csv".to_owned(),
+        };
+        let command = normalize_document_upload_command(command).unwrap();
+
+        let chunks = document_upload_chunks(42, &command);
+
+        assert!(!chunks.is_empty());
+        assert_eq!(
+            chunks[0].metadata.segment_type,
+            novex_rag::ChunkSegmentType::Table
+        );
+        assert_eq!(
+            chunks[0].metadata.table_header,
+            vec!["employee", "deadline", "status"]
+        );
+        assert!(chunks[0].semantic_search_text.contains("training.csv"));
+        assert!(chunks[0].semantic_search_text.contains("deadline"));
+    }
+
+    #[test]
+    fn chunk_save_records_keep_semantic_text_columns_and_metadata_json() {
+        let command = DocumentUploadCommand {
+            name: "handbook.md".to_owned(),
+            content: "# 入职培训\n[[page: 3]]\n第一天需要完成安全培训。".to_owned(),
+            content_type: "text/markdown".to_owned(),
+        };
+        let command = normalize_document_upload_command(command).unwrap();
+        let chunks = document_upload_chunks(42, &command);
+        let now = Utc::now().naive_utc();
+
+        let records = chunk_save_records(1, 7, 42, chunks, 9, now);
+
+        assert_eq!(records.len(), 1);
+        assert_eq!(
+            records[0].semantic_search_text,
+            "handbook.md\n入职培训\n第一天需要完成安全培训。"
+        );
+        assert_eq!(records[0].segment_type, "text");
+        assert_eq!(records[0].segment_index, 0);
+        assert_eq!(records[0].page_no, Some(3));
+        assert_eq!(records[0].section_path, serde_json::json!(["入职培训"]));
+        assert_eq!(records[0].content_role, "canonical");
+        assert_eq!(records[0].display_capability, "precise_anchor");
+        assert_eq!(records[0].metadata["sourceFileName"], "handbook.md");
+    }
+
+    #[test]
+    fn chunk_metadata_migration_defines_search_contract_columns() {
+        let migration =
+            include_str!("../../../migrations/202606050018_enrich_ai_document_chunk_metadata.sql");
+
+        for column in [
+            "semantic_search_text",
+            "segment_type",
+            "segment_index",
+            "page_no",
+            "section_path",
+            "content_role",
+            "display_capability",
+        ] {
+            assert!(migration.contains(column), "missing {column}");
+        }
+    }
+
+    #[test]
     fn rag_ask_rejects_blank_question() {
         let command = RagAskCommand {
             question: "   ".to_owned(),
@@ -987,6 +1267,40 @@ mod tests {
         assert_eq!(records[0].chunk_id, 11);
         assert_eq!(records[0].rank, 2);
         assert!((records[0].score - 0.75).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn rag_feedback_rejects_invalid_rating_and_requires_trace() {
+        let err = normalize_rag_feedback_command(RagFeedbackCommand {
+            trace_id: 0,
+            rating: "helpful".to_owned(),
+            reason: "  ".to_owned(),
+        })
+        .unwrap_err();
+        assert!(err.to_string().contains("Trace ID 不合法"));
+
+        let err = normalize_rag_feedback_command(RagFeedbackCommand {
+            trace_id: 42,
+            rating: "maybe".to_owned(),
+            reason: "  ".to_owned(),
+        })
+        .unwrap_err();
+        assert!(err.to_string().contains("反馈类型不合法"));
+    }
+
+    #[test]
+    fn rag_feedback_trims_reason_and_maps_eval_payload() {
+        let command = normalize_rag_feedback_command(RagFeedbackCommand {
+            trace_id: 42,
+            rating: "citation_issue".to_owned(),
+            reason: "  引用不准确  ".to_owned(),
+        })
+        .unwrap();
+
+        assert_eq!(command.trace_id, 42);
+        assert_eq!(command.rating, "citation_issue");
+        assert_eq!(command.reason, "引用不准确");
+        assert_eq!(rag_feedback_metadata(&command)["rating"], "citation_issue");
     }
 
     #[test]

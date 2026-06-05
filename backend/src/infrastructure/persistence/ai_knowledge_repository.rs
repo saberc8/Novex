@@ -55,8 +55,16 @@ pub struct ChunkRecord {
     pub chunk_uid: String,
     pub chunk_index: i32,
     pub content: String,
+    pub semantic_search_text: String,
     pub token_count: i32,
     pub citation: Value,
+    pub segment_type: String,
+    pub segment_index: i32,
+    pub page_no: Option<i32>,
+    pub section_path: Value,
+    pub content_role: String,
+    pub display_capability: String,
+    pub metadata: Value,
 }
 
 #[derive(Debug, Clone)]
@@ -131,8 +139,16 @@ pub struct ChunkSaveRecord {
     pub chunk_uid: String,
     pub chunk_index: i32,
     pub content: String,
+    pub semantic_search_text: String,
     pub token_count: i32,
     pub citation: Value,
+    pub segment_type: String,
+    pub segment_index: i32,
+    pub page_no: Option<i32>,
+    pub section_path: Value,
+    pub content_role: String,
+    pub display_capability: String,
+    pub metadata: Value,
     pub embedding_status: i16,
     pub user_id: i64,
     pub now: NaiveDateTime,
@@ -169,6 +185,21 @@ pub struct RagTraceHitSaveRecord {
     pub score: f32,
     pub citation: Value,
     pub content_preview: String,
+    pub now: NaiveDateTime,
+}
+
+#[derive(Debug, Clone)]
+pub struct FeedbackSaveRecord {
+    pub id: i64,
+    pub tenant_id: i64,
+    pub resource_type: String,
+    pub resource_id: String,
+    pub trace_id: Option<String>,
+    pub rating: String,
+    pub reason: String,
+    pub metadata: Value,
+    pub status: i16,
+    pub user_id: i64,
     pub now: NaiveDateTime,
 }
 
@@ -326,10 +357,15 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9);
             sqlx::query(
                 r#"
 INSERT INTO ai_document_chunk (
-    id, tenant_id, dataset_id, document_id, chunk_uid, chunk_index, content, token_count,
-    citation, embedding_status, create_user, create_time
+    id, tenant_id, dataset_id, document_id, chunk_uid, chunk_index, content,
+    semantic_search_text, token_count, citation, segment_type, segment_index, page_no,
+    section_path, content_role, display_capability, metadata, embedding_status,
+    create_user, create_time
 )
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12);
+VALUES (
+    $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
+    $11, $12, $13, $14, $15, $16, $17, $18, $19, $20
+);
 "#,
             )
             .bind(chunk.id)
@@ -339,8 +375,16 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12);
             .bind(&chunk.chunk_uid)
             .bind(chunk.chunk_index)
             .bind(&chunk.content)
+            .bind(&chunk.semantic_search_text)
             .bind(chunk.token_count)
             .bind(&chunk.citation)
+            .bind(&chunk.segment_type)
+            .bind(chunk.segment_index)
+            .bind(chunk.page_no)
+            .bind(&chunk.section_path)
+            .bind(&chunk.content_role)
+            .bind(&chunk.display_capability)
+            .bind(&chunk.metadata)
             .bind(chunk.embedding_status)
             .bind(chunk.user_id)
             .bind(chunk.now)
@@ -384,8 +428,16 @@ SELECT
     chunk_uid,
     chunk_index,
     content,
+    semantic_search_text,
     token_count,
-    citation
+    citation,
+    segment_type,
+    segment_index,
+    page_no,
+    section_path,
+    content_role,
+    display_capability,
+    metadata
 FROM ai_document_chunk
 WHERE tenant_id = $1
   AND dataset_id = $2
@@ -461,6 +513,32 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11);
         }
 
         tx.commit().await?;
+        Ok(())
+    }
+
+    pub async fn create_feedback(&self, record: &FeedbackSaveRecord) -> Result<(), AppError> {
+        sqlx::query(
+            r#"
+INSERT INTO ai_feedback (
+    id, tenant_id, resource_type, resource_id, trace_id, rating, reason,
+    metadata, status, create_user, create_time
+)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11);
+"#,
+        )
+        .bind(record.id)
+        .bind(record.tenant_id)
+        .bind(&record.resource_type)
+        .bind(&record.resource_id)
+        .bind(&record.trace_id)
+        .bind(&record.rating)
+        .bind(&record.reason)
+        .bind(&record.metadata)
+        .bind(record.status)
+        .bind(record.user_id)
+        .bind(record.now)
+        .execute(&self.db)
+        .await?;
         Ok(())
     }
 }
