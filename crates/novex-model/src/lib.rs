@@ -257,11 +257,7 @@ impl ModelRuntimeConfig {
 
     pub fn summary(&self) -> ModelRuntimeSummary {
         ModelRuntimeSummary {
-            routes: self
-                .routes
-                .iter()
-                .map(ModelRuntimeRoute::summary)
-                .collect(),
+            routes: self.routes.iter().map(ModelRuntimeRoute::summary).collect(),
             missing_env: self.missing_env.clone(),
         }
     }
