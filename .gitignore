@@ -47,6 +47,7 @@ logs/
 *.db
 
 # 其他工具
+.worktrees/
 .env
 .env.local
 .env.development.local
