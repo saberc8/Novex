@@ -8,7 +8,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sqlx::{FromRow, PgPool};
 
-use crate::{application::system::ensure_max_chars, shared::error::AppError, shared::id::next_id};
+use crate::{
+    application::system::{ensure_max_chars, format_datetime},
+    shared::error::AppError,
+    shared::id::next_id,
+};
 
 const MODEL_HEALTH_TIMEOUT: Duration = Duration::from_secs(20);
 const MODEL_CHAT_TIMEOUT: Duration = Duration::from_secs(60);
@@ -18,6 +22,10 @@ const DEFAULT_MODEL_CHAT_MAX_TOKENS: u32 = 1024;
 const MAX_MODEL_CHAT_MAX_TOKENS: u32 = 2048;
 const MAX_MODEL_CHAT_MESSAGES: usize = 30;
 const MAX_MODEL_CHAT_CONTENT_CHARS: usize = 12_000;
+const DEFAULT_TENANT_ID: i64 = 1;
+const MODEL_CHAT_HISTORY_LIMIT: i64 = 30;
+const MODEL_CHAT_TITLE_CHARS: usize = 60;
+const MODEL_CHAT_PREVIEW_CHARS: usize = 160;
 
 #[derive(Debug, Clone, Default)]
 pub struct ModelRuntimeService;
@@ -38,6 +46,8 @@ pub struct ModelHealthCheckResp {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelChatCommand {
+    #[serde(default)]
+    pub conversation_id: Option<i64>,
     #[serde(default)]
     pub messages: Vec<ModelChatMessage>,
     #[serde(default)]
@@ -66,11 +76,25 @@ pub struct ModelChatUsage {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelChatResp {
+    pub conversation_id: Option<i64>,
     pub answer: String,
     pub route_id: String,
     pub model: Option<String>,
     pub latency_ms: u128,
     pub usage: ModelChatUsage,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelChatConversationResp {
+    pub id: i64,
+    pub title: String,
+    pub route_id: String,
+    pub model: Option<String>,
+    pub message_count: i32,
+    pub last_message_preview: String,
+    pub create_time: String,
+    pub update_time: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -190,6 +214,18 @@ pub struct ModelRouteRegistryRow {
     pub masked_value: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, FromRow)]
+pub struct ModelChatConversationRow {
+    pub id: i64,
+    pub title: String,
+    pub route_id: String,
+    pub model: Option<String>,
+    pub message_count: i32,
+    pub last_message_preview: String,
+    pub create_time: NaiveDateTime,
+    pub update_time: NaiveDateTime,
+}
+
 #[derive(Debug, Clone)]
 struct ModelUsageSaveRecord {
     pub id: i64,
@@ -202,6 +238,40 @@ struct ModelUsageSaveRecord {
     pub metadata: Value,
     pub user_id: i64,
     pub now: NaiveDateTime,
+}
+
+#[derive(Debug, Clone)]
+struct ModelChatConversationSaveRecord {
+    pub id: i64,
+    pub tenant_id: i64,
+    pub title: String,
+    pub route_id: String,
+    pub model: Option<String>,
+    pub message_count_increment: i32,
+    pub last_message_preview: String,
+    pub user_id: i64,
+    pub now: NaiveDateTime,
+}
+
+#[derive(Debug, Clone)]
+struct ModelChatMessageSaveRecord {
+    pub id: i64,
+    pub tenant_id: i64,
+    pub conversation_id: i64,
+    pub role: String,
+    pub content: String,
+    pub route_id: Option<String>,
+    pub model: Option<String>,
+    pub token_count: i32,
+    pub metadata: Value,
+    pub user_id: i64,
+    pub now: NaiveDateTime,
+}
+
+#[derive(Debug, Clone)]
+struct ModelChatHistorySaveRecords {
+    pub conversation: ModelChatConversationSaveRecord,
+    pub messages: Vec<ModelChatMessageSaveRecord>,
 }
 
 impl ModelRuntimeService {
@@ -359,15 +429,66 @@ ORDER BY r.priority, r.id
         user_id: i64,
         command: ModelChatCommand,
     ) -> Result<ModelChatResp, AppError> {
-        let response = execute_chat_completion(command).await?;
+        let command = normalize_model_chat_command(command)?;
+        if let Some(conversation_id) = command.conversation_id {
+            ensure_model_chat_conversation_owner(db, DEFAULT_TENANT_ID, user_id, conversation_id)
+                .await?;
+        }
+        let conversation_id = command.conversation_id.unwrap_or_else(next_id);
+        let response = execute_normalized_chat_completion(&command, Some(conversation_id)).await?;
+        let now = Utc::now().naive_utc();
+        let history =
+            model_chat_history_records(DEFAULT_TENANT_ID, user_id, &command, &response, now)?;
+        persist_model_chat_history(db, &history).await?;
         let record = model_chat_usage_record(user_id, &response, Utc::now().naive_utc());
         record_model_chat_usage(db, &record).await?;
         Ok(response)
+    }
+
+    pub async fn list_chat_conversations(
+        db: &PgPool,
+        user_id: i64,
+    ) -> Result<Vec<ModelChatConversationResp>, AppError> {
+        let rows = sqlx::query_as::<_, ModelChatConversationRow>(
+            r#"
+SELECT
+    id,
+    title,
+    route_id,
+    model,
+    message_count,
+    last_message_preview,
+    create_time,
+    COALESCE(update_time, create_time) AS update_time
+FROM ai_model_chat_conversation
+WHERE tenant_id = $1
+  AND create_user = $2
+ORDER BY COALESCE(update_time, create_time) DESC, id DESC
+LIMIT $3;
+"#,
+        )
+        .bind(DEFAULT_TENANT_ID)
+        .bind(user_id)
+        .bind(MODEL_CHAT_HISTORY_LIMIT)
+        .fetch_all(db)
+        .await?;
+
+        Ok(rows
+            .into_iter()
+            .map(ModelChatConversationResp::from)
+            .collect())
     }
 }
 
 async fn execute_chat_completion(command: ModelChatCommand) -> Result<ModelChatResp, AppError> {
     let command = normalize_model_chat_command(command)?;
+    execute_normalized_chat_completion(&command, command.conversation_id).await
+}
+
+async fn execute_normalized_chat_completion(
+    command: &ModelChatCommand,
+    conversation_id: Option<i64>,
+) -> Result<ModelChatResp, AppError> {
     let config = ModelRuntimeConfig::from_env();
     let route = config
         .route(ModelRuntimeTarget::Llm)
@@ -376,7 +497,7 @@ async fn execute_chat_completion(command: ModelChatCommand) -> Result<ModelChatR
         .timeout(MODEL_CHAT_TIMEOUT)
         .build()
         .map_err(|err| AppError::Anyhow(err.into()))?;
-    let payload = model_chat_request_payload(route, &command);
+    let payload = model_chat_request_payload(route, command);
     let started = Instant::now();
     let response = client
         .post(route.endpoint())
@@ -395,12 +516,15 @@ async fn execute_chat_completion(command: ModelChatCommand) -> Result<ModelChatR
         )));
     }
 
-    model_chat_response_from_provider(route, body, started.elapsed().as_millis())
+    model_chat_response_from_provider(route, body, started.elapsed().as_millis(), conversation_id)
 }
 
 fn normalize_model_chat_command(
     mut command: ModelChatCommand,
 ) -> Result<ModelChatCommand, AppError> {
+    if matches!(command.conversation_id, Some(value) if value <= 0) {
+        return Err(AppError::bad_request("会话 ID 不合法"));
+    }
     if command.messages.is_empty() {
         return Err(AppError::bad_request("至少需要一条消息"));
     }
@@ -463,6 +587,7 @@ fn model_chat_response_from_provider(
     route: &ModelRuntimeRoute,
     body: Value,
     latency_ms: u128,
+    conversation_id: Option<i64>,
 ) -> Result<ModelChatResp, AppError> {
     let answer = body
         .pointer("/choices/0/message/content")
@@ -474,6 +599,7 @@ fn model_chat_response_from_provider(
     let usage = body.get("usage").unwrap_or(&Value::Null);
 
     Ok(ModelChatResp {
+        conversation_id,
         answer,
         route_id: route.summary().route_id,
         model: route.model().map(str::to_owned),
@@ -484,6 +610,190 @@ fn model_chat_response_from_provider(
             total_tokens: usage.get("total_tokens").and_then(Value::as_i64),
         },
     })
+}
+
+impl From<ModelChatConversationRow> for ModelChatConversationResp {
+    fn from(row: ModelChatConversationRow) -> Self {
+        Self {
+            id: row.id,
+            title: row.title,
+            route_id: row.route_id,
+            model: row.model,
+            message_count: row.message_count,
+            last_message_preview: row.last_message_preview,
+            create_time: format_datetime(row.create_time),
+            update_time: format_datetime(row.update_time),
+        }
+    }
+}
+
+fn model_chat_history_records(
+    tenant_id: i64,
+    user_id: i64,
+    command: &ModelChatCommand,
+    response: &ModelChatResp,
+    now: NaiveDateTime,
+) -> Result<ModelChatHistorySaveRecords, AppError> {
+    let conversation_id = response
+        .conversation_id
+        .ok_or_else(|| AppError::bad_request("会话 ID 不合法"))?;
+    let user_message = latest_user_message(command)
+        .ok_or_else(|| AppError::bad_request("至少需要一条用户消息"))?;
+    let assistant_token_count = response
+        .usage
+        .completion_tokens
+        .unwrap_or_else(|| tokenish_count(&response.answer) as i64)
+        .max(0)
+        .min(i32::MAX as i64) as i32;
+
+    Ok(ModelChatHistorySaveRecords {
+        conversation: ModelChatConversationSaveRecord {
+            id: conversation_id,
+            tenant_id,
+            title: preview_chars(&user_message.content, MODEL_CHAT_TITLE_CHARS),
+            route_id: response.route_id.clone(),
+            model: response.model.clone(),
+            message_count_increment: 2,
+            last_message_preview: preview_chars(&response.answer, MODEL_CHAT_PREVIEW_CHARS),
+            user_id,
+            now,
+        },
+        messages: vec![
+            ModelChatMessageSaveRecord {
+                id: next_id(),
+                tenant_id,
+                conversation_id,
+                role: "user".to_owned(),
+                content: user_message.content.clone(),
+                route_id: None,
+                model: None,
+                token_count: tokenish_count(&user_message.content),
+                metadata: json!({
+                    "source": "ai.models.chat",
+                    "messageCount": command.messages.len(),
+                }),
+                user_id,
+                now,
+            },
+            ModelChatMessageSaveRecord {
+                id: next_id(),
+                tenant_id,
+                conversation_id,
+                role: "assistant".to_owned(),
+                content: response.answer.clone(),
+                route_id: Some(response.route_id.clone()),
+                model: response.model.clone(),
+                token_count: assistant_token_count,
+                metadata: json!({
+                    "source": "ai.models.chat",
+                    "latencyMs": u128_to_i64(response.latency_ms),
+                    "usage": response.usage,
+                }),
+                user_id,
+                now,
+            },
+        ],
+    })
+}
+
+fn latest_user_message(command: &ModelChatCommand) -> Option<&ModelChatMessage> {
+    command
+        .messages
+        .iter()
+        .rev()
+        .find(|message| message.role == "user")
+}
+
+async fn ensure_model_chat_conversation_owner(
+    db: &PgPool,
+    tenant_id: i64,
+    user_id: i64,
+    conversation_id: i64,
+) -> Result<(), AppError> {
+    let exists = sqlx::query_scalar::<_, bool>(
+        r#"
+SELECT EXISTS (
+    SELECT 1
+    FROM ai_model_chat_conversation
+    WHERE tenant_id = $1
+      AND id = $2
+      AND create_user = $3
+);
+"#,
+    )
+    .bind(tenant_id)
+    .bind(conversation_id)
+    .bind(user_id)
+    .fetch_one(db)
+    .await?;
+    if exists {
+        Ok(())
+    } else {
+        Err(AppError::NotFound)
+    }
+}
+
+async fn persist_model_chat_history(
+    db: &PgPool,
+    records: &ModelChatHistorySaveRecords,
+) -> Result<(), AppError> {
+    let mut tx = db.begin().await?;
+    let conversation = &records.conversation;
+    sqlx::query(
+        r#"
+INSERT INTO ai_model_chat_conversation (
+    id, tenant_id, title, route_id, model, message_count, last_message_preview,
+    create_user, create_time, update_user, update_time
+)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $8, $9)
+ON CONFLICT (id) DO UPDATE
+SET route_id = EXCLUDED.route_id,
+    model = EXCLUDED.model,
+    message_count = ai_model_chat_conversation.message_count + EXCLUDED.message_count,
+    last_message_preview = EXCLUDED.last_message_preview,
+    update_user = EXCLUDED.update_user,
+    update_time = EXCLUDED.update_time;
+"#,
+    )
+    .bind(conversation.id)
+    .bind(conversation.tenant_id)
+    .bind(&conversation.title)
+    .bind(&conversation.route_id)
+    .bind(&conversation.model)
+    .bind(conversation.message_count_increment)
+    .bind(&conversation.last_message_preview)
+    .bind(conversation.user_id)
+    .bind(conversation.now)
+    .execute(&mut *tx)
+    .await?;
+
+    for message in &records.messages {
+        sqlx::query(
+            r#"
+INSERT INTO ai_model_chat_message (
+    id, tenant_id, conversation_id, role, content, route_id, model,
+    token_count, metadata, create_user, create_time
+)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11);
+"#,
+        )
+        .bind(message.id)
+        .bind(message.tenant_id)
+        .bind(message.conversation_id)
+        .bind(&message.role)
+        .bind(&message.content)
+        .bind(&message.route_id)
+        .bind(&message.model)
+        .bind(message.token_count)
+        .bind(&message.metadata)
+        .bind(message.user_id)
+        .bind(message.now)
+        .execute(&mut *tx)
+        .await?;
+    }
+
+    tx.commit().await?;
+    Ok(())
 }
 
 fn model_chat_usage_record(
@@ -502,6 +812,7 @@ fn model_chat_usage_record(
         metadata: json!({
             "routeId": response.route_id,
             "model": response.model,
+            "conversationId": response.conversation_id,
             "target": "llm",
             "source": "ai.models.chat"
         }),
@@ -555,6 +866,23 @@ VALUES (
 
 fn u128_to_i64(value: u128) -> i64 {
     value.min(i64::MAX as u128) as i64
+}
+
+fn preview_chars(text: &str, max_chars: usize) -> String {
+    text.trim().chars().take(max_chars).collect()
+}
+
+fn tokenish_count(text: &str) -> i32 {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return 0;
+    }
+    let whitespace_count = trimmed.split_whitespace().count();
+    if whitespace_count > 1 {
+        whitespace_count.min(i32::MAX as usize) as i32
+    } else {
+        trimmed.chars().count().min(i32::MAX as usize) as i32
+    }
 }
 
 fn health_check_targets(target: Option<&str>) -> Result<Vec<ModelRuntimeTarget>, AppError> {
@@ -901,6 +1229,7 @@ mod tests {
             ],
             temperature: Some(1.5),
             max_tokens: Some(4096),
+            ..ModelChatCommand::default()
         })
         .unwrap();
 
@@ -924,6 +1253,7 @@ mod tests {
             }],
             temperature: None,
             max_tokens: None,
+            ..ModelChatCommand::default()
         })
         .unwrap();
 
@@ -936,6 +1266,21 @@ mod tests {
         assert_eq!(payload["messages"][0]["content"], "hello");
         let debug = format!("{payload:?}");
         assert!(!debug.contains("sk-fake-llm-secret-508d"));
+    }
+
+    #[test]
+    fn model_chat_command_accepts_existing_conversation_id() {
+        let command = normalize_model_chat_command(ModelChatCommand {
+            conversation_id: Some(88),
+            messages: vec![ModelChatMessage {
+                role: "user".to_owned(),
+                content: "继续刚才的话题".to_owned(),
+            }],
+            ..ModelChatCommand::default()
+        })
+        .unwrap();
+
+        assert_eq!(command.conversation_id, Some(88));
     }
 
     #[test]
@@ -955,9 +1300,10 @@ mod tests {
             }
         });
 
-        let response = model_chat_response_from_provider(&route, body, 42).unwrap();
+        let response = model_chat_response_from_provider(&route, body, 42, Some(77)).unwrap();
 
         assert_eq!(response.answer, "Novex can run pure model chat.");
+        assert_eq!(response.conversation_id, Some(77));
         assert_eq!(response.route_id, "runtime.llm");
         assert_eq!(response.model.as_deref(), Some("deepseek-v4-flash"));
         assert_eq!(response.latency_ms, 42);
@@ -968,10 +1314,79 @@ mod tests {
     }
 
     #[test]
+    fn model_chat_history_records_capture_latest_turn_metadata() {
+        let now = chrono::NaiveDateTime::parse_from_str("2026-06-05 10:00:00", "%Y-%m-%d %H:%M:%S")
+            .unwrap();
+        let command = normalize_model_chat_command(ModelChatCommand {
+            conversation_id: None,
+            messages: vec![
+                ModelChatMessage {
+                    role: "system".to_owned(),
+                    content: "You are Novex.".to_owned(),
+                },
+                ModelChatMessage {
+                    role: "user".to_owned(),
+                    content: "  介绍一下模型对话历史能力  ".to_owned(),
+                },
+            ],
+            ..ModelChatCommand::default()
+        })
+        .unwrap();
+        let response = ModelChatResp {
+            conversation_id: Some(42),
+            answer: "Novex records chat turns.".to_owned(),
+            route_id: "runtime.llm".to_owned(),
+            model: Some("deepseek-v4-flash".to_owned()),
+            latency_ms: 42,
+            usage: ModelChatUsage {
+                prompt_tokens: Some(11),
+                completion_tokens: Some(7),
+                total_tokens: Some(18),
+            },
+        };
+
+        let records = model_chat_history_records(1, 9, &command, &response, now).unwrap();
+
+        assert_eq!(records.conversation.id, 42);
+        assert_eq!(records.conversation.title, "介绍一下模型对话历史能力");
+        assert_eq!(records.conversation.message_count_increment, 2);
+        assert_eq!(
+            records.conversation.last_message_preview,
+            "Novex records chat turns."
+        );
+        assert_eq!(records.messages.len(), 2);
+        assert_eq!(records.messages[0].role, "user");
+        assert_eq!(records.messages[0].content, "介绍一下模型对话历史能力");
+        assert_eq!(records.messages[1].role, "assistant");
+        assert_eq!(records.messages[1].route_id.as_deref(), Some("runtime.llm"));
+        assert_eq!(records.messages[1].token_count, 7);
+        assert_eq!(records.messages[1].metadata["latencyMs"], 42);
+    }
+
+    #[test]
+    fn model_chat_history_migration_defines_conversation_and_message_tables() {
+        let migration =
+            include_str!("../../../migrations/202606050021_create_ai_model_chat_history.sql");
+
+        for field in [
+            "ai_model_chat_conversation",
+            "ai_model_chat_message",
+            "conversation_id",
+            "last_message_preview",
+            "message_count",
+            "route_id",
+            "model",
+        ] {
+            assert!(migration.contains(field), "missing {field}");
+        }
+    }
+
+    #[test]
     fn model_chat_usage_record_maps_tokens_latency_and_route_without_content() {
         let now = chrono::NaiveDateTime::parse_from_str("2026-06-05 10:00:00", "%Y-%m-%d %H:%M:%S")
             .unwrap();
         let response = ModelChatResp {
+            conversation_id: Some(42),
             answer: "Do not persist this answer".to_owned(),
             route_id: "runtime.llm".to_owned(),
             model: Some("deepseek-v4-flash".to_owned()),

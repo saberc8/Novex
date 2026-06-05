@@ -6,8 +6,8 @@ use axum::{
 
 use crate::{
     application::ai::model_service::{
-        ModelChatCommand, ModelChatResp, ModelHealthCheckCommand, ModelHealthCheckResp,
-        ModelRegistrySummary, ModelRuntimeService,
+        ModelChatCommand, ModelChatConversationResp, ModelChatResp, ModelHealthCheckCommand,
+        ModelHealthCheckResp, ModelRegistrySummary, ModelRuntimeService,
     },
     domain::auth::model::CurrentUser,
     interfaces::http::{middleware::permission::require_permission, AppState},
@@ -23,6 +23,10 @@ pub fn routes() -> Router<AppState> {
         .route("/ai/models/runtime-config", get(runtime_config))
         .route("/ai/models/registry", get(model_registry))
         .route("/ai/models/health-check", post(health_check))
+        .route(
+            "/ai/models/chat/conversations",
+            get(list_chat_conversations),
+        )
         .route("/ai/models/chat", post(chat_completion))
 }
 
@@ -66,6 +70,17 @@ async fn chat_completion(
     Ok(Json(ApiResponse::ok(
         ModelRuntimeService::chat_completion_with_usage(&state.db, current_user.id, command)
             .await?,
+    )))
+}
+
+async fn list_chat_conversations(
+    State(state): State<AppState>,
+    current_user: CurrentUser,
+) -> Result<Json<ApiResponse<Vec<ModelChatConversationResp>>>, AppError> {
+    require_permission(&current_user, MODEL_CHAT_PERMISSION)?;
+
+    Ok(Json(ApiResponse::ok(
+        ModelRuntimeService::list_chat_conversations(&state.db, current_user.id).await?,
     )))
 }
 
@@ -214,6 +229,15 @@ mod tests {
         )
         .await
         .unwrap_err();
+
+        assert!(matches!(err, AppError::Forbidden));
+    }
+
+    #[tokio::test]
+    async fn model_chat_conversation_list_handler_rejects_missing_permission() {
+        let err = list_chat_conversations(State(test_state()), user_with_permissions(vec![]))
+            .await
+            .unwrap_err();
 
         assert!(matches!(err, AppError::Forbidden));
     }

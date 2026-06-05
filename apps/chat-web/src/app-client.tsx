@@ -1,10 +1,11 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   Bot,
   Database,
   FileText,
+  History,
   MessageSquare,
   Quote,
   Search,
@@ -15,9 +16,9 @@ import {
   ThumbsUp
 } from "lucide-react";
 import { askDataset, listDatasets, submitRagFeedback } from "@/api/knowledge";
-import { chatCompletion } from "@/api/model";
+import { chatCompletion, listChatConversations } from "@/api/model";
 import type { CitationResp, DatasetResp, RagAskResp, RagFeedbackRating } from "@/types/knowledge";
-import type { ModelChatResp } from "@/types/model";
+import type { ModelChatConversationResp, ModelChatResp } from "@/types/model";
 
 const fallbackDataset: DatasetResp = {
   id: 10,
@@ -45,6 +46,7 @@ const fallbackAnswer: RagAskResp = {
 };
 
 const fallbackModelAnswer: ModelChatResp = {
+  conversationId: null,
   answer: "Start a model chat to use the configured LLM route without knowledge retrieval.",
   routeId: "runtime.llm",
   model: "standby",
@@ -72,11 +74,22 @@ export function ChatAppClient() {
   const [answer, setAnswer] = useState<RagAskResp>(fallbackAnswer);
   const [modelQuestion, setModelQuestion] = useState("Explain Novex.");
   const [modelAnswer, setModelAnswer] = useState<ModelChatResp>(fallbackModelAnswer);
+  const [modelConversationId, setModelConversationId] = useState<number | null>(null);
+  const [modelConversations, setModelConversations] = useState<ModelChatConversationResp[]>([]);
   const [apiStatus, setApiStatus] = useState("fallback");
   const [asking, setAsking] = useState(false);
   const [modelAsking, setModelAsking] = useState(false);
   const [feedbackSubmitting, setFeedbackSubmitting] = useState(false);
   const [feedbackStatus, setFeedbackStatus] = useState("");
+
+  const refreshModelConversations = useCallback(async () => {
+    try {
+      const conversations = await listChatConversations();
+      setModelConversations(conversations);
+    } catch {
+      setModelConversations([]);
+    }
+  }, []);
 
   useEffect(() => {
     let mounted = true;
@@ -98,10 +111,12 @@ export function ChatAppClient() {
         }
       });
 
+    refreshModelConversations();
+
     return () => {
       mounted = false;
     };
-  }, []);
+  }, [refreshModelConversations]);
 
   const selectedDataset = useMemo(
     () => datasets.find((dataset) => dataset.id === selectedDatasetId) ?? fallbackDataset,
@@ -139,12 +154,15 @@ export function ChatAppClient() {
     setModelAsking(true);
     try {
       const response = await chatCompletion({
+        conversationId: modelConversationId ?? undefined,
         messages: [{ role: "user", content: trimmed }],
         temperature: 0.2,
         maxTokens: 1024
       });
       setModelAnswer(response);
+      setModelConversationId(response.conversationId ?? modelConversationId);
       setApiStatus("live");
+      await refreshModelConversations();
     } catch {
       setApiStatus("fallback");
     } finally {
@@ -321,32 +339,18 @@ export function ChatAppClient() {
         </section>
 
         <aside className="space-y-4 border-t border-slate-200 bg-white p-4 lg:border-l lg:border-t-0 lg:p-5">
-          <section className="rounded-lg border border-slate-200 p-4">
-            <div className="flex items-center gap-2">
-              <Database aria-hidden="true" className="h-4 w-4 text-teal-700" />
-              <h2 className="text-sm font-semibold text-slate-950">Sources</h2>
-            </div>
-            <div className="mt-3 space-y-2">
-              {datasets.map((dataset) => (
-                <button
-                  className={[
-                    "w-full rounded-lg border p-3 text-left",
-                    dataset.id === selectedDatasetId
-                      ? "border-teal-200 bg-teal-50"
-                      : "border-slate-200 hover:bg-slate-50"
-                  ].join(" ")}
-                  key={dataset.id}
-                  onClick={() => setSelectedDatasetId(dataset.id)}
-                  type="button"
-                >
-                  <div className="truncate text-sm font-semibold text-slate-900">{dataset.name}</div>
-                  <div className="mt-1 text-xs text-slate-500">
-                    {dataset.documentCount} docs · {dataset.chunkCount} chunks
-                  </div>
-                </button>
-              ))}
-            </div>
-          </section>
+          {mode === "knowledge" ? (
+            <KnowledgeSources datasets={datasets} selectedDatasetId={selectedDatasetId} onSelect={setSelectedDatasetId} />
+          ) : (
+            <ModelConversations
+              activeId={modelConversationId}
+              conversations={modelConversations}
+              onSelect={(conversation) => {
+                setModelConversationId(conversation.id);
+                setModelQuestion(conversation.title);
+              }}
+            />
+          )}
 
           <section className="rounded-lg border border-slate-200 p-4">
             <div className="flex items-center gap-2">
@@ -358,6 +362,87 @@ export function ChatAppClient() {
         </aside>
       </div>
     </main>
+  );
+}
+
+function KnowledgeSources({
+  datasets,
+  selectedDatasetId,
+  onSelect
+}: {
+  datasets: DatasetResp[];
+  selectedDatasetId: number;
+  onSelect: (datasetId: number) => void;
+}) {
+  return (
+    <section className="rounded-lg border border-slate-200 p-4">
+      <div className="flex items-center gap-2">
+        <Database aria-hidden="true" className="h-4 w-4 text-teal-700" />
+        <h2 className="text-sm font-semibold text-slate-950">Sources</h2>
+      </div>
+      <div className="mt-3 space-y-2">
+        {datasets.map((dataset) => (
+          <button
+            className={[
+              "w-full rounded-lg border p-3 text-left",
+              dataset.id === selectedDatasetId ? "border-teal-200 bg-teal-50" : "border-slate-200 hover:bg-slate-50"
+            ].join(" ")}
+            key={dataset.id}
+            onClick={() => onSelect(dataset.id)}
+            type="button"
+          >
+            <div className="truncate text-sm font-semibold text-slate-900">{dataset.name}</div>
+            <div className="mt-1 text-xs text-slate-500">
+              {dataset.documentCount} docs · {dataset.chunkCount} chunks
+            </div>
+          </button>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function ModelConversations({
+  activeId,
+  conversations,
+  onSelect
+}: {
+  activeId: number | null;
+  conversations: ModelChatConversationResp[];
+  onSelect: (conversation: ModelChatConversationResp) => void;
+}) {
+  return (
+    <section className="rounded-lg border border-slate-200 p-4">
+      <div className="flex items-center gap-2">
+        <History aria-hidden="true" className="h-4 w-4 text-teal-700" />
+        <h2 className="text-sm font-semibold text-slate-950">Recent Chats</h2>
+      </div>
+      <div className="mt-3 space-y-2">
+        {conversations.length === 0 ? (
+          <div className="rounded-lg border border-dashed border-slate-200 p-3 text-xs leading-5 text-slate-500">
+            No model conversations yet.
+          </div>
+        ) : (
+          conversations.map((conversation) => (
+            <button
+              className={[
+                "w-full rounded-lg border p-3 text-left",
+                conversation.id === activeId ? "border-teal-200 bg-teal-50" : "border-slate-200 hover:bg-slate-50"
+              ].join(" ")}
+              key={conversation.id}
+              onClick={() => onSelect(conversation)}
+              type="button"
+            >
+              <div className="truncate text-sm font-semibold text-slate-900">{conversation.title}</div>
+              <div className="mt-1 line-clamp-2 text-xs leading-5 text-slate-500">{conversation.lastMessagePreview}</div>
+              <div className="mt-2 text-xs text-slate-400">
+                {conversation.messageCount} messages · {conversation.model ?? "default"}
+              </div>
+            </button>
+          ))
+        )}
+      </div>
+    </section>
   );
 }
 

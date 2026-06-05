@@ -6,6 +6,7 @@ export interface ModelChatMessage {
 }
 
 export interface ModelChatCommand {
+  conversationId?: number;
   messages: ModelChatMessage[];
   temperature?: number;
   maxTokens?: number;
@@ -18,9 +19,21 @@ export interface ModelChatUsage {
 }
 
 export interface ModelChatResp {
+  conversationId?: number | null;
   answer: string;
   routeId: string;
   model?: string | null;
   latencyMs: number;
   usage: ModelChatUsage;
+}
+
+export interface ModelChatConversationResp {
+  id: number;
+  title: string;
+  routeId: string;
+  model?: string | null;
+  messageCount: number;
+  lastMessagePreview: string;
+  createTime: string;
+  updateTime: string;
 }

@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { metadata } from "./layout";
 import Page from "./page";
 import { askDataset, listDatasets, submitRagFeedback } from "@/api/knowledge";
-import { chatCompletion } from "@/api/model";
+import { chatCompletion, listChatConversations } from "@/api/model";
 import type { DatasetResp } from "@/types/knowledge";
 
 vi.mock("@/api/knowledge", () => ({
@@ -13,13 +13,15 @@ vi.mock("@/api/knowledge", () => ({
 }));
 
 vi.mock("@/api/model", () => ({
-  chatCompletion: vi.fn()
+  chatCompletion: vi.fn(),
+  listChatConversations: vi.fn()
 }));
 
 const askDatasetMock = vi.mocked(askDataset);
 const listDatasetsMock = vi.mocked(listDatasets);
 const submitRagFeedbackMock = vi.mocked(submitRagFeedback);
 const chatCompletionMock = vi.mocked(chatCompletion);
+const listChatConversationsMock = vi.mocked(listChatConversations);
 
 function dataset(overrides: Partial<DatasetResp> = {}): DatasetResp {
   return {
@@ -68,6 +70,7 @@ describe("Chat web page", () => {
       rating: "citation_issue"
     });
     chatCompletionMock.mockResolvedValue({
+      conversationId: 88,
       answer: "Pure model answer.",
       routeId: "runtime.llm",
       model: "deepseek-v4-flash",
@@ -78,6 +81,18 @@ describe("Chat web page", () => {
         totalTokens: 18
       }
     });
+    listChatConversationsMock.mockResolvedValue([
+      {
+        id: 88,
+        title: "Explain Novex.",
+        routeId: "runtime.llm",
+        model: "deepseek-v4-flash",
+        messageCount: 2,
+        lastMessagePreview: "Pure model answer.",
+        createTime: "2026-06-05 10:00:00",
+        updateTime: "2026-06-05 10:01:00"
+      }
+    ]);
   });
 
   it("renders a customer-facing knowledge chat workspace", async () => {
@@ -150,8 +165,11 @@ describe("Chat web page", () => {
         maxTokens: 1024
       })
     );
-    expect(await screen.findByText("Pure model answer.")).toBeTruthy();
+    expect((await screen.findAllByText("Pure model answer.")).length).toBeGreaterThan(0);
     expect((await screen.findAllByText("runtime.llm · deepseek-v4-flash")).length).toBeGreaterThan(0);
     expect((await screen.findAllByText("42 ms")).length).toBeGreaterThan(0);
+    await waitFor(() => expect(listChatConversationsMock).toHaveBeenCalled());
+    expect((await screen.findAllByText("Explain Novex.")).length).toBeGreaterThan(0);
+    expect((await screen.findAllByText("Pure model answer.")).length).toBeGreaterThan(0);
   });
 });
