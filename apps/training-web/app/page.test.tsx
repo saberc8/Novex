@@ -1,11 +1,17 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import Page from "./page";
+import { accountLogin, getImageCaptcha } from "@/api/auth";
 import { createAgentRun } from "@/api/agent";
 import { dryRunTool } from "@/api/capability";
 import { listEvalDatasets, listEvalResults, listEvalRuns, runEval } from "@/api/eval";
 import { askDataset, listDatasets, submitRagFeedback } from "@/api/knowledge";
 import type { DatasetResp } from "@/types/knowledge";
+
+vi.mock("@/api/auth", () => ({
+  accountLogin: vi.fn(),
+  getImageCaptcha: vi.fn()
+}));
 
 vi.mock("@/api/agent", () => ({
   createAgentRun: vi.fn()
@@ -28,9 +34,11 @@ vi.mock("@/api/knowledge", () => ({
   submitRagFeedback: vi.fn()
 }));
 
+const accountLoginMock = vi.mocked(accountLogin);
 const askDatasetMock = vi.mocked(askDataset);
 const createAgentRunMock = vi.mocked(createAgentRun);
 const dryRunToolMock = vi.mocked(dryRunTool);
+const getImageCaptchaMock = vi.mocked(getImageCaptcha);
 const listEvalDatasetsMock = vi.mocked(listEvalDatasets);
 const listEvalResultsMock = vi.mocked(listEvalResults);
 const listEvalRunsMock = vi.mocked(listEvalRuns);
@@ -61,6 +69,17 @@ function dataset(overrides: Partial<DatasetResp> = {}): DatasetResp {
 describe("Training home page", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    window.localStorage.clear();
+    window.localStorage.setItem("novex_token", "token-1");
+    getImageCaptchaMock.mockResolvedValue({
+      isEnabled: false,
+      uuid: "",
+      img: ""
+    });
+    accountLoginMock.mockResolvedValue({
+      token: "token-2",
+      expire: "2099-01-01T00:00:00Z"
+    });
     listDatasetsMock.mockResolvedValue({
       list: [dataset()],
       total: 1
@@ -181,6 +200,34 @@ describe("Training home page", () => {
       createTime: "2026-06-05 12:00:00",
       finishedAt: "2026-06-05 12:00:01"
     });
+  });
+
+  it("requires customer login before loading live training data", async () => {
+    window.localStorage.clear();
+    render(<Page />);
+
+    expect(screen.getByRole("heading", { name: "培训工作台登录", level: 1 })).toBeTruthy();
+    expect(listDatasetsMock).not.toHaveBeenCalled();
+
+    fireEvent.change(screen.getByLabelText("账号"), {
+      target: { value: "employee" }
+    });
+    fireEvent.change(screen.getByLabelText("密码"), {
+      target: { value: "employee123" }
+    });
+    fireEvent.click(screen.getByRole("button", { name: "登录" }));
+
+    await waitFor(() =>
+      expect(accountLoginMock).toHaveBeenCalledWith({
+        username: "employee",
+        password: "employee123",
+        authType: "ACCOUNT",
+        clientId: "novex-training-web"
+      })
+    );
+    expect(window.localStorage.getItem("novex_token")).toBe("token-2");
+    await waitFor(() => expect(listDatasetsMock).toHaveBeenCalledWith({ page: 1, size: 20 }));
+    expect(await screen.findByRole("heading", { name: "AI 员工培训", level: 1 })).toBeTruthy();
   });
 
   it("renders the customer-facing training workbench sections", () => {

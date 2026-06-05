@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { type FormEvent, useEffect, useMemo, useState } from "react";
 import {
   ArrowRight,
   BarChart3,
@@ -9,6 +9,7 @@ import {
   CheckCircle2,
   CircleAlert,
   CircleDashed,
+  LogIn,
   ListChecks,
   Quote,
   RotateCw,
@@ -17,6 +18,7 @@ import {
   ThumbsDown,
   ThumbsUp
 } from "lucide-react";
+import { accountLogin, getImageCaptcha } from "@/api/auth";
 import { createAgentRun } from "@/api/agent";
 import { dryRunTool } from "@/api/capability";
 import { listEvalDatasets, listEvalResults, listEvalRuns, runEval } from "@/api/eval";
@@ -24,10 +26,14 @@ import { askDataset, listDatasets, submitRagFeedback } from "@/api/knowledge";
 import { CitationList, type CitationItem } from "@/components/citation-list";
 import { MetricStrip } from "@/components/metric-strip";
 import { TrainingShell } from "@/components/training-shell";
+import { getAuthToken, setAuthToken as persistAuthToken } from "@/lib/auth";
 import type { AgentRunResp } from "@/types/agent";
+import type { ImageCaptchaResp } from "@/types/auth";
 import type { ToolDryRunResp } from "@/types/capability";
 import type { EvalDatasetResp, EvalResultResp, EvalRunResp } from "@/types/eval";
 import type { DatasetResp, RagAskResp, RagFeedbackRating } from "@/types/knowledge";
+
+const TRAINING_CLIENT_ID = "novex-training-web";
 
 const metrics = [
   { label: "完成率", value: "68%", detail: "本周提升 12%", tone: "teal" as const },
@@ -123,6 +129,13 @@ const fallbackEvalDataset: EvalDatasetResp = {
 };
 
 export function TrainingAppClient() {
+  const [authToken, setAuthToken] = useState<string | null>(() => getAuthToken());
+  const [loginUsername, setLoginUsername] = useState("admin");
+  const [loginPassword, setLoginPassword] = useState("admin123");
+  const [loginCaptcha, setLoginCaptcha] = useState("");
+  const [captcha, setCaptcha] = useState<ImageCaptchaResp | null>(null);
+  const [loggingIn, setLoggingIn] = useState(false);
+  const [loginStatus, setLoginStatus] = useState("");
   const [datasets, setDatasets] = useState<DatasetResp[]>([fallbackDataset]);
   const [selectedDatasetId, setSelectedDatasetId] = useState(fallbackDataset.id);
   const [evalDatasets, setEvalDatasets] = useState<EvalDatasetResp[]>([fallbackEvalDataset]);
@@ -146,6 +159,11 @@ export function TrainingAppClient() {
 
   useEffect(() => {
     let mounted = true;
+    if (!authToken) {
+      return () => {
+        mounted = false;
+      };
+    }
 
     listDatasets({ page: 1, size: 20 })
       .then((page) => {
@@ -167,10 +185,15 @@ export function TrainingAppClient() {
     return () => {
       mounted = false;
     };
-  }, []);
+  }, [authToken]);
 
   useEffect(() => {
     let mounted = true;
+    if (!authToken) {
+      return () => {
+        mounted = false;
+      };
+    }
 
     listEvalRuns({ page: 1, size: 5, datasetCode: "training_regression" })
       .then(async (page) => {
@@ -194,10 +217,15 @@ export function TrainingAppClient() {
     return () => {
       mounted = false;
     };
-  }, []);
+  }, [authToken]);
 
   useEffect(() => {
     let mounted = true;
+    if (!authToken) {
+      return () => {
+        mounted = false;
+      };
+    }
 
     listEvalDatasets({ page: 1, size: 20, code: "training_regression" })
       .then((page) => {
@@ -216,7 +244,32 @@ export function TrainingAppClient() {
     return () => {
       mounted = false;
     };
-  }, []);
+  }, [authToken]);
+
+  useEffect(() => {
+    let mounted = true;
+    if (authToken) {
+      return () => {
+        mounted = false;
+      };
+    }
+
+    getImageCaptcha()
+      .then((response) => {
+        if (mounted) {
+          setCaptcha(response);
+        }
+      })
+      .catch(() => {
+        if (mounted) {
+          setCaptcha({ isEnabled: false, uuid: "", img: "" });
+        }
+      });
+
+    return () => {
+      mounted = false;
+    };
+  }, [authToken]);
 
   const selectedDataset = useMemo(
     () => datasets.find((dataset) => dataset.id === selectedDatasetId) ?? fallbackDataset,
@@ -224,6 +277,112 @@ export function TrainingAppClient() {
   );
 
   const selectedEvalDataset = evalDatasets[0] ?? fallbackEvalDataset;
+
+  async function handleLogin(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const username = loginUsername.trim();
+    const password = loginPassword;
+    if (!username || !password || loggingIn) {
+      return;
+    }
+
+    setLoggingIn(true);
+    setLoginStatus("");
+    try {
+      const response = await accountLogin({
+        username,
+        password,
+        authType: "ACCOUNT",
+        clientId: TRAINING_CLIENT_ID,
+        ...(captcha?.isEnabled
+          ? {
+              captcha: loginCaptcha.trim(),
+              uuid: captcha.uuid
+            }
+          : {})
+      });
+      persistAuthToken(response.token);
+      setAuthToken(response.token);
+      setLoginPassword("");
+      setLoginCaptcha("");
+    } catch {
+      setLoginStatus("登录失败");
+    } finally {
+      setLoggingIn(false);
+    }
+  }
+
+  const loginPanel = (
+    <main className="min-h-screen bg-slate-100 text-slate-950">
+      <div className="mx-auto flex min-h-screen max-w-[1440px] items-center justify-center p-4">
+        <section className="w-full max-w-sm rounded-lg border border-slate-200 bg-white p-5 shadow-sm">
+          <div className="flex items-center gap-3">
+            <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-teal-700 text-white">
+              <LogIn aria-hidden="true" className="h-5 w-5" />
+            </div>
+            <div className="min-w-0">
+              <h1 className="text-lg font-semibold text-slate-950">培训工作台登录</h1>
+              <div className="mt-1 text-xs text-slate-500">Novex Training App</div>
+            </div>
+          </div>
+          <form className="mt-5 space-y-3" onSubmit={(event) => void handleLogin(event)}>
+            <label className="block text-sm font-medium text-slate-700">
+              账号
+              <input
+                aria-label="账号"
+                autoComplete="username"
+                className="mt-1 h-10 w-full rounded-lg border border-slate-200 px-3 text-sm outline-none focus:border-teal-500"
+                onChange={(event) => setLoginUsername(event.target.value)}
+                value={loginUsername}
+              />
+            </label>
+            <label className="block text-sm font-medium text-slate-700">
+              密码
+              <input
+                aria-label="密码"
+                autoComplete="current-password"
+                className="mt-1 h-10 w-full rounded-lg border border-slate-200 px-3 text-sm outline-none focus:border-teal-500"
+                onChange={(event) => setLoginPassword(event.target.value)}
+                type="password"
+                value={loginPassword}
+              />
+            </label>
+            {captcha?.isEnabled ? (
+              <div className="grid grid-cols-[minmax(0,1fr)_120px] gap-2">
+                <label className="block text-sm font-medium text-slate-700">
+                  验证码
+                  <input
+                    aria-label="验证码"
+                    autoComplete="off"
+                    className="mt-1 h-10 w-full rounded-lg border border-slate-200 px-3 text-sm outline-none focus:border-teal-500"
+                    onChange={(event) => setLoginCaptcha(event.target.value)}
+                    value={loginCaptcha}
+                  />
+                </label>
+                <img
+                  alt="验证码"
+                  className="mt-6 h-10 rounded-lg border border-slate-200 object-cover"
+                  src={captcha.img}
+                />
+              </div>
+            ) : null}
+            <button
+              className="inline-flex h-10 w-full items-center justify-center rounded-lg bg-teal-700 px-4 text-sm font-semibold text-white hover:bg-teal-800 disabled:bg-slate-300"
+              disabled={loggingIn}
+              type="submit"
+            >
+              登录
+            </button>
+            {loginStatus ? (
+              <div className="rounded-md bg-rose-50 px-3 py-2 text-sm font-medium text-rose-700">
+                {loginStatus}
+              </div>
+            ) : null}
+          </form>
+        </section>
+      </div>
+    </main>
+  );
 
   const citations = useMemo(() => {
     if (answer.traceId === 0) {
@@ -237,6 +396,10 @@ export function TrainingAppClient() {
       score: `trace ${answer.traceId}`
     }));
   }, [answer]);
+
+  if (!authToken) {
+    return loginPanel;
+  }
 
   async function handleAsk() {
     const trimmed = question.trim();
