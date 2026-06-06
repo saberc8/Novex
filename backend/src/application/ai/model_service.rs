@@ -16,6 +16,7 @@ use crate::{
 
 const MODEL_HEALTH_TIMEOUT: Duration = Duration::from_secs(20);
 const MODEL_CHAT_TIMEOUT: Duration = Duration::from_secs(60);
+const MODEL_RERANK_TIMEOUT: Duration = Duration::from_secs(30);
 const DEFAULT_MODEL_CHAT_TEMPERATURE: f64 = 0.2;
 const MAX_MODEL_CHAT_TEMPERATURE: f64 = 1.0;
 const DEFAULT_MODEL_CHAT_MAX_TOKENS: u32 = 1024;
@@ -125,6 +126,12 @@ pub struct ModelHealthCheckResult {
     pub message: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub detail: Option<Value>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ModelRerankScore {
+    pub index: usize,
+    pub score: f32,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -296,6 +303,53 @@ impl ModelRuntimeService {
 
     pub fn runtime_config() -> ModelRuntimeSummary {
         Self::runtime_config_summary(ModelRuntimeConfig::from_env())
+    }
+
+    pub fn parse_rerank_scores(body: &Value) -> Vec<ModelRerankScore> {
+        body.get("results")
+            .or_else(|| body.get("data"))
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(parse_rerank_score)
+            .collect()
+    }
+
+    pub async fn rerank_documents(
+        route: &ModelRuntimeRoute,
+        query: &str,
+        documents: &[String],
+    ) -> Result<Vec<ModelRerankScore>, AppError> {
+        if documents.is_empty() {
+            return Ok(Vec::new());
+        }
+        let client = reqwest::Client::builder()
+            .timeout(MODEL_RERANK_TIMEOUT)
+            .build()
+            .map_err(|err| AppError::Anyhow(err.into()))?;
+        let response = client
+            .post(route.endpoint())
+            .bearer_auth(route.api_key())
+            .json(&json!({
+                "model": route.model().unwrap_or_default(),
+                "query": query,
+                "documents": documents,
+            }))
+            .send()
+            .await
+            .map_err(|err| AppError::Anyhow(err.into()))?;
+        let status = response.status();
+        let body = response.json::<Value>().await.unwrap_or(Value::Null);
+        if !status.is_success() {
+            return Err(AppError::bad_request(format!(
+                "Rerank 模型调用失败: {status}"
+            )));
+        }
+        let scores = Self::parse_rerank_scores(&body);
+        if scores.is_empty() {
+            return Err(AppError::bad_request("Rerank 模型响应为空"));
+        }
+        Ok(scores)
     }
 
     pub async fn registry_summary(db: &PgPool) -> Result<ModelRegistrySummary, AppError> {
@@ -1144,6 +1198,41 @@ fn health_message(status: reqwest::StatusCode, ok: bool) -> String {
     }
 }
 
+fn parse_rerank_score(value: &Value) -> Option<ModelRerankScore> {
+    let index = value
+        .get("index")
+        .and_then(json_usize)
+        .or_else(|| value.get("document_index").and_then(json_usize))
+        .or_else(|| value.get("documentIndex").and_then(json_usize))?;
+    let score = value
+        .get("relevance_score")
+        .or_else(|| value.get("relevanceScore"))
+        .or_else(|| value.get("score"))
+        .and_then(json_f32)?;
+    if !score.is_finite() {
+        return None;
+    }
+    Some(ModelRerankScore { index, score })
+}
+
+fn json_usize(value: &Value) -> Option<usize> {
+    if let Some(value) = value.as_u64() {
+        return usize::try_from(value).ok();
+    }
+    value
+        .as_str()
+        .and_then(|text| text.trim().parse::<usize>().ok())
+}
+
+fn json_f32(value: &Value) -> Option<f32> {
+    if let Some(value) = value.as_f64() {
+        return Some(value as f32);
+    }
+    value
+        .as_str()
+        .and_then(|text| text.trim().parse::<f32>().ok())
+}
+
 fn sanitize_error_message(message: &str, route: &ModelRuntimeRoute) -> String {
     message.replace(route.api_key(), &mask_api_key(route.api_key()))
 }
@@ -1285,6 +1374,25 @@ mod tests {
         let debug = format!("{summary:?}");
         assert!(!debug.contains("LLM_API_KEY"));
         assert!(!debug.contains("env:"));
+    }
+
+    #[test]
+    fn rerank_response_parser_maps_dashscope_result_scores() {
+        let body = serde_json::json!({
+            "results": [
+                {"index": 2, "relevance_score": 0.91},
+                {"index": 0, "score": 0.72}
+            ],
+            "usage": {"total_tokens": 18}
+        });
+
+        let scores = ModelRuntimeService::parse_rerank_scores(&body);
+
+        assert_eq!(scores.len(), 2);
+        assert_eq!(scores[0].index, 2);
+        assert!((scores[0].score - 0.91).abs() < f32::EPSILON);
+        assert_eq!(scores[1].index, 0);
+        assert!((scores[1].score - 0.72).abs() < f32::EPSILON);
     }
 
     #[test]

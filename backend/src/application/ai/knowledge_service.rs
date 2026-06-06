@@ -13,6 +13,7 @@ use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 
 use crate::{
+    application::ai::model_service::{ModelRerankScore, ModelRuntimeService},
     application::system::{
         ensure_max_chars, file_service::FileResp, format_datetime, format_optional_datetime,
     },
@@ -49,6 +50,8 @@ const PARSER_JOB_STATUS_FAILED: i16 = 4;
 const CHUNK_EMBEDDING_STATUS_INDEXED: i16 = 4;
 const DEFAULT_RAG_LIMIT: usize = 5;
 const MAX_RAG_LIMIT: usize = 10;
+const RERANK_CANDIDATE_MULTIPLIER: usize = 4;
+const MAX_RERANK_CANDIDATES: usize = 30;
 const MAX_LOCAL_RETRIEVAL_CHUNKS: i64 = 500;
 const LOCAL_EMBEDDING_ROUTE: &str = "local-keyword";
 const LOCAL_RERANK_ROUTE: &str = "none";
@@ -856,7 +859,9 @@ impl KnowledgeService {
             .iter()
             .map(|chunk| chunk.chunk.clone())
             .collect::<Vec<_>>();
-        let hits = keyword_retrieve(&command.question, &rag_chunks, command.limit);
+        let candidate_limit = rerank_candidate_limit(command.limit);
+        let candidate_hits = keyword_retrieve(&command.question, &rag_chunks, candidate_limit);
+        let hits = rerank_dataset_hits(&command.question, candidate_hits, command.limit).await;
         let indexed_hits = indexed_retrieval_hits(&hits, &indexed_chunks);
         let answer = build_extractive_answer(&command.question, &hits);
         let trace_id = next_id();
@@ -2162,6 +2167,90 @@ fn indexed_retrieval_hits(
         .collect()
 }
 
+async fn rerank_dataset_hits(
+    question: &str,
+    hits: Vec<RetrievalHit>,
+    limit: usize,
+) -> Vec<RetrievalHit> {
+    if hits.is_empty() || limit == 0 {
+        return Vec::new();
+    }
+    let config = ModelRuntimeConfig::from_env();
+    let Some(route) = config.route(ModelRuntimeTarget::Reranker) else {
+        return rerank_retrieval_hits(&hits, &[], limit);
+    };
+    let documents = hits
+        .iter()
+        .map(|hit| rerank_document_text(hit))
+        .collect::<Vec<_>>();
+
+    match ModelRuntimeService::rerank_documents(route, question, &documents).await {
+        Ok(scores) if !scores.is_empty() => rerank_retrieval_hits(&hits, &scores, limit),
+        _ => rerank_retrieval_hits(&hits, &[], limit),
+    }
+}
+
+fn rerank_retrieval_hits(
+    hits: &[RetrievalHit],
+    scores: &[ModelRerankScore],
+    limit: usize,
+) -> Vec<RetrievalHit> {
+    if limit == 0 {
+        return Vec::new();
+    }
+    if scores.is_empty() {
+        return rank_retrieval_hits(hits.iter().take(limit).cloned().collect());
+    }
+
+    let mut used = HashSet::new();
+    let mut sorted_scores = scores.to_vec();
+    sorted_scores.sort_by(|left, right| {
+        right
+            .score
+            .partial_cmp(&left.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| left.index.cmp(&right.index))
+    });
+    let mut ordered = sorted_scores
+        .into_iter()
+        .filter_map(|score| {
+            if !used.insert(score.index) {
+                return None;
+            }
+            let mut hit = hits.get(score.index)?.clone();
+            hit.score = score.score;
+            Some(hit)
+        })
+        .collect::<Vec<_>>();
+
+    for (index, hit) in hits.iter().enumerate() {
+        if used.insert(index) {
+            ordered.push(hit.clone());
+        }
+    }
+
+    ordered.truncate(limit);
+    rank_retrieval_hits(ordered)
+}
+
+fn rank_retrieval_hits(mut hits: Vec<RetrievalHit>) -> Vec<RetrievalHit> {
+    for (index, hit) in hits.iter_mut().enumerate() {
+        hit.rank = index + 1;
+    }
+    hits
+}
+
+fn rerank_document_text(hit: &RetrievalHit) -> String {
+    non_empty_parser_string(&hit.chunk.semantic_search_text)
+        .unwrap_or_else(|| hit.chunk.text.clone())
+}
+
+fn rerank_candidate_limit(limit: usize) -> usize {
+    limit
+        .saturating_mul(RERANK_CANDIDATE_MULTIPLIER)
+        .clamp(limit, MAX_RERANK_CANDIDATES)
+}
+
 fn rag_trace_record(
     trace_id: i64,
     user_id: i64,
@@ -3257,6 +3346,59 @@ mod tests {
         assert_eq!(routes.embedding_model_route, LOCAL_EMBEDDING_ROUTE);
         assert_eq!(routes.rerank_model_route, LOCAL_RERANK_ROUTE);
         assert_eq!(routes.answer_model_route, LOCAL_ANSWER_ROUTE);
+    }
+
+    #[test]
+    fn rag_rerank_scores_reorder_candidates_and_keep_unscored_tail() {
+        fn hit(chunk_uid: &str, chunk_index: usize, score: f32) -> RetrievalHit {
+            let citation = CitationRef {
+                document_id: "42".to_owned(),
+                chunk_id: chunk_uid.to_owned(),
+                page_no: None,
+                section_path: vec![],
+            };
+            RetrievalHit {
+                rank: chunk_index + 1,
+                score,
+                citation: citation.clone(),
+                chunk: RagDocumentChunk {
+                    document_id: "42".to_owned(),
+                    chunk_id: chunk_uid.to_owned(),
+                    chunk_index,
+                    text: format!("chunk {chunk_index}"),
+                    semantic_search_text: format!("chunk {chunk_index}"),
+                    token_count: 2,
+                    citation,
+                    metadata: ChunkMetadata::default(),
+                },
+            }
+        }
+        let hits = vec![
+            hit("42:0", 0, 0.20),
+            hit("42:1", 1, 0.18),
+            hit("42:2", 2, 0.15),
+        ];
+        let scores = vec![
+            crate::application::ai::model_service::ModelRerankScore {
+                index: 2,
+                score: 0.91,
+            },
+            crate::application::ai::model_service::ModelRerankScore {
+                index: 0,
+                score: 0.72,
+            },
+        ];
+
+        let reranked = rerank_retrieval_hits(&hits, &scores, 3);
+
+        assert_eq!(reranked[0].chunk.chunk_id, "42:2");
+        assert_eq!(reranked[0].rank, 1);
+        assert!((reranked[0].score - 0.91).abs() < f32::EPSILON);
+        assert_eq!(reranked[1].chunk.chunk_id, "42:0");
+        assert_eq!(reranked[1].rank, 2);
+        assert_eq!(reranked[2].chunk.chunk_id, "42:1");
+        assert_eq!(reranked[2].rank, 3);
+        assert!((reranked[2].score - 0.18).abs() < f32::EPSILON);
     }
 
     #[test]
