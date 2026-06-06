@@ -8,6 +8,7 @@ import {
   listChatFlowSessions,
   sendChatFlowMessage
 } from "@/api/chat-flow";
+import { accountLogin, getImageCaptcha } from "@/api/auth";
 import {
   createDataset,
   getParseJob,
@@ -25,6 +26,11 @@ vi.mock("@/api/chat-flow", () => ({
   sendChatFlowMessage: vi.fn()
 }));
 
+vi.mock("@/api/auth", () => ({
+  accountLogin: vi.fn(),
+  getImageCaptcha: vi.fn()
+}));
+
 vi.mock("@/api/knowledge", () => ({
   createDataset: vi.fn(),
   getParseJob: vi.fn(),
@@ -33,6 +39,8 @@ vi.mock("@/api/knowledge", () => ({
   uploadKnowledgeFile: vi.fn()
 }));
 
+const accountLoginMock = vi.mocked(accountLogin);
+const getImageCaptchaMock = vi.mocked(getImageCaptcha);
 const createChatFlowSessionMock = vi.mocked(createChatFlowSession);
 const listChatFlowMessagesMock = vi.mocked(listChatFlowMessages);
 const listChatFlowSessionsMock = vi.mocked(listChatFlowSessions);
@@ -141,6 +149,17 @@ function parserJob(overrides: Partial<ParserJobResp> = {}): ParserJobResp {
 describe("Chat web page", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    window.localStorage.clear();
+    window.localStorage.setItem("novex_token", "token-1");
+    getImageCaptchaMock.mockResolvedValue({
+      isEnabled: false,
+      uuid: "",
+      img: ""
+    });
+    accountLoginMock.mockResolvedValue({
+      token: "token-2",
+      expire: "2099-01-01T00:00:00Z"
+    });
     listDatasetsMock.mockResolvedValue({
       list: [dataset()],
       total: 1
@@ -205,6 +224,26 @@ describe("Chat web page", () => {
     await waitFor(() => expect(listDatasetsMock).toHaveBeenCalledWith({ page: 1, size: 50 }));
     expect(await screen.findByText("Machine Learning Tools for Environmental Microplastic Analysis")).toBeTruthy();
     expect(await screen.findByText("2026年1月30日 · 7 个来源")).toBeTruthy();
+  });
+
+  it("requires login before loading notebooks and stores the token", async () => {
+    window.localStorage.clear();
+    render(<Page />);
+
+    expect(screen.getByRole("heading", { name: "NotebookLM 登录", level: 1 })).toBeTruthy();
+    expect(await screen.findByRole("button", { name: "登录" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "登录" }));
+
+    await waitFor(() =>
+      expect(accountLoginMock).toHaveBeenCalledWith({
+        username: "admin",
+        password: "admin123",
+        authType: "ACCOUNT",
+        clientId: "novex-chat-web"
+      })
+    );
+    expect(window.localStorage.getItem("novex_token")).toBe("token-2");
+    await waitFor(() => expect(listDatasetsMock).toHaveBeenCalledWith({ page: 1, size: 50 }));
   });
 
   it("uses shared chat template metadata", () => {

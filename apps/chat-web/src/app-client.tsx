@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { type FormEvent, useCallback, useEffect, useMemo, useState } from "react";
 import {
   ArrowRight,
   Bot,
@@ -20,6 +20,7 @@ import {
   ThumbsUp,
   Upload
 } from "lucide-react";
+import { accountLogin, getImageCaptcha } from "@/api/auth";
 import {
   createChatFlowSession,
   listChatFlowMessages,
@@ -33,9 +34,12 @@ import {
   submitRagFeedback,
   uploadKnowledgeFile
 } from "@/api/knowledge";
+import { getAuthToken, setAuthToken as persistAuthToken } from "@/lib/auth";
 import type { ChatFlowMessageResp, ChatFlowSessionResp } from "@/types/chat-flow";
+import type { ImageCaptchaResp } from "@/types/auth";
 import type { CitationResp, DatasetResp, ParserJobResp, RagFeedbackRating } from "@/types/knowledge";
 
+const CHAT_CLIENT_ID = "novex-chat-web";
 const notebookColors = ["bg-emerald-50", "bg-indigo-50", "bg-stone-100", "bg-rose-50", "bg-cyan-50"];
 const notebookIcons = ["🔬", "🍂", "🐫", "⚙️", "🌊", "📁", "⚠️"];
 const studioItems = [
@@ -50,6 +54,13 @@ const studioItems = [
 ];
 
 export function ChatAppClient() {
+  const [authToken, setAuthToken] = useState<string | null>(() => getAuthToken());
+  const [loginUsername, setLoginUsername] = useState("admin");
+  const [loginPassword, setLoginPassword] = useState("admin123");
+  const [loginCaptcha, setLoginCaptcha] = useState("");
+  const [captcha, setCaptcha] = useState<ImageCaptchaResp | null>(null);
+  const [loggingIn, setLoggingIn] = useState(false);
+  const [loginStatus, setLoginStatus] = useState("");
   const [datasets, setDatasets] = useState<DatasetResp[]>([]);
   const [sessions, setSessions] = useState<ChatFlowSessionResp[]>([]);
   const [activeDatasetId, setActiveDatasetId] = useState<number | null>(null);
@@ -63,6 +74,7 @@ export function ChatAppClient() {
   const [sending, setSending] = useState(false);
   const [feedbackSubmitting, setFeedbackSubmitting] = useState(false);
   const [feedbackStatus, setFeedbackStatus] = useState("");
+  const [actionStatus, setActionStatus] = useState("");
 
   const refreshDatasets = useCallback(async () => {
     const page = await listDatasets({ page: 1, size: 50 });
@@ -77,9 +89,37 @@ export function ChatAppClient() {
   }, []);
 
   useEffect(() => {
+    if (!authToken) {
+      return;
+    }
     void refreshDatasets().catch(() => setDatasets([]));
     void refreshSessions().catch(() => setSessions([]));
-  }, [refreshDatasets, refreshSessions]);
+  }, [authToken, refreshDatasets, refreshSessions]);
+
+  useEffect(() => {
+    let mounted = true;
+    if (authToken) {
+      return () => {
+        mounted = false;
+      };
+    }
+
+    getImageCaptcha()
+      .then((response) => {
+        if (mounted) {
+          setCaptcha(response);
+        }
+      })
+      .catch(() => {
+        if (mounted) {
+          setCaptcha({ isEnabled: false, uuid: "", img: "" });
+        }
+      });
+
+    return () => {
+      mounted = false;
+    };
+  }, [authToken]);
 
   const activeDataset = useMemo(
     () => datasets.find((dataset) => dataset.id === activeDatasetId) ?? null,
@@ -101,6 +141,7 @@ export function ChatAppClient() {
       return;
     }
     setCreating(true);
+    setActionStatus("");
     try {
       const datasetId = await createDataset({
         name: "未命名的笔记本",
@@ -113,8 +154,44 @@ export function ChatAppClient() {
       if (created) {
         openNotebook(created, sessions);
       }
+    } catch (error) {
+      setActionStatus(error instanceof Error ? error.message : "创建笔记本失败");
     } finally {
       setCreating(false);
+    }
+  }
+
+  async function handleLogin(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const username = loginUsername.trim();
+    const password = loginPassword;
+    if (!username || !password || loggingIn) {
+      return;
+    }
+
+    setLoggingIn(true);
+    setLoginStatus("");
+    try {
+      const response = await accountLogin({
+        username,
+        password,
+        authType: "ACCOUNT",
+        clientId: CHAT_CLIENT_ID,
+        ...(captcha?.isEnabled
+          ? {
+              captcha: loginCaptcha.trim(),
+              uuid: captcha.uuid
+            }
+          : {})
+      });
+      persistAuthToken(response.token);
+      setAuthToken(response.token);
+      setLoginPassword("");
+      setLoginCaptcha("");
+    } catch (error) {
+      setLoginStatus(error instanceof Error ? error.message : "登录失败");
+    } finally {
+      setLoggingIn(false);
     }
   }
 
@@ -215,6 +292,23 @@ export function ChatAppClient() {
     }
   }
 
+  if (!authToken) {
+    return (
+      <LoginPanel
+        captcha={captcha}
+        loginCaptcha={loginCaptcha}
+        loginPassword={loginPassword}
+        loginStatus={loginStatus}
+        loginUsername={loginUsername}
+        loggingIn={loggingIn}
+        onCaptchaChange={setLoginCaptcha}
+        onLogin={handleLogin}
+        onPasswordChange={setLoginPassword}
+        onUsernameChange={setLoginUsername}
+      />
+    );
+  }
+
   if (!notebookOpen || !activeDataset) {
     return (
       <main className="min-h-screen bg-white text-neutral-950">
@@ -232,6 +326,11 @@ export function ChatAppClient() {
               </span>
               <span className="mt-5 text-2xl font-medium">新建笔记本</span>
             </button>
+            {actionStatus ? (
+              <div className="rounded-lg border border-rose-200 bg-rose-50 p-4 text-sm text-rose-700">
+                {actionStatus}
+              </div>
+            ) : null}
 
             {datasets.map((dataset, index) => (
               <button
@@ -415,6 +514,97 @@ function TopBar({ title, onCreateNotebook }: { title: string; onCreateNotebook: 
         </button>
       </div>
     </header>
+  );
+}
+
+function LoginPanel({
+  captcha,
+  loginCaptcha,
+  loginPassword,
+  loginStatus,
+  loginUsername,
+  loggingIn,
+  onCaptchaChange,
+  onLogin,
+  onPasswordChange,
+  onUsernameChange
+}: {
+  captcha: ImageCaptchaResp | null;
+  loginCaptcha: string;
+  loginPassword: string;
+  loginStatus: string;
+  loginUsername: string;
+  loggingIn: boolean;
+  onCaptchaChange: (value: string) => void;
+  onLogin: (event: FormEvent<HTMLFormElement>) => void;
+  onPasswordChange: (value: string) => void;
+  onUsernameChange: (value: string) => void;
+}) {
+  return (
+    <main className="min-h-screen bg-white text-neutral-950">
+      <TopBar title="NotebookLM" onCreateNotebook={() => undefined} />
+      <div className="mx-auto flex min-h-[calc(100vh-88px)] max-w-[1440px] items-center justify-center px-6 pb-12">
+        <form
+          className="w-full max-w-sm rounded-lg border border-slate-200 bg-white p-6 shadow-sm"
+          onSubmit={onLogin}
+        >
+          <div className="flex items-center gap-3">
+            <div className="flex h-12 w-12 items-center justify-center rounded-full bg-black text-white">
+              <LayoutGrid aria-hidden="true" className="h-6 w-6" />
+            </div>
+            <div className="min-w-0">
+              <h1 className="text-xl font-semibold">NotebookLM 登录</h1>
+              <div className="mt-1 text-sm text-neutral-500">Novex Chat Workspace</div>
+            </div>
+          </div>
+
+          <label className="mt-6 block text-sm font-medium text-neutral-700">
+            账号
+            <input
+              className="mt-2 h-11 w-full rounded-lg border border-slate-200 px-3 text-sm outline-none focus:border-neutral-500"
+              onChange={(event) => onUsernameChange(event.target.value)}
+              value={loginUsername}
+            />
+          </label>
+          <label className="mt-4 block text-sm font-medium text-neutral-700">
+            密码
+            <input
+              className="mt-2 h-11 w-full rounded-lg border border-slate-200 px-3 text-sm outline-none focus:border-neutral-500"
+              onChange={(event) => onPasswordChange(event.target.value)}
+              type="password"
+              value={loginPassword}
+            />
+          </label>
+
+          {captcha?.isEnabled ? (
+            <div className="mt-4 grid grid-cols-[1fr_128px] gap-3">
+              <label className="block text-sm font-medium text-neutral-700">
+                验证码
+                <input
+                  className="mt-2 h-11 w-full rounded-lg border border-slate-200 px-3 text-sm outline-none focus:border-neutral-500"
+                  onChange={(event) => onCaptchaChange(event.target.value)}
+                  value={loginCaptcha}
+                />
+              </label>
+              <div className="mt-7 flex h-11 items-center justify-center overflow-hidden rounded-lg border border-slate-200 bg-slate-50">
+                {captcha.img ? <img alt="验证码" className="h-full w-full object-cover" src={captcha.img} /> : null}
+              </div>
+            </div>
+          ) : null}
+
+          <button
+            className="mt-6 h-11 w-full rounded-full bg-black text-sm font-semibold text-white disabled:opacity-50"
+            disabled={loggingIn}
+            type="submit"
+          >
+            登录
+          </button>
+          {loginStatus ? (
+            <div className="mt-3 rounded-lg bg-rose-50 px-3 py-2 text-sm text-rose-700">{loginStatus}</div>
+          ) : null}
+        </form>
+      </div>
+    </main>
   );
 }
 
