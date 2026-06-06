@@ -86,7 +86,11 @@ async fn list_datasets(
     require_permission(&current_user, DATASET_LIST_PERMISSION)?;
     let service = KnowledgeService::new(state.db);
 
-    Ok(Json(ApiResponse::ok(service.list_datasets(query).await?)))
+    Ok(Json(ApiResponse::ok(
+        service
+            .list_datasets_for_tenant(current_user.tenant_id, query)
+            .await?,
+    )))
 }
 
 async fn create_dataset(
@@ -98,7 +102,9 @@ async fn create_dataset(
     let service = KnowledgeService::new(state.db);
 
     Ok(Json(ApiResponse::ok(
-        service.create_dataset(current_user.id, command).await?,
+        service
+            .create_dataset_for_tenant(current_user.tenant_id, current_user.id, command)
+            .await?,
     )))
 }
 
@@ -112,7 +118,9 @@ async fn list_documents(
     let service = KnowledgeService::new(state.db);
 
     Ok(Json(ApiResponse::ok(
-        service.list_documents(dataset_id, query).await?,
+        service
+            .list_documents_for_tenant(current_user.tenant_id, dataset_id, query)
+            .await?,
     )))
 }
 
@@ -127,7 +135,12 @@ async fn upload_text_document(
 
     Ok(Json(ApiResponse::ok(
         service
-            .upload_text_document(current_user.id, dataset_id, command)
+            .upload_text_document_for_tenant(
+                current_user.tenant_id,
+                current_user.id,
+                dataset_id,
+                command,
+            )
             .await?,
     )))
 }
@@ -143,7 +156,12 @@ async fn upload_parsed_document(
 
     Ok(Json(ApiResponse::ok(
         service
-            .upload_parsed_document(current_user.id, dataset_id, command)
+            .upload_parsed_document_for_tenant(
+                current_user.tenant_id,
+                current_user.id,
+                dataset_id,
+                command,
+            )
             .await?,
     )))
 }
@@ -161,7 +179,12 @@ async fn upload_file_document(
     let parse_command = parse_job_command_from_uploaded_file(&file)?;
     let knowledge_service = KnowledgeService::new(state.db);
     let parse_job = knowledge_service
-        .create_parse_job(current_user.id, dataset_id, parse_command)
+        .create_parse_job_for_tenant(
+            current_user.tenant_id,
+            current_user.id,
+            dataset_id,
+            parse_command,
+        )
         .await?;
 
     Ok(Json(ApiResponse::ok(KnowledgeFileUploadResp {
@@ -181,7 +204,12 @@ async fn create_parse_job(
 
     Ok(Json(ApiResponse::ok(
         service
-            .create_parse_job(current_user.id, dataset_id, command)
+            .create_parse_job_for_tenant(
+                current_user.tenant_id,
+                current_user.id,
+                dataset_id,
+                command,
+            )
             .await?,
     )))
 }
@@ -195,7 +223,9 @@ async fn get_parse_job(
     let service = KnowledgeService::new(state.db);
 
     Ok(Json(ApiResponse::ok(
-        service.get_parse_job(dataset_id, job_id).await?,
+        service
+            .get_parse_job_for_tenant(current_user.tenant_id, dataset_id, job_id)
+            .await?,
     )))
 }
 
@@ -210,7 +240,13 @@ async fn update_parse_job_status(
 
     Ok(Json(ApiResponse::ok(
         service
-            .update_parse_job_status(current_user.id, dataset_id, job_id, command)
+            .update_parse_job_status_for_tenant(
+                current_user.tenant_id,
+                current_user.id,
+                dataset_id,
+                job_id,
+                command,
+            )
             .await?,
     )))
 }
@@ -226,7 +262,7 @@ async fn ask_dataset_handler(
 
     Ok(Json(ApiResponse::ok(
         service
-            .ask_dataset(current_user.id, dataset_id, command)
+            .ask_dataset_for_tenant(current_user.tenant_id, current_user.id, dataset_id, command)
             .await?,
     )))
 }
@@ -241,7 +277,7 @@ async fn submit_rag_feedback(
 
     Ok(Json(ApiResponse::ok(
         service
-            .submit_rag_feedback(current_user.id, command)
+            .submit_rag_feedback_for_tenant(current_user.tenant_id, current_user.id, command)
             .await?,
     )))
 }
@@ -286,6 +322,7 @@ mod tests {
     fn user_with_permissions(permissions: Vec<&str>) -> CurrentUser {
         CurrentUser {
             id: 1,
+            tenant_id: 1,
             username: "tester".to_owned(),
             dept_id: 1,
             roles: vec![RoleContext {
@@ -311,6 +348,25 @@ mod tests {
     #[test]
     fn rag_ask_permission_matches_seeded_menu_permission() {
         assert_eq!(RAG_ASK_PERMISSION, "ai:knowledge:ask");
+    }
+
+    #[test]
+    fn knowledge_handlers_pass_current_user_tenant_to_service() {
+        let source = include_str!("knowledge.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+
+        for needle in [
+            ".list_datasets_for_tenant(",
+            ".create_dataset_for_tenant(",
+            ".list_documents_for_tenant(",
+            ".upload_text_document_for_tenant(",
+            ".ask_dataset_for_tenant(",
+        ] {
+            assert!(source.contains(needle), "{needle} missing from handler");
+        }
+        assert!(source.matches("current_user.tenant_id").count() >= 10);
     }
 
     #[tokio::test]

@@ -7,6 +7,8 @@ use crate::{
     shared::error::AppError,
 };
 
+const DEFAULT_TENANT_ID: i64 = 1;
+
 #[derive(Debug, Clone)]
 pub struct UserRepository {
     db: PgPool,
@@ -172,14 +174,36 @@ ORDER BY m.permission ASC;
 
         let roles = self.roles_by_user_id(user_id).await?;
         let permissions = self.permissions_for_roles(user_id, &roles).await?;
+        let tenant_id = self.active_tenant_id_by_user_id(user_id).await?;
 
         Ok(Some(CurrentUser {
             id: user.id,
+            tenant_id,
             username: user.username,
             dept_id: user.dept_id,
             roles,
             permissions,
         }))
+    }
+
+    pub async fn active_tenant_id_by_user_id(&self, user_id: i64) -> Result<i64, AppError> {
+        let tenant_id = sqlx::query_scalar::<_, i64>(
+            r#"
+SELECT tu.tenant_id
+FROM sys_tenant_user AS tu
+JOIN sys_tenant AS t ON t.id = tu.tenant_id
+WHERE tu.user_id = $1
+  AND tu.status = 1
+  AND t.status = 1
+ORDER BY tu.joined_at ASC, tu.tenant_id ASC
+LIMIT 1;
+"#,
+        )
+        .bind(user_id)
+        .fetch_optional(&self.db)
+        .await?;
+
+        Ok(tenant_id.unwrap_or(DEFAULT_TENANT_ID))
     }
 
     pub async fn permissions_for_roles(
@@ -256,5 +280,19 @@ mod tests {
             .unwrap();
 
         assert_eq!(permissions, vec!["*:*:*"]);
+    }
+
+    #[test]
+    fn current_user_carries_tenant_context() {
+        let user = CurrentUser {
+            id: 1,
+            tenant_id: 7,
+            username: "tenant-user".to_owned(),
+            dept_id: 1,
+            roles: vec![],
+            permissions: vec![],
+        };
+
+        assert_eq!(user.tenant_id, 7);
     }
 }

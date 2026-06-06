@@ -21,6 +21,7 @@ mod tests {
     fn user_with_permissions(permissions: Vec<String>) -> CurrentUser {
         CurrentUser {
             id: 1,
+            tenant_id: 1,
             username: "tester".to_string(),
             dept_id: 1,
             roles: vec![RoleContext {

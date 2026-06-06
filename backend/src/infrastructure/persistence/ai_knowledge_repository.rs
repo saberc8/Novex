@@ -1,8 +1,13 @@
 use chrono::NaiveDateTime;
-use serde_json::Value;
-use sqlx::{FromRow, PgPool, Postgres, QueryBuilder};
+use serde_json::{json, Value};
+use sqlx::{FromRow, PgPool, Postgres, QueryBuilder, Transaction};
 
-use crate::shared::error::AppError;
+use crate::shared::{error::AppError, id::next_id};
+
+const DEFAULT_VECTOR_BACKEND: &str = "milvus";
+const DEFAULT_EMBEDDING_MODEL_ROUTE: &str = "local-keyword";
+const DEFAULT_VECTOR_DIMENSION: i32 = 64;
+const VECTOR_COLLECTION_STATUS_READY: i16 = 1;
 
 #[derive(Debug, Clone)]
 pub struct AiKnowledgeRepository {
@@ -288,6 +293,7 @@ impl AiKnowledgeRepository {
     }
 
     pub async fn create_dataset(&self, record: &DatasetSaveRecord<'_>) -> Result<(), AppError> {
+        let mut tx = self.db.begin().await?;
         sqlx::query(
             r#"
 INSERT INTO ai_dataset (
@@ -307,8 +313,10 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10);
         .bind(record.retrieval_mode)
         .bind(record.user_id)
         .bind(record.now)
-        .execute(&self.db)
+        .execute(&mut *tx)
         .await?;
+        insert_dataset_vector_collection(&mut tx, record).await?;
+        tx.commit().await?;
         Ok(())
     }
 
@@ -358,6 +366,15 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10);
         chunks: &[ChunkSaveRecord],
     ) -> Result<(), AppError> {
         let mut tx = self.db.begin().await?;
+        ensure_dataset_vector_collection(
+            &mut tx,
+            document.tenant_id,
+            document.dataset_id,
+            None,
+            document.user_id,
+            document.now,
+        )
+        .await?;
         sqlx::query(
             r#"
 INSERT INTO ai_document (
@@ -472,6 +489,7 @@ VALUES (
             .bind(chunk.now)
             .execute(&mut *tx)
             .await?;
+            insert_chunk_embedding(&mut tx, chunk).await?;
         }
 
         let result = sqlx::query(
@@ -577,6 +595,15 @@ WHERE tenant_id = $3 AND id = $4;
         chunks: &[ChunkSaveRecord],
     ) -> Result<(), AppError> {
         let mut tx = self.db.begin().await?;
+        ensure_dataset_vector_collection(
+            &mut tx,
+            document.tenant_id,
+            document.dataset_id,
+            None,
+            document.user_id,
+            document.now,
+        )
+        .await?;
         let result = sqlx::query(
             r#"
 UPDATE ai_document
@@ -695,6 +722,7 @@ VALUES (
             .bind(chunk.now)
             .execute(&mut *tx)
             .await?;
+            insert_chunk_embedding(&mut tx, chunk).await?;
         }
 
         let result = sqlx::query(
@@ -1053,5 +1081,239 @@ fn ensure_affected(rows_affected: u64) -> Result<(), AppError> {
         Err(AppError::NotFound)
     } else {
         Ok(())
+    }
+}
+
+async fn insert_dataset_vector_collection(
+    tx: &mut Transaction<'_, Postgres>,
+    record: &DatasetSaveRecord<'_>,
+) -> Result<(), AppError> {
+    ensure_dataset_vector_collection(
+        tx,
+        record.tenant_id,
+        record.id,
+        Some(record.name),
+        record.user_id,
+        record.now,
+    )
+    .await
+}
+
+async fn ensure_dataset_vector_collection(
+    tx: &mut Transaction<'_, Postgres>,
+    tenant_id: i64,
+    dataset_id: i64,
+    dataset_name: Option<&str>,
+    user_id: i64,
+    now: NaiveDateTime,
+) -> Result<(), AppError> {
+    let collection_code = dataset_vector_collection_code(tenant_id, dataset_id);
+    let collection_name = dataset_name
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(|name| format!("{name} Vector Collection"))
+        .unwrap_or_else(|| format!("Dataset {dataset_id} Vector Collection"));
+    let provider_collection = provider_vector_collection_name(tenant_id, dataset_id);
+
+    sqlx::query(
+        r#"
+INSERT INTO ai_vector_collection (
+    id, tenant_id, dataset_id, code, name, vector_backend, provider_collection,
+    embedding_model_route, dimension, metric_type, status, index_policy, filter_policy,
+    metadata, create_user, create_time
+)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'cosine', $10, $11, $12, $13, $14, $15)
+ON CONFLICT (tenant_id, dataset_id) DO NOTHING;
+"#,
+    )
+    .bind(next_id())
+    .bind(tenant_id)
+    .bind(dataset_id)
+    .bind(&collection_code)
+    .bind(&collection_name)
+    .bind(DEFAULT_VECTOR_BACKEND)
+    .bind(&provider_collection)
+    .bind(DEFAULT_EMBEDDING_MODEL_ROUTE)
+    .bind(DEFAULT_VECTOR_DIMENSION)
+    .bind(VECTOR_COLLECTION_STATUS_READY)
+    .bind(json!({
+        "kind": "local-poc",
+        "metricType": "cosine",
+        "dimension": DEFAULT_VECTOR_DIMENSION,
+    }))
+    .bind(json!({
+        "tenantId": tenant_id,
+        "datasetId": dataset_id,
+    }))
+    .bind(json!({
+        "source": "novex",
+        "contract": "m1-vector-persistence",
+    }))
+    .bind(user_id)
+    .bind(now)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
+async fn insert_chunk_embedding(
+    tx: &mut Transaction<'_, Postgres>,
+    chunk: &ChunkSaveRecord,
+) -> Result<(), AppError> {
+    let Some(vector) = chunk_embedding_vector(chunk) else {
+        return Ok(());
+    };
+    let embedding_model_route = chunk
+        .embedding_model
+        .as_deref()
+        .unwrap_or(DEFAULT_EMBEDDING_MODEL_ROUTE);
+    let embedding_ref = chunk
+        .embedding_ref
+        .as_deref()
+        .unwrap_or_else(|| chunk_embedding_ref(&chunk.chunk_uid));
+    let dimension = chunk_embedding_dimension(&vector);
+    let embedding_metadata = json!({
+        "chunkUid": chunk.chunk_uid,
+        "chunkIndex": chunk.chunk_index,
+        "source": "ai_document_chunk.metadata.embedding",
+        "embedding": chunk.metadata.get("embedding").cloned().unwrap_or_else(|| json!({})),
+    });
+
+    sqlx::query(
+        r#"
+INSERT INTO ai_embedding (
+    id, tenant_id, dataset_id, document_id, chunk_id, chunk_uid, collection_id,
+    collection_code, embedding_ref, embedding_model_route, embedding_status, dimension,
+    vector, content_hash, metadata, create_user, create_time
+)
+SELECT
+    $1, $2, $3, $4, $5, $6, c.id, c.code, $7, $8, $9, $10, $11, $12, $13, $14, $15
+FROM ai_vector_collection AS c
+WHERE c.tenant_id = $2 AND c.dataset_id = $3
+ON CONFLICT (tenant_id, chunk_id, embedding_model_route) DO UPDATE
+SET collection_id = EXCLUDED.collection_id,
+    collection_code = EXCLUDED.collection_code,
+    embedding_ref = EXCLUDED.embedding_ref,
+    embedding_status = EXCLUDED.embedding_status,
+    dimension = EXCLUDED.dimension,
+    vector = EXCLUDED.vector,
+    metadata = EXCLUDED.metadata,
+    update_user = EXCLUDED.create_user,
+    update_time = EXCLUDED.create_time;
+"#,
+    )
+    .bind(next_id())
+    .bind(chunk.tenant_id)
+    .bind(chunk.dataset_id)
+    .bind(chunk.document_id)
+    .bind(chunk.id)
+    .bind(&chunk.chunk_uid)
+    .bind(embedding_ref)
+    .bind(embedding_model_route)
+    .bind(chunk.embedding_status)
+    .bind(dimension)
+    .bind(&vector)
+    .bind(chunk_content_hash(chunk))
+    .bind(&embedding_metadata)
+    .bind(chunk.user_id)
+    .bind(chunk.now)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
+fn dataset_vector_collection_code(tenant_id: i64, dataset_id: i64) -> String {
+    format!("tenant-{tenant_id}-dataset-{dataset_id}-default")
+}
+
+fn provider_vector_collection_name(tenant_id: i64, dataset_id: i64) -> String {
+    format!("novex_t{tenant_id}_dataset_{dataset_id}")
+}
+
+fn chunk_embedding_ref(chunk_uid: &str) -> &str {
+    if chunk_uid.is_empty() {
+        "postgres-jsonb:unknown"
+    } else {
+        chunk_uid
+    }
+}
+
+fn chunk_embedding_vector(chunk: &ChunkSaveRecord) -> Option<Value> {
+    let vector = chunk
+        .metadata
+        .get("embedding")
+        .and_then(|embedding| embedding.get("vector"))?;
+    vector.as_array().filter(|items| !items.is_empty())?;
+    Some(vector.clone())
+}
+
+fn chunk_embedding_dimension(vector: &Value) -> i32 {
+    vector
+        .as_array()
+        .map(|items| items.len().min(i32::MAX as usize) as i32)
+        .filter(|dimension| *dimension > 0)
+        .unwrap_or(DEFAULT_VECTOR_DIMENSION)
+}
+
+fn chunk_content_hash(chunk: &ChunkSaveRecord) -> Option<String> {
+    chunk
+        .metadata
+        .get("contentHash")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn vector_persistence_migration_declares_collection_and_embedding_tables() {
+        let migration_path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/migrations/202606060001_create_ai_vector_persistence.sql"
+        );
+        let migration = std::fs::read_to_string(migration_path)
+            .expect("missing AI vector persistence migration");
+
+        for needle in [
+            "CREATE TABLE IF NOT EXISTS ai_vector_collection",
+            "CREATE TABLE IF NOT EXISTS ai_embedding",
+            "tenant_id",
+            "dataset_id",
+            "document_id",
+            "chunk_id",
+            "embedding_ref",
+            "embedding_model_route",
+            "dimension",
+            "vector JSONB",
+            "idx_ai_vector_collection_dataset",
+            "idx_ai_embedding_dataset",
+            "idx_ai_embedding_document",
+            "idx_ai_embedding_status",
+        ] {
+            assert!(
+                migration.contains(needle),
+                "{needle} missing from migration"
+            );
+        }
+    }
+
+    #[test]
+    fn repository_persists_vector_collection_and_embedding_records() {
+        let source = include_str!("ai_knowledge_repository.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+
+        for needle in [
+            "INSERT INTO ai_vector_collection",
+            "INSERT INTO ai_embedding",
+            "dataset_vector_collection_code",
+            "chunk_embedding_vector",
+            "embedding_status",
+        ] {
+            assert!(source.contains(needle), "{needle} missing from repository");
+        }
     }
 }

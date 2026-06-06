@@ -19,6 +19,7 @@ impl RoleContext {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CurrentUser {
     pub id: i64,
+    pub tenant_id: i64,
     pub username: String,
     pub dept_id: i64,
     pub roles: Vec<RoleContext>,
