@@ -15,6 +15,7 @@ pub fn routes() -> Router<AppState> {
     Router::new()
         .merge(agent::routes())
         .merge(capability::routes())
+        .merge(chat_flow::routes())
         .merge(eval::routes())
         .merge(foundation::routes())
         .merge(knowledge::routes())
