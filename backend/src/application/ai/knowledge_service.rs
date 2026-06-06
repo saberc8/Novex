@@ -422,7 +422,7 @@ pub struct ParserJobResp {
     pub update_time: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CitationResp {
     pub document_id: String,
@@ -500,9 +500,18 @@ impl KnowledgeService {
         &self,
         query: DatasetQuery,
     ) -> Result<PageResult<DatasetResp>, AppError> {
+        self.list_datasets_for_tenant(DEFAULT_TENANT_ID, query)
+            .await
+    }
+
+    pub async fn list_datasets_for_tenant(
+        &self,
+        tenant_id: i64,
+        query: DatasetQuery,
+    ) -> Result<PageResult<DatasetResp>, AppError> {
         let page = query.page_query();
         let filter = DatasetFilter {
-            tenant_id: DEFAULT_TENANT_ID,
+            tenant_id,
             name: query.name.as_deref(),
             status: query.status,
             limit: page.limit(),
@@ -524,9 +533,19 @@ impl KnowledgeService {
         user_id: i64,
         command: DatasetCommand,
     ) -> Result<i64, AppError> {
+        self.create_dataset_for_tenant(DEFAULT_TENANT_ID, user_id, command)
+            .await
+    }
+
+    pub async fn create_dataset_for_tenant(
+        &self,
+        tenant_id: i64,
+        user_id: i64,
+        command: DatasetCommand,
+    ) -> Result<i64, AppError> {
         let command = normalize_dataset_command(command)?;
         let id = next_id();
-        let record = dataset_save_record(id, user_id, &command);
+        let record = dataset_save_record(tenant_id, id, user_id, &command);
         self.repo.create_dataset(&record).await?;
         Ok(id)
     }
@@ -536,19 +555,25 @@ impl KnowledgeService {
         dataset_id: i64,
         query: DocumentQuery,
     ) -> Result<PageResult<DocumentResp>, AppError> {
+        self.list_documents_for_tenant(DEFAULT_TENANT_ID, dataset_id, query)
+            .await
+    }
+
+    pub async fn list_documents_for_tenant(
+        &self,
+        tenant_id: i64,
+        dataset_id: i64,
+        query: DocumentQuery,
+    ) -> Result<PageResult<DocumentResp>, AppError> {
         if dataset_id <= 0 {
             return Err(AppError::bad_request("知识库 ID 不合法"));
         }
-        if !self
-            .repo
-            .dataset_exists(DEFAULT_TENANT_ID, dataset_id)
-            .await?
-        {
+        if !self.repo.dataset_exists(tenant_id, dataset_id).await? {
             return Err(AppError::NotFound);
         }
         let page = query.page_query();
         let filter = DocumentFilter {
-            tenant_id: DEFAULT_TENANT_ID,
+            tenant_id,
             dataset_id,
             limit: page.limit(),
             offset: page.offset(),
@@ -570,14 +595,21 @@ impl KnowledgeService {
         dataset_id: i64,
         command: DocumentUploadCommand,
     ) -> Result<i64, AppError> {
+        self.upload_text_document_for_tenant(DEFAULT_TENANT_ID, user_id, dataset_id, command)
+            .await
+    }
+
+    pub async fn upload_text_document_for_tenant(
+        &self,
+        tenant_id: i64,
+        user_id: i64,
+        dataset_id: i64,
+        command: DocumentUploadCommand,
+    ) -> Result<i64, AppError> {
         if dataset_id <= 0 {
             return Err(AppError::bad_request("知识库 ID 不合法"));
         }
-        if !self
-            .repo
-            .dataset_exists(DEFAULT_TENANT_ID, dataset_id)
-            .await?
-        {
+        if !self.repo.dataset_exists(tenant_id, dataset_id).await? {
             return Err(AppError::NotFound);
         }
         let command = normalize_document_upload_command(command)?;
@@ -586,7 +618,7 @@ impl KnowledgeService {
         let now = Utc::now().naive_utc();
         let document = DocumentSaveRecord {
             id: document_id,
-            tenant_id: DEFAULT_TENANT_ID,
+            tenant_id,
             dataset_id,
             name: command.name.clone(),
             source_uri: None,
@@ -603,7 +635,7 @@ impl KnowledgeService {
         };
         let parser_job = ParserJobSaveRecord {
             id: next_id(),
-            tenant_id: DEFAULT_TENANT_ID,
+            tenant_id,
             dataset_id,
             document_id,
             job_type: PARSER_JOB_TYPE_TEXT,
@@ -612,14 +644,8 @@ impl KnowledgeService {
             user_id,
             now,
         };
-        let mut chunk_records = chunk_save_records(
-            DEFAULT_TENANT_ID,
-            dataset_id,
-            document_id,
-            chunks,
-            user_id,
-            now,
-        );
+        let mut chunk_records =
+            chunk_save_records(tenant_id, dataset_id, document_id, chunks, user_id, now);
         enrich_chunk_records_with_runtime_embeddings(&mut chunk_records).await;
 
         self.repo
@@ -634,19 +660,26 @@ impl KnowledgeService {
         dataset_id: i64,
         command: ParsedDocumentUploadCommand,
     ) -> Result<i64, AppError> {
+        self.upload_parsed_document_for_tenant(DEFAULT_TENANT_ID, user_id, dataset_id, command)
+            .await
+    }
+
+    pub async fn upload_parsed_document_for_tenant(
+        &self,
+        tenant_id: i64,
+        user_id: i64,
+        dataset_id: i64,
+        command: ParsedDocumentUploadCommand,
+    ) -> Result<i64, AppError> {
         if dataset_id <= 0 {
             return Err(AppError::bad_request("知识库 ID 不合法"));
         }
-        if !self
-            .repo
-            .dataset_exists(DEFAULT_TENANT_ID, dataset_id)
-            .await?
-        {
+        if !self.repo.dataset_exists(tenant_id, dataset_id).await? {
             return Err(AppError::NotFound);
         }
 
         let mut parts = parsed_document_ingestion_parts(
-            DEFAULT_TENANT_ID,
+            tenant_id,
             dataset_id,
             user_id,
             command,
@@ -657,7 +690,7 @@ impl KnowledgeService {
         if self
             .repo
             .parser_job_exists(
-                DEFAULT_TENANT_ID,
+                tenant_id,
                 dataset_id,
                 parts.document.id,
                 parts.parser_job.id,
@@ -691,30 +724,32 @@ impl KnowledgeService {
         dataset_id: i64,
         command: DocumentParseJobCommand,
     ) -> Result<ParserJobResp, AppError> {
+        self.create_parse_job_for_tenant(DEFAULT_TENANT_ID, user_id, dataset_id, command)
+            .await
+    }
+
+    pub async fn create_parse_job_for_tenant(
+        &self,
+        tenant_id: i64,
+        user_id: i64,
+        dataset_id: i64,
+        command: DocumentParseJobCommand,
+    ) -> Result<ParserJobResp, AppError> {
         if dataset_id <= 0 {
             return Err(AppError::bad_request("知识库 ID 不合法"));
         }
-        if !self
-            .repo
-            .dataset_exists(DEFAULT_TENANT_ID, dataset_id)
-            .await?
-        {
+        if !self.repo.dataset_exists(tenant_id, dataset_id).await? {
             return Err(AppError::NotFound);
         }
         let command = normalize_document_parse_job_command(command)?;
         let document_id = next_id();
         let parser_job_id = next_id();
         let now = Utc::now().naive_utc();
-        let parser_request = parser_worker_request(
-            DEFAULT_TENANT_ID,
-            dataset_id,
-            document_id,
-            parser_job_id,
-            &command,
-        );
+        let parser_request =
+            parser_worker_request(tenant_id, dataset_id, document_id, parser_job_id, &command);
         let document = DocumentSaveRecord {
             id: document_id,
-            tenant_id: DEFAULT_TENANT_ID,
+            tenant_id,
             dataset_id,
             name: command.name.clone(),
             source_uri: Some(command.source_uri.clone()),
@@ -731,7 +766,7 @@ impl KnowledgeService {
         };
         let parser_job = ParserJobSaveRecord {
             id: parser_job_id,
-            tenant_id: DEFAULT_TENANT_ID,
+            tenant_id,
             dataset_id,
             document_id,
             job_type: PARSER_JOB_TYPE_WORKER,
@@ -747,7 +782,7 @@ impl KnowledgeService {
 
         Ok(ParserJobResp {
             id: parser_job_id,
-            tenant_id: DEFAULT_TENANT_ID,
+            tenant_id,
             dataset_id,
             document_id,
             job_type: PARSER_JOB_TYPE_WORKER,
@@ -775,13 +810,23 @@ impl KnowledgeService {
         dataset_id: i64,
         job_id: i64,
     ) -> Result<ParserJobResp, AppError> {
+        self.get_parse_job_for_tenant(DEFAULT_TENANT_ID, dataset_id, job_id)
+            .await
+    }
+
+    pub async fn get_parse_job_for_tenant(
+        &self,
+        tenant_id: i64,
+        dataset_id: i64,
+        job_id: i64,
+    ) -> Result<ParserJobResp, AppError> {
         if dataset_id <= 0 || job_id <= 0 {
             return Err(AppError::bad_request("解析任务 ID 不合法"));
         }
         let record = self
             .repo
             .get_parser_job(&ParserJobFilter {
-                tenant_id: DEFAULT_TENANT_ID,
+                tenant_id,
                 dataset_id,
                 job_id,
             })
@@ -797,11 +842,29 @@ impl KnowledgeService {
         job_id: i64,
         command: ParserJobStatusUpdateCommand,
     ) -> Result<ParserJobResp, AppError> {
+        self.update_parse_job_status_for_tenant(
+            DEFAULT_TENANT_ID,
+            user_id,
+            dataset_id,
+            job_id,
+            command,
+        )
+        .await
+    }
+
+    pub async fn update_parse_job_status_for_tenant(
+        &self,
+        tenant_id: i64,
+        user_id: i64,
+        dataset_id: i64,
+        job_id: i64,
+        command: ParserJobStatusUpdateCommand,
+    ) -> Result<ParserJobResp, AppError> {
         if dataset_id <= 0 || job_id <= 0 {
             return Err(AppError::bad_request("解析任务 ID 不合法"));
         }
         let filter = ParserJobFilter {
-            tenant_id: DEFAULT_TENANT_ID,
+            tenant_id,
             dataset_id,
             job_id,
         };
@@ -811,7 +874,7 @@ impl KnowledgeService {
             .await?
             .ok_or(AppError::NotFound)?;
         let update = parser_job_status_update_record(
-            DEFAULT_TENANT_ID,
+            tenant_id,
             dataset_id,
             record.document_id,
             job_id,
@@ -843,20 +906,27 @@ impl KnowledgeService {
         dataset_id: i64,
         command: RagAskCommand,
     ) -> Result<RagAskResp, AppError> {
+        self.ask_dataset_for_tenant(DEFAULT_TENANT_ID, user_id, dataset_id, command)
+            .await
+    }
+
+    pub async fn ask_dataset_for_tenant(
+        &self,
+        tenant_id: i64,
+        user_id: i64,
+        dataset_id: i64,
+        command: RagAskCommand,
+    ) -> Result<RagAskResp, AppError> {
         if dataset_id <= 0 {
             return Err(AppError::bad_request("知识库 ID 不合法"));
         }
-        if !self
-            .repo
-            .dataset_exists(DEFAULT_TENANT_ID, dataset_id)
-            .await?
-        {
+        if !self.repo.dataset_exists(tenant_id, dataset_id).await? {
             return Err(AppError::NotFound);
         }
         let command = normalize_rag_ask_command(command)?;
         let chunk_records = self
             .repo
-            .list_indexed_chunks(DEFAULT_TENANT_ID, dataset_id, MAX_LOCAL_RETRIEVAL_CHUNKS)
+            .list_indexed_chunks(tenant_id, dataset_id, MAX_LOCAL_RETRIEVAL_CHUNKS)
             .await?;
         let indexed_chunks = indexed_rag_chunks(chunk_records);
         let candidate_limit = rerank_candidate_limit(command.limit);
@@ -873,6 +943,7 @@ impl KnowledgeService {
         let now = Utc::now().naive_utc();
         let trace = rag_trace_record(
             trace_id,
+            tenant_id,
             user_id,
             dataset_id,
             &command,
@@ -880,8 +951,7 @@ impl KnowledgeService {
             &indexed_hits,
             now,
         );
-        let trace_hits =
-            rag_trace_hit_records(trace_id, DEFAULT_TENANT_ID, dataset_id, &indexed_hits, now);
+        let trace_hits = rag_trace_hit_records(trace_id, tenant_id, dataset_id, &indexed_hits, now);
 
         self.repo.create_rag_trace(&trace, &trace_hits).await?;
 
@@ -893,11 +963,21 @@ impl KnowledgeService {
         user_id: i64,
         command: RagFeedbackCommand,
     ) -> Result<FeedbackResp, AppError> {
+        self.submit_rag_feedback_for_tenant(DEFAULT_TENANT_ID, user_id, command)
+            .await
+    }
+
+    pub async fn submit_rag_feedback_for_tenant(
+        &self,
+        tenant_id: i64,
+        user_id: i64,
+        command: RagFeedbackCommand,
+    ) -> Result<FeedbackResp, AppError> {
         let command = normalize_rag_feedback_command(command)?;
         let feedback_id = next_id();
         let record = FeedbackSaveRecord {
             id: feedback_id,
-            tenant_id: DEFAULT_TENANT_ID,
+            tenant_id,
             resource_type: FEEDBACK_RESOURCE_RAG_TRACE.to_owned(),
             resource_id: command.trace_id.to_string(),
             trace_id: Some(command.trace_id.to_string()),
@@ -1420,7 +1500,7 @@ fn parsed_document_ingestion_parts(
     command: ParsedDocumentUploadCommand,
     now: NaiveDateTime,
 ) -> Result<ParsedDocumentIngestionParts, AppError> {
-    let command = normalize_parsed_document_upload_command(dataset_id, command)?;
+    let command = normalize_parsed_document_upload_command(tenant_id, dataset_id, command)?;
     let result = &command.parser_result;
     let document_id = result.document_id;
     let rag_chunks = parser_result_chunks(&command)?;
@@ -1473,6 +1553,7 @@ fn parsed_document_ingestion_parts(
 }
 
 fn normalize_parsed_document_upload_command(
+    tenant_id: i64,
     dataset_id: i64,
     mut command: ParsedDocumentUploadCommand,
 ) -> Result<ParsedDocumentUploadCommand, AppError> {
@@ -1487,7 +1568,7 @@ fn normalize_parsed_document_upload_command(
     }
     ensure_max_chars("文档名称", &command.name, 255)?;
     ensure_max_chars("内容类型", &command.content_type, 255)?;
-    if command.parser_result.tenant_id != DEFAULT_TENANT_ID {
+    if command.parser_result.tenant_id != tenant_id {
         return Err(AppError::bad_request("解析结果租户不匹配"));
     }
     if command.parser_result.dataset_id != dataset_id {
@@ -2621,6 +2702,7 @@ fn rerank_candidate_limit(limit: usize) -> usize {
 
 fn rag_trace_record(
     trace_id: i64,
+    tenant_id: i64,
     user_id: i64,
     dataset_id: i64,
     command: &RagAskCommand,
@@ -2631,7 +2713,7 @@ fn rag_trace_record(
     let model_routes = rag_model_routes();
     RagTraceSaveRecord {
         id: trace_id,
-        tenant_id: DEFAULT_TENANT_ID,
+        tenant_id,
         dataset_id,
         question: command.question.clone(),
         answer: answer.answer.clone(),
@@ -2879,13 +2961,14 @@ fn preview_text(text: &str) -> String {
 }
 
 fn dataset_save_record<'a>(
+    tenant_id: i64,
     id: i64,
     user_id: i64,
     command: &'a DatasetCommand,
 ) -> DatasetSaveRecord<'a> {
     DatasetSaveRecord {
         id,
-        tenant_id: DEFAULT_TENANT_ID,
+        tenant_id,
         name: &command.name,
         description: non_empty(&command.description),
         owner_id: user_id,
