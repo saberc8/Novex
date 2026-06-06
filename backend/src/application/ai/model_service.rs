@@ -17,6 +17,7 @@ use crate::{
 const MODEL_HEALTH_TIMEOUT: Duration = Duration::from_secs(20);
 const MODEL_CHAT_TIMEOUT: Duration = Duration::from_secs(60);
 const MODEL_RERANK_TIMEOUT: Duration = Duration::from_secs(30);
+const MODEL_EMBEDDING_TIMEOUT: Duration = Duration::from_secs(30);
 const DEFAULT_MODEL_CHAT_TEMPERATURE: f64 = 0.2;
 const MAX_MODEL_CHAT_TEMPERATURE: f64 = 1.0;
 const DEFAULT_MODEL_CHAT_MAX_TOKENS: u32 = 1024;
@@ -132,6 +133,12 @@ pub struct ModelHealthCheckResult {
 pub struct ModelRerankScore {
     pub index: usize,
     pub score: f32,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ModelEmbeddingVector {
+    pub index: usize,
+    pub vector: Vec<f32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -313,6 +320,50 @@ impl ModelRuntimeService {
             .flatten()
             .filter_map(parse_rerank_score)
             .collect()
+    }
+
+    pub fn parse_embedding_vectors(body: &Value) -> Vec<ModelEmbeddingVector> {
+        body.get("data")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(parse_embedding_vector)
+            .collect()
+    }
+
+    pub async fn embed_texts(
+        route: &ModelRuntimeRoute,
+        texts: &[String],
+    ) -> Result<Vec<ModelEmbeddingVector>, AppError> {
+        if texts.is_empty() {
+            return Ok(Vec::new());
+        }
+        let client = reqwest::Client::builder()
+            .timeout(MODEL_EMBEDDING_TIMEOUT)
+            .build()
+            .map_err(|err| AppError::Anyhow(err.into()))?;
+        let response = client
+            .post(route.endpoint())
+            .bearer_auth(route.api_key())
+            .json(&json!({
+                "model": route.model().unwrap_or_default(),
+                "input": texts,
+            }))
+            .send()
+            .await
+            .map_err(|err| AppError::Anyhow(err.into()))?;
+        let status = response.status();
+        let body = response.json::<Value>().await.unwrap_or(Value::Null);
+        if !status.is_success() {
+            return Err(AppError::bad_request(format!(
+                "Embedding 模型调用失败: {status}"
+            )));
+        }
+        let vectors = Self::parse_embedding_vectors(&body);
+        if vectors.is_empty() {
+            return Err(AppError::bad_request("Embedding 模型响应为空"));
+        }
+        Ok(vectors)
     }
 
     pub async fn rerank_documents(
@@ -1215,6 +1266,21 @@ fn parse_rerank_score(value: &Value) -> Option<ModelRerankScore> {
     Some(ModelRerankScore { index, score })
 }
 
+fn parse_embedding_vector(value: &Value) -> Option<ModelEmbeddingVector> {
+    let index = value.get("index").and_then(json_usize).unwrap_or(0);
+    let vector = value
+        .get("embedding")?
+        .as_array()?
+        .iter()
+        .filter_map(json_f32)
+        .filter(|value| value.is_finite())
+        .collect::<Vec<_>>();
+    if vector.is_empty() {
+        return None;
+    }
+    Some(ModelEmbeddingVector { index, vector })
+}
+
 fn json_usize(value: &Value) -> Option<usize> {
     if let Some(value) = value.as_u64() {
         return usize::try_from(value).ok();
@@ -1393,6 +1459,25 @@ mod tests {
         assert!((scores[0].score - 0.91).abs() < f32::EPSILON);
         assert_eq!(scores[1].index, 0);
         assert!((scores[1].score - 0.72).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn embedding_response_parser_maps_openai_compatible_vectors() {
+        let body = serde_json::json!({
+            "data": [
+                {"index": 1, "embedding": [0.1, -0.2, 0.3]},
+                {"index": 0, "embedding": ["0.4", "0.5"]}
+            ],
+            "usage": {"total_tokens": 12}
+        });
+
+        let vectors = ModelRuntimeService::parse_embedding_vectors(&body);
+
+        assert_eq!(vectors.len(), 2);
+        assert_eq!(vectors[0].index, 1);
+        assert_eq!(vectors[0].vector, vec![0.1, -0.2, 0.3]);
+        assert_eq!(vectors[1].index, 0);
+        assert_eq!(vectors[1].vector, vec![0.4, 0.5]);
     }
 
     #[test]
