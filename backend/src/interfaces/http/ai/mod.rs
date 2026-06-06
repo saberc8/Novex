@@ -4,6 +4,7 @@ use super::AppState;
 
 pub mod agent;
 pub mod capability;
+pub mod chat_flow;
 pub mod eval;
 pub mod foundation;
 pub mod knowledge;
