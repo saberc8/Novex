@@ -712,6 +712,63 @@ WHERE tenant_id = $4 AND id = $5;
         Ok(())
     }
 
+    pub async fn update_parser_job_status(
+        &self,
+        parser_job: &ParserJobSaveRecord,
+        document_parse_status: i16,
+        document_ingestion_status: i16,
+        error_message: Option<&str>,
+    ) -> Result<(), AppError> {
+        let mut tx = self.db.begin().await?;
+        let result = sqlx::query(
+            r#"
+UPDATE ai_document
+SET parse_status = $1,
+    ingestion_status = $2,
+    update_user = $3,
+    update_time = $4
+WHERE tenant_id = $5 AND dataset_id = $6 AND id = $7;
+"#,
+        )
+        .bind(document_parse_status)
+        .bind(document_ingestion_status)
+        .bind(parser_job.user_id)
+        .bind(parser_job.now)
+        .bind(parser_job.tenant_id)
+        .bind(parser_job.dataset_id)
+        .bind(parser_job.document_id)
+        .execute(&mut *tx)
+        .await?;
+        ensure_affected(result.rows_affected())?;
+
+        let result = sqlx::query(
+            r#"
+UPDATE ai_parser_job
+SET status = $1,
+    error_message = $2,
+    result_summary = $3,
+    update_user = $4,
+    update_time = $5
+WHERE tenant_id = $6 AND dataset_id = $7 AND document_id = $8 AND id = $9;
+"#,
+        )
+        .bind(parser_job.status)
+        .bind(error_message)
+        .bind(&parser_job.result_summary)
+        .bind(parser_job.user_id)
+        .bind(parser_job.now)
+        .bind(parser_job.tenant_id)
+        .bind(parser_job.dataset_id)
+        .bind(parser_job.document_id)
+        .bind(parser_job.id)
+        .execute(&mut *tx)
+        .await?;
+        ensure_affected(result.rows_affected())?;
+
+        tx.commit().await?;
+        Ok(())
+    }
+
     pub async fn parser_job_exists(
         &self,
         tenant_id: i64,

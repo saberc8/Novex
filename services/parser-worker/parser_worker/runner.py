@@ -51,9 +51,27 @@ def execute_parse_job(
         )
         callback_status = "posted"
     elif status == "submitted":
+        payload = parse_job_status_payload(prepared_request, parser_result, callback_status="deferred")
+        callback = post_parse_job_status(
+            dataset_id=positive_int(prepared_request.get("datasetId"), "datasetId"),
+            parser_job_id=positive_int(prepared_request.get("parserJobId"), "parserJobId"),
+            payload=payload,
+            backend_base_url=backend_base_url,
+            backend_token=backend_token,
+            http_post=http_post,
+        )
         callback_status = "deferred"
     elif status == "failed":
-        callback_status = "failed_no_callback"
+        payload = parse_job_status_payload(prepared_request, parser_result, callback_status="failed")
+        callback = post_parse_job_status(
+            dataset_id=positive_int(prepared_request.get("datasetId"), "datasetId"),
+            parser_job_id=positive_int(prepared_request.get("parserJobId"), "parserJobId"),
+            payload=payload,
+            backend_base_url=backend_base_url,
+            backend_token=backend_token,
+            http_post=http_post,
+        )
+        callback_status = "failed"
 
     return {
         "status": status,
@@ -77,12 +95,42 @@ def complete_mineru_parse_job(
     task = mineru_client.get_extract_task(task_id)
     state = str(task.state or "").strip().lower()
     if state != "done":
+        status = "failed" if state in ("failed", "error") else "submitted"
+        callback_status = "failed" if state in ("failed", "error") else "deferred"
+        task_payload = mineru_task_payload(task)
+        parser_result = {
+            "tenantId": request.get("tenantId"),
+            "datasetId": request.get("datasetId"),
+            "documentId": request.get("documentId"),
+            "parserJobId": request.get("parserJobId"),
+            "status": status,
+            "mineruTask": task_payload,
+            "metadata": {"parser": "mineru"},
+        }
+        if status == "failed":
+            parser_result["error"] = {
+                "message": task.err_msg or "MinerU task failed",
+                "mineruTask": task_payload,
+            }
+        callback = post_parse_job_status(
+            dataset_id=positive_int(request.get("datasetId"), "datasetId"),
+            parser_job_id=positive_int(request.get("parserJobId"), "parserJobId"),
+            payload=parse_job_status_payload(
+                request,
+                parser_result,
+                callback_status=callback_status,
+                mineru_task=task_payload,
+            ),
+            backend_base_url=backend_base_url,
+            backend_token=backend_token,
+            http_post=http_post,
+        )
         return {
-            "status": "failed" if state in ("failed", "error") else "submitted",
-            "callbackStatus": "failed_no_callback" if state in ("failed", "error") else "deferred",
-            "mineruTask": mineru_task_payload(task),
-            "callback": None,
-            "parserResult": None,
+            "status": status,
+            "callbackStatus": callback_status,
+            "mineruTask": task_payload,
+            "callback": callback,
+            "parserResult": parser_result,
         }
     if not str(task.full_zip_url or "").strip():
         raise ValueError("completed MinerU task is missing full_zip_url")
@@ -178,6 +226,35 @@ def parsed_document_payload(request: Mapping[str, Any], parser_result: Mapping[s
     }
 
 
+def parse_job_status_payload(
+    request: Mapping[str, Any],
+    parser_result: Mapping[str, Any],
+    *,
+    callback_status: str,
+    mineru_task: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    status = non_empty(parser_result.get("status"), "submitted").lower()
+    payload: dict[str, Any] = {
+        "status": status,
+        "callbackStatus": callback_status,
+        "parserResult": dict(parser_result),
+    }
+    if mineru_task is not None:
+        payload["mineruTask"] = dict(mineru_task)
+    elif isinstance(parser_result.get("mineruTask"), Mapping):
+        payload["mineruTask"] = dict(parser_result["mineruTask"])
+    if parser_result.get("error"):
+        payload["error"] = parser_result["error"]
+    for source_key, result_key in [
+        ("tenantId", "tenantId"),
+        ("datasetId", "datasetId"),
+        ("documentId", "documentId"),
+        ("parserJobId", "parserJobId"),
+    ]:
+        payload["parserResult"].setdefault(result_key, request.get(source_key))
+    return payload
+
+
 def post_parsed_document(
     *,
     dataset_id: int,
@@ -189,6 +266,28 @@ def post_parsed_document(
     if not backend_base_url.strip():
         raise ValueError("backend_base_url is required for parser callback")
     url = absolute_backend_url(f"/ai/knowledge/datasets/{dataset_id}/documents/parsed", backend_base_url)
+    headers = {"Content-Type": "application/json"}
+    if backend_token.strip():
+        headers["Authorization"] = f"Bearer {backend_token.strip()}"
+    http_post = http_post or default_http_post
+    return http_post(url, headers=headers, json=payload)
+
+
+def post_parse_job_status(
+    *,
+    dataset_id: int,
+    parser_job_id: int,
+    payload: Mapping[str, Any],
+    backend_base_url: str,
+    backend_token: str = "",
+    http_post=None,
+) -> Mapping[str, Any]:
+    if not backend_base_url.strip():
+        raise ValueError("backend_base_url is required for parser status callback")
+    url = absolute_backend_url(
+        f"/ai/knowledge/datasets/{dataset_id}/parse-jobs/{parser_job_id}/status",
+        backend_base_url,
+    )
     headers = {"Content-Type": "application/json"}
     if backend_token.strip():
         headers["Authorization"] = f"Bearer {backend_token.strip()}"

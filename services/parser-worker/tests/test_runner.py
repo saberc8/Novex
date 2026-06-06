@@ -74,7 +74,7 @@ class ParserWorkerRunnerTest(unittest.TestCase):
         self.assertEqual(fetcher.uris, ["http://backend.local/file/knowledge/88.md"])
         self.assertIn("按时培训", poster.calls[0]["json"]["parserResult"]["chunks"][0]["text"])
 
-    def test_execute_submitted_mineru_task_does_not_post_completed_ingestion(self):
+    def test_execute_submitted_mineru_task_posts_status_without_completed_ingestion(self):
         poster = FakePoster()
         mineru = FakeMineruClient()
 
@@ -99,7 +99,17 @@ class ParserWorkerRunnerTest(unittest.TestCase):
 
         self.assertEqual(result["status"], "submitted")
         self.assertEqual(result["callbackStatus"], "deferred")
-        self.assertEqual(poster.calls, [])
+        self.assertEqual(
+            poster.calls[0]["url"],
+            "http://backend.local/ai/knowledge/datasets/7/parse-jobs/99/status",
+        )
+        self.assertEqual(poster.calls[0]["headers"]["Authorization"], "Bearer token-1")
+        self.assertEqual(poster.calls[0]["json"]["status"], "submitted")
+        self.assertEqual(poster.calls[0]["json"]["callbackStatus"], "deferred")
+        self.assertEqual(
+            poster.calls[0]["json"]["parserResult"]["mineruTask"]["taskId"],
+            "task-1",
+        )
         self.assertEqual(mineru.created_urls, ["https://objects.example.com/handbook.pdf"])
 
     def test_extract_mineru_markdown_prefers_auto_full_md_from_zip(self):
@@ -165,7 +175,7 @@ class ParserWorkerRunnerTest(unittest.TestCase):
         self.assertEqual(payload["parserResult"]["parserJobId"], 99)
         self.assertGreater(len(payload["parserResult"]["chunks"]), 0)
 
-    def test_complete_pending_mineru_task_defers_callback(self):
+    def test_complete_pending_mineru_task_posts_status_without_completed_ingestion(self):
         poster = FakePoster()
         mineru = FakeMineruClient(completed=MineruTask(task_id="task-2", state="pending"))
 
@@ -191,7 +201,15 @@ class ParserWorkerRunnerTest(unittest.TestCase):
 
         self.assertEqual(result["status"], "submitted")
         self.assertEqual(result["callbackStatus"], "deferred")
-        self.assertEqual(poster.calls, [])
+        self.assertEqual(
+            poster.calls[0]["url"],
+            "http://backend.local/ai/knowledge/datasets/7/parse-jobs/99/status",
+        )
+        self.assertEqual(poster.calls[0]["json"]["status"], "submitted")
+        self.assertEqual(
+            poster.calls[0]["json"]["mineruTask"]["taskId"],
+            "task-2",
+        )
 
 
 class FakePoster:

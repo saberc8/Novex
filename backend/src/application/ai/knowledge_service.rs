@@ -38,12 +38,14 @@ const DEFAULT_CHUNK_MAX_CHARS: usize = 1200;
 const DEFAULT_CHUNK_OVERLAP_CHARS: usize = 120;
 const DOCUMENT_PARSE_STATUS_PARSED: i16 = 3;
 const DOCUMENT_PARSE_STATUS_PARSING: i16 = 2;
+const DOCUMENT_PARSE_STATUS_FAILED: i16 = 4;
 const DOCUMENT_INGESTION_STATUS_PENDING: i16 = 1;
 const DOCUMENT_INGESTION_STATUS_INDEXED: i16 = 4;
 const PARSER_JOB_TYPE_TEXT: i16 = 1;
 const PARSER_JOB_TYPE_WORKER: i16 = 2;
 const PARSER_JOB_STATUS_SUBMITTED: i16 = 2;
 const PARSER_JOB_STATUS_SUCCEEDED: i16 = 3;
+const PARSER_JOB_STATUS_FAILED: i16 = 4;
 const CHUNK_EMBEDDING_STATUS_INDEXED: i16 = 4;
 const DEFAULT_RAG_LIMIT: usize = 5;
 const MAX_RAG_LIMIT: usize = 10;
@@ -196,6 +198,21 @@ pub struct DocumentParseJobCommand {
     pub source_hash: String,
     #[serde(default)]
     pub source_kind: String,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ParserJobStatusUpdateCommand {
+    #[serde(default)]
+    pub status: String,
+    #[serde(default)]
+    pub callback_status: String,
+    #[serde(default)]
+    pub parser_result: Value,
+    #[serde(default)]
+    pub mineru_task: Value,
+    #[serde(default)]
+    pub error: Option<Value>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -441,6 +458,14 @@ struct ParsedDocumentIngestionParts {
     parser_job: ParserJobSaveRecord,
     blocks: Vec<BlockSaveRecord>,
     chunks: Vec<ChunkSaveRecord>,
+}
+
+#[derive(Debug, Clone)]
+struct ParserJobStatusUpdateRecord {
+    parser_job: ParserJobSaveRecord,
+    document_parse_status: i16,
+    document_ingestion_status: i16,
+    error_message: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -758,6 +783,53 @@ impl KnowledgeService {
         Ok(ParserJobResp::from(record))
     }
 
+    pub async fn update_parse_job_status(
+        &self,
+        user_id: i64,
+        dataset_id: i64,
+        job_id: i64,
+        command: ParserJobStatusUpdateCommand,
+    ) -> Result<ParserJobResp, AppError> {
+        if dataset_id <= 0 || job_id <= 0 {
+            return Err(AppError::bad_request("解析任务 ID 不合法"));
+        }
+        let filter = ParserJobFilter {
+            tenant_id: DEFAULT_TENANT_ID,
+            dataset_id,
+            job_id,
+        };
+        let record = self
+            .repo
+            .get_parser_job(&filter)
+            .await?
+            .ok_or(AppError::NotFound)?;
+        let update = parser_job_status_update_record(
+            DEFAULT_TENANT_ID,
+            dataset_id,
+            record.document_id,
+            job_id,
+            user_id,
+            command,
+            Utc::now().naive_utc(),
+        )?;
+
+        self.repo
+            .update_parser_job_status(
+                &update.parser_job,
+                update.document_parse_status,
+                update.document_ingestion_status,
+                update.error_message.as_deref(),
+            )
+            .await?;
+
+        let record = self
+            .repo
+            .get_parser_job(&filter)
+            .await?
+            .ok_or(AppError::NotFound)?;
+        Ok(ParserJobResp::from(record))
+    }
+
     pub async fn ask_dataset(
         &self,
         user_id: i64,
@@ -1068,6 +1140,162 @@ fn parser_job_submitted_summary(
         "sourceHash": non_empty_parser_string(&command.source_hash),
         "parserRequest": parser_request,
     })
+}
+
+fn parser_job_status_update_record(
+    tenant_id: i64,
+    dataset_id: i64,
+    document_id: i64,
+    job_id: i64,
+    user_id: i64,
+    mut command: ParserJobStatusUpdateCommand,
+    now: NaiveDateTime,
+) -> Result<ParserJobStatusUpdateRecord, AppError> {
+    command.status = command.status.trim().to_ascii_lowercase();
+    if command.status.is_empty() {
+        command.status = json_string_field(&command.parser_result, "status").unwrap_or_default();
+    }
+    command.callback_status = command.callback_status.trim().to_ascii_lowercase();
+    if command.callback_status.is_empty() {
+        command.callback_status = match command.status.as_str() {
+            "submitted" => "deferred",
+            "failed" => "failed",
+            _ => "not_applicable",
+        }
+        .to_owned();
+    }
+
+    validate_parser_job_status_scope(tenant_id, dataset_id, document_id, job_id, &command)?;
+    let mineru_task = non_empty_json(command.mineru_task)
+        .or_else(|| json_field_clone(&command.parser_result, "mineruTask"));
+    let error = command
+        .error
+        .and_then(non_empty_json)
+        .or_else(|| json_field_clone(&command.parser_result, "error"));
+
+    let (parser_status, document_parse_status, document_ingestion_status, error_message) =
+        match command.status.as_str() {
+            "submitted" => (
+                PARSER_JOB_STATUS_SUBMITTED,
+                DOCUMENT_PARSE_STATUS_PARSING,
+                DOCUMENT_INGESTION_STATUS_PENDING,
+                None,
+            ),
+            "failed" => (
+                PARSER_JOB_STATUS_FAILED,
+                DOCUMENT_PARSE_STATUS_FAILED,
+                DOCUMENT_INGESTION_STATUS_PENDING,
+                parser_error_message(error.as_ref()).or_else(|| Some("解析任务失败".to_owned())),
+            ),
+            "succeeded" => {
+                return Err(AppError::bad_request(
+                    "解析成功结果必须通过 documents/parsed 接口入库",
+                ));
+            }
+            _ => return Err(AppError::bad_request("解析任务状态不合法")),
+        };
+
+    let result_summary = json!({
+        "parser": "parser-worker",
+        "status": command.status,
+        "callbackStatus": command.callback_status,
+        "parserResult": command.parser_result,
+        "mineruTask": mineru_task.unwrap_or(Value::Null),
+        "error": error.unwrap_or(Value::Null),
+        "updatedAt": format_datetime(now),
+    });
+
+    Ok(ParserJobStatusUpdateRecord {
+        parser_job: ParserJobSaveRecord {
+            id: job_id,
+            tenant_id,
+            dataset_id,
+            document_id,
+            job_type: PARSER_JOB_TYPE_WORKER,
+            status: parser_status,
+            result_summary,
+            user_id,
+            now,
+        },
+        document_parse_status,
+        document_ingestion_status,
+        error_message,
+    })
+}
+
+fn validate_parser_job_status_scope(
+    tenant_id: i64,
+    dataset_id: i64,
+    document_id: i64,
+    job_id: i64,
+    command: &ParserJobStatusUpdateCommand,
+) -> Result<(), AppError> {
+    for (field, expected) in [
+        ("tenantId", tenant_id),
+        ("datasetId", dataset_id),
+        ("documentId", document_id),
+        ("parserJobId", job_id),
+    ] {
+        if let Some(actual) = json_i64_field(&command.parser_result, field) {
+            if actual != expected {
+                return Err(AppError::bad_request("解析任务状态归属不匹配"));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn json_i64_field(value: &Value, field: &str) -> Option<i64> {
+    let value = value.as_object()?.get(field)?;
+    if let Some(number) = value.as_i64() {
+        return Some(number);
+    }
+    value
+        .as_str()
+        .and_then(|text| text.trim().parse::<i64>().ok())
+}
+
+fn json_string_field(value: &Value, field: &str) -> Option<String> {
+    value
+        .as_object()?
+        .get(field)?
+        .as_str()
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .map(str::to_ascii_lowercase)
+}
+
+fn json_field_clone(value: &Value, field: &str) -> Option<Value> {
+    value
+        .as_object()?
+        .get(field)
+        .cloned()
+        .and_then(non_empty_json)
+}
+
+fn non_empty_json(value: Value) -> Option<Value> {
+    match value {
+        Value::Null => None,
+        Value::Object(map) if map.is_empty() => None,
+        Value::Array(items) if items.is_empty() => None,
+        Value::String(text) if text.trim().is_empty() => None,
+        value => Some(value),
+    }
+}
+
+fn parser_error_message(error: Option<&Value>) -> Option<String> {
+    let error = error?;
+    let message = match error {
+        Value::String(text) => non_empty_parser_string(text),
+        Value::Object(map) => ["message", "errMsg", "error"]
+            .iter()
+            .find_map(|field| map.get(*field).and_then(Value::as_str))
+            .and_then(non_empty_parser_string)
+            .or_else(|| Some(error.to_string())),
+        _ => Some(error.to_string()),
+    }?;
+
+    Some(message.chars().take(2000).collect())
 }
 
 pub fn normalize_rag_ask_command(mut command: RagAskCommand) -> Result<RagAskCommand, AppError> {
@@ -2438,6 +2666,95 @@ mod tests {
         assert_eq!(command.content_type, "application/pdf");
         assert_eq!(command.source_hash, "file-hash");
         assert_eq!(command.source_kind, "objectStorage");
+    }
+
+    #[test]
+    fn parser_job_status_update_persists_deferred_mineru_task() {
+        let command = serde_json::from_value::<ParserJobStatusUpdateCommand>(serde_json::json!({
+            "status": " submitted ",
+            "callbackStatus": " deferred ",
+            "parserResult": {
+                "status": "submitted",
+                "tenantId": 1,
+                "datasetId": 7,
+                "documentId": 42,
+                "parserJobId": 99,
+                "mineruTask": {
+                    "taskId": "task-1",
+                    "state": "pending",
+                    "fullZipUrl": ""
+                },
+                "metadata": {"parser": "mineru"}
+            }
+        }))
+        .unwrap();
+
+        let update =
+            parser_job_status_update_record(1, 7, 42, 99, 9, command, Utc::now().naive_utc())
+                .unwrap();
+
+        assert_eq!(update.parser_job.status, PARSER_JOB_STATUS_SUBMITTED);
+        assert_eq!(update.document_parse_status, DOCUMENT_PARSE_STATUS_PARSING);
+        assert_eq!(
+            update.document_ingestion_status,
+            DOCUMENT_INGESTION_STATUS_PENDING
+        );
+        assert_eq!(update.error_message, None);
+        assert_eq!(update.parser_job.result_summary["parser"], "parser-worker");
+        assert_eq!(update.parser_job.result_summary["status"], "submitted");
+        assert_eq!(
+            update.parser_job.result_summary["callbackStatus"],
+            "deferred"
+        );
+        assert_eq!(
+            update.parser_job.result_summary["parserResult"]["mineruTask"]["taskId"],
+            "task-1"
+        );
+    }
+
+    #[test]
+    fn parser_job_status_update_marks_failed_with_error_summary() {
+        let command = serde_json::from_value::<ParserJobStatusUpdateCommand>(serde_json::json!({
+            "status": "failed",
+            "callbackStatus": "failed",
+            "error": {"message": "MinerU task failed"},
+            "parserResult": {
+                "status": "failed",
+                "tenantId": 1,
+                "datasetId": 7,
+                "documentId": 42,
+                "parserJobId": 99,
+                "error": {"message": "MinerU task failed"}
+            }
+        }))
+        .unwrap();
+
+        let update =
+            parser_job_status_update_record(1, 7, 42, 99, 9, command, Utc::now().naive_utc())
+                .unwrap();
+
+        assert_eq!(update.parser_job.status, PARSER_JOB_STATUS_FAILED);
+        assert_eq!(update.document_parse_status, DOCUMENT_PARSE_STATUS_FAILED);
+        assert_eq!(
+            update.document_ingestion_status,
+            DOCUMENT_INGESTION_STATUS_PENDING
+        );
+        assert_eq!(update.error_message.as_deref(), Some("MinerU task failed"));
+        assert_eq!(update.parser_job.result_summary["status"], "failed");
+    }
+
+    #[test]
+    fn parser_job_status_update_rejects_succeeded_without_chunks() {
+        let command = serde_json::from_value::<ParserJobStatusUpdateCommand>(serde_json::json!({
+            "status": "succeeded",
+            "callbackStatus": "posted"
+        }))
+        .unwrap();
+
+        let err = parser_job_status_update_record(1, 7, 42, 99, 9, command, Utc::now().naive_utc())
+            .unwrap_err();
+
+        assert!(err.to_string().contains("documents/parsed"));
     }
 
     #[test]
