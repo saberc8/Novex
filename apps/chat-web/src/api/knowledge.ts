@@ -1,8 +1,13 @@
-import { apiRequest } from "@/lib/api";
+import { apiFormRequest, apiRequest } from "@/lib/api";
 import type { PageResult } from "@/types/api";
 import type {
+  DatasetCommand,
   DatasetQuery,
   DatasetResp,
+  DocumentQuery,
+  DocumentResp,
+  KnowledgeFileUploadResp,
+  ParserJobResp,
   RagAskCommand,
   RagAskResp,
   RagFeedbackCommand,
@@ -18,11 +23,35 @@ export function listDatasets(query: DatasetQuery = {}) {
   });
 }
 
+export function createDataset(data: DatasetCommand) {
+  return apiRequest<number>(DATASET_URL, {
+    method: "POST",
+    body: data
+  });
+}
+
+export function listDocuments(datasetId: number, query: DocumentQuery = {}) {
+  return apiRequest<PageResult<DocumentResp>>(`${DATASET_URL}/${datasetId}/documents`, {
+    query
+  });
+}
+
 export function askDataset(datasetId: number, data: RagAskCommand) {
   return apiRequest<RagAskResp>(`${DATASET_URL}/${datasetId}/ask`, {
     method: "POST",
     body: data
   });
+}
+
+export function uploadKnowledgeFile(datasetId: number, file: File, parentPath = "/knowledge") {
+  const form = new FormData();
+  form.append("file", file, file.name);
+  form.append("parentPath", parentPath);
+  return apiFormRequest<KnowledgeFileUploadResp>(`${DATASET_URL}/${datasetId}/documents/files`, form);
+}
+
+export function getParseJob(datasetId: number, jobId: number) {
+  return apiRequest<ParserJobResp>(`${DATASET_URL}/${datasetId}/parse-jobs/${jobId}`);
 }
 
 export function submitRagFeedback(data: RagFeedbackCommand) {

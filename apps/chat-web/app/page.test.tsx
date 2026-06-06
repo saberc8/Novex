@@ -2,43 +2,138 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { metadata } from "./layout";
 import Page from "./page";
-import { askDataset, listDatasets, submitRagFeedback } from "@/api/knowledge";
-import { chatCompletion, listChatConversations } from "@/api/model";
-import type { DatasetResp } from "@/types/knowledge";
+import {
+  createChatFlowSession,
+  listChatFlowMessages,
+  listChatFlowSessions,
+  sendChatFlowMessage
+} from "@/api/chat-flow";
+import {
+  createDataset,
+  getParseJob,
+  listDatasets,
+  submitRagFeedback,
+  uploadKnowledgeFile
+} from "@/api/knowledge";
+import type { ChatFlowMessageResp, ChatFlowSessionResp } from "@/types/chat-flow";
+import type { DatasetResp, ParserJobResp } from "@/types/knowledge";
+
+vi.mock("@/api/chat-flow", () => ({
+  createChatFlowSession: vi.fn(),
+  listChatFlowMessages: vi.fn(),
+  listChatFlowSessions: vi.fn(),
+  sendChatFlowMessage: vi.fn()
+}));
 
 vi.mock("@/api/knowledge", () => ({
-  askDataset: vi.fn(),
+  createDataset: vi.fn(),
+  getParseJob: vi.fn(),
   listDatasets: vi.fn(),
-  submitRagFeedback: vi.fn()
+  submitRagFeedback: vi.fn(),
+  uploadKnowledgeFile: vi.fn()
 }));
 
-vi.mock("@/api/model", () => ({
-  chatCompletion: vi.fn(),
-  listChatConversations: vi.fn()
-}));
-
-const askDatasetMock = vi.mocked(askDataset);
+const createChatFlowSessionMock = vi.mocked(createChatFlowSession);
+const listChatFlowMessagesMock = vi.mocked(listChatFlowMessages);
+const listChatFlowSessionsMock = vi.mocked(listChatFlowSessions);
+const sendChatFlowMessageMock = vi.mocked(sendChatFlowMessage);
+const createDatasetMock = vi.mocked(createDataset);
+const getParseJobMock = vi.mocked(getParseJob);
 const listDatasetsMock = vi.mocked(listDatasets);
 const submitRagFeedbackMock = vi.mocked(submitRagFeedback);
-const chatCompletionMock = vi.mocked(chatCompletion);
-const listChatConversationsMock = vi.mocked(listChatConversations);
+const uploadKnowledgeFileMock = vi.mocked(uploadKnowledgeFile);
 
 function dataset(overrides: Partial<DatasetResp> = {}): DatasetResp {
   return {
     id: 10,
     tenantId: 1,
-    name: "企业制度知识库",
-    description: "政策、FAQ、流程",
+    name: "Machine Learning Tools for Environmental Microplastic Analysis",
+    description: "Microplastic papers and notes",
     ownerId: 1,
     visibility: 1,
     status: 1,
     retrievalMode: 3,
-    documentCount: 3,
-    chunkCount: 28,
+    documentCount: 7,
+    chunkCount: 128,
     createUserString: "admin",
-    createTime: "2026-06-05 10:00:00",
+    createTime: "2026-01-30 10:00:00",
     updateUserString: "",
     updateTime: "",
+    ...overrides
+  };
+}
+
+function session(overrides: Partial<ChatFlowSessionResp> = {}): ChatFlowSessionResp {
+  return {
+    id: 501,
+    tenantId: 1,
+    appCode: "chat-web",
+    mode: "knowledge",
+    datasetId: 10,
+    title: "Machine Learning Tools for Environmental Microplastic Analysis",
+    status: 1,
+    routeId: "novex-rag",
+    model: null,
+    messageCount: 2,
+    lastMessagePreview: "Use the current handbook.",
+    metadata: {},
+    createTime: "2026-01-30 10:00:00",
+    updateTime: "2026-01-30 10:01:00",
+    ...overrides
+  };
+}
+
+function assistantMessage(overrides: Partial<ChatFlowMessageResp> = {}): ChatFlowMessageResp {
+  return {
+    id: 902,
+    tenantId: 1,
+    sessionId: 501,
+    role: "assistant",
+    content: "Use the cited source list before drawing conclusions.",
+    routeId: "novex-rag",
+    model: null,
+    ragTraceId: 42,
+    citations: [
+      {
+        documentId: "20",
+        chunkId: "20:0",
+        pageNo: 3,
+        sectionPath: ["Policy"]
+      }
+    ],
+    tokenCount: 9,
+    metadata: {
+      answerStrategy: "extractive",
+      retrievalHitCount: 1
+    },
+    createTime: "2026-01-30 10:01:00",
+    ...overrides
+  };
+}
+
+function parserJob(overrides: Partial<ParserJobResp> = {}): ParserJobResp {
+  return {
+    id: 77,
+    tenantId: 1,
+    datasetId: 10,
+    documentId: 20,
+    jobType: 2,
+    status: 3,
+    attemptCount: 1,
+    errorMessage: "",
+    resultSummary: { parser: "novex-rag-local-structured" },
+    documentName: "microplastics.md",
+    sourceUri: "file://microplastics.md",
+    fileId: 33,
+    contentType: "text/markdown",
+    parseStatus: 3,
+    ingestionStatus: 4,
+    chunkCount: 12,
+    parserRequest: null,
+    createUserString: "admin",
+    createTime: "2026-01-30 10:00:00",
+    updateUserString: "admin",
+    updateTime: "2026-01-30 10:01:00",
     ...overrides
   };
 }
@@ -50,59 +145,66 @@ describe("Chat web page", () => {
       list: [dataset()],
       total: 1
     });
-    askDatasetMock.mockResolvedValue({
-      traceId: 42,
-      answer: "Use the current handbook.",
-      citations: [
-        {
-          documentId: "20",
-          chunkId: "20:0",
-          pageNo: 3,
-          sectionPath: ["Policy"]
-        }
-      ],
-      retrievalHitCount: 1,
-      answerStrategy: "extractive"
+    listChatFlowSessionsMock.mockResolvedValue([session()]);
+    listChatFlowMessagesMock.mockResolvedValue([]);
+    createChatFlowSessionMock.mockResolvedValue(session());
+    sendChatFlowMessageMock.mockResolvedValue({
+      session: session(),
+      userMessage: {
+        ...assistantMessage({
+          id: 901,
+          role: "user",
+          content: "Which source should I trust?",
+          ragTraceId: null,
+          citations: []
+        })
+      },
+      assistantMessage: assistantMessage()
     });
+    createDatasetMock.mockResolvedValue(12);
+    uploadKnowledgeFileMock.mockResolvedValue({
+      file: {
+        id: 33,
+        name: "microplastics.md",
+        originalName: "microplastics.md",
+        size: 128,
+        url: "",
+        parentPath: "/knowledge",
+        path: "/knowledge/microplastics.md",
+        sha256: "hash",
+        contentType: "text/markdown",
+        metadata: "",
+        thumbnailSize: 0,
+        thumbnailName: "",
+        thumbnailMetadata: "",
+        thumbnailUrl: "",
+        extension: "md",
+        type: 1,
+        storageId: 1,
+        storageName: "local",
+        createUserString: "admin",
+        createTime: "2026-01-30 10:00:00",
+        updateUserString: "",
+        updateTime: ""
+      },
+      parseJob: parserJob()
+    });
+    getParseJobMock.mockResolvedValue(parserJob());
     submitRagFeedbackMock.mockResolvedValue({
       id: 99,
       traceId: 42,
       rating: "citation_issue"
     });
-    chatCompletionMock.mockResolvedValue({
-      conversationId: 88,
-      answer: "Pure model answer.",
-      routeId: "runtime.llm",
-      model: "deepseek-v4-flash",
-      latencyMs: 42,
-      usage: {
-        promptTokens: 11,
-        completionTokens: 7,
-        totalTokens: 18
-      }
-    });
-    listChatConversationsMock.mockResolvedValue([
-      {
-        id: 88,
-        title: "Explain Novex.",
-        routeId: "runtime.llm",
-        model: "deepseek-v4-flash",
-        messageCount: 2,
-        lastMessagePreview: "Pure model answer.",
-        createTime: "2026-06-05 10:00:00",
-        updateTime: "2026-06-05 10:01:00"
-      }
-    ]);
   });
 
-  it("renders a customer-facing knowledge chat workspace", async () => {
+  it("renders a NotebookLM-style notebook grid", async () => {
     render(<Page />);
 
-    expect(screen.getByRole("heading", { name: "Novex Knowledge", level: 1 })).toBeTruthy();
-    expect(screen.getByRole("heading", { name: "Sources" })).toBeTruthy();
-    expect(screen.getByRole("heading", { name: "Trace" })).toBeTruthy();
-    await waitFor(() => expect(listDatasetsMock).toHaveBeenCalledWith({ page: 1, size: 20 }));
-    expect((await screen.findAllByText("企业制度知识库")).length).toBeGreaterThan(0);
+    expect(screen.getByRole("heading", { name: "NotebookLM", level: 1 })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "新建笔记本" })).toBeTruthy();
+    await waitFor(() => expect(listDatasetsMock).toHaveBeenCalledWith({ page: 1, size: 50 }));
+    expect(await screen.findByText("Machine Learning Tools for Environmental Microplastic Analysis")).toBeTruthy();
+    expect(await screen.findByText("2026年1月30日 · 7 个来源")).toBeTruthy();
   });
 
   it("uses shared chat template metadata", () => {
@@ -110,33 +212,64 @@ describe("Chat web page", () => {
     expect(metadata.description).toContain("model and knowledge");
   });
 
-  it("asks the selected dataset and renders citations with route metadata", async () => {
+  it("creates a notebook dataset from the app grid", async () => {
     render(<Page />);
 
-    await waitFor(() => expect(listDatasetsMock).toHaveBeenCalledWith({ page: 1, size: 20 }));
-    fireEvent.change(screen.getByLabelText("输入知识库问题"), {
-      target: { value: "Which handbook should I use?" }
-    });
-    fireEvent.click(screen.getByRole("button", { name: "发送问题" }));
+    fireEvent.click(screen.getByRole("button", { name: "新建笔记本" }));
 
     await waitFor(() =>
-      expect(askDatasetMock).toHaveBeenCalledWith(10, {
-        question: "Which handbook should I use?",
+      expect(createDatasetMock).toHaveBeenCalledWith({
+        name: "未命名的笔记本",
+        description: "Created from chat workspace",
+        visibility: 1,
+        retrievalMode: 3
+      })
+    );
+  });
+
+  it("uploads a source file and polls parser status inside a notebook", async () => {
+    render(<Page />);
+
+    fireEvent.click(await screen.findByRole("button", { name: /打开 Machine Learning Tools/ }));
+    const file = new File(["# Microplastics\nUse cited sources."], "microplastics.md", {
+      type: "text/markdown"
+    });
+    fireEvent.change(screen.getByLabelText("添加来源"), {
+      target: { files: [file] }
+    });
+
+    await waitFor(() => expect(uploadKnowledgeFileMock).toHaveBeenCalledWith(10, file));
+    await waitFor(() => expect(getParseJobMock).toHaveBeenCalledWith(10, 77));
+    expect(await screen.findByText("microplastics.md")).toBeTruthy();
+    expect(await screen.findByText("解析完成 · 12 chunks")).toBeTruthy();
+  });
+
+  it("asks the selected notebook through chat-flow and renders citations", async () => {
+    render(<Page />);
+
+    fireEvent.click(await screen.findByRole("button", { name: /打开 Machine Learning Tools/ }));
+    fireEvent.change(screen.getByLabelText("提问或创作内容"), {
+      target: { value: "Which source should I trust?" }
+    });
+    fireEvent.click(screen.getByRole("button", { name: "发送消息" }));
+
+    await waitFor(() =>
+      expect(sendChatFlowMessageMock).toHaveBeenCalledWith(501, {
+        content: "Which source should I trust?",
         limit: 5
       })
     );
-    expect(await screen.findByText("Use the current handbook.")).toBeTruthy();
+    expect(await screen.findByText("Use the cited source list before drawing conclusions.")).toBeTruthy();
     expect(await screen.findByText("Trace #42")).toBeTruthy();
     expect(await screen.findByText("20:0 · page 3")).toBeTruthy();
-    expect(await screen.findByText("Embedding local-keyword")).toBeTruthy();
   });
 
-  it("submits citation feedback for the latest answer", async () => {
+  it("submits citation feedback for the latest chat-flow answer", async () => {
     render(<Page />);
 
-    await waitFor(() => expect(listDatasetsMock).toHaveBeenCalledWith({ page: 1, size: 20 }));
-    fireEvent.click(screen.getByRole("button", { name: "发送问题" }));
-    expect(await screen.findByText("Use the current handbook.")).toBeTruthy();
+    fireEvent.click(await screen.findByRole("button", { name: /打开 Machine Learning Tools/ }));
+    fireEvent.click(screen.getByRole("button", { name: "发送消息" }));
+    expect(await screen.findByText("Use the cited source list before drawing conclusions.")).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "引用问题" }));
 
     await waitFor(() =>
@@ -147,44 +280,5 @@ describe("Chat web page", () => {
       })
     );
     expect(await screen.findByText("反馈已保存")).toBeTruthy();
-  });
-
-  it("runs pure model chat from the customer-facing workspace", async () => {
-    render(<Page />);
-
-    fireEvent.click(screen.getByRole("button", { name: "模型对话" }));
-    const file = new File(["# Handbook\nUse the current onboarding guide."], "handbook.md", {
-      type: "text/markdown"
-    });
-    fireEvent.change(screen.getByLabelText("添加模型上下文文件"), {
-      target: { files: [file] }
-    });
-    expect(await screen.findByText("handbook.md")).toBeTruthy();
-    fireEvent.change(screen.getByLabelText("输入模型问题"), {
-      target: { value: "Explain Novex." }
-    });
-    fireEvent.click(screen.getByRole("button", { name: "发送模型消息" }));
-
-    await waitFor(() =>
-      expect(chatCompletionMock).toHaveBeenCalledWith({
-        conversationId: undefined,
-        messages: [{ role: "user", content: "Explain Novex." }],
-        fileContexts: [
-          {
-            name: "handbook.md",
-            contentType: "text/markdown",
-            content: "# Handbook\nUse the current onboarding guide."
-          }
-        ],
-        temperature: 0.2,
-        maxTokens: 1024
-      })
-    );
-    expect((await screen.findAllByText("Pure model answer.")).length).toBeGreaterThan(0);
-    expect((await screen.findAllByText("runtime.llm · deepseek-v4-flash")).length).toBeGreaterThan(0);
-    expect((await screen.findAllByText("42 ms")).length).toBeGreaterThan(0);
-    await waitFor(() => expect(listChatConversationsMock).toHaveBeenCalled());
-    expect((await screen.findAllByText("Explain Novex.")).length).toBeGreaterThan(0);
-    expect((await screen.findAllByText("Pure model answer.")).length).toBeGreaterThan(0);
   });
 });
