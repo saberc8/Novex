@@ -1,5 +1,6 @@
 pub mod ai_agent_repository;
 pub mod ai_capability_repository;
+pub mod ai_chat_flow_repository;
 pub mod ai_eval_repository;
 pub mod ai_knowledge_repository;
 pub mod dept_repository;
