@@ -9,9 +9,10 @@ use crate::{
     application::system::{ensure_max_chars, format_datetime},
     infrastructure::persistence::{
         ai_agent_repository::{
-            AgentRunFilter, AgentRunRecord, AgentRunSaveRecord, AgentTraceSaveRecord,
-            AiAgentRepository, RunEventFilter, RunEventRecord, RunEventSaveRecord,
-            RunPauseSaveRecord, RunSaveRecord, RunStepSaveRecord,
+            AgentRunFilter, AgentRunRecord, AgentRunSaveRecord, AgentRunStatusUpdate,
+            AgentTraceSaveRecord, AiAgentRepository, RunEventFilter, RunEventRecord,
+            RunEventSaveRecord, RunPauseSaveRecord, RunSaveRecord, RunStatusUpdate,
+            RunStepSaveRecord,
         },
         ai_capability_repository::{AiCapabilityRepository, ToolAuditSaveRecord, ToolLookupRecord},
     },
@@ -26,7 +27,7 @@ const DEFAULT_TENANT_ID: i64 = 1;
 const DEFAULT_AGENT_PAGE_SIZE: u64 = 20;
 const DEFAULT_EVENT_PAGE_SIZE: u64 = 100;
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentRunCommand {
     #[serde(default)]
@@ -35,16 +36,6 @@ pub struct AgentRunCommand {
     pub auto_approve: bool,
     #[serde(default)]
     pub budget: TaskBudget,
-}
-
-impl Default for AgentRunCommand {
-    fn default() -> Self {
-        Self {
-            input: String::new(),
-            auto_approve: false,
-            budget: TaskBudget::default(),
-        }
-    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -113,6 +104,16 @@ impl AgentRunEventQuery {
         }
         .normalized()
     }
+}
+
+struct AgentStatusUpdate<'a> {
+    user_id: i64,
+    run_id: i64,
+    status: String,
+    output_payload: Value,
+    final_output: Option<&'a str>,
+    pause_reason: Option<&'a str>,
+    finished: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -237,15 +238,15 @@ impl AgentService {
             if plan.requires_approval {
                 self.pause_for_approval(user_id, run_id, &tool, &command.input, now)
                     .await?;
-                self.update_status(
+                self.update_status(AgentStatusUpdate {
                     user_id,
                     run_id,
-                    initial_status,
-                    Value::Null,
-                    None,
-                    Some("approval"),
-                    false,
-                )
+                    status: initial_status,
+                    output_payload: Value::Null,
+                    final_output: None,
+                    pause_reason: Some("approval"),
+                    finished: false,
+                })
                 .await?;
                 self.refresh_trace_snapshot(user_id, run_id, Value::Null)
                     .await?;
@@ -354,15 +355,15 @@ impl AgentService {
                 now,
             )
             .await?;
-        self.update_status(
+        self.update_status(AgentStatusUpdate {
             user_id,
             run_id,
-            run_status_code(RunStatus::Resuming),
-            Value::Null,
-            None,
-            None,
-            false,
-        )
+            status: run_status_code(RunStatus::Resuming),
+            output_payload: Value::Null,
+            final_output: None,
+            pause_reason: None,
+            finished: false,
+        })
         .await?;
         self.append_event(
             user_id,
@@ -396,15 +397,15 @@ impl AgentService {
         if is_terminal_status(&run.status) {
             return Err(AppError::conflict("当前 Run 已终止"));
         }
-        self.update_status(
+        self.update_status(AgentStatusUpdate {
             user_id,
             run_id,
-            run_status_code(RunStatus::Cancelling),
-            Value::Null,
-            None,
-            run.pause_reason.as_deref(),
-            false,
-        )
+            status: run_status_code(RunStatus::Cancelling),
+            output_payload: Value::Null,
+            final_output: None,
+            pause_reason: run.pause_reason.as_deref(),
+            finished: false,
+        })
         .await?;
         self.append_event(
             user_id,
@@ -419,15 +420,15 @@ impl AgentService {
         self.repo
             .cancel_active_pauses(DEFAULT_TENANT_ID, run_id, user_id, now)
             .await?;
-        self.update_status(
+        self.update_status(AgentStatusUpdate {
             user_id,
             run_id,
-            run_status_code(RunStatus::Cancelled),
-            json!({ "cancelled": true }),
-            None,
-            None,
-            true,
-        )
+            status: run_status_code(RunStatus::Cancelled),
+            output_payload: json!({ "cancelled": true }),
+            final_output: None,
+            pause_reason: None,
+            finished: true,
+        })
         .await?;
         self.append_event(
             user_id,
@@ -653,15 +654,15 @@ impl AgentService {
         )
         .await?;
         let final_output = format!("Agent dry-run executed {}.", tool.code);
-        self.update_status(
+        self.update_status(AgentStatusUpdate {
             user_id,
             run_id,
-            run_status_code(RunStatus::Succeeded),
-            json!({ "answer": final_output, "auditId": audit_id }),
-            Some(&final_output),
-            None,
-            true,
-        )
+            status: run_status_code(RunStatus::Succeeded),
+            output_payload: json!({ "answer": final_output, "auditId": audit_id }),
+            final_output: Some(&final_output),
+            pause_reason: None,
+            finished: true,
+        })
         .await?;
         self.append_event(
             user_id,
@@ -686,15 +687,15 @@ impl AgentService {
         run_id: i64,
         final_output: &str,
     ) -> Result<(), AppError> {
-        self.update_status(
+        self.update_status(AgentStatusUpdate {
             user_id,
             run_id,
-            run_status_code(RunStatus::Succeeded),
-            json!({ "answer": final_output }),
-            Some(final_output),
-            None,
-            true,
-        )
+            status: run_status_code(RunStatus::Succeeded),
+            output_payload: json!({ "answer": final_output }),
+            final_output: Some(final_output),
+            pause_reason: None,
+            finished: true,
+        })
         .await?;
         self.append_event(
             user_id,
@@ -707,38 +708,29 @@ impl AgentService {
         .await
     }
 
-    async fn update_status(
-        &self,
-        user_id: i64,
-        run_id: i64,
-        status: String,
-        output_payload: Value,
-        final_output: Option<&str>,
-        pause_reason: Option<&str>,
-        finished: bool,
-    ) -> Result<(), AppError> {
+    async fn update_status(&self, update: AgentStatusUpdate<'_>) -> Result<(), AppError> {
         let now = Utc::now().naive_utc();
         self.repo
-            .update_run_status(
-                DEFAULT_TENANT_ID,
-                run_id,
-                &status,
-                &output_payload,
-                finished,
-                user_id,
+            .update_run_status(&RunStatusUpdate {
+                tenant_id: DEFAULT_TENANT_ID,
+                run_id: update.run_id,
+                status: &update.status,
+                output_payload: &update.output_payload,
+                finished: update.finished,
+                user_id: update.user_id,
                 now,
-            )
+            })
             .await?;
         self.repo
-            .update_agent_run_status(
-                DEFAULT_TENANT_ID,
-                run_id,
-                &status,
-                final_output,
-                pause_reason,
-                user_id,
+            .update_agent_run_status(&AgentRunStatusUpdate {
+                tenant_id: DEFAULT_TENANT_ID,
+                run_id: update.run_id,
+                status: &update.status,
+                final_output: update.final_output,
+                pause_reason: update.pause_reason,
+                user_id: update.user_id,
                 now,
-            )
+            })
             .await
     }
 

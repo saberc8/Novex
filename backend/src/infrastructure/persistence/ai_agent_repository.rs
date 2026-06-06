@@ -73,6 +73,28 @@ pub struct RunStepSaveRecord {
 }
 
 #[derive(Debug, Clone)]
+pub struct RunStatusUpdate<'a> {
+    pub tenant_id: i64,
+    pub run_id: i64,
+    pub status: &'a str,
+    pub output_payload: &'a Value,
+    pub finished: bool,
+    pub user_id: i64,
+    pub now: NaiveDateTime,
+}
+
+#[derive(Debug, Clone)]
+pub struct AgentRunStatusUpdate<'a> {
+    pub tenant_id: i64,
+    pub run_id: i64,
+    pub status: &'a str,
+    pub final_output: Option<&'a str>,
+    pub pause_reason: Option<&'a str>,
+    pub user_id: i64,
+    pub now: NaiveDateTime,
+}
+
+#[derive(Debug, Clone)]
 pub struct RunEventSaveRecord {
     pub id: i64,
     pub tenant_id: i64,
@@ -313,16 +335,7 @@ VALUES ($1, $2, $3, $4, $5, 'active', $6, $7, $8, $9, $8, $9);
         Ok(())
     }
 
-    pub async fn update_run_status(
-        &self,
-        tenant_id: i64,
-        run_id: i64,
-        status: &str,
-        output_payload: &Value,
-        finished: bool,
-        user_id: i64,
-        now: NaiveDateTime,
-    ) -> Result<(), AppError> {
+    pub async fn update_run_status(&self, update: &RunStatusUpdate<'_>) -> Result<(), AppError> {
         sqlx::query(
             r#"
 UPDATE ai_run
@@ -334,13 +347,13 @@ SET status = $3,
 WHERE tenant_id = $1 AND id = $2;
 "#,
         )
-        .bind(tenant_id)
-        .bind(run_id)
-        .bind(status)
-        .bind(output_payload)
-        .bind(finished)
-        .bind(user_id)
-        .bind(now)
+        .bind(update.tenant_id)
+        .bind(update.run_id)
+        .bind(update.status)
+        .bind(update.output_payload)
+        .bind(update.finished)
+        .bind(update.user_id)
+        .bind(update.now)
         .execute(&self.db)
         .await?;
         Ok(())
@@ -348,13 +361,7 @@ WHERE tenant_id = $1 AND id = $2;
 
     pub async fn update_agent_run_status(
         &self,
-        tenant_id: i64,
-        run_id: i64,
-        status: &str,
-        final_output: Option<&str>,
-        pause_reason: Option<&str>,
-        user_id: i64,
-        now: NaiveDateTime,
+        update: &AgentRunStatusUpdate<'_>,
     ) -> Result<(), AppError> {
         sqlx::query(
             r#"
@@ -367,13 +374,13 @@ SET status = $3,
 WHERE tenant_id = $1 AND run_id = $2;
 "#,
         )
-        .bind(tenant_id)
-        .bind(run_id)
-        .bind(status)
-        .bind(final_output)
-        .bind(pause_reason)
-        .bind(user_id)
-        .bind(now)
+        .bind(update.tenant_id)
+        .bind(update.run_id)
+        .bind(update.status)
+        .bind(update.final_output)
+        .bind(update.pause_reason)
+        .bind(update.user_id)
+        .bind(update.now)
         .execute(&self.db)
         .await?;
         Ok(())

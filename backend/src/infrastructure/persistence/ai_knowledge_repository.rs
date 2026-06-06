@@ -198,6 +198,8 @@ pub struct ChunkSaveRecord {
     pub content_role: String,
     pub display_capability: String,
     pub metadata: Value,
+    pub embedding_model: Option<String>,
+    pub embedding_ref: Option<String>,
     pub embedding_status: i16,
     pub user_id: i64,
     pub now: NaiveDateTime,
@@ -437,12 +439,12 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14);
 INSERT INTO ai_document_chunk (
     id, tenant_id, dataset_id, document_id, chunk_uid, chunk_index, content,
     semantic_search_text, token_count, citation, segment_type, segment_index, page_no,
-    section_path, content_role, display_capability, metadata, embedding_status,
-    create_user, create_time
+    section_path, content_role, display_capability, metadata, embedding_model, embedding_ref,
+    embedding_status, create_user, create_time
 )
 VALUES (
     $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
-    $11, $12, $13, $14, $15, $16, $17, $18, $19, $20
+    $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22
 );
 "#,
             )
@@ -463,6 +465,8 @@ VALUES (
             .bind(&chunk.content_role)
             .bind(&chunk.display_capability)
             .bind(&chunk.metadata)
+            .bind(&chunk.embedding_model)
+            .bind(&chunk.embedding_ref)
             .bind(chunk.embedding_status)
             .bind(chunk.user_id)
             .bind(chunk.now)
@@ -658,12 +662,12 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14);
 INSERT INTO ai_document_chunk (
     id, tenant_id, dataset_id, document_id, chunk_uid, chunk_index, content,
     semantic_search_text, token_count, citation, segment_type, segment_index, page_no,
-    section_path, content_role, display_capability, metadata, embedding_status,
-    create_user, create_time
+    section_path, content_role, display_capability, metadata, embedding_model, embedding_ref,
+    embedding_status, create_user, create_time
 )
 VALUES (
     $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
-    $11, $12, $13, $14, $15, $16, $17, $18, $19, $20
+    $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22
 );
 "#,
             )
@@ -684,6 +688,8 @@ VALUES (
             .bind(&chunk.content_role)
             .bind(&chunk.display_capability)
             .bind(&chunk.metadata)
+            .bind(&chunk.embedding_model)
+            .bind(&chunk.embedding_ref)
             .bind(chunk.embedding_status)
             .bind(chunk.user_id)
             .bind(chunk.now)

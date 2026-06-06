@@ -13,77 +13,52 @@ pub enum KnowledgeResourceKind {
     Citation,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DatasetStatus {
+    #[default]
     Draft,
     Published,
     Archived,
 }
 
-impl Default for DatasetStatus {
-    fn default() -> Self {
-        Self::Draft
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ResourceVisibility {
+    #[default]
     Private,
     Tenant,
     Public,
 }
 
-impl Default for ResourceVisibility {
-    fn default() -> Self {
-        Self::Private
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RetrievalMode {
     Vector,
     Keyword,
+    #[default]
     Hybrid,
 }
 
-impl Default for RetrievalMode {
-    fn default() -> Self {
-        Self::Hybrid
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DocumentParseStatus {
+    #[default]
     Pending,
     Parsing,
     Parsed,
     Failed,
 }
 
-impl Default for DocumentParseStatus {
-    fn default() -> Self {
-        Self::Pending
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum IngestionStatus {
+    #[default]
     Pending,
     Chunking,
     Embedding,
     Indexed,
     Failed,
-}
-
-impl Default for IngestionStatus {
-    fn default() -> Self {
-        Self::Pending
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -95,18 +70,13 @@ pub struct CitationRef {
     pub section_path: Vec<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ChunkSegmentType {
+    #[default]
     Text,
     Table,
     Image,
-}
-
-impl Default for ChunkSegmentType {
-    fn default() -> Self {
-        Self::Text
-    }
 }
 
 impl ChunkSegmentType {
@@ -119,18 +89,13 @@ impl ChunkSegmentType {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ContentRole {
+    #[default]
     Canonical,
     SummaryFaq,
     TestCase,
-}
-
-impl Default for ContentRole {
-    fn default() -> Self {
-        Self::Canonical
-    }
 }
 
 impl ContentRole {
@@ -143,18 +108,13 @@ impl ContentRole {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DisplayCapability {
     PreciseAnchor,
     RowOnly,
+    #[default]
     TextOnly,
-}
-
-impl Default for DisplayCapability {
-    fn default() -> Self {
-        Self::TextOnly
-    }
 }
 
 impl DisplayCapability {
@@ -685,13 +645,8 @@ fn split_table_block(block: &SourceBlock, max_chars: usize) -> Vec<String> {
         if current != header_line && candidate.chars().count() > max_chars {
             chunks.push(std::mem::replace(&mut current, header_line.to_owned()));
         }
-        if current == header_line {
-            current.push('\n');
-            current.push_str(row);
-        } else {
-            current.push('\n');
-            current.push_str(row);
-        }
+        current.push('\n');
+        current.push_str(row);
     }
     if current != header_line || lines.len() == 1 {
         chunks.push(current);

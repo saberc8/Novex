@@ -13,7 +13,7 @@ use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 
 use crate::{
-    application::ai::model_service::{ModelRerankScore, ModelRuntimeService},
+    application::ai::model_service::{ModelEmbeddingVector, ModelRerankScore, ModelRuntimeService},
     application::system::{
         ensure_max_chars, file_service::FileResp, format_datetime, format_optional_datetime,
     },
@@ -52,6 +52,7 @@ const DEFAULT_RAG_LIMIT: usize = 5;
 const MAX_RAG_LIMIT: usize = 10;
 const RERANK_CANDIDATE_MULTIPLIER: usize = 4;
 const MAX_RERANK_CANDIDATES: usize = 30;
+const LOCAL_EMBEDDING_DIMENSION: usize = 64;
 const MAX_LOCAL_RETRIEVAL_CHUNKS: i64 = 500;
 const LOCAL_EMBEDDING_ROUTE: &str = "local-keyword";
 const LOCAL_RERANK_ROUTE: &str = "none";
@@ -452,6 +453,7 @@ pub struct FeedbackResp {
 struct IndexedRagChunk {
     chunk_db_id: i64,
     document_id: i64,
+    embedding_vector: Option<Vec<f32>>,
     chunk: RagDocumentChunk,
 }
 
@@ -610,7 +612,7 @@ impl KnowledgeService {
             user_id,
             now,
         };
-        let chunk_records = chunk_save_records(
+        let mut chunk_records = chunk_save_records(
             DEFAULT_TENANT_ID,
             dataset_id,
             document_id,
@@ -618,6 +620,7 @@ impl KnowledgeService {
             user_id,
             now,
         );
+        enrich_chunk_records_with_runtime_embeddings(&mut chunk_records).await;
 
         self.repo
             .create_document_ingestion(&document, &parser_job, &[], &chunk_records)
@@ -642,13 +645,14 @@ impl KnowledgeService {
             return Err(AppError::NotFound);
         }
 
-        let parts = parsed_document_ingestion_parts(
+        let mut parts = parsed_document_ingestion_parts(
             DEFAULT_TENANT_ID,
             dataset_id,
             user_id,
             command,
             Utc::now().naive_utc(),
         )?;
+        enrich_chunk_records_with_runtime_embeddings(&mut parts.chunks).await;
         let document_id = parts.document.id;
         if self
             .repo
@@ -855,12 +859,13 @@ impl KnowledgeService {
             .list_indexed_chunks(DEFAULT_TENANT_ID, dataset_id, MAX_LOCAL_RETRIEVAL_CHUNKS)
             .await?;
         let indexed_chunks = indexed_rag_chunks(chunk_records);
-        let rag_chunks = indexed_chunks
-            .iter()
-            .map(|chunk| chunk.chunk.clone())
-            .collect::<Vec<_>>();
         let candidate_limit = rerank_candidate_limit(command.limit);
-        let candidate_hits = keyword_retrieve(&command.question, &rag_chunks, candidate_limit);
+        let candidate_hits = hybrid_retrieve_indexed_chunks_with_runtime_embeddings(
+            &command.question,
+            &indexed_chunks,
+            candidate_limit,
+        )
+        .await;
         let hits = rerank_dataset_hits(&command.question, candidate_hits, command.limit).await;
         let indexed_hits = indexed_retrieval_hits(&hits, &indexed_chunks);
         let answer = build_extractive_answer(&command.question, &hits);
@@ -1756,21 +1761,23 @@ fn parser_chunk_save_records(
         .into_iter()
         .map(|chunk| {
             let metadata = chunk.metadata.clone();
+            let chunk_uid = chunk.chunk_id;
+            let semantic_search_text = chunk.semantic_search_text;
             let mut metadata_value = chunk_metadata_value(&metadata);
             if let Some(object) = metadata_value.as_object_mut() {
                 object.insert(
                     "parser".to_owned(),
                     json!(parser_name(&command.parser_result.metadata)),
                 );
-                object.insert("parserChunkUid".to_owned(), json!(chunk.chunk_id.clone()));
+                object.insert("parserChunkUid".to_owned(), json!(chunk_uid.clone()));
                 object.insert(
                     "parserBlockIds".to_owned(),
                     json!(parser_chunk_by_uid
-                        .get(chunk.chunk_id.as_str())
+                        .get(chunk_uid.as_str())
                         .map(|parser_chunk| parser_chunk.citation.block_ids.clone())
                         .unwrap_or_default()),
                 );
-                if let Some(parser_chunk) = parser_chunk_by_uid.get(chunk.chunk_id.as_str()) {
+                if let Some(parser_chunk) = parser_chunk_by_uid.get(chunk_uid.as_str()) {
                     if !parser_chunk.metadata.is_null() {
                         object.insert(
                             "parserChunkMetadata".to_owned(),
@@ -1779,15 +1786,23 @@ fn parser_chunk_save_records(
                     }
                 }
             }
+            let vector = local_embedding_vector(&semantic_search_text);
+            attach_embedding_metadata(
+                &mut metadata_value,
+                LOCAL_EMBEDDING_ROUTE,
+                "local",
+                &chunk_uid,
+                &vector,
+            );
             ChunkSaveRecord {
                 id: next_id(),
                 tenant_id,
                 dataset_id,
                 document_id,
-                chunk_uid: chunk.chunk_id,
+                chunk_uid: chunk_uid.clone(),
                 chunk_index: chunk.chunk_index as i32,
                 content: chunk.text,
-                semantic_search_text: chunk.semantic_search_text,
+                semantic_search_text,
                 token_count: chunk.token_count as i32,
                 citation: citation_value(&chunk.citation),
                 segment_type: metadata.segment_type.as_str().to_owned(),
@@ -1797,6 +1812,8 @@ fn parser_chunk_save_records(
                 content_role: metadata.content_role.as_str().to_owned(),
                 display_capability: metadata.display_capability.as_str().to_owned(),
                 metadata: metadata_value,
+                embedding_model: Some(LOCAL_EMBEDDING_ROUTE.to_owned()),
+                embedding_ref: Some(embedding_ref(&chunk_uid)),
                 embedding_status: CHUNK_EMBEDDING_STATUS_INDEXED,
                 user_id,
                 now,
@@ -2078,6 +2095,151 @@ fn non_empty_parser_string(value: &str) -> Option<String> {
     }
 }
 
+fn embedding_ref(chunk_uid: &str) -> String {
+    format!("postgres-jsonb:{chunk_uid}")
+}
+
+fn local_embedding_vector(text: &str) -> Vec<f32> {
+    let tokens = embedding_tokens(text);
+    if tokens.is_empty() {
+        return vec![0.0; LOCAL_EMBEDDING_DIMENSION];
+    }
+
+    let mut vector = vec![0.0f32; LOCAL_EMBEDDING_DIMENSION];
+    for token in tokens {
+        let hash = Sha256::digest(token.as_bytes());
+        let bucket = (((hash[0] as usize) << 8) | hash[1] as usize) % LOCAL_EMBEDDING_DIMENSION;
+        let sign = if hash[2] & 1 == 0 { 1.0 } else { -1.0 };
+        vector[bucket] += sign;
+    }
+    normalize_embedding_vector(vector)
+}
+
+fn embedding_tokens(text: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut ascii_token = String::new();
+    for character in text.chars().flat_map(char::to_lowercase) {
+        if character.is_ascii_alphanumeric() {
+            ascii_token.push(character);
+            continue;
+        }
+        if !ascii_token.is_empty() {
+            tokens.push(std::mem::take(&mut ascii_token));
+        }
+        if is_cjk_character(character) {
+            tokens.push(character.to_string());
+        }
+    }
+    if !ascii_token.is_empty() {
+        tokens.push(ascii_token);
+    }
+    tokens
+}
+
+fn is_cjk_character(character: char) -> bool {
+    matches!(
+        character as u32,
+        0x4E00..=0x9FFF | 0x3400..=0x4DBF | 0xF900..=0xFAFF
+    )
+}
+
+fn normalize_embedding_vector(mut vector: Vec<f32>) -> Vec<f32> {
+    let norm = vector
+        .iter()
+        .map(|value| (*value as f64) * (*value as f64))
+        .sum::<f64>()
+        .sqrt();
+    if norm <= f64::EPSILON {
+        return vector;
+    }
+    for value in &mut vector {
+        *value = (*value as f64 / norm) as f32;
+    }
+    vector
+}
+
+fn embedding_metadata(route_id: &str, source: &str, chunk_uid: &str, vector: &[f32]) -> Value {
+    json!({
+        "routeId": route_id,
+        "source": source,
+        "ref": embedding_ref(chunk_uid),
+        "dimension": vector.len(),
+        "vector": vector,
+    })
+}
+
+fn attach_embedding_metadata(
+    metadata: &mut Value,
+    route_id: &str,
+    source: &str,
+    chunk_uid: &str,
+    vector: &[f32],
+) {
+    if !metadata.is_object() {
+        *metadata = json!({});
+    }
+    if let Some(object) = metadata.as_object_mut() {
+        object.insert(
+            "embedding".to_owned(),
+            embedding_metadata(route_id, source, chunk_uid, vector),
+        );
+    }
+}
+
+fn apply_embedding_vectors_to_chunk_records(
+    records: &mut [ChunkSaveRecord],
+    route_id: &str,
+    source: &str,
+    vectors: &[ModelEmbeddingVector],
+) {
+    for vector in vectors {
+        let Some(record) = records.get_mut(vector.index) else {
+            continue;
+        };
+        record.embedding_model = Some(route_id.to_owned());
+        record.embedding_ref = Some(embedding_ref(&record.chunk_uid));
+        attach_embedding_metadata(
+            &mut record.metadata,
+            route_id,
+            source,
+            &record.chunk_uid,
+            &vector.vector,
+        );
+    }
+}
+
+async fn enrich_chunk_records_with_runtime_embeddings(records: &mut [ChunkSaveRecord]) {
+    let config = ModelRuntimeConfig::from_env();
+    enrich_chunk_records_with_runtime_embeddings_from_config(records, &config).await;
+}
+
+async fn enrich_chunk_records_with_runtime_embeddings_from_config(
+    records: &mut [ChunkSaveRecord],
+    config: &ModelRuntimeConfig,
+) {
+    let Some(route) = config.route(ModelRuntimeTarget::Embedding) else {
+        return;
+    };
+    if records.is_empty() {
+        return;
+    }
+
+    let texts = records
+        .iter()
+        .map(|record| record.semantic_search_text.clone())
+        .collect::<Vec<_>>();
+    let Ok(vectors) = ModelRuntimeService::embed_texts(route, &texts).await else {
+        return;
+    };
+
+    apply_embedding_vectors_to_chunk_records(
+        records,
+        &route.summary().route_id,
+        "runtime",
+        &vectors,
+    );
+}
+
 fn chunk_save_records(
     tenant_id: i64,
     dataset_id: i64,
@@ -2090,15 +2252,26 @@ fn chunk_save_records(
         .into_iter()
         .map(|chunk| {
             let metadata = chunk.metadata.clone();
+            let chunk_uid = chunk.chunk_id;
+            let semantic_search_text = chunk.semantic_search_text;
+            let vector = local_embedding_vector(&semantic_search_text);
+            let mut metadata_value = chunk_metadata_value(&metadata);
+            attach_embedding_metadata(
+                &mut metadata_value,
+                LOCAL_EMBEDDING_ROUTE,
+                "local",
+                &chunk_uid,
+                &vector,
+            );
             ChunkSaveRecord {
                 id: next_id(),
                 tenant_id,
                 dataset_id,
                 document_id,
-                chunk_uid: chunk.chunk_id,
+                chunk_uid: chunk_uid.clone(),
                 chunk_index: chunk.chunk_index as i32,
                 content: chunk.text,
-                semantic_search_text: chunk.semantic_search_text,
+                semantic_search_text,
                 token_count: chunk.token_count as i32,
                 citation: citation_value(&chunk.citation),
                 segment_type: metadata.segment_type.as_str().to_owned(),
@@ -2107,7 +2280,9 @@ fn chunk_save_records(
                 section_path: json!(metadata.section_path),
                 content_role: metadata.content_role.as_str().to_owned(),
                 display_capability: metadata.display_capability.as_str().to_owned(),
-                metadata: chunk_metadata_value(&metadata),
+                metadata: metadata_value,
+                embedding_model: Some(LOCAL_EMBEDDING_ROUTE.to_owned()),
+                embedding_ref: Some(embedding_ref(&chunk_uid)),
                 embedding_status: CHUNK_EMBEDDING_STATUS_INDEXED,
                 user_id,
                 now,
@@ -2122,10 +2297,12 @@ fn indexed_rag_chunks(records: Vec<ChunkRecord>) -> Vec<IndexedRagChunk> {
         .map(|record| {
             let citation =
                 citation_from_value(record.document_id, &record.chunk_uid, &record.citation);
+            let embedding_vector = embedding_vector_from_metadata(&record.metadata);
             let metadata = chunk_metadata_from_record(&record);
             IndexedRagChunk {
                 chunk_db_id: record.id,
                 document_id: record.document_id,
+                embedding_vector,
                 chunk: RagDocumentChunk {
                     document_id: record.document_id.to_string(),
                     chunk_id: record.chunk_uid,
@@ -2139,6 +2316,200 @@ fn indexed_rag_chunks(records: Vec<ChunkRecord>) -> Vec<IndexedRagChunk> {
             }
         })
         .collect()
+}
+
+#[cfg(test)]
+fn hybrid_retrieve_indexed_chunks(
+    question: &str,
+    indexed_chunks: &[IndexedRagChunk],
+    limit: usize,
+) -> Vec<RetrievalHit> {
+    let query_embeddings = vec![local_embedding_vector(question)];
+    hybrid_retrieve_indexed_chunks_with_query_embeddings(
+        question,
+        indexed_chunks,
+        limit,
+        &query_embeddings,
+    )
+}
+
+async fn hybrid_retrieve_indexed_chunks_with_runtime_embeddings(
+    question: &str,
+    indexed_chunks: &[IndexedRagChunk],
+    limit: usize,
+) -> Vec<RetrievalHit> {
+    let mut query_embeddings = vec![local_embedding_vector(question)];
+    if let Some(runtime_embedding) = runtime_query_embedding(question).await {
+        query_embeddings.push(runtime_embedding);
+    }
+
+    hybrid_retrieve_indexed_chunks_with_query_embeddings(
+        question,
+        indexed_chunks,
+        limit,
+        &query_embeddings,
+    )
+}
+
+async fn runtime_query_embedding(question: &str) -> Option<Vec<f32>> {
+    let config = ModelRuntimeConfig::from_env();
+    let route = config.route(ModelRuntimeTarget::Embedding)?;
+    let mut vectors = ModelRuntimeService::embed_texts(route, &[question.to_owned()])
+        .await
+        .ok()?;
+    vectors.sort_by_key(|vector| vector.index);
+    vectors.into_iter().next().map(|vector| vector.vector)
+}
+
+fn hybrid_retrieve_indexed_chunks_with_query_embeddings(
+    question: &str,
+    indexed_chunks: &[IndexedRagChunk],
+    limit: usize,
+    query_embeddings: &[Vec<f32>],
+) -> Vec<RetrievalHit> {
+    if limit == 0 {
+        return Vec::new();
+    }
+
+    let rag_chunks = indexed_chunks
+        .iter()
+        .map(|chunk| chunk.chunk.clone())
+        .collect::<Vec<_>>();
+    let keyword_hits = keyword_retrieve(question, &rag_chunks, limit);
+    let embedding_hits = embedding_retrieve_indexed_chunks(query_embeddings, indexed_chunks, limit);
+
+    merge_hybrid_retrieval_hits(keyword_hits, embedding_hits, limit)
+}
+
+fn embedding_vector_from_metadata(metadata: &Value) -> Option<Vec<f32>> {
+    let vector = metadata
+        .get("embedding")?
+        .get("vector")?
+        .as_array()?
+        .iter()
+        .filter_map(json_value_f32)
+        .filter(|value| value.is_finite())
+        .collect::<Vec<_>>();
+    if vector.is_empty() {
+        None
+    } else {
+        Some(vector)
+    }
+}
+
+fn json_value_f32(value: &Value) -> Option<f32> {
+    if let Some(value) = value.as_f64() {
+        return Some(value as f32);
+    }
+    value.as_str().and_then(|text| text.parse::<f32>().ok())
+}
+
+fn embedding_retrieve_indexed_chunks(
+    query_embeddings: &[Vec<f32>],
+    indexed_chunks: &[IndexedRagChunk],
+    limit: usize,
+) -> Vec<RetrievalHit> {
+    if query_embeddings.is_empty() || limit == 0 {
+        return Vec::new();
+    }
+
+    let mut scored = indexed_chunks
+        .iter()
+        .filter_map(|indexed_chunk| {
+            let vector = indexed_chunk.embedding_vector.as_deref()?;
+            let score = query_embeddings
+                .iter()
+                .filter_map(|query_embedding| cosine_similarity(query_embedding, vector))
+                .max_by(|left, right| {
+                    left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal)
+                })?;
+            if score <= 0.0 {
+                return None;
+            }
+            Some((score, indexed_chunk.chunk.clone()))
+        })
+        .collect::<Vec<_>>();
+
+    scored.sort_by(|left, right| {
+        right
+            .0
+            .partial_cmp(&left.0)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| left.1.chunk_index.cmp(&right.1.chunk_index))
+    });
+
+    scored
+        .into_iter()
+        .take(limit)
+        .enumerate()
+        .map(|(index, (score, chunk))| RetrievalHit {
+            rank: index + 1,
+            score,
+            citation: chunk.citation.clone(),
+            chunk,
+        })
+        .collect()
+}
+
+fn cosine_similarity(left: &[f32], right: &[f32]) -> Option<f32> {
+    if left.len() != right.len() || left.is_empty() {
+        return None;
+    }
+    let mut dot = 0.0f32;
+    let mut left_norm = 0.0f32;
+    let mut right_norm = 0.0f32;
+    for (left_value, right_value) in left.iter().zip(right.iter()) {
+        dot += left_value * right_value;
+        left_norm += left_value * left_value;
+        right_norm += right_value * right_value;
+    }
+    if left_norm <= f32::EPSILON || right_norm <= f32::EPSILON {
+        return None;
+    }
+    Some(dot / (left_norm.sqrt() * right_norm.sqrt()))
+}
+
+fn merge_hybrid_retrieval_hits(
+    keyword_hits: Vec<RetrievalHit>,
+    embedding_hits: Vec<RetrievalHit>,
+    limit: usize,
+) -> Vec<RetrievalHit> {
+    let mut merged = HashMap::<String, (RetrievalHit, f32)>::new();
+
+    for hit in keyword_hits {
+        let key = hit.chunk.chunk_id.clone();
+        let weighted_score = hit.score * 0.65;
+        merged
+            .entry(key)
+            .and_modify(|(_, score)| *score += weighted_score)
+            .or_insert((hit, weighted_score));
+    }
+
+    for hit in embedding_hits {
+        let key = hit.chunk.chunk_id.clone();
+        let weighted_score = hit.score * 0.35;
+        merged
+            .entry(key)
+            .and_modify(|(_, score)| *score += weighted_score)
+            .or_insert((hit, weighted_score));
+    }
+
+    let mut scored = merged
+        .into_values()
+        .map(|(mut hit, score)| {
+            hit.score = score;
+            hit
+        })
+        .collect::<Vec<_>>();
+    scored.sort_by(|left, right| {
+        right
+            .score
+            .partial_cmp(&left.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| left.chunk.chunk_index.cmp(&right.chunk.chunk_index))
+    });
+    scored.truncate(limit);
+    rank_retrieval_hits(scored)
 }
 
 fn indexed_retrieval_hits(
@@ -2179,10 +2550,7 @@ async fn rerank_dataset_hits(
     let Some(route) = config.route(ModelRuntimeTarget::Reranker) else {
         return rerank_retrieval_hits(&hits, &[], limit);
     };
-    let documents = hits
-        .iter()
-        .map(|hit| rerank_document_text(hit))
-        .collect::<Vec<_>>();
+    let documents = hits.iter().map(rerank_document_text).collect::<Vec<_>>();
 
     match ModelRuntimeService::rerank_documents(route, question, &documents).await {
         Ok(scores) if !scores.is_empty() => rerank_retrieval_hits(&hits, &scores, limit),
@@ -2868,9 +3236,162 @@ mod tests {
         assert_eq!(records[0].segment_index, 0);
         assert_eq!(records[0].page_no, Some(3));
         assert_eq!(records[0].section_path, serde_json::json!(["入职培训"]));
+        assert_eq!(
+            records[0].embedding_model.as_deref(),
+            Some(LOCAL_EMBEDDING_ROUTE)
+        );
+        assert_eq!(
+            records[0].embedding_ref.as_deref(),
+            Some("postgres-jsonb:42:0")
+        );
+        assert_eq!(
+            records[0].metadata["embedding"]["routeId"],
+            LOCAL_EMBEDDING_ROUTE
+        );
+        assert_eq!(records[0].metadata["embedding"]["dimension"], 64);
+        assert_eq!(
+            records[0].metadata["embedding"]["vector"]
+                .as_array()
+                .map(Vec::len),
+            Some(64)
+        );
         assert_eq!(records[0].content_role, "canonical");
         assert_eq!(records[0].display_capability, "precise_anchor");
         assert_eq!(records[0].metadata["sourceFileName"], "handbook.md");
+    }
+
+    #[test]
+    fn runtime_embedding_vectors_override_local_chunk_embedding_metadata() {
+        let command = normalize_document_upload_command(DocumentUploadCommand {
+            name: "training.txt".to_owned(),
+            content: "Onboarding training starts Monday.".to_owned(),
+            ..DocumentUploadCommand::default()
+        })
+        .unwrap();
+        let chunks = document_upload_chunks(42, &command);
+        let now = Utc::now().naive_utc();
+        let mut records = chunk_save_records(1, 7, 42, chunks, 9, now);
+
+        apply_embedding_vectors_to_chunk_records(
+            &mut records,
+            "runtime.embedding",
+            "runtime",
+            &[
+                crate::application::ai::model_service::ModelEmbeddingVector {
+                    index: 0,
+                    vector: vec![0.25, 0.75],
+                },
+            ],
+        );
+
+        assert_eq!(
+            records[0].embedding_model.as_deref(),
+            Some("runtime.embedding")
+        );
+        assert_eq!(
+            records[0].embedding_ref.as_deref(),
+            Some("postgres-jsonb:42:0")
+        );
+        assert_eq!(
+            records[0].metadata["embedding"]["routeId"],
+            "runtime.embedding"
+        );
+        assert_eq!(records[0].metadata["embedding"]["source"], "runtime");
+        assert_eq!(records[0].metadata["embedding"]["dimension"], 2);
+        assert_eq!(
+            records[0].metadata["embedding"]["vector"],
+            serde_json::json!([0.25, 0.75])
+        );
+    }
+
+    #[tokio::test]
+    async fn runtime_embedding_enrichment_keeps_local_fallback_without_runtime_route() {
+        let command = normalize_document_upload_command(DocumentUploadCommand {
+            name: "training.txt".to_owned(),
+            content: "Onboarding training starts Monday.".to_owned(),
+            ..DocumentUploadCommand::default()
+        })
+        .unwrap();
+        let chunks = document_upload_chunks(42, &command);
+        let now = Utc::now().naive_utc();
+        let mut records = chunk_save_records(1, 7, 42, chunks, 9, now);
+        let local_embedding = records[0].metadata["embedding"].clone();
+        let config = ModelRuntimeConfig::from_env_map(|_| None);
+
+        enrich_chunk_records_with_runtime_embeddings_from_config(&mut records, &config).await;
+
+        assert_eq!(
+            records[0].embedding_model.as_deref(),
+            Some(LOCAL_EMBEDDING_ROUTE)
+        );
+        assert_eq!(records[0].metadata["embedding"], local_embedding);
+    }
+
+    #[test]
+    fn hybrid_retrieval_uses_chunk_embedding_metadata_when_keyword_misses() {
+        let citation = CitationRef {
+            document_id: "42".to_owned(),
+            chunk_id: "42:0".to_owned(),
+            page_no: None,
+            section_path: vec!["安全培训".to_owned()],
+        };
+        let chunks = vec![IndexedRagChunk {
+            chunk_db_id: 11,
+            document_id: 42,
+            embedding_vector: Some(local_embedding_vector("安全培训")),
+            chunk: RagDocumentChunk {
+                document_id: "42".to_owned(),
+                chunk_id: "42:0".to_owned(),
+                chunk_index: 0,
+                text: "employee onboarding handbook".to_owned(),
+                semantic_search_text: "employee onboarding handbook".to_owned(),
+                token_count: 3,
+                citation: citation.clone(),
+                metadata: ChunkMetadata::default(),
+            },
+        }];
+
+        let hits = hybrid_retrieve_indexed_chunks("安全培训", &chunks, 5);
+
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].chunk.chunk_id, "42:0");
+        assert!(hits[0].score > 0.0);
+    }
+
+    #[test]
+    fn hybrid_retrieval_uses_runtime_query_embedding_dimension() {
+        let citation = CitationRef {
+            document_id: "42".to_owned(),
+            chunk_id: "42:0".to_owned(),
+            page_no: None,
+            section_path: vec!["安全培训".to_owned()],
+        };
+        let chunks = vec![IndexedRagChunk {
+            chunk_db_id: 11,
+            document_id: 42,
+            embedding_vector: Some(vec![0.0, 1.0, 0.0]),
+            chunk: RagDocumentChunk {
+                document_id: "42".to_owned(),
+                chunk_id: "42:0".to_owned(),
+                chunk_index: 0,
+                text: "employee onboarding handbook".to_owned(),
+                semantic_search_text: "employee onboarding handbook".to_owned(),
+                token_count: 3,
+                citation: citation.clone(),
+                metadata: ChunkMetadata::default(),
+            },
+        }];
+        let query_embeddings = vec![local_embedding_vector("安全培训"), vec![0.0, 0.9, 0.1]];
+
+        let hits = hybrid_retrieve_indexed_chunks_with_query_embeddings(
+            "安全培训",
+            &chunks,
+            5,
+            &query_embeddings,
+        );
+
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].chunk.chunk_id, "42:0");
     }
 
     #[test]
