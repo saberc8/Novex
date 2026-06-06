@@ -13,7 +13,6 @@ import {
   PanelLeft,
   Plus,
   Quote,
-  Send,
   Settings,
   Share2,
   SlidersHorizontal,
