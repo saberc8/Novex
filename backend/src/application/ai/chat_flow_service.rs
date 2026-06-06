@@ -208,7 +208,10 @@ impl ChatFlowService {
             .repo
             .list_messages(tenant_id, user_id, session_id)
             .await?;
-        Ok(messages.into_iter().map(ChatFlowMessageResp::from).collect())
+        Ok(messages
+            .into_iter()
+            .map(ChatFlowMessageResp::from)
+            .collect())
     }
 
     pub async fn send_message(
@@ -460,7 +463,10 @@ fn normalize_optional_mode(mode: Option<String>) -> Result<Option<String>, AppEr
 
 fn normalize_mode(mode: String) -> Result<String, AppError> {
     let mode = mode.trim().to_ascii_lowercase();
-    if matches!(mode.as_str(), CHAT_FLOW_MODE_KNOWLEDGE | CHAT_FLOW_MODE_MODEL) {
+    if matches!(
+        mode.as_str(),
+        CHAT_FLOW_MODE_KNOWLEDGE | CHAT_FLOW_MODE_MODEL
+    ) {
         Ok(mode)
     } else {
         Err(AppError::bad_request("会话模式不支持"))

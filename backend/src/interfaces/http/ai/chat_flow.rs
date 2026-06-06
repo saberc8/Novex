@@ -6,8 +6,8 @@ use axum::{
 
 use crate::{
     application::ai::chat_flow_service::{
-        ChatFlowMessageCommand, ChatFlowMessageResp, ChatFlowSendMessageResp,
-        ChatFlowService, ChatFlowSessionCommand, ChatFlowSessionQuery, ChatFlowSessionResp,
+        ChatFlowMessageCommand, ChatFlowMessageResp, ChatFlowSendMessageResp, ChatFlowService,
+        ChatFlowSessionCommand, ChatFlowSessionQuery, ChatFlowSessionResp,
     },
     domain::auth::model::CurrentUser,
     interfaces::http::{middleware::permission::require_permission, AppState},
@@ -20,7 +20,10 @@ pub const CHAT_FLOW_MESSAGE_PERMISSION: &str = "ai:chatFlow:message";
 
 pub fn routes() -> Router<AppState> {
     Router::new()
-        .route("/ai/chat-flow/sessions", get(list_sessions).post(create_session))
+        .route(
+            "/ai/chat-flow/sessions",
+            get(list_sessions).post(create_session),
+        )
         .route(
             "/ai/chat-flow/sessions/:session_id/messages",
             get(list_messages).post(send_message),
@@ -131,12 +134,9 @@ mod tests {
 
     #[test]
     fn chat_flow_migrations_define_session_message_and_permissions() {
-        let schema = include_str!(
-            "../../../../migrations/202606060002_create_ai_chat_flow.sql"
-        );
-        let permissions = include_str!(
-            "../../../../migrations/202606060003_seed_ai_chat_flow_permissions.sql"
-        );
+        let schema = include_str!("../../../../migrations/202606060002_create_ai_chat_flow.sql");
+        let permissions =
+            include_str!("../../../../migrations/202606060003_seed_ai_chat_flow_permissions.sql");
 
         for table in ["ai_chat_flow_session", "ai_chat_flow_message"] {
             assert!(schema.contains(table), "{table} missing from migration");
