@@ -1,14 +1,16 @@
 use std::{
     collections::HashMap,
+    env,
     time::{Duration, Instant},
 };
 
 use chrono::{NaiveDateTime, Utc};
 use novex_model::{
     estimate_model_cost_cents, estimate_model_text_tokens, evaluate_model_route_policy,
-    mask_api_key, normalize_model_provider_usage, ModelRoutePolicyInput, ModelRoutePolicyStatus,
-    ModelRuntimeConfig, ModelRuntimeRoute, ModelRuntimeSummary, ModelRuntimeTarget,
-    ModelTokenUsage, ModelUsageCostInput,
+    mask_api_key, normalize_model_provider_usage, ModelKind, ModelProviderType,
+    ModelRoutePolicyInput, ModelRoutePolicyStatus, ModelRoutePurpose, ModelRuntimeConfig,
+    ModelRuntimeRoute, ModelRuntimeSummary, ModelRuntimeTarget, ModelTokenUsage,
+    ModelUsageCostInput,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -252,6 +254,20 @@ pub struct ModelRouteRegistryRow {
     pub masked_value: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, FromRow)]
+struct ModelRuntimeRouteRow {
+    pub route_id: i64,
+    pub route_code: String,
+    pub route_purpose: String,
+    pub provider_type: String,
+    pub model_profile_id: i64,
+    pub model_name: String,
+    pub model_kind: String,
+    pub deployment_endpoint: String,
+    pub api_path: Option<String>,
+    pub credential_ref: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, FromRow)]
 pub struct ModelChatConversationRow {
     pub id: i64,
@@ -334,6 +350,88 @@ impl ModelRuntimeService {
 
     pub fn runtime_config() -> ModelRuntimeSummary {
         Self::runtime_config_summary(ModelRuntimeConfig::from_env())
+    }
+
+    pub async fn effective_runtime_summary(&self) -> Result<ModelRuntimeSummary, AppError> {
+        let mut routes = Vec::new();
+        for purpose in [
+            ModelRoutePurpose::Chat,
+            ModelRoutePurpose::RagAnswer,
+            ModelRoutePurpose::Embedding,
+            ModelRoutePurpose::Rerank,
+            ModelRoutePurpose::EvalJudge,
+            ModelRoutePurpose::MediaGeneration,
+        ] {
+            if let Some(route) = self.resolve_route_for_purpose(purpose).await? {
+                let route_id = route.route_id().to_owned();
+                if !routes.iter().any(|existing: &ModelRuntimeRoute| existing.route_id() == route_id)
+                {
+                    routes.push(route);
+                }
+            }
+        }
+
+        Ok(ModelRuntimeSummary {
+            routes: routes.iter().map(ModelRuntimeRoute::summary).collect(),
+            missing_env: ModelRuntimeConfig::from_env().missing_env().to_vec(),
+        })
+    }
+
+    pub async fn resolve_route_for_purpose(
+        &self,
+        purpose: ModelRoutePurpose,
+    ) -> Result<Option<ModelRuntimeRoute>, AppError> {
+        let rows = sqlx::query_as::<_, ModelRuntimeRouteRow>(
+            r#"
+SELECT
+    r.id AS route_id,
+    r.code AS route_code,
+    r.route_purpose,
+    provider.provider_type,
+    profile.id AS model_profile_id,
+    profile.model_name,
+    profile.model_kind,
+    deployment.endpoint AS deployment_endpoint,
+    deployment.api_path,
+    credential.credential_ref
+FROM ai_model_route r
+JOIN ai_model_profile profile
+  ON profile.tenant_id = r.tenant_id
+ AND profile.id = r.model_profile_id
+ AND profile.status = 1
+JOIN ai_model_deployment deployment
+  ON deployment.tenant_id = profile.tenant_id
+ AND deployment.id = profile.deployment_id
+ AND deployment.status = 1
+JOIN ai_model_provider provider
+  ON provider.tenant_id = deployment.tenant_id
+ AND provider.id = deployment.provider_id
+ AND provider.status = 1
+LEFT JOIN ai_model_credential credential
+  ON credential.tenant_id = r.tenant_id
+ AND credential.id = r.credential_id
+ AND credential.status = 1
+WHERE r.tenant_id = $1
+  AND r.route_purpose = $2
+  AND r.status = 1
+ORDER BY r.priority ASC, r.id ASC;
+"#,
+        )
+        .bind(self.tenant_id)
+        .bind(purpose.as_str())
+        .fetch_all(&self.db)
+        .await?;
+
+        for row in rows {
+            if let Some(route) = runtime_route_from_registry_row(&row, |key| env::var(key).ok()) {
+                return Ok(Some(route));
+            }
+        }
+
+        Ok(env_fallback_route_for_purpose(
+            purpose,
+            &ModelRuntimeConfig::from_env(),
+        ))
     }
 
     pub fn parse_rerank_scores(body: &Value) -> Vec<ModelRerankScore> {
@@ -1200,6 +1298,94 @@ fn preview_chars(text: &str, max_chars: usize) -> String {
     text.trim().chars().take(max_chars).collect()
 }
 
+fn route_target_for_purpose(purpose: ModelRoutePurpose) -> ModelRuntimeTarget {
+    match purpose {
+        ModelRoutePurpose::Embedding => ModelRuntimeTarget::Embedding,
+        ModelRoutePurpose::Rerank => ModelRuntimeTarget::Reranker,
+        ModelRoutePurpose::MediaGeneration => ModelRuntimeTarget::Draw,
+        ModelRoutePurpose::Chat
+        | ModelRoutePurpose::RagAnswer
+        | ModelRoutePurpose::QueryRewrite
+        | ModelRoutePurpose::EvalJudge
+        | ModelRoutePurpose::CodeAgent => ModelRuntimeTarget::Llm,
+    }
+}
+
+fn env_fallback_route_for_purpose(
+    purpose: ModelRoutePurpose,
+    config: &ModelRuntimeConfig,
+) -> Option<ModelRuntimeRoute> {
+    let target = route_target_for_purpose(purpose);
+    let route = config.route(target)?;
+    route
+        .purposes()
+        .contains(&purpose)
+        .then(|| route.clone())
+}
+
+fn runtime_route_from_registry_row<F>(
+    row: &ModelRuntimeRouteRow,
+    mut get_env: F,
+) -> Option<ModelRuntimeRoute>
+where
+    F: FnMut(&str) -> Option<String>,
+{
+    let purpose = ModelRoutePurpose::parse(&row.route_purpose)?;
+    let target = route_target_for_purpose(purpose);
+    let kind = ModelKind::parse(&row.model_kind)?;
+    let provider = ModelProviderType::parse(&row.provider_type)?;
+    let (api_key, env_keys) = resolve_credential_ref(row.credential_ref.as_deref(), &mut get_env)?;
+    let base_url = row.deployment_endpoint.trim();
+    if base_url.is_empty() {
+        return None;
+    }
+    let endpoint = join_model_endpoint(base_url, row.api_path.as_deref());
+
+    ModelRuntimeRoute::new(
+        row.route_code.clone(),
+        target,
+        kind,
+        provider,
+        Some(row.model_name.clone()),
+        base_url.to_owned(),
+        endpoint,
+        api_key,
+        vec![purpose],
+        env_keys,
+    )
+    .ok()
+}
+
+fn resolve_credential_ref<F>(
+    credential_ref: Option<&str>,
+    get_env: &mut F,
+) -> Option<(String, Vec<String>)>
+where
+    F: FnMut(&str) -> Option<String>,
+{
+    let credential_ref = credential_ref?.trim();
+    let env_key = credential_ref.strip_prefix("env:")?.trim();
+    if env_key.is_empty() {
+        return None;
+    }
+    let api_key = get_env(env_key)
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())?;
+    Some((api_key, vec![env_key.to_owned()]))
+}
+
+fn join_model_endpoint(base_url: &str, api_path: Option<&str>) -> String {
+    let base_url = base_url.trim().trim_end_matches('/');
+    let Some(path) = api_path
+        .map(str::trim)
+        .map(|path| path.trim_matches('/'))
+        .filter(|path| !path.is_empty())
+    else {
+        return base_url.to_owned();
+    };
+    format!("{base_url}/{path}")
+}
+
 fn health_check_targets(target: Option<&str>) -> Result<Vec<ModelRuntimeTarget>, AppError> {
     let target = target.unwrap_or("all").trim();
     if target.is_empty() || target.eq_ignore_ascii_case("all") {
@@ -1461,7 +1647,7 @@ fn public_masked_credential(masked_value: Option<String>) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use novex_model::{ModelRuntimeConfig, ModelRuntimeTarget};
+    use novex_model::{ModelKind, ModelProviderType, ModelRoutePurpose, ModelRuntimeConfig, ModelRuntimeTarget};
 
     use super::*;
 
@@ -1510,6 +1696,78 @@ mod tests {
             "sk-****508d"
         );
         assert!(!format!("{summary:?}").contains("sk-fake-llm-secret-508d"));
+    }
+
+    #[test]
+    fn dynamic_route_from_registry_row_uses_route_code_and_env_secret() {
+        let row = dynamic_route_test_row(
+            "tenant42.rag_answer",
+            "rag_answer",
+            "llm",
+            Some("/chat/completions"),
+            Some("env:LLM_PRIVATE_KEY"),
+        );
+
+        let route = runtime_route_from_registry_row(&row, |key| {
+            (key == "LLM_PRIVATE_KEY").then(|| "sk-fake-private-secret-0001".to_owned())
+        })
+        .unwrap();
+        let summary = route.summary();
+
+        assert_eq!(summary.route_id, "tenant42.rag_answer");
+        assert_eq!(summary.target, ModelRuntimeTarget::Llm);
+        assert_eq!(summary.kind, ModelKind::Llm);
+        assert_eq!(summary.provider, ModelProviderType::OpenAiCompatible);
+        assert_eq!(summary.endpoint, "https://llm.internal/v1/chat/completions");
+        assert_eq!(summary.model.as_deref(), Some("qwen-private"));
+        assert_eq!(summary.masked_api_key, "sk-****0001");
+        assert_eq!(summary.purposes, vec![ModelRoutePurpose::RagAnswer]);
+        assert!(!format!("{route:?}").contains("sk-fake-private-secret-0001"));
+    }
+
+    #[test]
+    fn dynamic_route_from_registry_row_skips_missing_env_secret() {
+        let row = dynamic_route_test_row(
+            "tenant42.chat",
+            "chat",
+            "llm",
+            Some("/chat/completions"),
+            Some("env:LLM_PRIVATE_KEY"),
+        );
+
+        let route = runtime_route_from_registry_row(&row, |_| None);
+
+        assert!(route.is_none());
+    }
+
+    #[test]
+    fn dynamic_route_purpose_maps_to_runtime_target() {
+        assert_eq!(
+            route_target_for_purpose(ModelRoutePurpose::Chat),
+            ModelRuntimeTarget::Llm
+        );
+        assert_eq!(
+            route_target_for_purpose(ModelRoutePurpose::Embedding),
+            ModelRuntimeTarget::Embedding
+        );
+        assert_eq!(
+            route_target_for_purpose(ModelRoutePurpose::Rerank),
+            ModelRuntimeTarget::Reranker
+        );
+        assert_eq!(
+            route_target_for_purpose(ModelRoutePurpose::MediaGeneration),
+            ModelRuntimeTarget::Draw
+        );
+    }
+
+    #[test]
+    fn dynamic_route_falls_back_to_env_config_for_purpose() {
+        let config = llm_test_config();
+
+        let route = env_fallback_route_for_purpose(ModelRoutePurpose::Chat, &config).unwrap();
+
+        assert_eq!(route.summary().route_id, "runtime.llm");
+        assert_eq!(route.summary().target, ModelRuntimeTarget::Llm);
     }
 
     #[test]
@@ -2079,5 +2337,26 @@ mod tests {
             "LLM_MODEL" => Some("deepseek-v4-flash".to_owned()),
             _ => None,
         })
+    }
+
+    fn dynamic_route_test_row(
+        route_code: &str,
+        route_purpose: &str,
+        model_kind: &str,
+        api_path: Option<&str>,
+        credential_ref: Option<&str>,
+    ) -> ModelRuntimeRouteRow {
+        ModelRuntimeRouteRow {
+            route_id: 30,
+            route_code: route_code.to_owned(),
+            route_purpose: route_purpose.to_owned(),
+            provider_type: "openai-compatible".to_owned(),
+            model_profile_id: 20,
+            model_name: "qwen-private".to_owned(),
+            model_kind: model_kind.to_owned(),
+            deployment_endpoint: "https://llm.internal/v1".to_owned(),
+            api_path: api_path.map(str::to_owned),
+            credential_ref: credential_ref.map(str::to_owned),
+        }
     }
 }
