@@ -17,6 +17,33 @@ pub enum ModelKind {
     MediaGeneration,
 }
 
+impl ModelKind {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Llm => "llm",
+            Self::Embedding => "embedding",
+            Self::Rerank => "rerank",
+            Self::Vlm => "vlm",
+            Self::Asr => "asr",
+            Self::Tts => "tts",
+            Self::MediaGeneration => "media_generation",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match normalize_registry_token(value).as_str() {
+            "llm" => Some(Self::Llm),
+            "embedding" => Some(Self::Embedding),
+            "rerank" | "reranker" => Some(Self::Rerank),
+            "vlm" => Some(Self::Vlm),
+            "asr" => Some(Self::Asr),
+            "tts" => Some(Self::Tts),
+            "media_generation" | "media" | "image_generation" => Some(Self::MediaGeneration),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum ModelProviderType {
@@ -26,6 +53,31 @@ pub enum ModelProviderType {
     DeepSeek,
     LocalRuntime,
     RightCodeDraw,
+}
+
+impl ModelProviderType {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::OpenAiCompatible => "openai-compatible",
+            Self::AzureOpenAi => "azure-openai",
+            Self::DashScope => "dash-scope",
+            Self::DeepSeek => "deep-seek",
+            Self::LocalRuntime => "local-runtime",
+            Self::RightCodeDraw => "right-code-draw",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match normalize_registry_token(value).as_str() {
+            "openai_compatible" | "open_ai_compatible" => Some(Self::OpenAiCompatible),
+            "azure_openai" | "azure_open_ai" => Some(Self::AzureOpenAi),
+            "dash_scope" | "dashscope" => Some(Self::DashScope),
+            "deep_seek" | "deepseek" => Some(Self::DeepSeek),
+            "local_runtime" => Some(Self::LocalRuntime),
+            "right_code_draw" => Some(Self::RightCodeDraw),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -39,6 +91,35 @@ pub enum ModelRoutePurpose {
     EvalJudge,
     CodeAgent,
     MediaGeneration,
+}
+
+impl ModelRoutePurpose {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Chat => "chat",
+            Self::RagAnswer => "rag_answer",
+            Self::QueryRewrite => "query_rewrite",
+            Self::Embedding => "embedding",
+            Self::Rerank => "rerank",
+            Self::EvalJudge => "eval_judge",
+            Self::CodeAgent => "code_agent",
+            Self::MediaGeneration => "media_generation",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match normalize_registry_token(value).as_str() {
+            "chat" => Some(Self::Chat),
+            "rag_answer" | "rag" => Some(Self::RagAnswer),
+            "query_rewrite" => Some(Self::QueryRewrite),
+            "embedding" => Some(Self::Embedding),
+            "rerank" | "reranker" => Some(Self::Rerank),
+            "eval_judge" | "judge" => Some(Self::EvalJudge),
+            "code_agent" => Some(Self::CodeAgent),
+            "media_generation" | "image_generation" => Some(Self::MediaGeneration),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -77,6 +158,7 @@ impl ModelRuntimeTarget {
 
 #[derive(Clone, PartialEq, Eq)]
 pub struct ModelRuntimeRoute {
+    route_id: String,
     target: ModelRuntimeTarget,
     kind: ModelKind,
     provider: ModelProviderType,
@@ -85,13 +167,14 @@ pub struct ModelRuntimeRoute {
     endpoint: String,
     api_key: String,
     purposes: Vec<ModelRoutePurpose>,
-    env_keys: Vec<&'static str>,
+    env_keys: Vec<String>,
 }
 
 impl fmt::Debug for ModelRuntimeRoute {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("ModelRuntimeRoute")
+            .field("route_id", &self.route_id)
             .field("target", &self.target)
             .field("kind", &self.kind)
             .field("provider", &self.provider)
@@ -106,6 +189,50 @@ impl fmt::Debug for ModelRuntimeRoute {
 }
 
 impl ModelRuntimeRoute {
+    pub fn new(
+        route_id: impl Into<String>,
+        target: ModelRuntimeTarget,
+        kind: ModelKind,
+        provider: ModelProviderType,
+        model: Option<String>,
+        base_url: impl Into<String>,
+        endpoint: impl Into<String>,
+        api_key: impl Into<String>,
+        purposes: Vec<ModelRoutePurpose>,
+        env_keys: Vec<String>,
+    ) -> Result<Self, String> {
+        let route_id = route_id.into().trim().to_owned();
+        let base_url = normalize_base_url(&base_url.into());
+        let endpoint = endpoint.into().trim().to_owned();
+        let api_key = api_key.into().trim().to_owned();
+        if route_id.is_empty() {
+            return Err("route_id is required".to_owned());
+        }
+        if endpoint.is_empty() {
+            return Err("endpoint is required".to_owned());
+        }
+        if api_key.is_empty() {
+            return Err("api_key is required".to_owned());
+        }
+
+        Ok(Self {
+            route_id,
+            target,
+            kind,
+            provider,
+            model: model.map(|value| value.trim().to_owned()).filter(|value| !value.is_empty()),
+            base_url,
+            endpoint,
+            api_key,
+            purposes,
+            env_keys,
+        })
+    }
+
+    pub fn route_id(&self) -> &str {
+        &self.route_id
+    }
+
     pub const fn target(&self) -> ModelRuntimeTarget {
         self.target
     }
@@ -141,7 +268,7 @@ impl ModelRuntimeRoute {
     pub fn summary(&self) -> ModelRuntimeRouteSummary {
         ModelRuntimeRouteSummary {
             target: self.target,
-            route_id: format!("runtime.{}", self.target.as_str()),
+            route_id: self.route_id.clone(),
             kind: self.kind,
             provider: self.provider,
             model: self.model.clone(),
@@ -149,7 +276,7 @@ impl ModelRuntimeRoute {
             endpoint: self.endpoint.clone(),
             masked_api_key: mask_api_key(&self.api_key),
             purposes: self.purposes.clone(),
-            env_keys: self.env_keys.iter().map(|key| (*key).to_owned()).collect(),
+            env_keys: self.env_keys.clone(),
         }
     }
 }
@@ -632,6 +759,13 @@ fn normalize_network_zone(value: &str) -> String {
     }
 }
 
+fn normalize_registry_token(value: &str) -> String {
+    value
+        .trim()
+        .to_ascii_lowercase()
+        .replace(['-', ' '], "_")
+}
+
 fn non_negative(value: i64) -> f64 {
     value.max(0) as f64
 }
@@ -669,12 +803,13 @@ fn add_route<F>(
 
     let base_url = normalize_base_url(&base_url);
     let endpoint = join_url(&base_url, spec.endpoint_path);
-    let mut env_keys = vec![spec.api_key_env, spec.base_url_env];
+    let mut env_keys = vec![spec.api_key_env.to_owned(), spec.base_url_env.to_owned()];
     if let Some(model_env) = spec.model_env {
-        env_keys.push(model_env);
+        env_keys.push(model_env.to_owned());
     }
 
     routes.push(ModelRuntimeRoute {
+        route_id: format!("runtime.{}", spec.target.as_str()),
         target: spec.target,
         kind: spec.kind,
         provider: spec.provider,
@@ -844,6 +979,55 @@ mod tests {
                 "RIGHT_CODE_DRAW_API_KEY",
                 "RIGHT_CODE_DRAW_BASE_URL",
             ]
+        );
+    }
+
+    #[test]
+    fn dynamic_route_constructor_preserves_registry_route_id() {
+        let route = ModelRuntimeRoute::new(
+            "tenant42.rag_answer",
+            ModelRuntimeTarget::Llm,
+            ModelKind::Llm,
+            ModelProviderType::OpenAiCompatible,
+            Some("qwen-private".to_owned()),
+            "https://llm.internal/v1",
+            "https://llm.internal/v1/chat/completions",
+            "sk-fake-private-secret-0001",
+            vec![ModelRoutePurpose::RagAnswer],
+            vec!["LLM_PRIVATE_KEY".to_owned()],
+        )
+        .unwrap();
+
+        let summary = route.summary();
+
+        assert_eq!(summary.route_id, "tenant42.rag_answer");
+        assert_eq!(summary.target, ModelRuntimeTarget::Llm);
+        assert_eq!(summary.provider, ModelProviderType::OpenAiCompatible);
+        assert_eq!(summary.model.as_deref(), Some("qwen-private"));
+        assert_eq!(summary.masked_api_key, "sk-****0001");
+        assert_eq!(summary.env_keys, vec!["LLM_PRIVATE_KEY"]);
+        assert!(!format!("{route:?}").contains("sk-fake-private-secret-0001"));
+    }
+
+    #[test]
+    fn dynamic_route_parsers_accept_registry_values() {
+        assert_eq!(
+            ModelRoutePurpose::parse("rag_answer"),
+            Some(ModelRoutePurpose::RagAnswer)
+        );
+        assert_eq!(
+            ModelRoutePurpose::parse("rerank"),
+            Some(ModelRoutePurpose::Rerank)
+        );
+        assert_eq!(ModelRoutePurpose::Chat.as_str(), "chat");
+        assert_eq!(ModelKind::parse("media_generation"), Some(ModelKind::MediaGeneration));
+        assert_eq!(
+            ModelProviderType::parse("openai-compatible"),
+            Some(ModelProviderType::OpenAiCompatible)
+        );
+        assert_eq!(
+            ModelProviderType::parse("deep-seek"),
+            Some(ModelProviderType::DeepSeek)
         );
     }
 
