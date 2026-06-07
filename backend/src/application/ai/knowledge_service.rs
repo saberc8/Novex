@@ -19,7 +19,10 @@ use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 
 use crate::{
-    application::ai::model_service::{ModelEmbeddingVector, ModelRerankScore, ModelRuntimeService},
+    application::ai::model_service::{
+        ModelChatCommand, ModelChatMessage, ModelChatResp, ModelEmbeddingVector, ModelRerankScore,
+        ModelRuntimeService,
+    },
     application::system::{
         ensure_max_chars, file_service::FileResp, format_datetime, format_optional_datetime,
     },
@@ -58,6 +61,7 @@ const DEFAULT_RAG_LIMIT: usize = 5;
 const MAX_RAG_LIMIT: usize = 10;
 const RERANK_CANDIDATE_MULTIPLIER: usize = 4;
 const MAX_RERANK_CANDIDATES: usize = 30;
+const DEFAULT_RAG_ANSWER_MAX_TOKENS: u32 = 1024;
 const LOCAL_EMBEDDING_DIMENSION: usize = 64;
 const MAX_LOCAL_RETRIEVAL_CHUNKS: i64 = 500;
 const VECTOR_COLLECTION_STATUS_READY: i16 = 1;
@@ -3281,6 +3285,84 @@ fn rerank_candidate_limit(limit: usize) -> usize {
         .clamp(limit, MAX_RERANK_CANDIDATES)
 }
 
+fn rag_answer_chat_command(
+    question: &str,
+    hits: &[RetrievalHit],
+    max_tokens: u32,
+) -> ModelChatCommand {
+    ModelChatCommand {
+        conversation_id: None,
+        messages: vec![
+            ModelChatMessage {
+                role: "system".to_owned(),
+                content: "Only answer from the provided context. If the context does not contain enough evidence, say that the answer is not available in the provided context. Keep the answer concise and grounded. Do not invent citations."
+                    .to_owned(),
+            },
+            ModelChatMessage {
+                role: "user".to_owned(),
+                content: rag_context_message(question, hits),
+            },
+        ],
+        file_contexts: vec![],
+        temperature: Some(0.2),
+        max_tokens: Some(max_tokens),
+    }
+}
+
+fn rag_context_message(question: &str, hits: &[RetrievalHit]) -> String {
+    let mut message = format!("Question:\n{}\n\nContext:\n", question.trim());
+    if hits.is_empty() {
+        message.push_str("(no retrieved context)");
+        return message;
+    }
+
+    for (index, hit) in hits.iter().enumerate() {
+        let label = index + 1;
+        let chunk_id = hit.citation.chunk_id.trim();
+        let section = if hit.citation.section_path.is_empty() {
+            String::new()
+        } else {
+            format!(" section={}", hit.citation.section_path.join(" > "))
+        };
+        let page = hit
+            .citation
+            .page_no
+            .map(|page_no| format!(" page={page_no}"))
+            .unwrap_or_default();
+        message.push_str(&format!(
+            "[{label}] {chunk_id}{page}{section}\n{}\n\n",
+            hit.chunk.text.trim()
+        ));
+    }
+
+    message.push_str("Answer with the facts supported by the context above.");
+    message
+}
+
+fn rag_answer_from_model_chat(chat: ModelChatResp, hits: &[RetrievalHit]) -> RagAnswer {
+    RagAnswer {
+        answer: chat.answer.trim().to_owned(),
+        citations: citations_from_retrieval_hits(hits),
+        trace: novex_rag::RagTraceSnapshot {
+            retrieval_hit_count: hits.len(),
+            answer_strategy: "llm_grounded".to_owned(),
+        },
+    }
+}
+
+fn citations_from_retrieval_hits(hits: &[RetrievalHit]) -> Vec<CitationRef> {
+    let mut seen = HashSet::new();
+    hits.iter()
+        .filter_map(|hit| {
+            if seen.insert(hit.citation.chunk_id.clone()) {
+                Some(hit.citation.clone())
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
 fn rag_trace_record(
     trace_id: i64,
     tenant_id: i64,
@@ -3586,6 +3668,7 @@ fn default_rag_limit() -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::application::ai::model_service::{ModelChatResp, ModelChatUsage};
 
     #[test]
     fn normalize_dataset_command_rejects_empty_name() {
@@ -4718,6 +4801,79 @@ mod tests {
         assert_eq!(routes.embedding_model_route, LOCAL_EMBEDDING_ROUTE);
         assert_eq!(routes.rerank_model_route, novex_rag::LOCAL_RERANK_ROUTE);
         assert_eq!(routes.answer_model_route, novex_rag::LOCAL_ANSWER_ROUTE);
+    }
+
+    fn test_retrieval_hit(chunk_uid: &str, chunk_index: usize, text: &str) -> RetrievalHit {
+        let citation = CitationRef {
+            document_id: "42".to_owned(),
+            chunk_id: chunk_uid.to_owned(),
+            page_no: None,
+            section_path: vec![],
+        };
+        RetrievalHit {
+            rank: chunk_index + 1,
+            score: 0.8 - (chunk_index as f32 * 0.01),
+            citation: citation.clone(),
+            chunk: RagDocumentChunk {
+                document_id: "42".to_owned(),
+                chunk_id: chunk_uid.to_owned(),
+                chunk_index,
+                text: text.to_owned(),
+                semantic_search_text: text.to_owned(),
+                token_count: tokenish_count(text).max(1) as usize,
+                citation,
+                metadata: ChunkMetadata::default(),
+            },
+        }
+    }
+
+    #[test]
+    fn rag_answer_prompt_contains_question_context_and_citation_labels() {
+        let hits = vec![test_retrieval_hit(
+            "chunk-a",
+            0,
+            "Training starts on Monday.",
+        )];
+
+        let command = rag_answer_chat_command("When does training start?", &hits, 512);
+
+        assert_eq!(command.temperature, Some(0.2));
+        assert_eq!(command.max_tokens, Some(512));
+        assert_eq!(command.messages.len(), 2);
+        assert!(command.messages[0]
+            .content
+            .contains("Only answer from the provided context"));
+        assert!(command.messages[1]
+            .content
+            .contains("Question:\nWhen does training start?"));
+        assert!(command.messages[1].content.contains("[1] chunk-a"));
+        assert!(command.messages[1]
+            .content
+            .contains("Training starts on Monday."));
+    }
+
+    #[test]
+    fn llm_rag_answer_uses_retrieved_citations_and_live_strategy() {
+        let hits = vec![
+            test_retrieval_hit("chunk-a", 0, "Training starts on Monday."),
+            test_retrieval_hit("chunk-b", 1, "Mentors review progress Friday."),
+        ];
+        let chat = ModelChatResp {
+            conversation_id: None,
+            answer: "Training starts on Monday.".to_owned(),
+            route_id: "runtime.llm".to_owned(),
+            model: Some("deepseek-test".to_owned()),
+            latency_ms: 12,
+            usage: ModelChatUsage::default(),
+        };
+
+        let answer = rag_answer_from_model_chat(chat, &hits);
+
+        assert_eq!(answer.answer, "Training starts on Monday.");
+        assert_eq!(answer.trace.answer_strategy, "llm_grounded");
+        assert_eq!(answer.trace.retrieval_hit_count, 2);
+        assert_eq!(answer.citations.len(), 2);
+        assert_eq!(answer.citations[0].chunk_id, "chunk-a");
     }
 
     #[test]
