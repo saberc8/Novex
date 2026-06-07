@@ -1166,6 +1166,7 @@ impl KnowledgeService {
         let hits = rerank_dataset_hits(&command.question, candidate_hits, command.limit).await?;
         let indexed_hits = indexed_retrieval_hits(&hits, &indexed_chunks);
         let answer = generate_rag_answer(&command.question, &hits).await?;
+        let model_routes = rag_model_routes();
         let trace_id = next_id();
         let now = Utc::now().naive_utc();
         let trace = rag_trace_record(
@@ -1176,6 +1177,7 @@ impl KnowledgeService {
             &command,
             &answer,
             &indexed_hits,
+            &model_routes,
             now,
         );
         let trace_hits = rag_trace_hit_records(trace_id, tenant_id, dataset_id, &indexed_hits, now);
@@ -3502,9 +3504,9 @@ fn rag_trace_record(
     command: &RagAskCommand,
     answer: &RagAnswer,
     hits: &[IndexedRetrievalHit],
+    model_routes: &RagModelRoutes,
     now: NaiveDateTime,
 ) -> RagTraceSaveRecord {
-    let model_routes = rag_model_routes();
     RagTraceSaveRecord {
         id: trace_id,
         tenant_id,
@@ -3513,9 +3515,9 @@ fn rag_trace_record(
         answer: answer.answer.clone(),
         answer_strategy: answer.trace.answer_strategy.clone(),
         retrieval_mode: RETRIEVAL_MODE_HYBRID,
-        embedding_model_route: Some(model_routes.embedding_model_route),
-        rerank_model_route: Some(model_routes.rerank_model_route),
-        answer_model_route: Some(model_routes.answer_model_route),
+        embedding_model_route: Some(model_routes.embedding_model_route.clone()),
+        rerank_model_route: Some(model_routes.rerank_model_route.clone()),
+        answer_model_route: Some(model_routes.answer_model_route.clone()),
         retrieval_hit_count: hits.len() as i32,
         context_token_count: hits.iter().map(|hit| hit.token_count).sum(),
         output_token_count: tokenish_count(&answer.answer),
@@ -5097,6 +5099,44 @@ mod tests {
 
         assert!(rerank_route_for_mode(&config, true).is_err());
         assert!(rerank_route_for_mode(&config, false).is_ok());
+    }
+
+    #[test]
+    fn rag_trace_record_uses_explicit_live_model_routes() {
+        let command = RagAskCommand {
+            question: "When does training start?".to_owned(),
+            limit: 3,
+        };
+        let answer = RagAnswer {
+            answer: "Training starts on Monday.".to_owned(),
+            citations: vec![],
+            trace: novex_rag::RagTraceSnapshot {
+                retrieval_hit_count: 1,
+                answer_strategy: "llm_grounded".to_owned(),
+            },
+        };
+        let routes = RagModelRoutes {
+            embedding_model_route: "runtime.embedding".to_owned(),
+            rerank_model_route: "runtime.reranker".to_owned(),
+            answer_model_route: "runtime.llm".to_owned(),
+        };
+
+        let trace = rag_trace_record(
+            1,
+            42,
+            99,
+            7,
+            &command,
+            &answer,
+            &[],
+            &routes,
+            chrono::DateTime::from_timestamp(0, 0).unwrap().naive_utc(),
+        );
+
+        assert_eq!(trace.answer_strategy, "llm_grounded");
+        assert_eq!(trace.embedding_model_route.as_deref(), Some("runtime.embedding"));
+        assert_eq!(trace.rerank_model_route.as_deref(), Some("runtime.reranker"));
+        assert_eq!(trace.answer_model_route.as_deref(), Some("runtime.llm"));
     }
 
     #[test]
