@@ -10,8 +10,9 @@ use novex_rag::{
     build_extractive_answer, build_semantic_search_text, chunk_document, keyword_retrieve,
     parse_document_content, parse_milvus_search_hits, BoundingBox, ChunkMetadata, ChunkSegmentType,
     CitationRef, ContentRole, DisplayCapability, DocumentChunk as RagDocumentChunk,
-    MilvusMetricType, MilvusSearchHit, MilvusSearchRequest, MilvusUpsertRequest, MilvusUpsertRow,
-    RagAnswer, RagModelRoutes, RetrievalHit, LOCAL_EMBEDDING_ROUTE,
+    MilvusCreateCollectionRequest, MilvusMetricType, MilvusSearchHit, MilvusSearchRequest,
+    MilvusUpsertRequest, MilvusUpsertRow, RagAnswer, RagModelRoutes, RetrievalHit,
+    LOCAL_EMBEDDING_ROUTE,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -105,6 +106,14 @@ impl MilvusSearchConfig {
 
     fn upsert_url(&self) -> String {
         format!("{}/v2/vectordb/entities/upsert", self.endpoint)
+    }
+
+    fn create_collection_url(&self) -> String {
+        format!("{}/v2/vectordb/collections/create", self.endpoint)
+    }
+
+    fn load_collection_url(&self) -> String {
+        format!("{}/v2/vectordb/collections/load", self.endpoint)
     }
 }
 
@@ -796,7 +805,7 @@ impl KnowledgeService {
             .create_document_ingestion(&document, &parser_job, &[], &chunk_records)
             .await?;
         self.upsert_chunks_to_milvus_after_ingestion(tenant_id, dataset_id, &chunk_records)
-            .await;
+            .await?;
         Ok(document_id)
     }
 
@@ -862,7 +871,7 @@ impl KnowledgeService {
                 .await?;
         }
         self.upsert_chunks_to_milvus_after_ingestion(tenant_id, dataset_id, &parts.chunks)
-            .await;
+            .await?;
         Ok(document_id)
     }
 
@@ -871,25 +880,48 @@ impl KnowledgeService {
         tenant_id: i64,
         dataset_id: i64,
         chunks: &[ChunkSaveRecord],
-    ) {
+    ) -> Result<(), AppError> {
+        let strict = strict_live_rag_required();
         let Some(config) = MilvusSearchConfig::from_env() else {
-            return;
+            if strict {
+                return Err(AppError::bad_request("Milvus 环境变量未配置完整"));
+            }
+            return Ok(());
         };
         let collection = match self.repo.get_vector_collection(tenant_id, dataset_id).await {
             Ok(Some(collection)) => collection,
-            Ok(None) => return,
+            Ok(None) if strict => return Err(AppError::bad_request("Milvus collection 未就绪")),
+            Ok(None) => return Ok(()),
             Err(err) => {
+                if strict {
+                    return Err(err);
+                }
                 tracing::warn!(error = %err, tenant_id, dataset_id, "Milvus collection lookup failed after ingestion");
-                return;
+                return Ok(());
             }
         };
         let Some(request) = milvus_upsert_request_for_collection(&collection, chunks) else {
-            return;
+            if strict {
+                return Err(AppError::bad_request("Milvus 写入请求无法构造"));
+            }
+            return Ok(());
         };
 
+        if let Err(err) = milvus_ensure_collection(&config, &collection).await {
+            if strict {
+                return Err(err);
+            }
+            tracing::warn!(error = %err, tenant_id, dataset_id, "Milvus collection ensure failed after ingestion");
+            return Ok(());
+        }
+
         if let Err(err) = milvus_upsert_chunks(&config, &request).await {
+            if strict {
+                return Err(err);
+            }
             tracing::warn!(error = %err, tenant_id, dataset_id, "Milvus upsert failed after ingestion");
         }
+        Ok(())
     }
 
     pub async fn create_parse_job(
@@ -2764,18 +2796,16 @@ async fn hybrid_retrieve_indexed_chunks_with_milvus_or_local_strict(
 
     let (query_embeddings, runtime_query_embedding) = retrieval_query_embeddings(question).await;
     if strict && runtime_query_embedding.is_none() {
-        return Err(AppError::bad_request("Runtime Embedding 模型未配置或调用失败"));
+        return Err(AppError::bad_request(
+            "Runtime Embedding 模型未配置或调用失败",
+        ));
     }
 
     let milvus_query_vector = runtime_query_embedding
         .clone()
         .or_else(|| query_embeddings.last().cloned());
 
-    match (
-        milvus_config,
-        vector_collection,
-        milvus_query_vector,
-    ) {
+    match (milvus_config, vector_collection, milvus_query_vector) {
         (Some(config), Some(collection), Some(query_vector)) => {
             let Some(request) = milvus_search_request_for_collection(
                 tenant_id,
@@ -2812,9 +2842,7 @@ async fn hybrid_retrieve_indexed_chunks_with_milvus_or_local_strict(
                         ));
                     }
                     if strict {
-                        return Err(AppError::bad_request(
-                            "Milvus 检索未返回可用的已索引 chunk",
-                        ));
+                        return Err(AppError::bad_request("Milvus 检索未返回可用的已索引 chunk"));
                     }
                 }
                 Err(err) if strict => return Err(err),
@@ -2889,6 +2917,30 @@ fn milvus_search_request_for_collection(
         )
         .with_metric_type(milvus_metric_type(&collection.metric_type)),
     )
+}
+
+fn milvus_create_collection_request_for_collection(
+    collection: &VectorCollectionRecord,
+) -> Option<MilvusCreateCollectionRequest> {
+    if collection.dimension <= 0
+        || collection.status != VECTOR_COLLECTION_STATUS_READY
+        || !collection
+            .vector_backend
+            .trim()
+            .eq_ignore_ascii_case("milvus")
+    {
+        return None;
+    }
+    let provider_collection = collection.provider_collection.trim();
+    if provider_collection.is_empty() {
+        return None;
+    }
+
+    Some(MilvusCreateCollectionRequest::new(
+        provider_collection,
+        collection.dimension as usize,
+        milvus_metric_type(&collection.metric_type),
+    ))
 }
 
 fn milvus_upsert_request_for_collection(
@@ -3008,6 +3060,100 @@ async fn milvus_search_hits(
     }
 
     Ok(parse_milvus_search_hits(&payload))
+}
+
+async fn milvus_ensure_collection(
+    config: &MilvusSearchConfig,
+    collection: &VectorCollectionRecord,
+) -> Result<(), AppError> {
+    let request = milvus_create_collection_request_for_collection(collection)
+        .ok_or_else(|| AppError::bad_request("Milvus collection 创建请求无法构造"))?;
+    let body = request.to_rest_create_body();
+    let (status, payload) = milvus_post_json_payload(
+        config,
+        &config.create_collection_url(),
+        &body,
+        "Milvus collection 创建",
+    )
+    .await?;
+    milvus_accept_idempotent_response(status, &payload, "Milvus collection 创建", &["exist"])?;
+    milvus_load_collection(config, &request.collection_name).await
+}
+
+async fn milvus_load_collection(
+    config: &MilvusSearchConfig,
+    collection_name: &str,
+) -> Result<(), AppError> {
+    let body = json!({ "collectionName": collection_name });
+    let (status, payload) = milvus_post_json_payload(
+        config,
+        &config.load_collection_url(),
+        &body,
+        "Milvus collection 加载",
+    )
+    .await?;
+    milvus_accept_idempotent_response(status, &payload, "Milvus collection 加载", &["loaded"])
+}
+
+async fn milvus_post_json_payload(
+    config: &MilvusSearchConfig,
+    url: &str,
+    body: &Value,
+    operation: &str,
+) -> Result<(reqwest::StatusCode, Value), AppError> {
+    let client = milvus_http_client()?;
+    let mut builder = client.post(url).json(body);
+    if let Some(token) = config.token.as_deref() {
+        builder = builder.bearer_auth(token);
+    }
+
+    let response = builder
+        .send()
+        .await
+        .map_err(|err| AppError::bad_request(format!("{operation}请求失败: {err}")))?;
+    let status = response.status();
+    let payload = response.json::<Value>().await.unwrap_or(Value::Null);
+    Ok((status, payload))
+}
+
+fn milvus_accept_idempotent_response(
+    status: reqwest::StatusCode,
+    payload: &Value,
+    operation: &str,
+    idempotent_needles: &[&str],
+) -> Result<(), AppError> {
+    let message = milvus_payload_message(payload).unwrap_or_else(|| "unknown error".to_owned());
+    if !status.is_success() {
+        if milvus_message_contains_any(&message, idempotent_needles) {
+            return Ok(());
+        }
+        return Err(AppError::bad_request(format!(
+            "{operation}请求失败: HTTP {status}"
+        )));
+    }
+
+    if let Some(code) = payload.get("code").and_then(Value::as_i64) {
+        if code != 0 && !milvus_message_contains_any(&message, idempotent_needles) {
+            return Err(AppError::bad_request(format!("{operation}失败: {message}")));
+        }
+    }
+
+    Ok(())
+}
+
+fn milvus_payload_message(payload: &Value) -> Option<String> {
+    payload
+        .get("message")
+        .or_else(|| payload.get("msg"))
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+}
+
+fn milvus_message_contains_any(message: &str, needles: &[&str]) -> bool {
+    let message = message.to_ascii_lowercase();
+    needles
+        .iter()
+        .any(|needle| message.contains(&needle.to_ascii_lowercase()))
 }
 
 async fn milvus_upsert_chunks(
@@ -4331,6 +4477,14 @@ mod tests {
             config.search_url(),
             "http://localhost:19530/v2/vectordb/entities/search"
         );
+        assert_eq!(
+            config.create_collection_url(),
+            "http://localhost:19530/v2/vectordb/collections/create"
+        );
+        assert_eq!(
+            config.load_collection_url(),
+            "http://localhost:19530/v2/vectordb/collections/load"
+        );
     }
 
     #[test]
@@ -4387,6 +4541,31 @@ mod tests {
         assert_eq!(body["data"][0]["chunk_uid"], records[0].chunk_uid);
         assert!(body["data"][0]["embedding"].as_array().unwrap().len() > 1);
         assert_eq!(body["data"][0]["segment_type"], records[0].segment_type);
+    }
+
+    #[test]
+    fn milvus_create_collection_request_uses_mapping_dimension_and_metric() {
+        let collection = VectorCollectionRecord {
+            id: 100,
+            vector_backend: "milvus".to_owned(),
+            provider_collection: "novex_t42_dataset_7".to_owned(),
+            dimension: 1024,
+            metric_type: "ip".to_owned(),
+            status: VECTOR_COLLECTION_STATUS_READY,
+        };
+
+        let request = milvus_create_collection_request_for_collection(&collection)
+            .expect("valid collection should build a milvus create request");
+        let body = request.to_rest_create_body();
+
+        assert_eq!(body["collectionName"], "novex_t42_dataset_7");
+        assert!(body["schema"]["fields"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|field| field["fieldName"] == "embedding"
+                && field["elementTypeParams"]["dim"] == 1024));
+        assert_eq!(body["indexParams"][0]["metricType"], "IP");
     }
 
     #[test]
@@ -5134,8 +5313,14 @@ mod tests {
         );
 
         assert_eq!(trace.answer_strategy, "llm_grounded");
-        assert_eq!(trace.embedding_model_route.as_deref(), Some("runtime.embedding"));
-        assert_eq!(trace.rerank_model_route.as_deref(), Some("runtime.reranker"));
+        assert_eq!(
+            trace.embedding_model_route.as_deref(),
+            Some("runtime.embedding")
+        );
+        assert_eq!(
+            trace.rerank_model_route.as_deref(),
+            Some("runtime.reranker")
+        );
         assert_eq!(trace.answer_model_route.as_deref(), Some("runtime.llm"));
     }
 

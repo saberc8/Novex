@@ -425,6 +425,100 @@ pub struct MilvusSearchHit {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct MilvusCreateCollectionRequest {
+    pub collection_name: String,
+    pub dimension: usize,
+    pub metric_type: MilvusMetricType,
+}
+
+impl MilvusCreateCollectionRequest {
+    pub fn new(
+        collection_name: impl Into<String>,
+        dimension: usize,
+        metric_type: MilvusMetricType,
+    ) -> Self {
+        Self {
+            collection_name: collection_name.into().trim().to_owned(),
+            dimension,
+            metric_type,
+        }
+    }
+
+    pub fn to_rest_create_body(&self) -> Value {
+        json!({
+            "collectionName": self.collection_name,
+            "schema": {
+                "autoID": false,
+                "enableDynamicField": false,
+                "fields": [
+                    {
+                        "fieldName": "id",
+                        "dataType": "Int64",
+                        "isPrimary": true,
+                    },
+                    {
+                        "fieldName": "chunk_db_id",
+                        "dataType": "Int64",
+                    },
+                    {
+                        "fieldName": "tenant_id",
+                        "dataType": "Int64",
+                    },
+                    {
+                        "fieldName": "dataset_id",
+                        "dataType": "Int64",
+                    },
+                    {
+                        "fieldName": "document_id",
+                        "dataType": "Int64",
+                    },
+                    {
+                        "fieldName": "chunk_uid",
+                        "dataType": "VarChar",
+                        "elementTypeParams": {"max_length": 255},
+                    },
+                    {
+                        "fieldName": "chunk_index",
+                        "dataType": "Int32",
+                    },
+                    {
+                        "fieldName": "embedding",
+                        "dataType": "FloatVector",
+                        "elementTypeParams": {"dim": self.dimension},
+                    },
+                    {
+                        "fieldName": "semantic_search_text",
+                        "dataType": "VarChar",
+                        "elementTypeParams": {"max_length": 8192},
+                    },
+                    {
+                        "fieldName": "segment_type",
+                        "dataType": "VarChar",
+                        "elementTypeParams": {"max_length": 64},
+                    },
+                    {
+                        "fieldName": "content_role",
+                        "dataType": "VarChar",
+                        "elementTypeParams": {"max_length": 64},
+                    },
+                ],
+            },
+            "indexParams": [
+                {
+                    "fieldName": "embedding",
+                    "indexName": "embedding_idx",
+                    "metricType": self.metric_type.as_milvus_str(),
+                    "params": {
+                        "index_type": "AUTOINDEX",
+                    },
+                },
+            ],
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct MilvusUpsertRow {
     pub id: i64,
     pub tenant_id: i64,
@@ -1696,6 +1790,37 @@ mod tests {
             body["data"][0]["semantic_search_text"],
             "onboarding training"
         );
+    }
+
+    #[test]
+    fn milvus_create_collection_request_declares_rag_schema_and_index() {
+        let request =
+            MilvusCreateCollectionRequest::new("novex_t42_dataset_7", 3, MilvusMetricType::Cosine);
+
+        let body = request.to_rest_create_body();
+
+        assert_eq!(body["collectionName"], "novex_t42_dataset_7");
+        assert_eq!(body["schema"]["autoID"], false);
+        assert_eq!(body["schema"]["enableDynamicField"], false);
+        assert!(body["schema"]["fields"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|field| field["fieldName"] == "id" && field["isPrimary"] == true));
+        assert!(body["schema"]["fields"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|field| field["fieldName"] == "tenant_id" && field["dataType"] == "Int64"));
+        assert!(body["schema"]["fields"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|field| field["fieldName"] == "embedding"
+                && field["dataType"] == "FloatVector"
+                && field["elementTypeParams"]["dim"] == 3));
+        assert_eq!(body["indexParams"][0]["fieldName"], "embedding");
+        assert_eq!(body["indexParams"][0]["metricType"], "COSINE");
     }
 
     #[test]
