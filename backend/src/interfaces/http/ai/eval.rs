@@ -225,6 +225,7 @@ mod tests {
             Json(EvalRunCommand {
                 dataset_id: None,
                 dataset_code: "training_regression".to_owned(),
+                run_mode: String::new(),
             }),
         )
         .await

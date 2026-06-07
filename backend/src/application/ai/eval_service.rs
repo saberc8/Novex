@@ -1,3 +1,5 @@
+use std::time::Instant;
+
 use chrono::Utc;
 use novex_eval::{
     build_regression_report, score_case, score_cost_case, score_latency_case,
@@ -9,6 +11,7 @@ use serde_json::{json, Value};
 use sqlx::PgPool;
 
 use crate::{
+    application::ai::knowledge_service::{KnowledgeService, RagAskCommand},
     application::system::{ensure_max_chars, format_datetime},
     infrastructure::persistence::ai_eval_repository::{
         AiEvalRepository, EvalCaseFilter, EvalCaseRecord, EvalDatasetFilter, EvalDatasetRecord,
@@ -26,6 +29,8 @@ const DEFAULT_TENANT_ID: i64 = 1;
 const DEFAULT_EVAL_PAGE_SIZE: u64 = 20;
 const DEFAULT_CASE_PAGE_SIZE: u64 = 100;
 const ENABLED_STATUS: i16 = 1;
+const EVAL_RUN_MODE_DETERMINISTIC: &str = "deterministic";
+const EVAL_RUN_MODE_LIVE_RAG: &str = "live_rag";
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -161,6 +166,8 @@ pub struct EvalRunCommand {
     pub dataset_id: Option<i64>,
     #[serde(default)]
     pub dataset_code: String,
+    #[serde(default, rename = "runMode")]
+    pub run_mode: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -232,6 +239,7 @@ pub struct EvalResultResp {
 #[derive(Debug, Clone)]
 pub struct EvalService {
     tenant_id: i64,
+    db: PgPool,
     repo: AiEvalRepository,
 }
 
@@ -243,6 +251,7 @@ impl EvalService {
     pub fn for_tenant(db: PgPool, tenant_id: i64) -> Self {
         Self {
             tenant_id,
+            db: db.clone(),
             repo: AiEvalRepository::new(db),
         }
     }
@@ -325,10 +334,19 @@ impl EvalService {
             return Err(AppError::bad_request("评测集没有启用用例"));
         }
 
-        let scores = cases
+        let mut eval_outputs = Vec::with_capacity(cases.len());
+        for case in &cases {
+            let expected = expected_from_case(case)?;
+            let actual = self
+                .build_eval_actual_for_run(user_id, &dataset, case, &expected, &command)
+                .await?;
+            let score = score_eval_case_with_actual(case, &expected, &actual);
+            eval_outputs.push((score, actual));
+        }
+        let scores = eval_outputs
             .iter()
-            .map(score_eval_case)
-            .collect::<Result<Vec<_>, _>>()?;
+            .map(|(score, _)| score.clone())
+            .collect::<Vec<_>>();
         let report = build_regression_report(&scores);
         let run_id = next_id();
         let now = Utc::now().naive_utc();
@@ -359,9 +377,7 @@ impl EvalService {
             })
             .await?;
 
-        for (case, score) in cases.iter().zip(scores.iter()) {
-            let expected = expected_from_case(case)?;
-            let actual = build_eval_actual(&case.target_kind, &expected, &case.prompt);
+        for (case, (score, actual)) in cases.iter().zip(eval_outputs.iter()) {
             self.repo
                 .create_result(&EvalResultSaveRecord {
                     id: next_id(),
@@ -386,6 +402,48 @@ impl EvalService {
         }
 
         self.get_run(run_id).await
+    }
+
+    async fn build_eval_actual_for_run(
+        &self,
+        user_id: i64,
+        dataset: &EvalDatasetRecord,
+        case: &EvalCaseRecord,
+        expected: &EvalCaseExpected,
+        command: &EvalRunCommand,
+    ) -> Result<EvalCaseActual, AppError> {
+        if eval_run_uses_live_rag(command) && case.target_kind == "rag" {
+            let knowledge_dataset_id = live_rag_knowledge_dataset_id(
+                &dataset.metadata,
+                &case.tags,
+                &case.expected_payload,
+            )
+            .ok_or_else(|| AppError::bad_request("live_rag 评测缺少 knowledgeDatasetId"))?;
+            let started = Instant::now();
+            let response = KnowledgeService::new(self.db.clone())
+                .ask_dataset_for_tenant(
+                    self.tenant_id,
+                    user_id,
+                    knowledge_dataset_id,
+                    RagAskCommand {
+                        question: case.prompt.clone(),
+                        limit: 5,
+                    },
+                )
+                .await?;
+            return Ok(EvalCaseActual {
+                answer: Some(response.answer),
+                citations: response
+                    .citations
+                    .into_iter()
+                    .map(|citation| citation.chunk_id)
+                    .collect(),
+                latency_ms: started.elapsed().as_millis().min(u128::from(u32::MAX)) as u32,
+                ..Default::default()
+            });
+        }
+
+        Ok(build_eval_actual(&case.target_kind, expected, &case.prompt))
     }
 
     pub async fn list_runs(
@@ -443,13 +501,47 @@ impl EvalService {
 
 pub fn normalize_eval_run_command(mut command: EvalRunCommand) -> Result<EvalRunCommand, AppError> {
     command.dataset_code = command.dataset_code.trim().to_owned();
+    command.run_mode = command.run_mode.trim().to_ascii_lowercase();
+    if command.run_mode.is_empty() {
+        command.run_mode = EVAL_RUN_MODE_DETERMINISTIC.to_owned();
+    }
     if command.dataset_id.is_none() && command.dataset_code.is_empty() {
         return Err(AppError::bad_request("评测集不能为空"));
     }
     if !command.dataset_code.is_empty() {
         ensure_max_chars("评测集编码", &command.dataset_code, 128)?;
     }
+    if !matches!(
+        command.run_mode.as_str(),
+        EVAL_RUN_MODE_DETERMINISTIC | EVAL_RUN_MODE_LIVE_RAG
+    ) {
+        return Err(AppError::bad_request("评测运行模式不合法"));
+    }
     Ok(command)
+}
+
+fn eval_run_uses_live_rag(command: &EvalRunCommand) -> bool {
+    command.run_mode == EVAL_RUN_MODE_LIVE_RAG
+}
+
+fn live_rag_knowledge_dataset_id(
+    dataset_metadata: &Value,
+    case_tags: &Value,
+    expected_payload: &Value,
+) -> Option<i64> {
+    json_positive_i64(dataset_metadata, "knowledgeDatasetId")
+        .or_else(|| json_positive_i64(dataset_metadata, "knowledge_dataset_id"))
+        .or_else(|| json_positive_i64(case_tags, "knowledgeDatasetId"))
+        .or_else(|| json_positive_i64(case_tags, "knowledge_dataset_id"))
+        .or_else(|| json_positive_i64(expected_payload, "knowledgeDatasetId"))
+        .or_else(|| json_positive_i64(expected_payload, "knowledge_dataset_id"))
+}
+
+fn json_positive_i64(value: &Value, key: &str) -> Option<i64> {
+    value
+        .get(key)
+        .and_then(Value::as_i64)
+        .filter(|value| *value > 0)
 }
 
 pub fn build_eval_actual(
@@ -623,33 +715,41 @@ pub fn eval_report_payload(
     })
 }
 
+#[cfg(test)]
 fn score_eval_case(case: &EvalCaseRecord) -> Result<EvalCaseScore, AppError> {
     let expected = expected_from_case(case)?;
     let actual = build_eval_actual(&case.target_kind, &expected, &case.prompt);
+    Ok(score_eval_case_with_actual(case, &expected, &actual))
+}
+
+fn score_eval_case_with_actual(
+    case: &EvalCaseRecord,
+    expected: &EvalCaseExpected,
+    actual: &EvalCaseActual,
+) -> EvalCaseScore {
     let target_kind = target_kind_from_code(&case.target_kind);
-    let score = match metric_kind_from_code(&case.metric_kind) {
+    match metric_kind_from_code(&case.metric_kind) {
         EvalMetricKind::Latency => score_latency_case(
             case.case_code.clone(),
             target_kind,
-            &actual,
+            actual,
             expected_u32(&case.expected_payload, "maxLatencyMs", 5_000),
         ),
         EvalMetricKind::Cost => score_cost_case(
             case.case_code.clone(),
             target_kind,
-            &actual,
+            actual,
             expected_u32(&case.expected_payload, "maxCostCents", 0),
         ),
         EvalMetricKind::RetrievalRecall => {
-            score_retrieval_recall_case(case.case_code.clone(), target_kind, &expected, &actual)
+            score_retrieval_recall_case(case.case_code.clone(), target_kind, expected, actual)
         }
         metric => {
-            let mut score = score_case(case.case_code.clone(), target_kind, &expected, &actual);
+            let mut score = score_case(case.case_code.clone(), target_kind, expected, actual);
             score.metric = metric;
             score
         }
-    };
-    Ok(score)
+    }
 }
 
 fn expected_from_case(case: &EvalCaseRecord) -> Result<EvalCaseExpected, AppError> {
@@ -822,10 +922,53 @@ mod tests {
         let err = normalize_eval_run_command(EvalRunCommand {
             dataset_id: None,
             dataset_code: "   ".to_owned(),
+            run_mode: String::new(),
         })
         .unwrap_err();
 
         assert!(err.to_string().contains("评测集不能为空"));
+    }
+
+    #[test]
+    fn eval_runtime_normalizes_live_rag_run_mode() {
+        let command = normalize_eval_run_command(EvalRunCommand {
+            dataset_id: Some(10),
+            dataset_code: "  knowledge_base_regression  ".to_owned(),
+            run_mode: " LIVE_RAG ".to_owned(),
+        })
+        .unwrap();
+
+        assert_eq!(command.dataset_code, "knowledge_base_regression");
+        assert_eq!(command.run_mode, "live_rag");
+        assert!(eval_run_uses_live_rag(&command));
+    }
+
+    #[test]
+    fn live_rag_eval_reads_knowledge_dataset_id_from_metadata_tags_or_expected() {
+        assert_eq!(
+            live_rag_knowledge_dataset_id(
+                &json!({"knowledgeDatasetId": 7001}),
+                &json!({}),
+                &json!({})
+            ),
+            Some(7001)
+        );
+        assert_eq!(
+            live_rag_knowledge_dataset_id(
+                &json!({}),
+                &json!({"knowledgeDatasetId": 7002}),
+                &json!({})
+            ),
+            Some(7002)
+        );
+        assert_eq!(
+            live_rag_knowledge_dataset_id(
+                &json!({}),
+                &json!({}),
+                &json!({"knowledgeDatasetId": 7003})
+            ),
+            Some(7003)
+        );
     }
 
     #[test]
