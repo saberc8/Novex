@@ -593,6 +593,14 @@ VALUES (
             insert_chunk_embedding(&mut tx, chunk).await?;
         }
 
+        update_vector_collection_embedding_shape(
+            &mut tx,
+            document.tenant_id,
+            document.dataset_id,
+            chunks,
+        )
+        .await?;
+
         let result = sqlx::query(
             r#"
 UPDATE ai_dataset
@@ -1493,6 +1501,62 @@ async fn insert_dataset_vector_collection(
     .await
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CollectionEmbeddingShape {
+    embedding_model_route: String,
+    dimension: i32,
+}
+
+fn collection_embedding_shape_from_chunks(
+    chunks: &[ChunkSaveRecord],
+) -> Option<CollectionEmbeddingShape> {
+    chunks.iter().find_map(|chunk| {
+        let vector = chunk_embedding_vector(chunk)?;
+        let dimension = chunk_embedding_dimension(&vector);
+        if dimension <= 0 {
+            return None;
+        }
+        Some(CollectionEmbeddingShape {
+            embedding_model_route: chunk
+                .embedding_model
+                .clone()
+                .unwrap_or_else(|| DEFAULT_EMBEDDING_MODEL_ROUTE.to_owned()),
+            dimension,
+        })
+    })
+}
+
+async fn update_vector_collection_embedding_shape(
+    tx: &mut Transaction<'_, Postgres>,
+    tenant_id: i64,
+    dataset_id: i64,
+    chunks: &[ChunkSaveRecord],
+) -> Result<(), AppError> {
+    let Some(shape) = collection_embedding_shape_from_chunks(chunks) else {
+        return Ok(());
+    };
+
+    sqlx::query(
+        r#"
+UPDATE ai_vector_collection
+SET embedding_model_route = $1,
+    dimension = $2,
+    index_policy = jsonb_set(index_policy, '{dimension}', to_jsonb($2::int), true),
+    update_user = 0,
+    update_time = NOW()
+WHERE tenant_id = $3 AND dataset_id = $4;
+"#,
+    )
+    .bind(&shape.embedding_model_route)
+    .bind(shape.dimension)
+    .bind(tenant_id)
+    .bind(dataset_id)
+    .execute(&mut **tx)
+    .await?;
+
+    Ok(())
+}
+
 async fn ensure_dataset_vector_collection(
     tx: &mut Transaction<'_, Postgres>,
     tenant_id: i64,
@@ -1661,6 +1725,54 @@ fn chunk_content_hash(chunk: &ChunkSaveRecord) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    fn chunk_record_with_embedding(route: &str, vector: Vec<f32>) -> ChunkSaveRecord {
+        ChunkSaveRecord {
+            id: 1,
+            tenant_id: 1,
+            dataset_id: 7,
+            document_id: 9,
+            chunk_uid: "chunk-a".to_owned(),
+            chunk_index: 0,
+            content: "content".to_owned(),
+            semantic_search_text: "content".to_owned(),
+            token_count: 1,
+            citation: json!({}),
+            segment_type: "text".to_owned(),
+            segment_index: 0,
+            page_no: None,
+            section_path: json!([]),
+            content_role: "canonical".to_owned(),
+            display_capability: "text_only".to_owned(),
+            metadata: json!({
+                "embedding": {
+                    "routeId": route,
+                    "source": "runtime",
+                    "vector": vector
+                }
+            }),
+            embedding_model: Some(route.to_owned()),
+            embedding_ref: Some("chunk-a".to_owned()),
+            embedding_status: 4,
+            user_id: 99,
+            now: chrono::DateTime::from_timestamp(0, 0).unwrap().naive_utc(),
+        }
+    }
+
+    #[test]
+    fn collection_embedding_shape_uses_runtime_chunk_embedding_dimension() {
+        let chunks = vec![chunk_record_with_embedding(
+            "runtime.embedding",
+            vec![0.1, 0.2, 0.3],
+        )];
+
+        let shape = collection_embedding_shape_from_chunks(&chunks).unwrap();
+
+        assert_eq!(shape.embedding_model_route, "runtime.embedding");
+        assert_eq!(shape.dimension, 3);
+    }
+
     #[test]
     fn vector_persistence_migration_declares_collection_and_embedding_tables() {
         let migration_path = concat!(
