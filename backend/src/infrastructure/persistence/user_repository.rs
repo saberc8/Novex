@@ -294,21 +294,16 @@ impl From<RoleContextRow> for RoleContext {
 
 #[cfg(test)]
 mod tests {
-    use sqlx::postgres::PgPoolOptions;
-
     use super::*;
-
-    fn test_repository() -> UserRepository {
-        let db = PgPoolOptions::new()
-            .connect_lazy("postgres://postgres:postgres@localhost:5432/avalon_admin")
-            .unwrap();
-        UserRepository::new(db)
-    }
 
     #[tokio::test]
     async fn admin_permission_uses_java_wildcard() {
-        let permissions = test_repository()
-            .permissions_for_roles(
+        let db = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://novex:novex@localhost:5432/unused")
+            .expect("lazy postgres pool");
+        let permissions = UserRepository::new(db)
+            .permissions_for_roles_in_tenant(
+                1,
                 1,
                 &[RoleContext {
                     id: 1,
