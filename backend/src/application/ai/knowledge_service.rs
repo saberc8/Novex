@@ -5,7 +5,9 @@ use std::{
 };
 
 use chrono::{NaiveDateTime, Utc};
-use novex_model::{ModelRuntimeConfig, ModelRuntimeTarget};
+#[cfg(test)]
+use novex_model::ModelRuntimeTarget;
+use novex_model::{ModelRoutePurpose, ModelRuntimeConfig};
 use novex_rag::{
     build_extractive_answer, build_semantic_search_text, chunk_document, keyword_retrieve,
     parse_document_content, parse_milvus_search_hits, BoundingBox, ChunkMetadata, ChunkSegmentType,
@@ -560,13 +562,15 @@ struct IndexedRetrievalHit {
 
 #[derive(Debug, Clone)]
 pub struct KnowledgeService {
+    db: PgPool,
     repo: AiKnowledgeRepository,
 }
 
 impl KnowledgeService {
     pub fn new(db: PgPool) -> Self {
         Self {
-            repo: AiKnowledgeRepository::new(db),
+            repo: AiKnowledgeRepository::new(db.clone()),
+            db,
         }
     }
 
@@ -799,7 +803,8 @@ impl KnowledgeService {
         };
         let mut chunk_records =
             chunk_save_records(tenant_id, dataset_id, document_id, chunks, user_id, now);
-        enrich_chunk_records_with_runtime_embeddings(&mut chunk_records).await;
+        let model_runtime = ModelRuntimeService::for_tenant(self.db.clone(), tenant_id);
+        enrich_chunk_records_with_runtime_embeddings(&mut chunk_records, &model_runtime).await?;
 
         self.repo
             .create_document_ingestion(&document, &parser_job, &[], &chunk_records)
@@ -840,7 +845,8 @@ impl KnowledgeService {
             command,
             Utc::now().naive_utc(),
         )?;
-        enrich_chunk_records_with_runtime_embeddings(&mut parts.chunks).await;
+        let model_runtime = ModelRuntimeService::for_tenant(self.db.clone(), tenant_id);
+        enrich_chunk_records_with_runtime_embeddings(&mut parts.chunks, &model_runtime).await?;
         let document_id = parts.document.id;
         if self
             .repo
@@ -1186,8 +1192,10 @@ impl KnowledgeService {
             .get_vector_collection(tenant_id, dataset_id)
             .await?;
         let candidate_limit = rerank_candidate_limit(command.limit);
+        let model_runtime = ModelRuntimeService::for_tenant(self.db.clone(), tenant_id);
         let candidate_hits = hybrid_retrieve_indexed_chunks_with_milvus_or_local(
             &command.question,
+            &model_runtime,
             tenant_id,
             dataset_id,
             vector_collection.as_ref(),
@@ -1195,10 +1203,16 @@ impl KnowledgeService {
             candidate_limit,
         )
         .await?;
-        let hits = rerank_dataset_hits(&command.question, candidate_hits, command.limit).await?;
+        let hits = rerank_dataset_hits(
+            &command.question,
+            candidate_hits,
+            command.limit,
+            &model_runtime,
+        )
+        .await?;
         let indexed_hits = indexed_retrieval_hits(&hits, &indexed_chunks);
-        let answer = generate_rag_answer(&command.question, &hits).await?;
-        let model_routes = rag_model_routes();
+        let answer = generate_rag_answer(&command.question, &hits, &model_runtime).await?;
+        let model_routes = rag_model_routes_for_runtime(&model_runtime).await;
         let trace_id = next_id();
         let now = Utc::now().naive_utc();
         let trace = rag_trace_record(
@@ -2628,11 +2642,43 @@ fn apply_embedding_vectors_to_chunk_records(
     }
 }
 
-async fn enrich_chunk_records_with_runtime_embeddings(records: &mut [ChunkSaveRecord]) {
-    let config = ModelRuntimeConfig::from_env();
-    enrich_chunk_records_with_runtime_embeddings_from_config(records, &config).await;
+async fn enrich_chunk_records_with_runtime_embeddings(
+    records: &mut [ChunkSaveRecord],
+    model_runtime: &ModelRuntimeService,
+) -> Result<(), AppError> {
+    if records.is_empty() {
+        return Ok(());
+    }
+    let strict = strict_live_rag_required();
+    let Some(route) = model_runtime
+        .resolve_route_for_purpose(ModelRoutePurpose::Embedding)
+        .await?
+    else {
+        if strict {
+            return Err(AppError::bad_request("Embedding 模型环境变量未配置完整"));
+        }
+        return Ok(());
+    };
+    let texts = records
+        .iter()
+        .map(|record| record.semantic_search_text.clone())
+        .collect::<Vec<_>>();
+    match ModelRuntimeService::embed_texts(&route, &texts).await {
+        Ok(vectors) => {
+            apply_embedding_vectors_to_chunk_records(
+                records,
+                &route.summary().route_id,
+                "runtime",
+                &vectors,
+            );
+            Ok(())
+        }
+        Err(err) if strict => Err(err),
+        Err(_) => Ok(()),
+    }
 }
 
+#[cfg(test)]
 async fn enrich_chunk_records_with_runtime_embeddings_from_config(
     records: &mut [ChunkSaveRecord],
     config: &ModelRuntimeConfig,
@@ -2755,6 +2801,7 @@ fn hybrid_retrieve_indexed_chunks(
 
 async fn hybrid_retrieve_indexed_chunks_with_milvus_or_local(
     question: &str,
+    model_runtime: &ModelRuntimeService,
     tenant_id: i64,
     dataset_id: i64,
     vector_collection: Option<&VectorCollectionRecord>,
@@ -2763,6 +2810,7 @@ async fn hybrid_retrieve_indexed_chunks_with_milvus_or_local(
 ) -> Result<Vec<RetrievalHit>, AppError> {
     hybrid_retrieve_indexed_chunks_with_milvus_or_local_strict(
         question,
+        model_runtime,
         tenant_id,
         dataset_id,
         vector_collection,
@@ -2775,6 +2823,7 @@ async fn hybrid_retrieve_indexed_chunks_with_milvus_or_local(
 
 async fn hybrid_retrieve_indexed_chunks_with_milvus_or_local_strict(
     question: &str,
+    model_runtime: &ModelRuntimeService,
     tenant_id: i64,
     dataset_id: i64,
     vector_collection: Option<&VectorCollectionRecord>,
@@ -2794,7 +2843,8 @@ async fn hybrid_retrieve_indexed_chunks_with_milvus_or_local_strict(
         return Err(AppError::bad_request("Milvus collection 未就绪"));
     }
 
-    let (query_embeddings, runtime_query_embedding) = retrieval_query_embeddings(question).await;
+    let (query_embeddings, runtime_query_embedding) =
+        retrieval_query_embeddings(question, model_runtime).await;
     if strict && runtime_query_embedding.is_none() {
         return Err(AppError::bad_request(
             "Runtime Embedding 模型未配置或调用失败",
@@ -2861,9 +2911,12 @@ async fn hybrid_retrieve_indexed_chunks_with_milvus_or_local_strict(
     ))
 }
 
-async fn retrieval_query_embeddings(question: &str) -> (Vec<Vec<f32>>, Option<Vec<f32>>) {
+async fn retrieval_query_embeddings(
+    question: &str,
+    model_runtime: &ModelRuntimeService,
+) -> (Vec<Vec<f32>>, Option<Vec<f32>>) {
     let mut query_embeddings = vec![local_embedding_vector(question)];
-    if let Some(runtime_embedding) = runtime_query_embedding(question).await {
+    if let Some(runtime_embedding) = runtime_query_embedding(question, model_runtime).await {
         let runtime_query_embedding = Some(runtime_embedding.clone());
         query_embeddings.push(runtime_embedding);
         return (query_embeddings, runtime_query_embedding);
@@ -2871,10 +2924,15 @@ async fn retrieval_query_embeddings(question: &str) -> (Vec<Vec<f32>>, Option<Ve
     (query_embeddings, None)
 }
 
-async fn runtime_query_embedding(question: &str) -> Option<Vec<f32>> {
-    let config = ModelRuntimeConfig::from_env();
-    let route = config.route(ModelRuntimeTarget::Embedding)?;
-    let mut vectors = ModelRuntimeService::embed_texts(route, &[question.to_owned()])
+async fn runtime_query_embedding(
+    question: &str,
+    model_runtime: &ModelRuntimeService,
+) -> Option<Vec<f32>> {
+    let route = model_runtime
+        .resolve_route_for_purpose(ModelRoutePurpose::Embedding)
+        .await
+        .ok()??;
+    let mut vectors = ModelRuntimeService::embed_texts(&route, &[question.to_owned()])
         .await
         .ok()?;
     vectors.sort_by_key(|vector| vector.index);
@@ -3422,18 +3480,25 @@ async fn rerank_dataset_hits(
     question: &str,
     hits: Vec<RetrievalHit>,
     limit: usize,
+    model_runtime: &ModelRuntimeService,
 ) -> Result<Vec<RetrievalHit>, AppError> {
     if hits.is_empty() || limit == 0 {
         return Ok(Vec::new());
     }
-    let config = ModelRuntimeConfig::from_env();
     let strict = strict_live_rag_required();
-    let Some(route) = rerank_route_for_mode(&config, strict)? else {
-        return Ok(rerank_retrieval_hits(&hits, &[], limit));
+    let route = model_runtime
+        .resolve_route_for_purpose(ModelRoutePurpose::Rerank)
+        .await?;
+    let Some(route) = route else {
+        return if strict {
+            Err(AppError::bad_request("Rerank 模型环境变量未配置完整"))
+        } else {
+            Ok(rerank_retrieval_hits(&hits, &[], limit))
+        };
     };
     let documents = hits.iter().map(rerank_document_text).collect::<Vec<_>>();
 
-    match ModelRuntimeService::rerank_documents(route, question, &documents).await {
+    match ModelRuntimeService::rerank_documents(&route, question, &documents).await {
         Ok(scores) if !scores.is_empty() => Ok(rerank_retrieval_hits(&hits, &scores, limit)),
         Ok(_) if strict => Err(AppError::bad_request("Rerank 模型响应为空")),
         Err(err) if strict => Err(err),
@@ -3441,6 +3506,7 @@ async fn rerank_dataset_hits(
     }
 }
 
+#[cfg(test)]
 fn rerank_route_for_mode<'a>(
     config: &'a ModelRuntimeConfig,
     strict: bool,
@@ -3513,6 +3579,7 @@ fn rerank_candidate_limit(limit: usize) -> usize {
         .clamp(limit, MAX_RERANK_CANDIDATES)
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RagAnswerMode {
     UseLlm,
@@ -3520,6 +3587,7 @@ enum RagAnswerMode {
     ExtractiveFallback,
 }
 
+#[cfg(test)]
 fn rag_answer_mode_from_config(config: &ModelRuntimeConfig, strict: bool) -> RagAnswerMode {
     if config.route(ModelRuntimeTarget::Llm).is_some() {
         RagAnswerMode::UseLlm
@@ -3530,24 +3598,31 @@ fn rag_answer_mode_from_config(config: &ModelRuntimeConfig, strict: bool) -> Rag
     }
 }
 
-async fn generate_rag_answer(question: &str, hits: &[RetrievalHit]) -> Result<RagAnswer, AppError> {
-    let config = ModelRuntimeConfig::from_env();
-    match rag_answer_mode_from_config(&config, strict_live_rag_required()) {
-        RagAnswerMode::UseLlm => {
-            let chat = ModelRuntimeService::chat_completion(rag_answer_chat_command(
-                question,
-                hits,
-                DEFAULT_RAG_ANSWER_MAX_TOKENS,
-            ))
-            .await?;
+async fn generate_rag_answer(
+    question: &str,
+    hits: &[RetrievalHit],
+    model_runtime: &ModelRuntimeService,
+) -> Result<RagAnswer, AppError> {
+    let strict = strict_live_rag_required();
+    let route = model_runtime
+        .resolve_route_for_purpose(ModelRoutePurpose::RagAnswer)
+        .await?;
+    match (route, strict) {
+        (Some(_), _) => {
+            let chat = model_runtime
+                .chat_completion_for_purpose(
+                    ModelRoutePurpose::RagAnswer,
+                    rag_answer_chat_command(question, hits, DEFAULT_RAG_ANSWER_MAX_TOKENS),
+                )
+                .await?;
             let answer = rag_answer_from_model_chat(chat, hits);
             if answer.answer.trim().is_empty() {
                 return Err(AppError::bad_request("LLM RAG 回答为空"));
             }
             Ok(answer)
         }
-        RagAnswerMode::RequireLlm => Err(AppError::bad_request("LLM 模型环境变量未配置完整")),
-        RagAnswerMode::ExtractiveFallback => Ok(build_extractive_answer(question, hits)),
+        (None, true) => Err(AppError::bad_request("LLM 模型环境变量未配置完整")),
+        (None, false) => Ok(build_extractive_answer(question, hits)),
     }
 }
 
@@ -3678,6 +3753,40 @@ fn rag_model_routes() -> RagModelRoutes {
 
 fn rag_model_routes_from_config(config: &ModelRuntimeConfig) -> RagModelRoutes {
     RagModelRoutes::from_runtime_config(config)
+}
+
+async fn rag_model_routes_for_runtime(model_runtime: &ModelRuntimeService) -> RagModelRoutes {
+    let fallback = rag_model_routes();
+    let embedding_model_route =
+        resolved_route_id_for_purpose(model_runtime, ModelRoutePurpose::Embedding)
+            .await
+            .unwrap_or(fallback.embedding_model_route);
+    let rerank_model_route =
+        resolved_route_id_for_purpose(model_runtime, ModelRoutePurpose::Rerank)
+            .await
+            .unwrap_or(fallback.rerank_model_route);
+    let answer_model_route =
+        resolved_route_id_for_purpose(model_runtime, ModelRoutePurpose::RagAnswer)
+            .await
+            .unwrap_or(fallback.answer_model_route);
+
+    RagModelRoutes {
+        embedding_model_route,
+        rerank_model_route,
+        answer_model_route,
+    }
+}
+
+async fn resolved_route_id_for_purpose(
+    model_runtime: &ModelRuntimeService,
+    purpose: ModelRoutePurpose,
+) -> Option<String> {
+    model_runtime
+        .resolve_route_for_purpose(purpose)
+        .await
+        .ok()
+        .flatten()
+        .map(|route| route.route_id().to_owned())
 }
 
 fn rag_trace_hit_records(
@@ -3948,6 +4057,7 @@ fn default_rag_limit() -> usize {
 mod tests {
     use super::*;
     use crate::application::ai::model_service::{ModelChatResp, ModelChatUsage};
+    use sqlx::postgres::PgPoolOptions;
 
     #[test]
     fn normalize_dataset_command_rejects_empty_name() {
@@ -5115,6 +5225,22 @@ mod tests {
         assert_eq!(routes.answer_model_route, novex_rag::LOCAL_ANSWER_ROUTE);
     }
 
+    #[test]
+    fn rag_dynamic_model_calls_use_tenant_bound_runtime_service() {
+        let source = include_str!("knowledge_service.rs");
+
+        assert!(source.contains("ModelRuntimeService::for_tenant(self.db.clone(), tenant_id)"));
+        assert!(source.contains("ModelRoutePurpose::Embedding"));
+        assert!(source.contains("ModelRoutePurpose::Rerank"));
+        assert!(source.contains("ModelRoutePurpose::RagAnswer"));
+        let legacy_static_call = [
+            "ModelRuntimeService::chat_completion",
+            "(rag_answer_chat_command",
+        ]
+        .concat();
+        assert!(!source.contains(&legacy_static_call));
+    }
+
     fn test_retrieval_hit(chunk_uid: &str, chunk_index: usize, text: &str) -> RetrievalHit {
         let citation = CitationRef {
             document_id: "42".to_owned(),
@@ -5256,9 +5382,14 @@ mod tests {
             0,
             "Training starts on Monday.",
         )];
+        let db = PgPoolOptions::new()
+            .connect_lazy("postgres://novex:novex@localhost:5432/novex_test")
+            .expect("lazy postgres pool");
+        let model_runtime = ModelRuntimeService::for_tenant(db, 42);
 
         let err = hybrid_retrieve_indexed_chunks_with_milvus_or_local_strict(
             "When does training start?",
+            &model_runtime,
             42,
             7,
             None,

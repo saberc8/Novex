@@ -365,7 +365,9 @@ impl ModelRuntimeService {
         ] {
             if let Some(route) = self.resolve_route_for_purpose(purpose).await? {
                 let route_id = route.route_id().to_owned();
-                if !routes.iter().any(|existing: &ModelRuntimeRoute| existing.route_id() == route_id)
+                if !routes
+                    .iter()
+                    .any(|existing: &ModelRuntimeRoute| existing.route_id() == route_id)
                 {
                     routes.push(route);
                 }
@@ -814,9 +816,12 @@ ORDER BY r.priority, r.id
             .resolve_route_for_purpose(ModelRoutePurpose::Chat)
             .await?
             .ok_or_else(|| AppError::bad_request("LLM 模型环境变量未配置完整"))?;
-        let response =
-            execute_normalized_chat_completion_with_route(&route, &command, command.conversation_id)
-                .await?;
+        let response = execute_normalized_chat_completion_with_route(
+            &route,
+            &command,
+            command.conversation_id,
+        )
+        .await?;
         let record = model_chat_usage_record(
             self.tenant_id,
             user_id,
@@ -826,6 +831,20 @@ ORDER BY r.priority, r.id
         );
         record_model_chat_usage(&self.db, &record).await?;
         Ok(response)
+    }
+
+    pub async fn chat_completion_for_purpose(
+        &self,
+        purpose: ModelRoutePurpose,
+        command: ModelChatCommand,
+    ) -> Result<ModelChatResp, AppError> {
+        let command = normalize_model_chat_command(command)?;
+        let route = self
+            .resolve_route_for_purpose(purpose)
+            .await?
+            .ok_or_else(|| AppError::bad_request("LLM 模型环境变量未配置完整"))?;
+        execute_normalized_chat_completion_with_route(&route, &command, command.conversation_id)
+            .await
     }
 
     pub async fn list_chat_conversations(
@@ -1380,10 +1399,7 @@ fn env_fallback_route_for_purpose(
 ) -> Option<ModelRuntimeRoute> {
     let target = route_target_for_purpose(purpose);
     let route = config.route(target)?;
-    route
-        .purposes()
-        .contains(&purpose)
-        .then(|| route.clone())
+    route.purposes().contains(&purpose).then(|| route.clone())
 }
 
 fn runtime_route_from_registry_row<F>(
@@ -1718,7 +1734,9 @@ fn public_masked_credential(masked_value: Option<String>) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use novex_model::{ModelKind, ModelProviderType, ModelRoutePurpose, ModelRuntimeConfig, ModelRuntimeTarget};
+    use novex_model::{
+        ModelKind, ModelProviderType, ModelRoutePurpose, ModelRuntimeConfig, ModelRuntimeTarget,
+    };
 
     use super::*;
 

@@ -220,7 +220,9 @@ impl ModelRuntimeRoute {
             target,
             kind,
             provider,
-            model: model.map(|value| value.trim().to_owned()).filter(|value| !value.is_empty()),
+            model: model
+                .map(|value| value.trim().to_owned())
+                .filter(|value| !value.is_empty()),
             base_url,
             endpoint,
             api_key,
@@ -760,10 +762,7 @@ fn normalize_network_zone(value: &str) -> String {
 }
 
 fn normalize_registry_token(value: &str) -> String {
-    value
-        .trim()
-        .to_ascii_lowercase()
-        .replace(['-', ' '], "_")
+    value.trim().to_ascii_lowercase().replace(['-', ' '], "_")
 }
 
 fn non_negative(value: i64) -> f64 {
@@ -1020,7 +1019,10 @@ mod tests {
             Some(ModelRoutePurpose::Rerank)
         );
         assert_eq!(ModelRoutePurpose::Chat.as_str(), "chat");
-        assert_eq!(ModelKind::parse("media_generation"), Some(ModelKind::MediaGeneration));
+        assert_eq!(
+            ModelKind::parse("media_generation"),
+            Some(ModelKind::MediaGeneration)
+        );
         assert_eq!(
             ModelProviderType::parse("openai-compatible"),
             Some(ModelProviderType::OpenAiCompatible)
