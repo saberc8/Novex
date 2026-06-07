@@ -29,11 +29,8 @@ async fn live_rag_uses_embedding_milvus_rerank_and_llm() {
     env::set_var("NOVEX_REQUIRE_MILVUS", "1");
 
     let database_url = env::var("DATABASE_URL").expect("DATABASE_URL checked");
-    let db = PgPoolOptions::new()
-        .max_connections(3)
-        .connect(&database_url)
-        .await
-        .expect("connect live RAG database");
+    let test_database = LiveTestDatabase::create(&database_url).await;
+    let db = test_database.pool().clone();
     sqlx::migrate!("./migrations")
         .run(&db)
         .await
@@ -153,6 +150,8 @@ WHERE tenant_id = $1 AND id = $2;
             .expect("retrieval hit count")
             > 0
     );
+
+    test_database.drop_database().await;
 }
 
 fn require_env(key: &str) {
@@ -178,3 +177,68 @@ fn default_local_milvus_env_if_missing() {
     env::set_var("MILVUS_TOKEN", "root:Milvus");
 }
 
+struct LiveTestDatabase {
+    admin_url: String,
+    name: String,
+    pool: sqlx::PgPool,
+}
+
+impl LiveTestDatabase {
+    async fn create(admin_url: &str) -> Self {
+        let name = format!("novex_live_rag_{}", chrono::Utc::now().timestamp_millis());
+        let admin = PgPoolOptions::new()
+            .max_connections(1)
+            .connect(admin_url)
+            .await
+            .expect("connect admin database");
+        sqlx::query(&format!(r#"CREATE DATABASE "{}";"#, name))
+            .execute(&admin)
+            .await
+            .expect("create live RAG test database");
+        admin.close().await;
+
+        let database_url = database_url_with_database(admin_url, &name);
+        let pool = PgPoolOptions::new()
+            .max_connections(3)
+            .connect(&database_url)
+            .await
+            .expect("connect live RAG test database");
+
+        Self {
+            admin_url: admin_url.to_owned(),
+            name,
+            pool,
+        }
+    }
+
+    fn pool(&self) -> &sqlx::PgPool {
+        &self.pool
+    }
+
+    async fn drop_database(self) {
+        self.pool.close().await;
+        let admin = PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&self.admin_url)
+            .await
+            .expect("connect admin database for cleanup");
+        sqlx::query(&format!(
+            "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '{}';",
+            self.name
+        ))
+        .execute(&admin)
+        .await
+        .ok();
+        sqlx::query(&format!(r#"DROP DATABASE IF EXISTS "{}";"#, self.name))
+            .execute(&admin)
+            .await
+            .expect("drop live RAG test database");
+        admin.close().await;
+    }
+}
+
+fn database_url_with_database(database_url: &str, database: &str) -> String {
+    let mut url = url::Url::parse(database_url).expect("DATABASE_URL must be parseable");
+    url.set_path(database);
+    url.to_string()
+}

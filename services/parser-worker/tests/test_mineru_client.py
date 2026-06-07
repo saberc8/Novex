@@ -1,6 +1,6 @@
 import unittest
 
-from parser_worker.mineru_client import MineruClient, MineruError
+from parser_worker.mineru_client import MineruClient, MineruError, default_ssl_context
 
 
 class FakeTransport:
@@ -54,6 +54,26 @@ class MineruClientTest(unittest.TestCase):
             },
         )
 
+    def test_create_extract_task_defaults_state_when_api_omits_it(self):
+        transport = FakeTransport(
+            [
+                {
+                    "code": 0,
+                    "msg": "ok",
+                    "trace_id": "trace-1",
+                    "data": {
+                        "task_id": "task-1",
+                    },
+                }
+            ]
+        )
+        client = MineruClient(token="token-123", transport=transport)
+
+        task = client.create_extract_task("https://cdn-mineru.openxlab.org.cn/demo/example.pdf")
+
+        self.assertEqual(task.task_id, "task-1")
+        self.assertEqual(task.state, "submitted")
+
     def test_get_extract_task_maps_done_result(self):
         transport = FakeTransport(
             [
@@ -98,6 +118,9 @@ class MineruClientTest(unittest.TestCase):
 
         self.assertIn("invalid token", str(error.exception))
         self.assertNotIn("secret-token-value", str(error.exception))
+
+    def test_default_ssl_context_is_available_for_live_transport(self):
+        self.assertIsNotNone(default_ssl_context())
 
 
 if __name__ == "__main__":

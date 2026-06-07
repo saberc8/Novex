@@ -4,6 +4,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urljoin
 from urllib.request import Request, urlopen
 import json
+import ssl
 
 
 DEFAULT_MINERU_BASE_URL = "https://mineru.net"
@@ -118,12 +119,22 @@ def urllib_transport(request: MineruRequest) -> Mapping[str, Any]:
                 method=request.method,
             ),
             timeout=request.timeout_seconds,
+            context=default_ssl_context(),
         ) as response:
             return json.loads(response.read().decode("utf-8"))
     except HTTPError as error:
         raise MineruError(f"MinerU HTTP {error.code}") from error
     except URLError as error:
         raise MineruError(f"MinerU network error: {error.reason}") from error
+
+
+def default_ssl_context() -> ssl.SSLContext:
+    try:
+        import certifi
+
+        return ssl.create_default_context(cafile=certifi.where())
+    except Exception:
+        return ssl.create_default_context()
 
 
 def task_from_response(response: Mapping[str, Any], token: str) -> MineruTask:
@@ -137,9 +148,11 @@ def task_from_response(response: Mapping[str, Any], token: str) -> MineruTask:
         raise MineruError("MinerU response missing data")
 
     task_id = str(data.get("task_id") or "")
-    state = str(data.get("state") or "")
-    if not task_id or not state:
-        raise MineruError("MinerU response missing task state")
+    state = str(data.get("state") or data.get("status") or "")
+    if not task_id:
+        raise MineruError("MinerU response missing task id")
+    if not state:
+        state = "submitted"
 
     return MineruTask(
         task_id=task_id,
