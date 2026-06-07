@@ -1165,7 +1165,7 @@ impl KnowledgeService {
         .await;
         let hits = rerank_dataset_hits(&command.question, candidate_hits, command.limit).await;
         let indexed_hits = indexed_retrieval_hits(&hits, &indexed_chunks);
-        let answer = build_extractive_answer(&command.question, &hits);
+        let answer = generate_rag_answer(&command.question, &hits).await?;
         let trace_id = next_id();
         let now = Utc::now().naive_utc();
         let trace = rag_trace_record(
@@ -3285,6 +3285,57 @@ fn rerank_candidate_limit(limit: usize) -> usize {
         .clamp(limit, MAX_RERANK_CANDIDATES)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RagAnswerMode {
+    UseLlm,
+    RequireLlm,
+    ExtractiveFallback,
+}
+
+fn rag_answer_mode_from_config(config: &ModelRuntimeConfig, strict: bool) -> RagAnswerMode {
+    if config.route(ModelRuntimeTarget::Llm).is_some() {
+        RagAnswerMode::UseLlm
+    } else if strict {
+        RagAnswerMode::RequireLlm
+    } else {
+        RagAnswerMode::ExtractiveFallback
+    }
+}
+
+async fn generate_rag_answer(question: &str, hits: &[RetrievalHit]) -> Result<RagAnswer, AppError> {
+    let config = ModelRuntimeConfig::from_env();
+    match rag_answer_mode_from_config(&config, strict_live_rag_required()) {
+        RagAnswerMode::UseLlm => {
+            let chat = ModelRuntimeService::chat_completion(rag_answer_chat_command(
+                question,
+                hits,
+                DEFAULT_RAG_ANSWER_MAX_TOKENS,
+            ))
+            .await?;
+            let answer = rag_answer_from_model_chat(chat, hits);
+            if answer.answer.trim().is_empty() {
+                return Err(AppError::bad_request("LLM RAG 回答为空"));
+            }
+            Ok(answer)
+        }
+        RagAnswerMode::RequireLlm => Err(AppError::bad_request("LLM 模型环境变量未配置完整")),
+        RagAnswerMode::ExtractiveFallback => Ok(build_extractive_answer(question, hits)),
+    }
+}
+
+fn strict_live_rag_required() -> bool {
+    parse_bool_env_flag(env::var("NOVEX_LIVE_RAG_TEST").ok().as_deref())
+        || parse_bool_env_flag(env::var("NOVEX_REQUIRE_LIVE_RAG").ok().as_deref())
+        || parse_bool_env_flag(env::var("NOVEX_REQUIRE_MILVUS").ok().as_deref())
+}
+
+fn parse_bool_env_flag(value: Option<&str>) -> bool {
+    matches!(
+        value.map(|value| value.trim().to_ascii_lowercase()),
+        Some(value) if matches!(value.as_str(), "1" | "true" | "yes" | "on")
+    )
+}
+
 fn rag_answer_chat_command(
     question: &str,
     hits: &[RetrievalHit],
@@ -4874,6 +4925,45 @@ mod tests {
         assert_eq!(answer.trace.retrieval_hit_count, 2);
         assert_eq!(answer.citations.len(), 2);
         assert_eq!(answer.citations[0].chunk_id, "chunk-a");
+    }
+
+    fn runtime_config_with_llm() -> novex_model::ModelRuntimeConfig {
+        let env = [
+            ("LLM_API_KEY", "sk-fake-llm-secret-508d"),
+            ("LLM_BASE_URL", "https://api.deepseek.com"),
+            ("LLM_MODEL", "deepseek-v4-flash"),
+        ];
+        novex_model::ModelRuntimeConfig::from_env_map(|key| {
+            env.iter()
+                .find_map(|(env_key, value)| (*env_key == key).then(|| (*value).to_owned()))
+        })
+    }
+
+    #[test]
+    fn rag_answer_mode_requires_llm_when_strict_env_is_enabled() {
+        let config = novex_model::ModelRuntimeConfig::from_env_map(|_| None);
+
+        let mode = rag_answer_mode_from_config(&config, true);
+
+        assert!(matches!(mode, RagAnswerMode::RequireLlm));
+    }
+
+    #[test]
+    fn rag_answer_mode_uses_llm_when_route_is_configured() {
+        let config = runtime_config_with_llm();
+
+        let mode = rag_answer_mode_from_config(&config, false);
+
+        assert!(matches!(mode, RagAnswerMode::UseLlm));
+    }
+
+    #[test]
+    fn rag_answer_mode_keeps_extract_fallback_without_llm_or_strict() {
+        let config = novex_model::ModelRuntimeConfig::from_env_map(|_| None);
+
+        let mode = rag_answer_mode_from_config(&config, false);
+
+        assert!(matches!(mode, RagAnswerMode::ExtractiveFallback));
     }
 
     #[test]
