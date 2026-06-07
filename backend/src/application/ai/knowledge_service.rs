@@ -1162,8 +1162,8 @@ impl KnowledgeService {
             &indexed_chunks,
             candidate_limit,
         )
-        .await;
-        let hits = rerank_dataset_hits(&command.question, candidate_hits, command.limit).await;
+        .await?;
+        let hits = rerank_dataset_hits(&command.question, candidate_hits, command.limit).await?;
         let indexed_hits = indexed_retrieval_hits(&hits, &indexed_chunks);
         let answer = generate_rag_answer(&command.question, &hits).await?;
         let trace_id = next_id();
@@ -2726,53 +2726,119 @@ async fn hybrid_retrieve_indexed_chunks_with_milvus_or_local(
     vector_collection: Option<&VectorCollectionRecord>,
     indexed_chunks: &[IndexedRagChunk],
     limit: usize,
-) -> Vec<RetrievalHit> {
+) -> Result<Vec<RetrievalHit>, AppError> {
+    hybrid_retrieve_indexed_chunks_with_milvus_or_local_strict(
+        question,
+        tenant_id,
+        dataset_id,
+        vector_collection,
+        indexed_chunks,
+        limit,
+        strict_live_rag_required(),
+    )
+    .await
+}
+
+async fn hybrid_retrieve_indexed_chunks_with_milvus_or_local_strict(
+    question: &str,
+    tenant_id: i64,
+    dataset_id: i64,
+    vector_collection: Option<&VectorCollectionRecord>,
+    indexed_chunks: &[IndexedRagChunk],
+    limit: usize,
+    strict: bool,
+) -> Result<Vec<RetrievalHit>, AppError> {
     if limit == 0 {
-        return Vec::new();
+        return Ok(Vec::new());
     }
 
-    let query_embeddings = query_embeddings_for_retrieval(question).await;
-    if let (Some(config), Some(collection), Some(query_vector)) = (
-        MilvusSearchConfig::from_env(),
+    let milvus_config = MilvusSearchConfig::from_env();
+    if strict && milvus_config.is_none() {
+        return Err(AppError::bad_request("Milvus 环境变量未配置完整"));
+    }
+    if strict && vector_collection.is_none() {
+        return Err(AppError::bad_request("Milvus collection 未就绪"));
+    }
+
+    let (query_embeddings, runtime_query_embedding) = retrieval_query_embeddings(question).await;
+    if strict && runtime_query_embedding.is_none() {
+        return Err(AppError::bad_request("Runtime Embedding 模型未配置或调用失败"));
+    }
+
+    let milvus_query_vector = runtime_query_embedding
+        .clone()
+        .or_else(|| query_embeddings.last().cloned());
+
+    match (
+        milvus_config,
         vector_collection,
-        query_embeddings.last().cloned(),
+        milvus_query_vector,
     ) {
-        if let Some(request) = milvus_search_request_for_collection(
-            tenant_id,
-            dataset_id,
-            collection,
-            query_vector,
-            limit,
-        ) {
-            if let Ok(milvus_hits) = milvus_search_hits(&config, &request).await {
-                let embedding_hits =
-                    retrieval_hits_from_milvus_hits(&milvus_hits, indexed_chunks, limit);
-                if !embedding_hits.is_empty() {
-                    let rag_chunks = indexed_chunks
-                        .iter()
-                        .map(|chunk| chunk.chunk.clone())
-                        .collect::<Vec<_>>();
-                    let keyword_hits = keyword_retrieve(question, &rag_chunks, limit);
-                    return merge_hybrid_retrieval_hits(keyword_hits, embedding_hits, limit);
+        (Some(config), Some(collection), Some(query_vector)) => {
+            let Some(request) = milvus_search_request_for_collection(
+                tenant_id,
+                dataset_id,
+                collection,
+                query_vector,
+                limit,
+            ) else {
+                if strict {
+                    return Err(AppError::bad_request("Milvus 检索请求无法构造"));
                 }
+                return Ok(hybrid_retrieve_indexed_chunks_with_query_embeddings(
+                    question,
+                    indexed_chunks,
+                    limit,
+                    &query_embeddings,
+                ));
+            };
+
+            match milvus_search_hits(&config, &request).await {
+                Ok(milvus_hits) => {
+                    let embedding_hits =
+                        retrieval_hits_from_milvus_hits(&milvus_hits, indexed_chunks, limit);
+                    if !embedding_hits.is_empty() {
+                        let rag_chunks = indexed_chunks
+                            .iter()
+                            .map(|chunk| chunk.chunk.clone())
+                            .collect::<Vec<_>>();
+                        let keyword_hits = keyword_retrieve(question, &rag_chunks, limit);
+                        return Ok(merge_hybrid_retrieval_hits(
+                            keyword_hits,
+                            embedding_hits,
+                            limit,
+                        ));
+                    }
+                    if strict {
+                        return Err(AppError::bad_request(
+                            "Milvus 检索未返回可用的已索引 chunk",
+                        ));
+                    }
+                }
+                Err(err) if strict => return Err(err),
+                Err(_) => {}
             }
         }
+        (_, _, None) if strict => return Err(AppError::bad_request("Milvus 查询向量为空")),
+        _ => {}
     }
 
-    hybrid_retrieve_indexed_chunks_with_query_embeddings(
+    Ok(hybrid_retrieve_indexed_chunks_with_query_embeddings(
         question,
         indexed_chunks,
         limit,
         &query_embeddings,
-    )
+    ))
 }
 
-async fn query_embeddings_for_retrieval(question: &str) -> Vec<Vec<f32>> {
+async fn retrieval_query_embeddings(question: &str) -> (Vec<Vec<f32>>, Option<Vec<f32>>) {
     let mut query_embeddings = vec![local_embedding_vector(question)];
     if let Some(runtime_embedding) = runtime_query_embedding(question).await {
+        let runtime_query_embedding = Some(runtime_embedding.clone());
         query_embeddings.push(runtime_embedding);
+        return (query_embeddings, runtime_query_embedding);
     }
-    query_embeddings
+    (query_embeddings, None)
 }
 
 async fn runtime_query_embedding(question: &str) -> Option<Vec<f32>> {
@@ -3208,19 +3274,33 @@ async fn rerank_dataset_hits(
     question: &str,
     hits: Vec<RetrievalHit>,
     limit: usize,
-) -> Vec<RetrievalHit> {
+) -> Result<Vec<RetrievalHit>, AppError> {
     if hits.is_empty() || limit == 0 {
-        return Vec::new();
+        return Ok(Vec::new());
     }
     let config = ModelRuntimeConfig::from_env();
-    let Some(route) = config.route(ModelRuntimeTarget::Reranker) else {
-        return rerank_retrieval_hits(&hits, &[], limit);
+    let strict = strict_live_rag_required();
+    let Some(route) = rerank_route_for_mode(&config, strict)? else {
+        return Ok(rerank_retrieval_hits(&hits, &[], limit));
     };
     let documents = hits.iter().map(rerank_document_text).collect::<Vec<_>>();
 
     match ModelRuntimeService::rerank_documents(route, question, &documents).await {
-        Ok(scores) if !scores.is_empty() => rerank_retrieval_hits(&hits, &scores, limit),
-        _ => rerank_retrieval_hits(&hits, &[], limit),
+        Ok(scores) if !scores.is_empty() => Ok(rerank_retrieval_hits(&hits, &scores, limit)),
+        Ok(_) if strict => Err(AppError::bad_request("Rerank 模型响应为空")),
+        Err(err) if strict => Err(err),
+        _ => Ok(rerank_retrieval_hits(&hits, &[], limit)),
+    }
+}
+
+fn rerank_route_for_mode<'a>(
+    config: &'a ModelRuntimeConfig,
+    strict: bool,
+) -> Result<Option<&'a novex_model::ModelRuntimeRoute>, AppError> {
+    match config.route(ModelRuntimeTarget::Reranker) {
+        Some(route) => Ok(Some(route)),
+        None if strict => Err(AppError::bad_request("Rerank 模型环境变量未配置完整")),
+        None => Ok(None),
     }
 }
 
@@ -4964,6 +5044,59 @@ mod tests {
         let mode = rag_answer_mode_from_config(&config, false);
 
         assert!(matches!(mode, RagAnswerMode::ExtractiveFallback));
+    }
+
+    fn test_indexed_rag_chunk(chunk_uid: &str, chunk_index: usize, text: &str) -> IndexedRagChunk {
+        let hit = test_retrieval_hit(chunk_uid, chunk_index, text);
+        IndexedRagChunk {
+            chunk_db_id: 1000 + chunk_index as i64,
+            document_id: 42,
+            embedding_vector: Some(local_embedding_vector(text)),
+            chunk: hit.chunk,
+        }
+    }
+
+    #[test]
+    fn strict_rag_dependency_mode_reads_truthy_env_values() {
+        assert!(parse_bool_env_flag(Some("1")));
+        assert!(parse_bool_env_flag(Some("true")));
+        assert!(parse_bool_env_flag(Some("TRUE")));
+        assert!(parse_bool_env_flag(Some("yes")));
+        assert!(parse_bool_env_flag(Some("on")));
+        assert!(!parse_bool_env_flag(Some("0")));
+        assert!(!parse_bool_env_flag(Some("false")));
+        assert!(!parse_bool_env_flag(None));
+    }
+
+    #[tokio::test]
+    async fn strict_retrieval_fails_without_milvus_config() {
+        let chunks = vec![test_indexed_rag_chunk(
+            "chunk-a",
+            0,
+            "Training starts on Monday.",
+        )];
+
+        let err = hybrid_retrieve_indexed_chunks_with_milvus_or_local_strict(
+            "When does training start?",
+            42,
+            7,
+            None,
+            &chunks,
+            5,
+            true,
+        )
+        .await
+        .unwrap_err();
+
+        assert!(err.to_string().contains("Milvus"));
+    }
+
+    #[test]
+    fn strict_rerank_requires_runtime_route() {
+        let config = novex_model::ModelRuntimeConfig::from_env_map(|_| None);
+
+        assert!(rerank_route_for_mode(&config, true).is_err());
+        assert!(rerank_route_for_mode(&config, false).is_ok());
     }
 
     #[test]
