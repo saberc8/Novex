@@ -284,6 +284,7 @@ pub struct ModelChatConversationRow {
 struct ModelUsageSaveRecord {
     pub id: i64,
     pub tenant_id: i64,
+    pub route_id: String,
     pub usage_kind: String,
     pub prompt_tokens: i64,
     pub completion_tokens: i64,
@@ -719,6 +720,38 @@ ORDER BY r.priority, r.id
         Ok(ModelHealthCheckResp { results })
     }
 
+    pub async fn health_check_for_tenant(
+        &self,
+        command: ModelHealthCheckCommand,
+    ) -> Result<ModelHealthCheckResp, AppError> {
+        let targets = health_check_targets(command.target.as_deref())?;
+        let client = reqwest::Client::builder()
+            .timeout(MODEL_HEALTH_TIMEOUT)
+            .build()
+            .map_err(|err| AppError::Anyhow(err.into()))?;
+
+        let mut results = Vec::with_capacity(targets.len());
+        for target in targets {
+            let purpose = default_purpose_for_target(target);
+            match self.resolve_route_for_purpose(purpose).await? {
+                Some(route) => results.push(check_target_with_route(&client, &route, target).await),
+                None => results.push(ModelHealthCheckResult {
+                    target,
+                    configured: false,
+                    ok: false,
+                    endpoint: None,
+                    masked_api_key: None,
+                    http_status: None,
+                    latency_ms: 0,
+                    message: "未配置完整模型路由".to_owned(),
+                    detail: None,
+                }),
+            }
+        }
+
+        Ok(ModelHealthCheckResp { results })
+    }
+
     pub async fn chat_completion(command: ModelChatCommand) -> Result<ModelChatResp, AppError> {
         execute_chat_completion(command).await
     }
@@ -739,7 +772,13 @@ ORDER BY r.priority, r.id
             .await?;
         }
         let conversation_id = command.conversation_id.unwrap_or_else(next_id);
-        let response = execute_normalized_chat_completion(&command, Some(conversation_id)).await?;
+        let route = self
+            .resolve_route_for_purpose(ModelRoutePurpose::Chat)
+            .await?
+            .ok_or_else(|| AppError::bad_request("LLM 模型环境变量未配置完整"))?;
+        let response =
+            execute_normalized_chat_completion_with_route(&route, &command, Some(conversation_id))
+                .await?;
         let now = Utc::now().naive_utc();
         let history =
             model_chat_history_records(self.tenant_id, user_id, &command, &response, now)?;
@@ -771,8 +810,13 @@ ORDER BY r.priority, r.id
         source: &str,
     ) -> Result<ModelChatResp, AppError> {
         let command = normalize_model_chat_command(command)?;
+        let route = self
+            .resolve_route_for_purpose(ModelRoutePurpose::Chat)
+            .await?
+            .ok_or_else(|| AppError::bad_request("LLM 模型环境变量未配置完整"))?;
         let response =
-            execute_normalized_chat_completion(&command, command.conversation_id).await?;
+            execute_normalized_chat_completion_with_route(&route, &command, command.conversation_id)
+                .await?;
         let record = model_chat_usage_record(
             self.tenant_id,
             user_id,
@@ -832,6 +876,14 @@ async fn execute_normalized_chat_completion(
     let route = config
         .route(ModelRuntimeTarget::Llm)
         .ok_or_else(|| AppError::bad_request("LLM 模型环境变量未配置完整"))?;
+    execute_normalized_chat_completion_with_route(route, command, conversation_id).await
+}
+
+async fn execute_normalized_chat_completion_with_route(
+    route: &ModelRuntimeRoute,
+    command: &ModelChatCommand,
+    conversation_id: Option<i64>,
+) -> Result<ModelChatResp, AppError> {
     let client = reqwest::Client::builder()
         .timeout(MODEL_CHAT_TIMEOUT)
         .build()
@@ -1199,6 +1251,7 @@ fn model_chat_usage_record(
     ModelUsageSaveRecord {
         id: next_id(),
         tenant_id,
+        route_id: response.route_id.clone(),
         usage_kind: "chat".to_owned(),
         prompt_tokens: counts.prompt_tokens,
         completion_tokens: counts.completion_tokens,
@@ -1231,13 +1284,14 @@ JOIN ai_model_profile p
   ON p.tenant_id = r.tenant_id
  AND p.id = r.model_profile_id
 WHERE r.tenant_id = $1
-  AND r.route_purpose = 'chat'
+  AND r.code = $2
   AND r.status = 1
 ORDER BY r.priority ASC, r.id ASC
 LIMIT 1;
 "#,
     )
     .bind(record.tenant_id)
+    .bind(&record.route_id)
     .fetch_optional(db)
     .await?;
     let (route_id, model_profile_id, cost_spec) = route
@@ -1308,6 +1362,15 @@ fn route_target_for_purpose(purpose: ModelRoutePurpose) -> ModelRuntimeTarget {
         | ModelRoutePurpose::QueryRewrite
         | ModelRoutePurpose::EvalJudge
         | ModelRoutePurpose::CodeAgent => ModelRuntimeTarget::Llm,
+    }
+}
+
+fn default_purpose_for_target(target: ModelRuntimeTarget) -> ModelRoutePurpose {
+    match target {
+        ModelRuntimeTarget::Llm => ModelRoutePurpose::Chat,
+        ModelRuntimeTarget::Embedding => ModelRoutePurpose::Embedding,
+        ModelRuntimeTarget::Reranker => ModelRoutePurpose::Rerank,
+        ModelRuntimeTarget::Draw => ModelRoutePurpose::MediaGeneration,
     }
 }
 
@@ -1416,6 +1479,14 @@ async fn check_target(
         };
     };
 
+    check_target_with_route(client, route, target).await
+}
+
+async fn check_target_with_route(
+    client: &reqwest::Client,
+    route: &ModelRuntimeRoute,
+    target: ModelRuntimeTarget,
+) -> ModelHealthCheckResult {
     let started = Instant::now();
     let checked = match target {
         ModelRuntimeTarget::Llm => check_llm(client, route).await,
@@ -1768,6 +1839,22 @@ mod tests {
 
         assert_eq!(route.summary().route_id, "runtime.llm");
         assert_eq!(route.summary().target, ModelRuntimeTarget::Llm);
+    }
+
+    #[test]
+    fn model_chat_tenant_bound_path_resolves_chat_route_purpose() {
+        let source = include_str!("model_service.rs");
+
+        assert!(source.contains("self.resolve_route_for_purpose(ModelRoutePurpose::Chat).await?"));
+        assert!(source.contains("execute_normalized_chat_completion_with_route"));
+    }
+
+    #[test]
+    fn model_chat_usage_accounting_matches_selected_route_code() {
+        let source = include_str!("model_service.rs");
+
+        assert!(source.contains("AND r.code = $2"));
+        assert!(source.contains(".bind(&record.route_id)"));
     }
 
     #[test]

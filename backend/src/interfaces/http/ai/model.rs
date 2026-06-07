@@ -31,11 +31,15 @@ pub fn routes() -> Router<AppState> {
 }
 
 async fn runtime_config(
+    State(state): State<AppState>,
     current_user: CurrentUser,
 ) -> Result<Json<ApiResponse<novex_model::ModelRuntimeSummary>>, AppError> {
     require_permission(&current_user, MODEL_LIST_PERMISSION)?;
+    let service = ModelRuntimeService::for_tenant(state.db, current_user.tenant_id);
 
-    Ok(Json(ApiResponse::ok(ModelRuntimeService::runtime_config())))
+    Ok(Json(ApiResponse::ok(
+        service.effective_runtime_summary().await?,
+    )))
 }
 
 async fn model_registry(
@@ -50,13 +54,15 @@ async fn model_registry(
 }
 
 async fn health_check(
+    State(state): State<AppState>,
     current_user: CurrentUser,
     Json(command): Json<ModelHealthCheckCommand>,
 ) -> Result<Json<ApiResponse<ModelHealthCheckResp>>, AppError> {
     require_permission(&current_user, MODEL_HEALTH_PERMISSION)?;
+    let service = ModelRuntimeService::for_tenant(state.db, current_user.tenant_id);
 
     Ok(Json(ApiResponse::ok(
-        ModelRuntimeService::health_check(command).await?,
+        service.health_check_for_tenant(command).await?,
     )))
 }
 
@@ -203,13 +209,21 @@ mod tests {
             source
                 .matches("ModelRuntimeService::for_tenant(state.db, current_user.tenant_id)")
                 .count()
-                >= 2
+                >= 4
         );
+    }
+
+    #[test]
+    fn model_runtime_config_and_health_handlers_use_tenant_routes() {
+        let source = include_str!("model.rs");
+
+        assert!(source.contains(".effective_runtime_summary().await?"));
+        assert!(source.contains(".health_check_for_tenant(command).await?"));
     }
 
     #[tokio::test]
     async fn runtime_config_handler_rejects_missing_permission() {
-        let err = runtime_config(user_with_permissions(vec![]))
+        let err = runtime_config(State(test_state()), user_with_permissions(vec![]))
             .await
             .unwrap_err();
 
@@ -219,6 +233,7 @@ mod tests {
     #[tokio::test]
     async fn health_check_handler_rejects_missing_permission_before_network() {
         let err = health_check(
+            State(test_state()),
             user_with_permissions(vec![]),
             axum::Json(ModelHealthCheckCommand {
                 target: Some("all".to_owned()),
