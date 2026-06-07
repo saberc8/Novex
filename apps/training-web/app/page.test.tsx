@@ -5,7 +5,8 @@ import { accountLogin, getImageCaptcha } from "@/api/auth";
 import { createAgentRun } from "@/api/agent";
 import { dryRunTool } from "@/api/capability";
 import { listEvalDatasets, listEvalResults, listEvalRuns, runEval } from "@/api/eval";
-import { askDataset, listDatasets, submitRagFeedback, uploadKnowledgeFile } from "@/api/knowledge";
+import { askDataset, listDatasets, submitAiFeedback, submitRagFeedback, uploadKnowledgeFile } from "@/api/knowledge";
+import { listTrainingLearningRecords } from "@/api/training";
 import type { DatasetResp } from "@/types/knowledge";
 
 vi.mock("@/api/auth", () => ({
@@ -31,8 +32,17 @@ vi.mock("@/api/eval", () => ({
 vi.mock("@/api/knowledge", () => ({
   askDataset: vi.fn(),
   listDatasets: vi.fn(),
+  submitAiFeedback: vi.fn(),
   submitRagFeedback: vi.fn(),
   uploadKnowledgeFile: vi.fn()
+}));
+
+vi.mock("@/api/training", () => ({
+  listTrainingLearningRecords: vi.fn()
+}));
+
+vi.mock("next/navigation", () => ({
+  usePathname: () => "/"
 }));
 
 const accountLoginMock = vi.mocked(accountLogin);
@@ -45,8 +55,10 @@ const listEvalResultsMock = vi.mocked(listEvalResults);
 const listEvalRunsMock = vi.mocked(listEvalRuns);
 const listDatasetsMock = vi.mocked(listDatasets);
 const runEvalMock = vi.mocked(runEval);
+const submitAiFeedbackMock = vi.mocked(submitAiFeedback);
 const submitRagFeedbackMock = vi.mocked(submitRagFeedback);
 const uploadKnowledgeFileMock = vi.mocked(uploadKnowledgeFile);
+const listTrainingLearningRecordsMock = vi.mocked(listTrainingLearningRecords);
 
 function dataset(overrides: Partial<DatasetResp> = {}): DatasetResp {
   return {
@@ -104,6 +116,13 @@ describe("Training home page", () => {
       id: 99,
       traceId: 42,
       rating: "not_helpful"
+    });
+    submitAiFeedbackMock.mockResolvedValue({
+      id: 100,
+      resourceType: "training_quiz",
+      resourceId: "900",
+      traceId: "agent-900",
+      rating: "quiz_wrong_answer"
     });
     uploadKnowledgeFileMock.mockResolvedValue({
       file: {
@@ -191,7 +210,7 @@ describe("Training home page", () => {
           targetScope: "training",
           status: 1,
           metadata: {},
-          caseCount: 3,
+          caseCount: 20,
           createTime: "2026-06-05 12:00:00"
         }
       ],
@@ -204,11 +223,11 @@ describe("Training home page", () => {
           datasetId: 700,
           datasetCode: "training_regression",
           status: "succeeded",
-          totalCases: 3,
-          passedCases: 2,
-          failedCases: 1,
-          averageScore: 0.67,
-          metricBreakdown: { citation_accuracy: 0.67 },
+          totalCases: 20,
+          passedCases: 18,
+          failedCases: 2,
+          averageScore: 0.9,
+          metricBreakdown: { citation_accuracy: 0.9 },
           reportPayload: {},
           createTime: "2026-06-05 11:00:00",
           finishedAt: "2026-06-05 11:00:01"
@@ -242,14 +261,58 @@ describe("Training home page", () => {
       datasetId: 700,
       datasetCode: "training_regression",
       status: "succeeded",
-      totalCases: 3,
-      passedCases: 2,
-      failedCases: 1,
-      averageScore: 0.67,
-      metricBreakdown: { citation_accuracy: 0.67 },
+      totalCases: 20,
+      passedCases: 18,
+      failedCases: 2,
+      averageScore: 0.9,
+      metricBreakdown: { citation_accuracy: 0.9 },
       reportPayload: {},
       createTime: "2026-06-05 12:00:00",
       finishedAt: "2026-06-05 12:00:01"
+    });
+    listTrainingLearningRecordsMock.mockResolvedValue({
+      scope: "self",
+      summary: {
+        completionRate: 72,
+        pendingTaskCount: 2,
+        quizAverageScore: 91,
+        weakPointCount: 2
+      },
+      tasks: [
+        {
+          title: "完成信息安全入职培训",
+          source: "入职制度知识库",
+          due: "今日 18:00",
+          status: "进行中"
+        },
+        {
+          title: "复盘本周错题",
+          source: "测验记录",
+          due: "周五前",
+          status: "待复习"
+        }
+      ],
+      records: [
+        {
+          id: 501,
+          kind: "quiz_feedback",
+          title: "测验错题反馈",
+          detail: "客户数据外发",
+          status: "needs_review",
+          score: null,
+          learnerId: 1,
+          learnerName: "admin",
+          createTime: "2026-06-05 12:10:00"
+        }
+      ],
+      weakPoints: [
+        {
+          topic: "客户数据外发与权限申请",
+          evidence: "quiz_wrong_answer",
+          count: 2,
+          lastSeenAt: "2026-06-05 12:10:00"
+        }
+      ]
     });
   });
 
@@ -289,6 +352,16 @@ describe("Training home page", () => {
     expect(screen.getByText("知识库问答")).toBeTruthy();
     expect(screen.getByText("测验与错题")).toBeTruthy();
     expect(screen.getByText("引用来源")).toBeTruthy();
+  });
+
+  it("loads live learning records and weak points for the employee workbench", async () => {
+    render(<Page />);
+
+    await waitFor(() => expect(listTrainingLearningRecordsMock).toHaveBeenCalledWith({ scope: "self" }));
+    expect(await screen.findByText("72%")).toBeTruthy();
+    expect(await screen.findByText("91")).toBeTruthy();
+    expect((await screen.findAllByText("客户数据外发与权限申请")).length).toBeGreaterThan(0);
+    expect(await screen.findByText("测验错题反馈")).toBeTruthy();
   });
 
   it("loads the first dataset and submits training questions to the RAG API", async () => {
@@ -363,8 +436,8 @@ describe("Training home page", () => {
         datasetCode: "training_regression"
       })
     );
-    expect(await screen.findByText("通过 2 / 3")).toBeTruthy();
-    expect(await screen.findByText("平均 0.67")).toBeTruthy();
+    expect(await screen.findByText("通过 18 / 20")).toBeTruthy();
+    expect(await screen.findByText("平均 0.90")).toBeTruthy();
     await waitFor(() => expect(listEvalResultsMock).toHaveBeenCalledWith(800, { page: 1, size: 5 }));
     expect(await screen.findByText("Run #800")).toBeTruthy();
   });
@@ -408,22 +481,96 @@ describe("Training home page", () => {
     expect(screen.queryByText("ai:tool:dryRun")).toBeNull();
   });
 
-  it("dry-runs a Feishu training reminder and shows the audit status to employees", async () => {
+  it("submits quiz wrong-answer feedback from the customer workbench", async () => {
+    render(<Page />);
+
+    fireEvent.click(screen.getByRole("button", { name: "生成测验" }));
+    expect(await screen.findByText("测验已生成")).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "反馈错题" }));
+
+    await waitFor(() =>
+      expect(submitAiFeedbackMock).toHaveBeenCalledWith({
+        resourceType: "training_quiz",
+        resourceId: "900",
+        traceId: "agent-900",
+        rating: "quiz_wrong_answer",
+        reason: "training-quiz-wrong-answer-feedback",
+        metadata: {
+          source: "training-web",
+          quizRunId: 900
+        }
+      })
+    );
+    expect(await screen.findByText("错题反馈已记录")).toBeTruthy();
+  });
+
+  it("runs a Feishu training reminder through the Agent tool loop", async () => {
+    createAgentRunMock.mockResolvedValueOnce({
+      runId: 901,
+      traceId: "agent-901",
+      status: "succeeded",
+      intent: "tool_task",
+      loopKind: "react",
+      selectedToolCode: "feishu.message.send",
+      pauseReason: null,
+      finalOutput: "Feishu notification sent.",
+      taskBudget: {
+        maxSteps: 6,
+        maxToolCalls: 1,
+        maxSeconds: 30,
+        maxCostCents: 0
+      },
+      createTime: "2026-06-05 12:20:00",
+      updateTime: "2026-06-05 12:20:01"
+    });
     render(<Page />);
 
     fireEvent.click(screen.getByRole("button", { name: "发送学习提醒" }));
 
     await waitFor(() =>
-      expect(dryRunToolMock).toHaveBeenCalledWith({
-        toolCode: "feishu.message.send",
-        input: {
-          recipient: "training-team",
-          text: "请完成信息安全入职培训"
+      expect(createAgentRunMock).toHaveBeenCalledWith({
+        input: "发送飞书学习提醒：请完成信息安全入职培训",
+        autoApprove: true,
+        budget: {
+          maxSteps: 6,
+          maxToolCalls: 1,
+          maxSeconds: 30,
+          maxCostCents: 0
         }
       })
     );
-    expect(await screen.findByText("提醒已发送（演练）")).toBeTruthy();
-    expect(await screen.findByText("Audit #901")).toBeTruthy();
+    expect(dryRunToolMock).not.toHaveBeenCalled();
+    expect(await screen.findByText("提醒已发送")).toBeTruthy();
+    expect(await screen.findByText("Run #901")).toBeTruthy();
     expect(screen.queryByText("permissionCode")).toBeNull();
+  });
+
+  it("shows a user-readable Feishu reminder approval state", async () => {
+    createAgentRunMock.mockResolvedValueOnce({
+      runId: 902,
+      traceId: "agent-902",
+      status: "waiting_approval",
+      intent: "tool_task",
+      loopKind: "react",
+      selectedToolCode: "feishu.message.send",
+      pauseReason: "approval",
+      finalOutput: null,
+      taskBudget: {
+        maxSteps: 6,
+        maxToolCalls: 1,
+        maxSeconds: 30,
+        maxCostCents: 0
+      },
+      createTime: "2026-06-05 12:25:00",
+      updateTime: null
+    });
+    render(<Page />);
+
+    fireEvent.click(screen.getByRole("button", { name: "发送学习提醒" }));
+
+    expect(await screen.findByText("等待管理员审批")).toBeTruthy();
+    expect(screen.queryByText("waiting_approval")).toBeNull();
+    expect(screen.queryByText("approval")).toBeNull();
   });
 });

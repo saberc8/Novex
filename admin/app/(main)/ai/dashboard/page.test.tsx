@@ -47,6 +47,16 @@ describe("AiDashboardPage", () => {
           status: "skeleton",
           description: "Chunking and retrieval"
         }
+      ],
+      milestoneCoverage: [
+        {
+          id: "M1",
+          name: "Knowledge Base MVP",
+          status: "poc_limited",
+          summary: "RAG query path, citations, trace, and training/chat-web pages are present.",
+          evidence: ["Admin knowledge control plane"],
+          limitations: ["Milvus is wired through metadata but live POC still supports local fallback."]
+        }
       ]
     });
     getCapabilitySummaryMock.mockResolvedValue({
@@ -73,6 +83,10 @@ describe("AiDashboardPage", () => {
     expect((await screen.findAllByText("3")).length).toBeGreaterThan(0);
     expect(await screen.findByText("MCP Servers")).toBeTruthy();
     expect((await screen.findAllByText("1")).length).toBeGreaterThan(0);
+    expect(await screen.findByText("M0-M5 Coverage")).toBeTruthy();
+    expect(await screen.findByText("Knowledge Base MVP")).toBeTruthy();
+    expect(await screen.findByText("poc_limited")).toBeTruthy();
+    expect(await screen.findByText(/Milvus is wired/)).toBeTruthy();
     expect(screen.queryByText("Next Milestone")).toBeNull();
   });
 });

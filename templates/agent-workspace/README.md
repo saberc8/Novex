@@ -18,6 +18,8 @@ M5 package:
 
 ## Smoke checks
 
+Script: `templates/agent-workspace/smoke.sh`
+
 | Code | Workdir | Command |
 | --- | --- | --- |
 | `agent_runtime_api` | `backend` | `cargo test -p backend-rust agent --offline` |

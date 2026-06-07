@@ -45,7 +45,7 @@ async fn model_registry(
     require_permission(&current_user, MODEL_LIST_PERMISSION)?;
 
     Ok(Json(ApiResponse::ok(
-        ModelRuntimeService::registry_summary(&state.db).await?,
+        ModelRuntimeService::registry_summary_for_tenant(&state.db, current_user.tenant_id).await?,
     )))
 }
 
@@ -66,9 +66,11 @@ async fn chat_completion(
     Json(command): Json<ModelChatCommand>,
 ) -> Result<Json<ApiResponse<ModelChatResp>>, AppError> {
     require_permission(&current_user, MODEL_CHAT_PERMISSION)?;
+    let service = ModelRuntimeService::for_tenant(state.db, current_user.tenant_id);
 
     Ok(Json(ApiResponse::ok(
-        ModelRuntimeService::chat_completion_with_usage(&state.db, current_user.id, command)
+        service
+            .chat_completion_with_usage(current_user.id, command)
             .await?,
     )))
 }
@@ -78,9 +80,10 @@ async fn list_chat_conversations(
     current_user: CurrentUser,
 ) -> Result<Json<ApiResponse<Vec<ModelChatConversationResp>>>, AppError> {
     require_permission(&current_user, MODEL_CHAT_PERMISSION)?;
+    let service = ModelRuntimeService::for_tenant(state.db, current_user.tenant_id);
 
     Ok(Json(ApiResponse::ok(
-        ModelRuntimeService::list_chat_conversations(&state.db, current_user.id).await?,
+        service.list_chat_conversations(current_user.id).await?,
     )))
 }
 
@@ -190,6 +193,18 @@ mod tests {
         );
         assert!(sanitize_migration.contains("masked_value = 'configured'"));
         assert!(sanitize_migration.contains("masked_value LIKE 'env:%'"));
+    }
+
+    #[test]
+    fn model_chat_handlers_bind_runtime_to_current_tenant() {
+        let source = include_str!("model.rs");
+
+        assert!(
+            source
+                .matches("ModelRuntimeService::for_tenant(state.db, current_user.tenant_id)")
+                .count()
+                >= 2
+        );
     }
 
     #[tokio::test]

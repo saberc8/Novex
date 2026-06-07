@@ -21,48 +21,20 @@ import {
 } from "lucide-react";
 import { accountLogin, getImageCaptcha } from "@/api/auth";
 import { createAgentRun } from "@/api/agent";
-import { dryRunTool } from "@/api/capability";
 import { listEvalDatasets, listEvalResults, listEvalRuns, runEval } from "@/api/eval";
-import { askDataset, listDatasets, submitRagFeedback, uploadKnowledgeFile } from "@/api/knowledge";
+import { askDataset, listDatasets, submitAiFeedback, submitRagFeedback, uploadKnowledgeFile } from "@/api/knowledge";
+import { listTrainingLearningRecords } from "@/api/training";
 import { CitationList, type CitationItem } from "@/components/citation-list";
 import { MetricStrip } from "@/components/metric-strip";
 import { TrainingShell } from "@/components/training-shell";
 import { getAuthToken, setAuthToken as persistAuthToken } from "@/lib/auth";
 import type { AgentRunResp } from "@/types/agent";
 import type { ImageCaptchaResp } from "@/types/auth";
-import type { ToolDryRunResp } from "@/types/capability";
 import type { EvalDatasetResp, EvalResultResp, EvalRunResp } from "@/types/eval";
 import type { DatasetResp, RagAskResp, RagFeedbackRating } from "@/types/knowledge";
+import type { TrainingLearningRecordsResp } from "@/types/training";
 
 const TRAINING_CLIENT_ID = "novex-training-web";
-
-const metrics = [
-  { label: "完成率", value: "68%", detail: "本周提升 12%", tone: "teal" as const },
-  { label: "待学习", value: "4", detail: "2 项今天截止", tone: "amber" as const },
-  { label: "测验均分", value: "86", detail: "高于团队均值", tone: "blue" as const },
-  { label: "薄弱点", value: "3", detail: "集中在安全流程", tone: "rose" as const }
-];
-
-const tasks = [
-  {
-    title: "完成信息安全入职培训",
-    source: "入职制度知识库",
-    due: "今日 18:00",
-    status: "进行中"
-  },
-  {
-    title: "阅读客户数据处理规范",
-    source: "合规资料库",
-    due: "明日 12:00",
-    status: "未开始"
-  },
-  {
-    title: "复盘本周错题",
-    source: "测验记录",
-    due: "周五前",
-    status: "待复习"
-  }
-];
 
 const fallbackDataset: DatasetResp = {
   id: 10,
@@ -129,6 +101,57 @@ const fallbackEvalDataset: EvalDatasetResp = {
   createTime: "2026-06-05 10:00:00"
 };
 
+const fallbackLearningRecords: TrainingLearningRecordsResp = {
+  scope: "self",
+  summary: {
+    completionRate: 68,
+    pendingTaskCount: 4,
+    quizAverageScore: 86,
+    weakPointCount: 3
+  },
+  tasks: [
+    {
+      title: "完成信息安全入职培训",
+      source: "入职制度知识库",
+      due: "今日 18:00",
+      status: "进行中"
+    },
+    {
+      title: "阅读客户数据处理规范",
+      source: "合规资料库",
+      due: "明日 12:00",
+      status: "未开始"
+    },
+    {
+      title: "复盘本周错题",
+      source: "测验记录",
+      due: "周五前",
+      status: "待复习"
+    }
+  ],
+  records: [
+    {
+      id: 0,
+      kind: "quiz_feedback",
+      title: "测验错题反馈",
+      detail: "客户数据外发和权限申请",
+      status: "needs_review",
+      score: null,
+      learnerId: 1,
+      learnerName: "admin",
+      createTime: "2026-06-05 10:00:00"
+    }
+  ],
+  weakPoints: [
+    {
+      topic: "客户数据外发与权限申请",
+      evidence: "fallback",
+      count: 2,
+      lastSeenAt: "2026-06-05 10:00:00"
+    }
+  ]
+};
+
 export function TrainingAppClient() {
   const [authToken, setAuthToken] = useState<string | null>(() => getAuthToken());
   const [loginUsername, setLoginUsername] = useState("admin");
@@ -143,6 +166,8 @@ export function TrainingAppClient() {
   const [evalRun, setEvalRun] = useState<EvalRunResp | null>(null);
   const [evalRuns, setEvalRuns] = useState<EvalRunResp[]>([]);
   const [evalResults, setEvalResults] = useState<EvalResultResp[]>([]);
+  const [learningRecords, setLearningRecords] = useState<TrainingLearningRecordsResp>(fallbackLearningRecords);
+  const [learningStatus, setLearningStatus] = useState("fallback");
   const [question, setQuestion] = useState("培训什么时候开始？");
   const [answer, setAnswer] = useState<RagAskResp>(fallbackAnswer);
   const [apiStatus, setApiStatus] = useState("fallback");
@@ -156,7 +181,9 @@ export function TrainingAppClient() {
   const [quizRun, setQuizRun] = useState<AgentRunResp | null>(null);
   const [quizRunning, setQuizRunning] = useState(false);
   const [quizStatus, setQuizStatus] = useState("");
-  const [reminderResult, setReminderResult] = useState<ToolDryRunResp | null>(null);
+  const [quizFeedbackSubmitting, setQuizFeedbackSubmitting] = useState(false);
+  const [quizFeedbackStatus, setQuizFeedbackStatus] = useState("");
+  const [reminderRun, setReminderRun] = useState<AgentRunResp | null>(null);
   const [reminderSending, setReminderSending] = useState(false);
   const [reminderStatus, setReminderStatus] = useState("");
 
@@ -251,6 +278,34 @@ export function TrainingAppClient() {
 
   useEffect(() => {
     let mounted = true;
+    if (!authToken) {
+      return () => {
+        mounted = false;
+      };
+    }
+
+    listTrainingLearningRecords({ scope: "self" })
+      .then((records) => {
+        if (!mounted) {
+          return;
+        }
+        setLearningRecords(records);
+        setLearningStatus("live");
+      })
+      .catch(() => {
+        if (mounted) {
+          setLearningRecords(fallbackLearningRecords);
+          setLearningStatus("fallback");
+        }
+      });
+
+    return () => {
+      mounted = false;
+    };
+  }, [authToken]);
+
+  useEffect(() => {
+    let mounted = true;
     if (authToken) {
       return () => {
         mounted = false;
@@ -280,6 +335,37 @@ export function TrainingAppClient() {
   );
 
   const selectedEvalDataset = evalDatasets[0] ?? fallbackEvalDataset;
+  const learningTasks =
+    learningRecords.tasks.length > 0 ? learningRecords.tasks : fallbackLearningRecords.tasks;
+  const learningMetrics = useMemo(
+    () => [
+      {
+        label: "完成率",
+        value: `${learningRecords.summary.completionRate}%`,
+        detail: learningStatus === "live" ? `${learningRecords.records.length} 条学习记录` : "Fallback",
+        tone: "teal" as const
+      },
+      {
+        label: "待学习",
+        value: String(learningRecords.summary.pendingTaskCount),
+        detail: "来自任务状态",
+        tone: "amber" as const
+      },
+      {
+        label: "测验均分",
+        value: String(learningRecords.summary.quizAverageScore),
+        detail: "Training Regression",
+        tone: "blue" as const
+      },
+      {
+        label: "薄弱点",
+        value: String(learningRecords.summary.weakPointCount),
+        detail: learningRecords.weakPoints[0]?.topic ?? "暂无薄弱点",
+        tone: "rose" as const
+      }
+    ],
+    [learningRecords, learningStatus]
+  );
 
   async function handleLogin(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -508,6 +594,7 @@ export function TrainingAppClient() {
 
     setQuizRunning(true);
     setQuizStatus("");
+    setQuizFeedbackStatus("");
     try {
       const response = await createAgentRun({
         input: "为信息安全入职培训生成 5 道测验题",
@@ -528,6 +615,33 @@ export function TrainingAppClient() {
     }
   }
 
+  async function handleQuizFeedback() {
+    if (!quizRun || quizFeedbackSubmitting) {
+      return;
+    }
+
+    setQuizFeedbackSubmitting(true);
+    setQuizFeedbackStatus("");
+    try {
+      await submitAiFeedback({
+        resourceType: "training_quiz",
+        resourceId: String(quizRun.runId),
+        traceId: quizRun.traceId,
+        rating: "quiz_wrong_answer",
+        reason: "training-quiz-wrong-answer-feedback",
+        metadata: {
+          source: "training-web",
+          quizRunId: quizRun.runId
+        }
+      });
+      setQuizFeedbackStatus("错题反馈已记录");
+    } catch {
+      setQuizFeedbackStatus("错题反馈提交失败");
+    } finally {
+      setQuizFeedbackSubmitting(false);
+    }
+  }
+
   async function handleSendReminder() {
     if (reminderSending) {
       return;
@@ -536,15 +650,18 @@ export function TrainingAppClient() {
     setReminderSending(true);
     setReminderStatus("");
     try {
-      const response = await dryRunTool({
-        toolCode: "feishu.message.send",
-        input: {
-          recipient: "training-team",
-          text: "请完成信息安全入职培训"
+      const response = await createAgentRun({
+        input: "发送飞书学习提醒：请完成信息安全入职培训",
+        autoApprove: true,
+        budget: {
+          maxSteps: 6,
+          maxToolCalls: 1,
+          maxSeconds: 30,
+          maxCostCents: 0
         }
       });
-      setReminderResult(response);
-      setReminderStatus("提醒已发送（演练）");
+      setReminderRun(response);
+      setReminderStatus(reminderStatusLabel(response.status));
     } catch {
       setReminderStatus("提醒发送失败");
     } finally {
@@ -603,7 +720,7 @@ export function TrainingAppClient() {
             </div>
           </header>
 
-          <MetricStrip metrics={metrics} />
+          <MetricStrip metrics={learningMetrics} />
 
           <div className="grid grid-cols-1 gap-4 xl:grid-cols-[minmax(0,0.95fr)_minmax(0,1.05fr)]">
             <section className="rounded-lg border border-slate-200 bg-white p-4 shadow-sm">
@@ -618,7 +735,7 @@ export function TrainingAppClient() {
                 </button>
               </div>
               <div className="mt-4 space-y-3">
-                {tasks.map((task, index) => (
+                {learningTasks.map((task, index) => (
                   <article className="rounded-lg border border-slate-200 p-3" key={task.title}>
                     <div className="flex items-start gap-3">
                       {index === 0 ? (
@@ -857,8 +974,20 @@ export function TrainingAppClient() {
               <div className="h-2 overflow-hidden rounded-full bg-slate-100">
                 <div className="h-full w-3/5 rounded-full bg-amber-500" />
               </div>
-              <div className="rounded-lg bg-rose-50 p-3 text-rose-800">
-                最近错题集中在客户数据外发和权限申请。
+              <div className="space-y-2">
+                {learningRecords.weakPoints.slice(0, 3).map((weakPoint) => (
+                  <div className="rounded-lg bg-rose-50 p-3 text-rose-800" key={`${weakPoint.topic}-${weakPoint.evidence}`}>
+                    <div className="font-medium">{weakPoint.topic}</div>
+                    <div className="mt-1 text-xs text-rose-700">
+                      {weakPoint.evidence} · {weakPoint.count} 次 · {weakPoint.lastSeenAt}
+                    </div>
+                  </div>
+                ))}
+                {!learningRecords.weakPoints.length ? (
+                  <div className="rounded-lg bg-emerald-50 p-3 text-emerald-800">
+                    暂无薄弱点记录。
+                  </div>
+                ) : null}
               </div>
               <button
                 className="inline-flex h-9 w-full items-center justify-center gap-2 rounded-md border border-slate-200 px-3 text-sm font-semibold text-slate-700 hover:bg-slate-50 disabled:text-slate-300"
@@ -884,6 +1013,58 @@ export function TrainingAppClient() {
                       {quizRun.finalOutput}
                     </div>
                   ) : null}
+                  {quizRun ? (
+                    <div className="mt-3 flex flex-wrap items-center gap-2">
+                      <button
+                        className="inline-flex h-8 items-center gap-2 rounded-md border border-slate-200 px-2 text-xs font-medium text-slate-600 hover:bg-slate-50 disabled:text-slate-300"
+                        disabled={quizFeedbackSubmitting}
+                        onClick={() => void handleQuizFeedback()}
+                        type="button"
+                      >
+                        <CircleAlert aria-hidden="true" className="h-3.5 w-3.5" />
+                        反馈错题
+                      </button>
+                      {quizFeedbackStatus ? (
+                        <span className="inline-flex h-8 items-center rounded-md bg-slate-100 px-2 text-xs font-medium text-slate-600">
+                          {quizFeedbackStatus}
+                        </span>
+                      ) : null}
+                    </div>
+                  ) : null}
+                </div>
+              ) : null}
+            </div>
+          </section>
+
+          <section className="rounded-lg border border-slate-200 bg-white p-4 shadow-sm">
+            <div className="flex items-center justify-between gap-3">
+              <h2 className="text-sm font-semibold text-slate-950">学习记录</h2>
+              <span className="rounded-md bg-slate-100 px-2 py-1 text-xs font-medium text-slate-600">
+                {learningStatus === "live" ? "Live" : "Fallback"}
+              </span>
+            </div>
+            <div className="mt-3 space-y-2">
+              {learningRecords.records.slice(0, 4).map((record) => (
+                <article className="rounded-lg border border-slate-200 p-3" key={`${record.kind}-${record.id}`}>
+                  <div className="flex items-center justify-between gap-3">
+                    <div className="min-w-0">
+                      <div className="truncate text-sm font-semibold text-slate-900">{record.title}</div>
+                      <div className="mt-1 truncate text-xs text-slate-500">
+                        {record.learnerName} · {record.createTime}
+                      </div>
+                    </div>
+                    <span className="shrink-0 rounded-md bg-slate-100 px-2 py-1 text-xs text-slate-600">
+                      {record.status}
+                    </span>
+                  </div>
+                  <div className="mt-2 line-clamp-2 text-xs leading-5 text-slate-500">
+                    {record.detail}
+                  </div>
+                </article>
+              ))}
+              {!learningRecords.records.length ? (
+                <div className="rounded-lg border border-dashed border-slate-200 p-4 text-center text-sm text-slate-500">
+                  暂无学习记录
                 </div>
               ) : null}
             </div>
@@ -895,15 +1076,20 @@ export function TrainingAppClient() {
                 <Bell aria-hidden="true" className="h-4 w-4 text-teal-700" />
                 <h2 className="text-sm font-semibold text-slate-950">通知状态</h2>
               </div>
-              {reminderResult ? (
+              {reminderRun ? (
                 <span className="rounded-md bg-slate-100 px-2 py-1 text-xs font-medium text-slate-600">
-                  Audit #{reminderResult.auditId}
+                  Run #{reminderRun.runId}
                 </span>
               ) : null}
             </div>
             <div className="mt-3 text-sm leading-6 text-slate-600">
               {reminderStatus || "飞书学习任务已发送，员工可从通知回到培训工作台继续学习。"}
             </div>
+            {reminderRun?.finalOutput ? (
+              <div className="mt-2 rounded-lg bg-slate-50 p-3 text-xs leading-5 text-slate-500">
+                {reminderRun.finalOutput}
+              </div>
+            ) : null}
             <button
               className="mt-3 inline-flex h-9 w-full items-center justify-center gap-2 rounded-md border border-slate-200 px-3 text-sm font-semibold text-slate-700 hover:bg-slate-50 disabled:text-slate-300"
               disabled={reminderSending}
@@ -918,4 +1104,20 @@ export function TrainingAppClient() {
       </div>
     </TrainingShell>
   );
+}
+
+function reminderStatusLabel(status: string) {
+  switch (status) {
+    case "succeeded":
+      return "提醒已发送";
+    case "waiting_approval":
+    case "paused":
+      return "等待管理员审批";
+    case "cancelled":
+      return "提醒已取消";
+    case "failed":
+      return "提醒发送失败";
+    default:
+      return "提醒处理中";
+  }
 }

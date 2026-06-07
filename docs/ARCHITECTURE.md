@@ -1451,6 +1451,8 @@ POC 不做：
 - 部署手册。
 - `apps/*` 模板发布配置：入口 URL、品牌、导航、默认页面、允许访问角色。
 - `templates/*` 必须包含前台页面清单和 smoke test 脚本。
+- 模板 apply 入口必须能幂等写入租户、角色、菜单、前台配置快照、能力 registry、内置插件安装、默认 eval set 选择和客户包快照，并返回剩余操作员步骤。
+- 模板 smoke runner 必须能按 manifest 中的 smoke checks 生成 dry-run 计划或执行检查，并记录 run/result 明细。
 
 ## 17. 客户交付方法
 

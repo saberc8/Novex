@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { askDataset, listDatasets, submitRagFeedback, uploadKnowledgeFile } from "./knowledge";
+import { askDataset, listDatasets, submitAiFeedback, submitRagFeedback, uploadKnowledgeFile } from "./knowledge";
 import { getAuthToken } from "@/lib/auth";
 
 function okResponse(data: unknown) {
@@ -109,6 +109,51 @@ describe("training knowledge api", () => {
         traceId: 42,
         rating: "not_helpful",
         reason: "答案没有覆盖培训截止时间"
+      })
+    });
+  });
+
+  it("submits generic customer feedback for quiz wrong answers", async () => {
+    window.localStorage.setItem("novex_token", "token-1");
+    fetchMock.mockImplementationOnce(() =>
+      okResponse({
+        id: 100,
+        resourceType: "training_quiz",
+        resourceId: "900",
+        traceId: "agent-900",
+        rating: "quiz_wrong_answer"
+      })
+    );
+
+    await submitAiFeedback({
+      resourceType: "training_quiz",
+      resourceId: "900",
+      traceId: "agent-900",
+      rating: "quiz_wrong_answer",
+      reason: "错题答案需要复核",
+      metadata: {
+        source: "training-web",
+        quizRunId: 900
+      }
+    });
+
+    expect(fetchMock.mock.calls[0]?.[0]).toBe("http://localhost:4398/ai/feedback");
+    expect(fetchMock.mock.calls[0]?.[1]).toMatchObject({
+      method: "POST",
+      headers: expect.objectContaining({
+        Authorization: "Bearer token-1",
+        "Content-Type": "application/json"
+      }),
+      body: JSON.stringify({
+        resourceType: "training_quiz",
+        resourceId: "900",
+        traceId: "agent-900",
+        rating: "quiz_wrong_answer",
+        reason: "错题答案需要复核",
+        metadata: {
+          source: "training-web",
+          quizRunId: 900
+        }
       })
     });
   });

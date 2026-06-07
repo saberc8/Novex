@@ -1,5 +1,6 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import ChatPage from "./chat/page";
 import { metadata } from "./layout";
 import Page from "./page";
 import {
@@ -319,5 +320,78 @@ describe("Chat web page", () => {
       })
     );
     expect(await screen.findByText("反馈已保存")).toBeTruthy();
+  });
+
+  it("runs pure model chat on /chat through chat-flow model sessions", async () => {
+    const modelSession = session({
+      id: 701,
+      mode: "model",
+      datasetId: null,
+      title: "Model Chat",
+      routeId: "runtime.llm",
+      model: "deepseek-v4-flash",
+      lastMessagePreview: "Pure model answer."
+    });
+    listChatFlowSessionsMock.mockResolvedValue([]);
+    createChatFlowSessionMock.mockResolvedValue(modelSession);
+    sendChatFlowMessageMock.mockResolvedValue({
+      session: {
+        ...modelSession,
+        messageCount: 2
+      },
+      userMessage: {
+        ...assistantMessage({
+          id: 903,
+          sessionId: 701,
+          role: "user",
+          content: "Draft a concise rollout note.",
+          routeId: null,
+          model: null,
+          ragTraceId: null,
+          citations: []
+        })
+      },
+      assistantMessage: {
+        ...assistantMessage({
+          id: 904,
+          sessionId: 701,
+          content: "Rollout note drafted with the configured chat model.",
+          routeId: "runtime.llm",
+          model: "deepseek-v4-flash",
+          ragTraceId: null,
+          citations: [],
+          tokenCount: 18,
+          metadata: {
+            source: "ai.chatFlow.model",
+            usage: {
+              totalTokens: 18
+            }
+          }
+        })
+      }
+    });
+
+    render(<ChatPage />);
+
+    await waitFor(() => expect(listChatFlowSessionsMock).toHaveBeenCalledWith({ mode: "model" }));
+    fireEvent.change(screen.getByLabelText("提问或创作内容"), {
+      target: { value: "Draft a concise rollout note." }
+    });
+    fireEvent.click(screen.getByRole("button", { name: "发送消息" }));
+
+    await waitFor(() =>
+      expect(createChatFlowSessionMock).toHaveBeenCalledWith({
+        mode: "model",
+        title: "Model Chat"
+      })
+    );
+    await waitFor(() =>
+      expect(sendChatFlowMessageMock).toHaveBeenCalledWith(701, {
+        content: "Draft a concise rollout note."
+      })
+    );
+    expect(await screen.findByText("Rollout note drafted with the configured chat model.")).toBeTruthy();
+    expect(await screen.findByText("runtime.llm")).toBeTruthy();
+    expect(await screen.findByText("deepseek-v4-flash")).toBeTruthy();
   });
 });

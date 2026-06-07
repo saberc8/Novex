@@ -101,6 +101,31 @@ mod tests {
         assert_eq!(body["code"], "401");
     }
 
+    #[tokio::test]
+    async fn integration_route_is_registered_and_requires_auth() {
+        let db = PgPoolOptions::new()
+            .connect_lazy("postgres://postgres:postgres@localhost:5432/avalon_admin")
+            .unwrap();
+        let jwt = JwtService::new("test-secret".to_owned(), 24);
+        let app = build_router(db, &["http://localhost:4399".to_owned()], jwt).unwrap();
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/ai/integrations/api-keys")
+                    .header(header::ACCEPT, "application/json")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let body = serde_json::from_slice::<Value>(&body).unwrap();
+        assert_eq!(body["code"], "401");
+    }
+
     #[test]
     fn foundation_control_plane_migration_contains_required_tables() {
         let migration =
@@ -120,6 +145,8 @@ mod tests {
             "sys_external_account",
             "sys_oauth_state",
             "sys_secret",
+            "ai_api_key",
+            "ai_public_link",
         ] {
             assert!(migration.contains(table), "{table} missing from migration");
         }
@@ -136,8 +163,60 @@ mod tests {
             "quota_limit",
             "usage_value",
             "window_seconds",
+            "key_hash",
+            "masked_key",
+            "permission_scope",
+            "qps_limit",
+            "quota_limit",
+            "token_hash",
+            "public_url",
         ] {
             assert!(migration.contains(field), "{field} missing from migration");
+        }
+    }
+
+    #[test]
+    fn local_poc_compose_declares_foundation_runtime_services() {
+        let compose = include_str!("../../../../../infra/docker-compose.yml");
+
+        for service in [
+            "postgres:",
+            "etcd:",
+            "minio:",
+            "milvus:",
+            "backend:",
+            "admin:",
+            "training-web:",
+        ] {
+            assert!(compose.contains(service), "{service} missing from compose");
+        }
+
+        for contract in [
+            "${POSTGRES_IMAGE:-postgres:16-alpine}",
+            "${ETCD_IMAGE:-quay.io/coreos/etcd:v3.5.18}",
+            "${MINIO_IMAGE:-minio/minio:RELEASE.2025-01-20T14-49-07Z}",
+            "${MILVUS_IMAGE:-milvusdb/milvus:v2.5.4}",
+            "${RUST_IMAGE:-rust:1.85-bookworm}",
+            "${NODE_IMAGE:-node:24-bookworm-slim}",
+            "${POSTGRES_PORT:-5432}:5432",
+            "${MINIO_API_PORT:-9000}:9000",
+            "${MINIO_CONSOLE_PORT:-9001}:9001",
+            "${MILVUS_PORT:-19530}:19530",
+            "${MILVUS_METRICS_PORT:-9091}:9091",
+            "${BACKEND_PORT:-4398}:4398",
+            "${ADMIN_PORT:-4399}:4399",
+            "${TRAINING_WEB_PORT:-4401}:4401",
+            "${CHAT_WEB_PORT:-4402}:4402",
+            "${AGENT_WORKSPACE_PORT:-4403}:4403",
+            "DB_AUTO_MIGRATE",
+            "AUTH_JWT_SECRET",
+            "MILVUS_ENDPOINT",
+            "NEXT_PUBLIC_API_BASE_URL",
+        ] {
+            assert!(
+                compose.contains(contract),
+                "{contract} missing from compose"
+            );
         }
     }
 }

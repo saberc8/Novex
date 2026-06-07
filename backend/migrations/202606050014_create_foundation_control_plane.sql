@@ -259,6 +259,61 @@ CREATE UNIQUE INDEX IF NOT EXISTS uk_sys_secret_scope_code ON sys_secret (tenant
 CREATE INDEX IF NOT EXISTS idx_sys_secret_tenant_id ON sys_secret (tenant_id);
 CREATE INDEX IF NOT EXISTS idx_sys_secret_scope ON sys_secret (tenant_id, scope_type, scope_id);
 
+CREATE TABLE IF NOT EXISTS ai_api_key (
+    id                BIGINT       NOT NULL,
+    tenant_id         BIGINT       NOT NULL,
+    app_id            VARCHAR(128) NOT NULL,
+    name              VARCHAR(100) NOT NULL,
+    key_prefix        VARCHAR(32)  NOT NULL,
+    key_hash          VARCHAR(128) NOT NULL,
+    masked_key        VARCHAR(128) NOT NULL,
+    permission_scope  JSONB        NOT NULL DEFAULT '[]'::jsonb,
+    qps_limit         INTEGER      NOT NULL DEFAULT 1,
+    quota_limit       BIGINT       NOT NULL DEFAULT 1000,
+    expires_at        TIMESTAMP    DEFAULT NULL,
+    last_used_at      TIMESTAMP    DEFAULT NULL,
+    revoked_at        TIMESTAMP    DEFAULT NULL,
+    metadata          JSONB        NOT NULL DEFAULT '{}'::jsonb,
+    status            SMALLINT     NOT NULL DEFAULT 1,
+    create_user       BIGINT       NOT NULL,
+    create_time       TIMESTAMP    NOT NULL,
+    update_user       BIGINT       DEFAULT NULL,
+    update_time       TIMESTAMP    DEFAULT NULL,
+    PRIMARY KEY (id)
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS uk_ai_api_key_hash ON ai_api_key (key_hash);
+CREATE INDEX IF NOT EXISTS idx_ai_api_key_tenant_app ON ai_api_key (tenant_id, app_id);
+CREATE INDEX IF NOT EXISTS idx_ai_api_key_status ON ai_api_key (tenant_id, status);
+
+CREATE TABLE IF NOT EXISTS ai_public_link (
+    id                BIGINT       NOT NULL,
+    tenant_id         BIGINT       NOT NULL,
+    app_id            VARCHAR(128) NOT NULL,
+    name              VARCHAR(100) NOT NULL,
+    path              VARCHAR(255) NOT NULL,
+    token_hash        VARCHAR(128) NOT NULL,
+    masked_token      VARCHAR(128) NOT NULL,
+    public_url        TEXT         NOT NULL,
+    permission_scope  JSONB        NOT NULL DEFAULT '[]'::jsonb,
+    qps_limit         INTEGER      NOT NULL DEFAULT 1,
+    quota_limit       BIGINT       NOT NULL DEFAULT 1000,
+    expires_at        TIMESTAMP    DEFAULT NULL,
+    last_used_at      TIMESTAMP    DEFAULT NULL,
+    revoked_at        TIMESTAMP    DEFAULT NULL,
+    metadata          JSONB        NOT NULL DEFAULT '{}'::jsonb,
+    status            SMALLINT     NOT NULL DEFAULT 1,
+    create_user       BIGINT       NOT NULL,
+    create_time       TIMESTAMP    NOT NULL,
+    update_user       BIGINT       DEFAULT NULL,
+    update_time       TIMESTAMP    DEFAULT NULL,
+    PRIMARY KEY (id)
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS uk_ai_public_link_token_hash ON ai_public_link (token_hash);
+CREATE INDEX IF NOT EXISTS idx_ai_public_link_tenant_app ON ai_public_link (tenant_id, app_id);
+CREATE INDEX IF NOT EXISTS idx_ai_public_link_status ON ai_public_link (tenant_id, status);
+
 INSERT INTO sys_tenant
     (id, code, name, status, plan_code, metadata, create_user, create_time)
 VALUES

@@ -73,6 +73,16 @@ pub struct ChunkRecord {
 }
 
 #[derive(Debug, Clone, FromRow)]
+pub struct VectorCollectionRecord {
+    pub id: i64,
+    pub vector_backend: String,
+    pub provider_collection: String,
+    pub dimension: i32,
+    pub metric_type: String,
+    pub status: i16,
+}
+
+#[derive(Debug, Clone, FromRow)]
 pub struct ParserJobRecord {
     pub id: i64,
     pub tenant_id: i64,
@@ -99,6 +109,18 @@ pub struct ParserJobRecord {
 #[derive(Debug, Clone)]
 pub struct DatasetFilter<'a> {
     pub tenant_id: i64,
+    pub name: Option<&'a str>,
+    pub status: Option<i16>,
+    pub limit: i64,
+    pub offset: i64,
+}
+
+#[derive(Debug, Clone)]
+pub struct DatasetAccessFilter<'a> {
+    pub tenant_id: i64,
+    pub user_id: i64,
+    pub role_ids: &'a [i64],
+    pub is_admin: bool,
     pub name: Option<&'a str>,
     pub status: Option<i16>,
     pub limit: i64,
@@ -259,6 +281,38 @@ pub struct FeedbackSaveRecord {
     pub now: NaiveDateTime,
 }
 
+#[derive(Debug, Clone, FromRow)]
+pub struct TrainingLearningSummaryRecord {
+    pub rag_trace_count: i64,
+    pub feedback_count: i64,
+    pub weak_signal_count: i64,
+    pub quiz_wrong_count: i64,
+    pub latest_eval_average_score: Option<f64>,
+    pub latest_eval_total_cases: Option<i32>,
+    pub latest_eval_passed_cases: Option<i32>,
+}
+
+#[derive(Debug, Clone, FromRow)]
+pub struct TrainingLearningActivityRecord {
+    pub id: i64,
+    pub learner_id: i64,
+    pub learner_name: String,
+    pub kind: String,
+    pub title: String,
+    pub detail: String,
+    pub status: String,
+    pub score: Option<f64>,
+    pub create_time: NaiveDateTime,
+}
+
+#[derive(Debug, Clone, FromRow)]
+pub struct TrainingWeakPointRecord {
+    pub topic: String,
+    pub evidence: String,
+    pub count: i64,
+    pub last_seen_at: NaiveDateTime,
+}
+
 impl AiKnowledgeRepository {
     pub fn new(db: PgPool) -> Self {
         Self { db }
@@ -289,6 +343,53 @@ impl AiKnowledgeRepository {
         Ok(query
             .build_query_as::<DatasetRecord>()
             .fetch_all(&self.db)
+            .await?)
+    }
+
+    pub async fn count_accessible_datasets(
+        &self,
+        filter: &DatasetAccessFilter<'_>,
+    ) -> Result<i64, AppError> {
+        let mut query = QueryBuilder::<Postgres>::new("SELECT COUNT(*) FROM ai_dataset AS d");
+        query.push(" WHERE 1 = 1");
+        push_dataset_access_filters(&mut query, filter);
+        Ok(query
+            .build_query_scalar::<i64>()
+            .fetch_one(&self.db)
+            .await?)
+    }
+
+    pub async fn list_accessible_datasets(
+        &self,
+        filter: &DatasetAccessFilter<'_>,
+    ) -> Result<Vec<DatasetRecord>, AppError> {
+        let mut query = QueryBuilder::<Postgres>::new(dataset_select_sql());
+        query.push(" WHERE 1 = 1");
+        push_dataset_access_filters(&mut query, filter);
+        query
+            .push(" ORDER BY d.create_time DESC, d.id DESC LIMIT ")
+            .push_bind(filter.limit)
+            .push(" OFFSET ")
+            .push_bind(filter.offset);
+        Ok(query
+            .build_query_as::<DatasetRecord>()
+            .fetch_all(&self.db)
+            .await?)
+    }
+
+    pub async fn dataset_readable(
+        &self,
+        filter: &DatasetAccessFilter<'_>,
+        dataset_id: i64,
+    ) -> Result<bool, AppError> {
+        let mut query =
+            QueryBuilder::<Postgres>::new("SELECT EXISTS(SELECT 1 FROM ai_dataset AS d");
+        query.push(" WHERE 1 = 1");
+        push_dataset_access_filters(&mut query, filter);
+        query.push(" AND d.id = ").push_bind(dataset_id).push(")");
+        Ok(query
+            .build_query_scalar::<bool>()
+            .fetch_one(&self.db)
             .await?)
     }
 
@@ -880,6 +981,33 @@ LIMIT $3;
         .await?)
     }
 
+    pub async fn get_vector_collection(
+        &self,
+        tenant_id: i64,
+        dataset_id: i64,
+    ) -> Result<Option<VectorCollectionRecord>, AppError> {
+        Ok(sqlx::query_as::<_, VectorCollectionRecord>(
+            r#"
+SELECT
+    id,
+    vector_backend,
+    provider_collection,
+    dimension,
+    metric_type,
+    status
+FROM ai_vector_collection
+WHERE tenant_id = $1
+  AND dataset_id = $2
+ORDER BY create_time DESC
+LIMIT 1;
+"#,
+        )
+        .bind(tenant_id)
+        .bind(dataset_id)
+        .fetch_optional(&self.db)
+        .await?)
+    }
+
     pub async fn create_rag_trace(
         &self,
         trace: &RagTraceSaveRecord,
@@ -968,6 +1096,215 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11);
         .await?;
         Ok(())
     }
+
+    pub async fn training_learning_summary(
+        &self,
+        tenant_id: i64,
+        user_id: Option<i64>,
+    ) -> Result<TrainingLearningSummaryRecord, AppError> {
+        Ok(sqlx::query_as::<_, TrainingLearningSummaryRecord>(
+            r#"
+SELECT
+    (
+        SELECT COUNT(*)
+        FROM ai_rag_trace AS t
+        WHERE t.tenant_id = $1
+          AND ($2::BIGINT IS NULL OR t.create_user = $2)
+    ) AS rag_trace_count,
+    (
+        SELECT COUNT(*)
+        FROM ai_feedback AS f
+        WHERE f.tenant_id = $1
+          AND ($2::BIGINT IS NULL OR f.create_user = $2)
+    ) AS feedback_count,
+    (
+        SELECT COUNT(*)
+        FROM ai_feedback AS f
+        WHERE f.tenant_id = $1
+          AND ($2::BIGINT IS NULL OR f.create_user = $2)
+          AND f.rating IN ('quiz_wrong_answer', 'not_helpful', 'citation_issue')
+    ) AS weak_signal_count,
+    (
+        SELECT COUNT(*)
+        FROM ai_feedback AS f
+        WHERE f.tenant_id = $1
+          AND ($2::BIGINT IS NULL OR f.create_user = $2)
+          AND f.rating = 'quiz_wrong_answer'
+    ) AS quiz_wrong_count,
+    (
+        SELECT r.average_score
+        FROM ai_eval_run AS r
+        WHERE r.tenant_id = $1
+          AND ($2::BIGINT IS NULL OR r.create_user = $2)
+          AND r.dataset_code = 'training_regression'
+        ORDER BY r.create_time DESC, r.id DESC
+        LIMIT 1
+    ) AS latest_eval_average_score,
+    (
+        SELECT r.total_cases
+        FROM ai_eval_run AS r
+        WHERE r.tenant_id = $1
+          AND ($2::BIGINT IS NULL OR r.create_user = $2)
+          AND r.dataset_code = 'training_regression'
+        ORDER BY r.create_time DESC, r.id DESC
+        LIMIT 1
+    ) AS latest_eval_total_cases,
+    (
+        SELECT r.passed_cases
+        FROM ai_eval_run AS r
+        WHERE r.tenant_id = $1
+          AND ($2::BIGINT IS NULL OR r.create_user = $2)
+          AND r.dataset_code = 'training_regression'
+        ORDER BY r.create_time DESC, r.id DESC
+        LIMIT 1
+    ) AS latest_eval_passed_cases;
+"#,
+        )
+        .bind(tenant_id)
+        .bind(user_id)
+        .fetch_one(&self.db)
+        .await?)
+    }
+
+    pub async fn list_training_learning_activities(
+        &self,
+        tenant_id: i64,
+        user_id: Option<i64>,
+        limit: i64,
+    ) -> Result<Vec<TrainingLearningActivityRecord>, AppError> {
+        Ok(sqlx::query_as::<_, TrainingLearningActivityRecord>(
+            r#"
+SELECT
+    activity.id,
+    activity.learner_id,
+    activity.learner_name,
+    activity.kind,
+    activity.title,
+    activity.detail,
+    activity.status,
+    activity.score,
+    activity.create_time
+FROM (
+    SELECT
+        t.id,
+        t.create_user AS learner_id,
+        COALESCE(NULLIF(u.nickname, ''), NULLIF(u.username, ''), CONCAT('user-', t.create_user)) AS learner_name,
+        'rag_ask'::TEXT AS kind,
+        '知识库问答'::TEXT AS title,
+        t.question AS detail,
+        'completed'::TEXT AS status,
+        NULL::DOUBLE PRECISION AS score,
+        t.create_time
+    FROM ai_rag_trace AS t
+    LEFT JOIN sys_user AS u ON u.id = t.create_user
+    WHERE t.tenant_id = $1
+      AND ($2::BIGINT IS NULL OR t.create_user = $2)
+
+    UNION ALL
+
+    SELECT
+        f.id,
+        f.create_user AS learner_id,
+        COALESCE(NULLIF(u.nickname, ''), NULLIF(u.username, ''), CONCAT('user-', f.create_user)) AS learner_name,
+        CASE
+            WHEN f.resource_type = 'training_quiz' THEN 'quiz_feedback'
+            ELSE 'feedback'
+        END AS kind,
+        CASE
+            WHEN f.resource_type = 'training_quiz' THEN '测验错题反馈'
+            ELSE '问答反馈'
+        END AS title,
+        CONCAT(f.rating, CASE WHEN f.reason = '' THEN '' ELSE CONCAT(' · ', f.reason) END) AS detail,
+        CASE
+            WHEN f.rating IN ('quiz_wrong_answer', 'not_helpful', 'citation_issue') THEN 'needs_review'
+            ELSE 'completed'
+        END AS status,
+        NULL::DOUBLE PRECISION AS score,
+        f.create_time
+    FROM ai_feedback AS f
+    LEFT JOIN sys_user AS u ON u.id = f.create_user
+    WHERE f.tenant_id = $1
+      AND ($2::BIGINT IS NULL OR f.create_user = $2)
+
+    UNION ALL
+
+    SELECT
+        r.id,
+        r.create_user AS learner_id,
+        COALESCE(NULLIF(u.nickname, ''), NULLIF(u.username, ''), CONCAT('user-', r.create_user)) AS learner_name,
+        'eval_run'::TEXT AS kind,
+        'Training Regression'::TEXT AS title,
+        CONCAT(r.passed_cases, '/', r.total_cases, ' passed') AS detail,
+        r.status,
+        r.average_score AS score,
+        r.create_time
+    FROM ai_eval_run AS r
+    LEFT JOIN sys_user AS u ON u.id = r.create_user
+    WHERE r.tenant_id = $1
+      AND ($2::BIGINT IS NULL OR r.create_user = $2)
+      AND r.dataset_code = 'training_regression'
+) AS activity
+ORDER BY activity.create_time DESC, activity.id DESC
+LIMIT $3;
+"#,
+        )
+        .bind(tenant_id)
+        .bind(user_id)
+        .bind(limit)
+        .fetch_all(&self.db)
+        .await?)
+    }
+
+    pub async fn list_training_weak_points(
+        &self,
+        tenant_id: i64,
+        user_id: Option<i64>,
+        limit: i64,
+    ) -> Result<Vec<TrainingWeakPointRecord>, AppError> {
+        Ok(sqlx::query_as::<_, TrainingWeakPointRecord>(
+            r#"
+SELECT
+    weak.topic,
+    weak.evidence,
+    COUNT(*) AS count,
+    MAX(weak.create_time) AS last_seen_at
+FROM (
+    SELECT
+        CASE
+            WHEN f.rating = 'quiz_wrong_answer' THEN '客户数据外发与权限申请'
+            WHEN f.rating = 'citation_issue' THEN '知识库引用定位'
+            ELSE '培训资料理解'
+        END AS topic,
+        f.rating AS evidence,
+        f.create_time
+    FROM ai_feedback AS f
+    WHERE f.tenant_id = $1
+      AND ($2::BIGINT IS NULL OR f.create_user = $2)
+      AND f.rating IN ('quiz_wrong_answer', 'not_helpful', 'citation_issue')
+
+    UNION ALL
+
+    SELECT
+        '回归评测失败用例'::TEXT AS topic,
+        CONCAT(r.dataset_code, ':failed') AS evidence,
+        r.create_time
+    FROM ai_eval_run AS r
+    WHERE r.tenant_id = $1
+      AND ($2::BIGINT IS NULL OR r.create_user = $2)
+      AND r.dataset_code = 'training_regression'
+      AND r.failed_cases > 0
+) AS weak
+GROUP BY weak.topic, weak.evidence
+ORDER BY count DESC, last_seen_at DESC
+LIMIT $3;
+"#,
+        )
+        .bind(tenant_id)
+        .bind(user_id)
+        .bind(limit)
+        .fetch_all(&self.db)
+        .await?)
+    }
 }
 
 fn push_dataset_filters(query: &mut QueryBuilder<'_, Postgres>, filter: &DatasetFilter<'_>) {
@@ -982,6 +1319,63 @@ fn push_dataset_filters(query: &mut QueryBuilder<'_, Postgres>, filter: &Dataset
     if let Some(status) = filter.status.filter(|value| *value > 0) {
         query.push(" AND d.status = ").push_bind(status);
     }
+}
+
+fn push_dataset_access_filters(
+    query: &mut QueryBuilder<'_, Postgres>,
+    filter: &DatasetAccessFilter<'_>,
+) {
+    query
+        .push(" AND d.tenant_id = ")
+        .push_bind(filter.tenant_id);
+    if let Some(name) = non_empty(filter.name) {
+        query
+            .push(" AND d.name ILIKE ")
+            .push_bind(format!("%{name}%"));
+    }
+    if let Some(status) = filter.status.filter(|value| *value > 0) {
+        query.push(" AND d.status = ").push_bind(status);
+    }
+    if filter.is_admin {
+        return;
+    }
+
+    query
+        .push(" AND (d.owner_id = ")
+        .push_bind(filter.user_id)
+        .push(" OR d.visibility IN (2, 3)")
+        .push(
+            " OR EXISTS (
+                SELECT 1
+                FROM sys_resource_permission AS rp
+                WHERE rp.tenant_id = d.tenant_id
+                  AND rp.resource_type = 'ai_dataset'
+                  AND rp.resource_id = d.id::TEXT
+                  AND rp.effect = 'allow'
+                  AND rp.permission_value IN ('read', 'write', 'manage', 'owner')
+                  AND (rp.expires_at IS NULL OR rp.expires_at > NOW())
+                  AND (",
+        )
+        .push(" (rp.subject_type = 'user' AND rp.subject_id = ")
+        .push_bind(filter.user_id.to_string())
+        .push(")");
+
+    let role_ids = filter
+        .role_ids
+        .iter()
+        .copied()
+        .filter(|role_id| *role_id > 0)
+        .collect::<Vec<_>>();
+    if !role_ids.is_empty() {
+        query.push(" OR (rp.subject_type = 'role' AND rp.subject_id IN (");
+        let mut separated = query.separated(", ");
+        for role_id in role_ids {
+            separated.push_bind(role_id.to_string());
+        }
+        query.push("))");
+    }
+
+    query.push(")))");
 }
 
 fn push_document_filters(query: &mut QueryBuilder<'_, Postgres>, filter: &DocumentFilter) {
@@ -1309,11 +1703,38 @@ mod tests {
         for needle in [
             "INSERT INTO ai_vector_collection",
             "INSERT INTO ai_embedding",
+            "get_vector_collection",
+            "provider_collection",
+            "vector_backend",
             "dataset_vector_collection_code",
             "chunk_embedding_vector",
             "embedding_status",
         ] {
             assert!(source.contains(needle), "{needle} missing from repository");
+        }
+    }
+
+    #[test]
+    fn dataset_queries_enforce_owner_visibility_and_resource_permissions() {
+        let source = include_str!("ai_knowledge_repository.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+
+        for needle in [
+            "DatasetAccessFilter",
+            "push_dataset_access_filters",
+            "d.owner_id =",
+            "d.visibility IN (2, 3)",
+            "sys_resource_permission",
+            "rp.resource_type = 'ai_dataset'",
+            "rp.subject_type = 'role'",
+            "rp.permission_value IN ('read', 'write', 'manage', 'owner')",
+        ] {
+            assert!(
+                source.contains(needle),
+                "{needle} missing from dataset access query"
+            );
         }
     }
 }

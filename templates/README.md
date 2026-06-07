@@ -11,6 +11,7 @@ M5 turns the template folder into package artifacts. Each template directory con
 - Tool, connector, plugin, and trigger configuration.
 - Eval set metadata.
 - Frontend entry, frontend app id, C-side page list, smoke checks, and deployment checklist.
+- `smoke.sh` script that runs the template smoke checks from the repository root.
 
 Default packages:
 

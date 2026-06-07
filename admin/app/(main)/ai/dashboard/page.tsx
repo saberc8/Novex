@@ -24,7 +24,11 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import type { CapabilitySummaryResp } from "@/types/ai-capability";
-import type { FoundationModuleResp, FoundationSummaryResp } from "@/types/ai-foundation";
+import type {
+  FoundationMilestoneCoverageResp,
+  FoundationModuleResp,
+  FoundationSummaryResp
+} from "@/types/ai-foundation";
 
 const MODULE_ICONS: Record<string, typeof BrainCircuit> = {
   "novex-ai-core": GitBranch,
@@ -41,12 +45,12 @@ const MODULE_ICONS: Record<string, typeof BrainCircuit> = {
 };
 
 const capabilityLinks = [
-  { label: "Skills", valueKey: "skillCount", href: "/ai/tools" },
+  { label: "Skills", valueKey: "skillCount", href: "/ai/skills" },
   { label: "Tools", valueKey: "toolCount", href: "/ai/tools" },
   { label: "Connectors", valueKey: "connectorCount", href: "/ai/connectors" },
   { label: "Plugins", valueKey: "pluginCount", href: "/ai/plugins" },
   { label: "Triggers", valueKey: "triggerCount", href: "/ai/triggers" },
-  { label: "MCP Servers", valueKey: "mcpServerCount", href: "/ai/tools" }
+  { label: "MCP Servers", valueKey: "mcpServerCount", href: "/ai/mcp" }
 ] as const;
 
 const controlLinks = [
@@ -54,7 +58,8 @@ const controlLinks = [
   { label: "知识库", href: "/ai/knowledge", permission: "ai:knowledge:list" },
   { label: "Agent Runs", href: "/ai/agents", permission: "ai:agent:list" },
   { label: "评测报告", href: "/ai/evals", permission: "ai:eval:report" },
-  { label: "交付模板", href: "/ai/templates", permission: "ai:template:list" }
+  { label: "交付模板", href: "/ai/templates", permission: "ai:template:list" },
+  { label: "集成入口", href: "/ai/integrations", permission: "ai:integration:list" }
 ];
 
 export default function AiDashboardPage() {
@@ -83,6 +88,7 @@ export default function AiDashboardPage() {
   }, [loadDashboard]);
 
   const modules = foundation?.modules ?? [];
+  const milestoneCoverage = foundation?.milestoneCoverage ?? [];
   const moduleGroups = useMemo(() => groupModulesByLayer(modules), [modules]);
 
   return (
@@ -110,7 +116,7 @@ export default function AiDashboardPage() {
           <MetricCard
             title="Foundation Modules"
             value={String(foundation?.totalModules ?? modules.length)}
-            detail={foundation?.status ?? "loading"}
+            detail={coverageSummary(foundation)}
             icon={BrainCircuit}
           />
           <MetricCard
@@ -156,6 +162,22 @@ export default function AiDashboardPage() {
           <div className="space-y-4">
             <Card className="shadow-sm">
               <CardHeader>
+                <CardTitle className="text-base">M0-M5 Coverage</CardTitle>
+              </CardHeader>
+              <CardContent className="space-y-3">
+                {milestoneCoverage.map((milestone) => (
+                  <MilestoneItem key={milestone.id} milestone={milestone} />
+                ))}
+                {!milestoneCoverage.length ? (
+                  <div className="rounded-md border border-dashed p-4 text-center text-sm text-muted-foreground">
+                    暂无里程碑覆盖
+                  </div>
+                ) : null}
+              </CardContent>
+            </Card>
+
+            <Card className="shadow-sm">
+              <CardHeader>
                 <CardTitle className="text-base">能力治理</CardTitle>
               </CardHeader>
               <CardContent className="grid gap-2">
@@ -192,6 +214,32 @@ export default function AiDashboardPage() {
         </section>
       </div>
     </PermissionGate>
+  );
+}
+
+function MilestoneItem({ milestone }: { milestone: FoundationMilestoneCoverageResp }) {
+  return (
+    <article className="rounded-md border bg-muted/20 p-3">
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <div className="flex min-w-0 items-center gap-2">
+            <span className="font-mono text-xs font-semibold text-primary">{milestone.id}</span>
+            <div className="truncate text-sm font-semibold">{milestone.name}</div>
+          </div>
+          <p className="mt-1 line-clamp-2 text-xs leading-5 text-muted-foreground">{milestone.summary}</p>
+        </div>
+        <Badge variant="outline" className="shrink-0">
+          {milestone.status}
+        </Badge>
+      </div>
+      {milestone.limitations.length ? (
+        <ul className="mt-2 space-y-1 text-xs leading-5 text-muted-foreground">
+          {milestone.limitations.map((limitation) => (
+            <li key={limitation}>{limitation}</li>
+          ))}
+        </ul>
+      ) : null}
+    </article>
   );
 }
 
@@ -240,6 +288,17 @@ function ModuleItem({ module }: { module: FoundationModuleResp }) {
       <p className="mt-2 line-clamp-2 text-xs leading-5 text-muted-foreground">{module.description}</p>
     </article>
   );
+}
+
+function coverageSummary(summary: FoundationSummaryResp | null) {
+  if (!summary) {
+    return "loading";
+  }
+
+  const ready = summary.milestoneCoverage.filter((milestone) => milestone.status === "poc_ready").length;
+  const limited = summary.milestoneCoverage.filter((milestone) => milestone.status === "poc_limited").length;
+
+  return `${ready} ready, ${limited} limited`;
 }
 
 function groupModulesByLayer(modules: FoundationModuleResp[]) {

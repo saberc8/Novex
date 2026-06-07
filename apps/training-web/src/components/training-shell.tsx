@@ -1,7 +1,12 @@
+"use client";
+
 import { ChevronRight, LogOut } from "lucide-react";
+import { usePathname } from "next/navigation";
 import { trainingNavItems } from "@/lib/navigation";
 
 export function TrainingShell({ children }: { children: React.ReactNode }) {
+  const pathname = usePathname() || "/";
+
   return (
     <main className="min-h-screen bg-slate-100 text-slate-950">
       <div className="mx-auto grid min-h-screen max-w-[1440px] grid-cols-1 lg:grid-cols-[260px_1fr]">
@@ -21,12 +26,16 @@ export function TrainingShell({ children }: { children: React.ReactNode }) {
           </div>
 
           <nav aria-label="培训导航" className="mt-5 grid grid-cols-5 gap-2 lg:grid-cols-1">
-            {trainingNavItems.map((item, index) => {
+            {trainingNavItems.map((item) => {
               const Icon = item.icon;
-              const active = index === 0;
+              const active =
+                item.href === "/"
+                  ? pathname === "/"
+                  : pathname === item.href || pathname.startsWith(`${item.href}/`);
 
               return (
                 <a
+                  aria-current={active ? "page" : undefined}
                   className={`group flex min-h-16 items-center justify-center rounded-lg border px-2 py-2 text-center lg:justify-between lg:text-left ${
                     active
                       ? "border-teal-200 bg-teal-50 text-teal-950"

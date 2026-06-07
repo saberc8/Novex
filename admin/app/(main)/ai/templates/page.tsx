@@ -8,11 +8,12 @@ import {
   PackageCheck,
   Play,
   RefreshCw,
-  Sparkles
+  Sparkles,
+  UploadCloud
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState, type FormEvent } from "react";
 import { toast } from "sonner";
-import { generateCustomerPackage, listDeliveryTemplates } from "@/api/ai/template";
+import { applyCustomerPackage, generateCustomerPackage, listDeliveryTemplates, runTemplateSmoke } from "@/api/ai/template";
 import { PermissionGate } from "@/components/permission/permission-gate";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -25,7 +26,7 @@ import {
   SelectTrigger,
   SelectValue
 } from "@/components/ui/select";
-import type { CustomerPackageResp, DeliveryTemplateResp } from "@/types/ai-template";
+import type { CustomerPackageApplyResp, CustomerPackageCommand, CustomerPackageResp, DeliveryTemplateResp, TemplateSmokeRunResp } from "@/types/ai-template";
 
 const DEFAULT_TEMPLATE_CODE = "training_app";
 
@@ -52,9 +53,13 @@ export default function AiTemplatesPage() {
   const [selectedTemplateCode, setSelectedTemplateCode] = useState(DEFAULT_TEMPLATE_CODE);
   const [form, setForm] = useState<InitForm>(DEFAULT_FORM);
   const [packagePreview, setPackagePreview] = useState<CustomerPackageResp | null>(null);
+  const [applyResult, setApplyResult] = useState<CustomerPackageApplyResp | null>(null);
   const [templateTotal, setTemplateTotal] = useState(0);
   const [templatesLoading, setTemplatesLoading] = useState(false);
   const [submitting, setSubmitting] = useState(false);
+  const [applying, setApplying] = useState(false);
+  const [smokeRunning, setSmokeRunning] = useState(false);
+  const [smokeResult, setSmokeResult] = useState<TemplateSmokeRunResp | null>(null);
 
   const selectedTemplate = useMemo(
     () => templates.find((template) => template.code === selectedTemplateCode) ?? templates[0] ?? null,
@@ -99,10 +104,24 @@ export default function AiTemplatesPage() {
   function selectTemplate(code: string) {
     setSelectedTemplateCode(code);
     setPackagePreview(null);
+    setApplyResult(null);
+    setSmokeResult(null);
     const template = templates.find((item) => item.code === code);
     if (template) {
       applyTemplateDefaults(template);
     }
+  }
+
+  function packageCommand(template: DeliveryTemplateResp): CustomerPackageCommand {
+    return {
+      templateCode: template.code,
+      customerName: form.customerName,
+      appName: form.appName,
+      industry: form.industry,
+      brandName: form.brandName,
+      primaryColor: form.primaryColor,
+      publicUrl: form.publicUrl
+    };
   }
 
   async function submitPackage(event: FormEvent<HTMLFormElement>) {
@@ -112,22 +131,56 @@ export default function AiTemplatesPage() {
       return;
     }
     setSubmitting(true);
+    setApplyResult(null);
+    setSmokeResult(null);
     try {
-      const result = await generateCustomerPackage({
-        templateCode: selectedTemplate.code,
-        customerName: form.customerName,
-        appName: form.appName,
-        industry: form.industry,
-        brandName: form.brandName,
-        primaryColor: form.primaryColor,
-        publicUrl: form.publicUrl
-      });
+      const result = await generateCustomerPackage(packageCommand(selectedTemplate));
       setPackagePreview(result);
       toast.success(result.packageId);
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Customer Package 生成失败");
     } finally {
       setSubmitting(false);
+    }
+  }
+
+  async function applyPackage() {
+    if (!selectedTemplate) {
+      toast.error("请选择交付模板");
+      return;
+    }
+    setApplying(true);
+    setSmokeResult(null);
+    try {
+      const result = await applyCustomerPackage(packageCommand(selectedTemplate));
+      setPackagePreview(result.package);
+      setApplyResult(result);
+      toast.success(`tenant ${result.tenantCode}`);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Customer Package Apply 失败");
+    } finally {
+      setApplying(false);
+    }
+  }
+
+  async function runSmoke(dryRun: boolean) {
+    if (!selectedTemplate) {
+      toast.error("请选择交付模板");
+      return;
+    }
+    setSmokeRunning(true);
+    try {
+      const result = await runTemplateSmoke({
+        templateCode: selectedTemplate.code,
+        packageId: packagePreview?.packageId,
+        dryRun
+      });
+      setSmokeResult(result);
+      toast.success(`smoke ${result.status}`);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Smoke 运行失败");
+    } finally {
+      setSmokeRunning(false);
     }
   }
 
@@ -145,6 +198,36 @@ export default function AiTemplatesPage() {
       toast.error(error instanceof Error ? error.message : "Package JSON 复制失败");
     }
   }
+
+  const smokeItems = [
+    packagePreview?.smokeScript ?? selectedTemplate?.smokeScript,
+    ...(packagePreview?.smokeChecks ?? selectedTemplate?.smokeChecks ?? []).map((item) => `${item.workdir}: ${item.command}`)
+  ].filter((item): item is string => Boolean(item));
+  const frontendItems = packagePreview
+    ? [
+        packagePreview.frontendConfig.entryUrl,
+        `Default: ${packagePreview.frontendConfig.defaultPage.path}`,
+        `${packagePreview.frontendConfig.navigation.length} nav items`,
+        ...packagePreview.frontendConfig.allowedRoles.map((role) => role.name)
+      ]
+    : [];
+  const provisioningItems = packagePreview
+    ? packagePreview.provisioningPlan.steps.map((step) => `${step.target}: ${step.operation}`)
+    : [];
+  const appliedStepItems = applyResult
+    ? [`tenant ${applyResult.tenantCode}`, ...applyResult.appliedSteps.map((step) => `${step.target}: ${step.operation}`)]
+    : [];
+  const pendingOperatorItems = applyResult
+    ? applyResult.pendingOperatorSteps.map((step) => `${step.target}: ${step.operation}`)
+    : [];
+  const smokeResultItems = smokeResult
+    ? [
+        `run #${smokeResult.runId} ${smokeResult.status}`,
+        `${smokeResult.passedChecks}/${smokeResult.totalChecks} passed`,
+        `${smokeResult.failedChecks} failed`,
+        ...smokeResult.checks.map((check) => `${check.name}: ${check.status}`)
+      ]
+    : [];
 
   return (
     <div className="mx-auto grid w-full max-w-7xl items-start gap-4 xl:grid-cols-[380px_1fr]">
@@ -265,6 +348,7 @@ export default function AiTemplatesPage() {
               <Metric label="Pages" value={String(packagePreview?.frontendPages.length ?? selectedTemplate?.frontendPages.length ?? "-")} />
               <Metric label="Capabilities" value={String(packagePreview ? capabilityCount(packagePreview) : selectedTemplate ? templateCapabilityCount(selectedTemplate) : "-")} />
               <Metric label="Smoke" value={String(packagePreview?.smokeChecks.length ?? selectedTemplate?.smokeChecks.length ?? "-")} />
+              <Metric label="Plan" value={String(packagePreview?.provisioningPlan.steps.length ?? "-")} />
             </div>
 
             <div className="mt-4 grid gap-2">
@@ -287,21 +371,44 @@ export default function AiTemplatesPage() {
                 <p className="text-xs text-muted-foreground">{packagePreview?.tenantConfig.frontendApp ?? selectedTemplate?.frontendApp ?? "-"}</p>
               </div>
               {packagePreview ? (
-                <Button type="button" variant="outline" size="sm" onClick={() => void copyPackageJson()}>
-                  <Copy />
-                  Copy JSON
-                </Button>
+                <div className="flex flex-wrap items-center justify-end gap-2">
+                  <PermissionGate permissions={["ai:template:init"]}>
+                    <Button type="button" size="sm" onClick={() => void applyPackage()} disabled={applying}>
+                      <UploadCloud />
+                      Apply
+                    </Button>
+                  </PermissionGate>
+                  <PermissionGate permissions={["ai:template:smoke"]}>
+                    <Button type="button" variant="outline" size="sm" onClick={() => void runSmoke(true)} disabled={smokeRunning}>
+                      <ListChecks />
+                      Plan Smoke
+                    </Button>
+                    <Button type="button" variant="outline" size="sm" onClick={() => void runSmoke(false)} disabled={smokeRunning}>
+                      <Play />
+                      Run Smoke
+                    </Button>
+                  </PermissionGate>
+                  <Button type="button" variant="outline" size="sm" onClick={() => void copyPackageJson()}>
+                    <Copy />
+                    Copy JSON
+                  </Button>
+                </div>
               ) : (
                 <ListChecks className="size-4 text-muted-foreground" />
               )}
             </div>
 
             <div className="grid gap-3">
+              {packagePreview ? <CapabilityGroup title="Frontend Publish" items={frontendItems} /> : null}
+              {packagePreview ? <CapabilityGroup title="Provisioning Plan" items={provisioningItems} /> : null}
+              {applyResult ? <CapabilityGroup title="Applied Steps" items={appliedStepItems} /> : null}
+              {applyResult ? <CapabilityGroup title="Pending Operator Steps" items={pendingOperatorItems} /> : null}
+              {smokeResult ? <CapabilityGroup title="Smoke Result" items={smokeResultItems} /> : null}
               <CapabilityGroup title="Connectors" items={(packagePreview?.connectors ?? selectedTemplate?.connectors ?? []).map((item) => item.name)} />
               <CapabilityGroup title="Plugins" items={(packagePreview?.plugins ?? selectedTemplate?.plugins ?? []).map((item) => item.name)} />
               <CapabilityGroup title="Triggers" items={(packagePreview?.triggers ?? selectedTemplate?.triggers ?? []).map((item) => item.name)} />
               <CapabilityGroup title="Eval Sets" items={(packagePreview?.evalSets ?? selectedTemplate?.evalSets ?? []).map((item) => `${item.name} (${item.caseCount})`)} />
-              <CapabilityGroup title="Smoke" items={(packagePreview?.smokeChecks ?? selectedTemplate?.smokeChecks ?? []).map((item) => `${item.workdir}: ${item.command}`)} />
+              <CapabilityGroup title="Smoke" items={smokeItems} />
             </div>
 
             <div className="mt-4 grid gap-2">

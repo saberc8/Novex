@@ -1,8 +1,13 @@
 use novex_ai_core::FoundationModule;
+use novex_model::{ModelRuntimeConfig, ModelRuntimeTarget};
 use serde::{Deserialize, Serialize};
+use serde_json::{json, Map, Value};
 use std::collections::HashSet;
 
 pub const CRATE_ID: &str = "novex-rag";
+pub const LOCAL_EMBEDDING_ROUTE: &str = "local-keyword";
+pub const LOCAL_RERANK_ROUTE: &str = "none";
+pub const LOCAL_ANSWER_ROUTE: &str = "local-extractive";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -68,6 +73,35 @@ pub struct CitationRef {
     pub chunk_id: String,
     pub page_no: Option<i32>,
     pub section_path: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RagModelRoutes {
+    pub embedding_model_route: String,
+    pub rerank_model_route: String,
+    pub answer_model_route: String,
+}
+
+impl RagModelRoutes {
+    pub fn from_runtime_config(config: &ModelRuntimeConfig) -> Self {
+        Self {
+            embedding_model_route: runtime_route_id(config, ModelRuntimeTarget::Embedding)
+                .unwrap_or_else(|| LOCAL_EMBEDDING_ROUTE.to_owned()),
+            rerank_model_route: runtime_route_id(config, ModelRuntimeTarget::Reranker)
+                .unwrap_or_else(|| LOCAL_RERANK_ROUTE.to_owned()),
+            answer_model_route: runtime_route_id(config, ModelRuntimeTarget::Llm)
+                .unwrap_or_else(|| LOCAL_ANSWER_ROUTE.to_owned()),
+        }
+    }
+
+    pub fn local() -> Self {
+        Self {
+            embedding_model_route: LOCAL_EMBEDDING_ROUTE.to_owned(),
+            rerank_model_route: LOCAL_RERANK_ROUTE.to_owned(),
+            answer_model_route: LOCAL_ANSWER_ROUTE.to_owned(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -262,6 +296,211 @@ pub struct RetrievalHit {
     pub citation: CitationRef,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MilvusMetricType {
+    #[default]
+    Cosine,
+    Ip,
+    L2,
+}
+
+impl MilvusMetricType {
+    pub fn as_milvus_str(self) -> &'static str {
+        match self {
+            Self::Cosine => "COSINE",
+            Self::Ip => "IP",
+            Self::L2 => "L2",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MilvusSearchRequest {
+    pub collection_name: String,
+    pub anns_field: String,
+    pub query_vector: Vec<f32>,
+    pub top_k: usize,
+    pub tenant_id: i64,
+    pub dataset_id: i64,
+    pub document_ids: Vec<i64>,
+    pub output_fields: Vec<String>,
+    pub metric_type: MilvusMetricType,
+}
+
+impl MilvusSearchRequest {
+    pub fn new(
+        collection_name: impl Into<String>,
+        query_vector: Vec<f32>,
+        top_k: usize,
+        tenant_id: i64,
+        dataset_id: i64,
+    ) -> Self {
+        Self {
+            collection_name: collection_name.into().trim().to_owned(),
+            anns_field: "embedding".to_owned(),
+            query_vector,
+            top_k,
+            tenant_id,
+            dataset_id,
+            document_ids: vec![],
+            output_fields: vec![
+                "chunk_uid".to_owned(),
+                "chunk_db_id".to_owned(),
+                "document_id".to_owned(),
+            ],
+            metric_type: MilvusMetricType::Cosine,
+        }
+    }
+
+    pub fn with_document_ids(mut self, document_ids: Vec<i64>) -> Self {
+        self.document_ids = normalized_positive_ids(document_ids);
+        self
+    }
+
+    pub fn with_output_fields<I, S>(mut self, output_fields: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        let fields = output_fields
+            .into_iter()
+            .map(Into::into)
+            .map(|field| field.trim().to_owned())
+            .filter(|field| !field.is_empty())
+            .collect::<Vec<_>>();
+        if !fields.is_empty() {
+            self.output_fields = fields;
+        }
+        self
+    }
+
+    pub fn with_metric_type(mut self, metric_type: MilvusMetricType) -> Self {
+        self.metric_type = metric_type;
+        self
+    }
+
+    pub fn filter_expression(&self) -> String {
+        let mut parts = vec![
+            format!("tenant_id == {}", self.tenant_id),
+            format!("dataset_id == {}", self.dataset_id),
+        ];
+        if !self.document_ids.is_empty() {
+            let ids = self
+                .document_ids
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(", ");
+            parts.push(format!("document_id in [{ids}]"));
+        }
+        parts.join(" and ")
+    }
+
+    pub fn to_rest_search_body(&self) -> Value {
+        json!({
+            "collectionName": self.collection_name,
+            "data": [self.query_vector],
+            "annsField": self.anns_field,
+            "filter": self.filter_expression(),
+            "limit": self.top_k.max(1),
+            "outputFields": self.output_fields,
+            "searchParams": {
+                "metric_type": self.metric_type.as_milvus_str(),
+            },
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MilvusSearchHit {
+    pub chunk_uid: String,
+    pub score: f32,
+    pub chunk_db_id: Option<i64>,
+    pub document_id: Option<i64>,
+    pub fields: Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MilvusUpsertRow {
+    pub id: i64,
+    pub tenant_id: i64,
+    pub dataset_id: i64,
+    pub document_id: i64,
+    pub chunk_uid: String,
+    pub chunk_index: i32,
+    pub embedding: Vec<f32>,
+    pub semantic_search_text: String,
+    pub segment_type: String,
+    pub content_role: String,
+}
+
+impl MilvusUpsertRow {
+    fn to_entity(&self) -> Value {
+        json!({
+            "id": self.id,
+            "chunk_db_id": self.id,
+            "tenant_id": self.tenant_id,
+            "dataset_id": self.dataset_id,
+            "document_id": self.document_id,
+            "chunk_uid": self.chunk_uid,
+            "chunk_index": self.chunk_index,
+            "embedding": self.embedding,
+            "semantic_search_text": self.semantic_search_text,
+            "segment_type": self.segment_type,
+            "content_role": self.content_role,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MilvusUpsertRequest {
+    pub collection_name: String,
+    pub rows: Vec<MilvusUpsertRow>,
+}
+
+impl MilvusUpsertRequest {
+    pub fn new(collection_name: impl Into<String>, rows: Vec<MilvusUpsertRow>) -> Self {
+        Self {
+            collection_name: collection_name.into().trim().to_owned(),
+            rows,
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.rows.is_empty()
+    }
+
+    pub fn to_rest_upsert_body(&self) -> Value {
+        let data = self
+            .rows
+            .iter()
+            .map(MilvusUpsertRow::to_entity)
+            .collect::<Vec<_>>();
+        json!({
+            "collectionName": self.collection_name,
+            "data": data,
+        })
+    }
+}
+
+pub fn parse_milvus_search_hits(response: &Value) -> Vec<MilvusSearchHit> {
+    let Some(rows) = milvus_hits_container(response) else {
+        return vec![];
+    };
+
+    let mut raw_hits = Vec::new();
+    collect_milvus_hit_rows(rows, &mut raw_hits);
+    raw_hits
+        .into_iter()
+        .filter_map(milvus_search_hit_from_value)
+        .collect()
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RagTraceSnapshot {
@@ -379,6 +618,117 @@ fn normalize_content_type(content_type: &str) -> String {
     } else {
         content_type.to_ascii_lowercase()
     }
+}
+
+fn normalized_positive_ids(mut ids: Vec<i64>) -> Vec<i64> {
+    ids.retain(|id| *id > 0);
+    ids.sort_unstable();
+    ids.dedup();
+    ids
+}
+
+fn milvus_hits_container(response: &Value) -> Option<&Value> {
+    response
+        .get("data")
+        .or_else(|| response.get("results"))
+        .or_else(|| response.get("result"))
+        .or_else(|| response.get("hits"))
+}
+
+fn collect_milvus_hit_rows<'a>(value: &'a Value, rows: &mut Vec<&'a Value>) {
+    match value {
+        Value::Array(items) => {
+            for item in items {
+                if item.is_array() {
+                    collect_milvus_hit_rows(item, rows);
+                } else if let Some(nested) = milvus_hits_container(item) {
+                    collect_milvus_hit_rows(nested, rows);
+                } else {
+                    rows.push(item);
+                }
+            }
+        }
+        Value::Object(_) => {
+            if let Some(nested) = milvus_hits_container(value) {
+                collect_milvus_hit_rows(nested, rows);
+            } else {
+                rows.push(value);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn milvus_search_hit_from_value(value: &Value) -> Option<MilvusSearchHit> {
+    let fields = merged_milvus_hit_fields(value);
+    let chunk_uid = string_field(&fields, &["chunk_uid", "chunkUid"])?
+        .trim()
+        .to_owned();
+    if chunk_uid.is_empty() {
+        return None;
+    }
+    let score = f32_field(&fields, &["score", "distance"])?;
+    if !score.is_finite() {
+        return None;
+    }
+
+    Some(MilvusSearchHit {
+        chunk_uid,
+        score,
+        chunk_db_id: i64_field(&fields, &["chunk_db_id", "chunkDbId"]),
+        document_id: i64_field(&fields, &["document_id", "documentId"]),
+        fields,
+    })
+}
+
+fn merged_milvus_hit_fields(value: &Value) -> Value {
+    let mut fields = Map::new();
+    merge_object_fields(value, &mut fields);
+    if let Some(entity) = value.get("entity") {
+        merge_object_fields(entity, &mut fields);
+    }
+    if let Some(output_fields) = value.get("fields") {
+        merge_object_fields(output_fields, &mut fields);
+    }
+    Value::Object(fields)
+}
+
+fn merge_object_fields(value: &Value, fields: &mut Map<String, Value>) {
+    let Some(object) = value.as_object() else {
+        return;
+    };
+    for (key, value) in object {
+        if matches!(key.as_str(), "entity" | "fields") {
+            continue;
+        }
+        fields.insert(key.clone(), value.clone());
+    }
+}
+
+fn string_field<'a>(value: &'a Value, names: &[&str]) -> Option<&'a str> {
+    names
+        .iter()
+        .find_map(|name| value.get(*name).and_then(Value::as_str))
+}
+
+fn f32_field(value: &Value, names: &[&str]) -> Option<f32> {
+    names.iter().find_map(|name| {
+        let value = value.get(*name)?;
+        if let Some(number) = value.as_f64() {
+            return Some(number as f32);
+        }
+        value.as_str()?.parse::<f32>().ok()
+    })
+}
+
+fn i64_field(value: &Value, names: &[&str]) -> Option<i64> {
+    names.iter().find_map(|name| {
+        let value = value.get(*name)?;
+        if let Some(number) = value.as_i64() {
+            return Some(number);
+        }
+        value.as_str()?.parse::<i64>().ok()
+    })
 }
 
 fn non_empty_string(value: &str) -> Option<String> {
@@ -1054,6 +1404,10 @@ fn tokenize(text: &str) -> Vec<String> {
     tokens
 }
 
+fn runtime_route_id(config: &ModelRuntimeConfig, target: ModelRuntimeTarget) -> Option<String> {
+    config.route(target).map(|route| route.summary().route_id)
+}
+
 pub fn module() -> FoundationModule {
     FoundationModule::skeleton(
         CRATE_ID,
@@ -1246,6 +1600,105 @@ mod tests {
     }
 
     #[test]
+    fn milvus_search_request_builds_safe_scalar_filter_and_rest_body() {
+        let request = MilvusSearchRequest::new("novex_t42_dataset_7", vec![0.25, -0.5], 3, 42, 7)
+            .with_document_ids(vec![21, 21, 22])
+            .with_output_fields(vec!["chunk_uid", "chunk_db_id", "document_id"]);
+
+        assert_eq!(
+            request.filter_expression(),
+            "tenant_id == 42 and dataset_id == 7 and document_id in [21, 22]"
+        );
+
+        let body = request.to_rest_search_body();
+        assert_eq!(body["collectionName"], "novex_t42_dataset_7");
+        assert_eq!(body["data"], serde_json::json!([[0.25, -0.5]]));
+        assert_eq!(body["annsField"], "embedding");
+        assert_eq!(body["filter"], request.filter_expression());
+        assert_eq!(body["limit"], 3);
+        assert_eq!(
+            body["outputFields"],
+            serde_json::json!(["chunk_uid", "chunk_db_id", "document_id"])
+        );
+        assert_eq!(body["searchParams"]["metric_type"], "COSINE");
+    }
+
+    #[test]
+    fn parse_milvus_search_hits_maps_output_fields_and_ignores_malformed_rows() {
+        let response = serde_json::json!({
+            "code": 0,
+            "data": [
+                {
+                    "id": 101,
+                    "distance": 0.91,
+                    "chunk_uid": "doc-a:0",
+                    "chunk_db_id": 9001,
+                    "document_id": 77
+                },
+                {
+                    "id": 102,
+                    "distance": 0.88,
+                    "entity": {
+                        "chunkUid": "doc-a:1",
+                        "chunkDbId": 9002,
+                        "documentId": 77
+                    }
+                },
+                {
+                    "id": 103,
+                    "distance": 0.1
+                }
+            ]
+        });
+
+        let hits = parse_milvus_search_hits(&response);
+
+        assert_eq!(hits.len(), 2);
+        assert_eq!(hits[0].chunk_uid, "doc-a:0");
+        assert_eq!(hits[0].chunk_db_id, Some(9001));
+        assert_eq!(hits[0].document_id, Some(77));
+        assert!((hits[0].score - 0.91).abs() < f32::EPSILON);
+        assert_eq!(hits[1].chunk_uid, "doc-a:1");
+        assert_eq!(hits[1].chunk_db_id, Some(9002));
+    }
+
+    #[test]
+    fn milvus_upsert_request_builds_entities_with_scalar_metadata_and_embedding() {
+        let request = MilvusUpsertRequest::new(
+            "novex_t42_dataset_7",
+            vec![MilvusUpsertRow {
+                id: 9001,
+                tenant_id: 42,
+                dataset_id: 7,
+                document_id: 77,
+                chunk_uid: "doc-a:0".to_owned(),
+                chunk_index: 0,
+                embedding: vec![0.25, -0.5],
+                semantic_search_text: "onboarding training".to_owned(),
+                segment_type: "text".to_owned(),
+                content_role: "canonical".to_owned(),
+            }],
+        );
+
+        let body = request.to_rest_upsert_body();
+
+        assert_eq!(body["collectionName"], "novex_t42_dataset_7");
+        assert_eq!(body["data"][0]["id"], 9001);
+        assert_eq!(body["data"][0]["tenant_id"], 42);
+        assert_eq!(body["data"][0]["dataset_id"], 7);
+        assert_eq!(body["data"][0]["document_id"], 77);
+        assert_eq!(body["data"][0]["chunk_uid"], "doc-a:0");
+        assert_eq!(
+            body["data"][0]["embedding"],
+            serde_json::json!([0.25, -0.5])
+        );
+        assert_eq!(
+            body["data"][0]["semantic_search_text"],
+            "onboarding training"
+        );
+    }
+
+    #[test]
     fn chunk_document_keeps_markdown_section_and_page_anchor() {
         let parsed = parse_document_content(
             "doc-md",
@@ -1265,5 +1718,47 @@ mod tests {
             chunks[0].metadata.display_capability,
             DisplayCapability::PreciseAnchor
         );
+    }
+
+    #[test]
+    fn rag_model_routes_use_runtime_route_ids_when_available() {
+        let env = [
+            ("LLM_API_KEY", "sk-fake-llm-secret-508d"),
+            ("LLM_BASE_URL", "https://api.deepseek.com"),
+            ("LLM_MODEL", "deepseek-v4-flash"),
+            ("EMBEDDING_API_KEY", "sk-fake-embedding-secret-ffff"),
+            (
+                "EMBEDDING_BASE_URL",
+                "https://dashscope.aliyuncs.com/compatible-mode/v1",
+            ),
+            ("EMBEDDING_MODEL", "text-embedding-v4"),
+            ("RERANKER_API_KEY", "sk-fake-reranker-secret-ffff"),
+            (
+                "RERANKER_BASE_URL",
+                "https://dashscope.aliyuncs.com/compatible-api/v1",
+            ),
+            ("RERANKER_MODEL", "qwen3-rerank"),
+        ];
+        let config = novex_model::ModelRuntimeConfig::from_env_map(|key| {
+            env.iter()
+                .find_map(|(env_key, value)| (*env_key == key).then(|| (*value).to_owned()))
+        });
+
+        let routes = RagModelRoutes::from_runtime_config(&config);
+
+        assert_eq!(routes.embedding_model_route, "runtime.embedding");
+        assert_eq!(routes.rerank_model_route, "runtime.reranker");
+        assert_eq!(routes.answer_model_route, "runtime.llm");
+    }
+
+    #[test]
+    fn rag_model_routes_fall_back_to_local_route_ids_when_runtime_missing() {
+        let config = novex_model::ModelRuntimeConfig::from_env_map(|_| None);
+
+        let routes = RagModelRoutes::from_runtime_config(&config);
+
+        assert_eq!(routes.embedding_model_route, LOCAL_EMBEDDING_ROUTE);
+        assert_eq!(routes.rerank_model_route, LOCAL_RERANK_ROUTE);
+        assert_eq!(routes.answer_model_route, LOCAL_ANSWER_ROUTE);
     }
 }

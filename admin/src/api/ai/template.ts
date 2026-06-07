@@ -1,10 +1,13 @@
 import { api } from "@/lib/api";
 import type { PageResult } from "@/types/api";
 import type {
+  CustomerPackageApplyResp,
   CustomerPackageCommand,
   CustomerPackageResp,
   DeliveryTemplateQuery,
-  DeliveryTemplateResp
+  DeliveryTemplateResp,
+  TemplateSmokeRunCommand,
+  TemplateSmokeRunResp
 } from "@/types/ai-template";
 
 const TEMPLATE_URL = "/ai/templates";
@@ -19,4 +22,12 @@ export function getDeliveryTemplate(code: string) {
 
 export function generateCustomerPackage(data: CustomerPackageCommand) {
   return api.post<CustomerPackageResp>(`${TEMPLATE_URL}/packages`, data);
+}
+
+export function applyCustomerPackage(data: CustomerPackageCommand) {
+  return api.post<CustomerPackageApplyResp>(`${TEMPLATE_URL}/packages/apply`, data);
+}
+
+export function runTemplateSmoke(data: TemplateSmokeRunCommand) {
+  return api.post<TemplateSmokeRunResp>(`${TEMPLATE_URL}/smoke/runs`, data);
 }

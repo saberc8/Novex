@@ -4,6 +4,14 @@ import type {
   CapabilityItemResp,
   CapabilityQuery,
   CapabilitySummaryResp,
+  ConnectorCredentialCommand,
+  ConnectorCredentialQuery,
+  ConnectorCredentialResp,
+  McpServerCommand,
+  McpServerResp,
+  PluginInstallCommand,
+  PluginInstallationQuery,
+  PluginInstallationResp,
   ToolCallAuditQuery,
   ToolCallAuditResp,
   ToolDryRunCommand,
@@ -20,12 +28,36 @@ export function listTools(query: CapabilityQuery = {}) {
   return api.get<PageResult<CapabilityItemResp>>(`${CAPABILITY_URL}/tools`, { ...query });
 }
 
+export function listSkills(query: CapabilityQuery = {}) {
+  return api.get<PageResult<CapabilityItemResp>>(`${CAPABILITY_URL}/skills`, { ...query });
+}
+
 export function listConnectors(query: CapabilityQuery = {}) {
   return api.get<PageResult<CapabilityItemResp>>(`${CAPABILITY_URL}/connectors`, { ...query });
 }
 
+export function listConnectorCredentials(query: ConnectorCredentialQuery = {}) {
+  return api.get<PageResult<ConnectorCredentialResp>>(`${CAPABILITY_URL}/connectors/credentials`, {
+    ...query
+  });
+}
+
+export function upsertConnectorCredential(data: ConnectorCredentialCommand) {
+  return api.post<ConnectorCredentialResp>(`${CAPABILITY_URL}/connectors/credentials`, data);
+}
+
 export function listPlugins(query: CapabilityQuery = {}) {
   return api.get<PageResult<CapabilityItemResp>>(`${CAPABILITY_URL}/plugins`, { ...query });
+}
+
+export function listPluginInstallations(query: PluginInstallationQuery = {}) {
+  return api.get<PageResult<PluginInstallationResp>>(`${CAPABILITY_URL}/plugins/installations`, {
+    ...query
+  });
+}
+
+export function installPlugin(data: PluginInstallCommand) {
+  return api.post<PluginInstallationResp>(`${CAPABILITY_URL}/plugins/installations`, data);
 }
 
 export function listTriggers(query: CapabilityQuery = {}) {
@@ -34,6 +66,10 @@ export function listTriggers(query: CapabilityQuery = {}) {
 
 export function listMcpServers(query: CapabilityQuery = {}) {
   return api.get<PageResult<CapabilityItemResp>>(`${CAPABILITY_URL}/mcp-servers`, { ...query });
+}
+
+export function upsertMcpServer(data: McpServerCommand) {
+  return api.post<McpServerResp>(`${CAPABILITY_URL}/mcp-servers`, data);
 }
 
 export function dryRunTool(data: ToolDryRunCommand) {

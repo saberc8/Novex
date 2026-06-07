@@ -5,6 +5,7 @@ edition.workspace = true
 
 [dependencies]
 novex-ai-core.workspace = true
+novex-memory.workspace = true
 novex-model = { path = "../novex-model" }
 novex-rag = { path = "../novex-rag" }
 novex-tools = { path = "../novex-tools" }

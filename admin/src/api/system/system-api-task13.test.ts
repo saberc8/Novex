@@ -4,6 +4,7 @@ import { createDir, listFile } from "@/api/system/file";
 import { listOption, resetOptionValue } from "@/api/system/option";
 import { setDefaultStorage } from "@/api/system/storage";
 import { listClient } from "@/api/system/client";
+import { listSecrets, upsertSecret } from "@/api/system/secret";
 
 function okResponse(data: unknown = true) {
   return Promise.resolve(
@@ -75,5 +76,34 @@ describe("system api wrappers task 13", () => {
     expect(fetchMock.mock.calls[3]?.[0]).toBe(
       "http://localhost:4398/system/client?page=2&size=10&clientType=PC&authType=ACCOUNT&status=1"
     );
+  });
+
+  it("uses secret list and upsert endpoints without exposing plaintext in query strings", async () => {
+    await listSecrets({ page: 1, size: 20, scopeType: "tenant", code: "github.connector" });
+    await upsertSecret({
+      scopeType: "tenant",
+      scopeId: "default",
+      code: "github.connector",
+      plaintext: "ghp_secret_token",
+      metadata: { provider: "github" },
+      status: 1
+    });
+
+    expect(fetchMock.mock.calls[0]?.[0]).toBe(
+      "http://localhost:4398/system/secrets?page=1&size=20&scopeType=tenant&code=github.connector"
+    );
+    expect(fetchMock.mock.calls[0]?.[1]).toMatchObject({ method: "GET" });
+    expect(fetchMock.mock.calls[1]?.[0]).toBe("http://localhost:4398/system/secrets");
+    expect(fetchMock.mock.calls[1]?.[1]).toMatchObject({
+      method: "POST",
+      body: JSON.stringify({
+        scopeType: "tenant",
+        scopeId: "default",
+        code: "github.connector",
+        plaintext: "ghp_secret_token",
+        metadata: { provider: "github" },
+        status: 1
+      })
+    });
   });
 });

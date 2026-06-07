@@ -46,6 +46,32 @@ export async function apiRequest<T>(path: string, options: RequestOptions = {}):
   return envelope.data;
 }
 
+export async function apiPublicRequest<T>(path: string, options: RequestOptions = {}): Promise<T> {
+  const url = apiUrl(path, options.query);
+  const headers: Record<string, string> = {};
+
+  if (options.body !== undefined) {
+    headers["Content-Type"] = "application/json";
+  }
+
+  const response = await fetch(url, {
+    method: options.method ?? "GET",
+    headers,
+    body: options.body === undefined ? undefined : JSON.stringify(options.body)
+  });
+
+  if (!response.ok) {
+    throw new ApiClientError(`Request failed: HTTP ${response.status}`);
+  }
+
+  const envelope = (await response.json()) as ApiResponse<T>;
+  if (!envelope.success || envelope.code !== "200") {
+    throw new ApiClientError(envelope.msg || "Request failed");
+  }
+
+  return envelope.data;
+}
+
 export async function apiFormRequest<T>(path: string, form: FormData): Promise<T> {
   const url = apiUrl(path);
   const token = getAuthToken();

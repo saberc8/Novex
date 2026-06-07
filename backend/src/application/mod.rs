@@ -1,6 +1,7 @@
 pub mod ai;
 pub mod auth;
 pub mod data_scope;
+pub mod identity;
 pub mod monitor;
 pub mod rbac;
 pub mod scheduler;

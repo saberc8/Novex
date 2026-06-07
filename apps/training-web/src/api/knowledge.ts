@@ -1,6 +1,8 @@
 import { apiFormRequest, apiRequest } from "@/lib/api";
 import type { PageResult } from "@/types/api";
 import type {
+  AiFeedbackCommand,
+  AiFeedbackResp,
   DatasetQuery,
   DatasetResp,
   KnowledgeFileUploadResp,
@@ -12,6 +14,7 @@ import type {
 
 const DATASET_URL = "/ai/knowledge/datasets";
 const FEEDBACK_URL = "/ai/knowledge/feedback";
+const AI_FEEDBACK_URL = "/ai/feedback";
 
 export function listDatasets(query: DatasetQuery = {}) {
   return apiRequest<PageResult<DatasetResp>>(DATASET_URL, {
@@ -28,6 +31,13 @@ export function askDataset(datasetId: number, data: RagAskCommand) {
 
 export function submitRagFeedback(data: RagFeedbackCommand) {
   return apiRequest<RagFeedbackResp>(FEEDBACK_URL, {
+    method: "POST",
+    body: data
+  });
+}
+
+export function submitAiFeedback(data: AiFeedbackCommand) {
+  return apiRequest<AiFeedbackResp>(AI_FEEDBACK_URL, {
     method: "POST",
     body: data
   });

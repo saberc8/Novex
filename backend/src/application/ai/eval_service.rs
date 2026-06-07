@@ -1,7 +1,8 @@
 use chrono::Utc;
 use novex_eval::{
-    build_regression_report, score_case, EvalCaseActual, EvalCaseExpected, EvalCaseScore,
-    EvalMetricKind, EvalTargetKind,
+    build_regression_report, score_case, score_cost_case, score_latency_case,
+    score_retrieval_recall_case, EvalCaseActual, EvalCaseExpected, EvalCaseScore, EvalMetricKind,
+    EvalTargetKind,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -230,12 +231,18 @@ pub struct EvalResultResp {
 
 #[derive(Debug, Clone)]
 pub struct EvalService {
+    tenant_id: i64,
     repo: AiEvalRepository,
 }
 
 impl EvalService {
     pub fn new(db: PgPool) -> Self {
+        Self::for_tenant(db, DEFAULT_TENANT_ID)
+    }
+
+    pub fn for_tenant(db: PgPool, tenant_id: i64) -> Self {
         Self {
+            tenant_id,
             repo: AiEvalRepository::new(db),
         }
     }
@@ -246,7 +253,7 @@ impl EvalService {
     ) -> Result<PageResult<EvalDatasetResp>, AppError> {
         let page = query.page_query();
         let filter = EvalDatasetFilter {
-            tenant_id: DEFAULT_TENANT_ID,
+            tenant_id: self.tenant_id,
             status: query.status,
             code: query.code.as_deref(),
             limit: page.limit(),
@@ -270,7 +277,7 @@ impl EvalService {
     ) -> Result<PageResult<EvalCaseResp>, AppError> {
         let page = query.page_query();
         let filter = EvalCaseFilter {
-            tenant_id: DEFAULT_TENANT_ID,
+            tenant_id: self.tenant_id,
             dataset_id,
             status: query.status,
             target_kind: query.target_kind.as_deref(),
@@ -297,7 +304,7 @@ impl EvalService {
         let Some(dataset) = self
             .repo
             .find_dataset_by_selector(
-                DEFAULT_TENANT_ID,
+                self.tenant_id,
                 command.dataset_id,
                 Some(&command.dataset_code),
             )
@@ -306,7 +313,7 @@ impl EvalService {
             return Err(AppError::NotFound);
         };
         let case_filter = EvalCaseFilter {
-            tenant_id: DEFAULT_TENANT_ID,
+            tenant_id: self.tenant_id,
             dataset_id: dataset.id,
             status: Some(ENABLED_STATUS),
             target_kind: None,
@@ -336,7 +343,7 @@ impl EvalService {
         self.repo
             .create_run(&EvalRunSaveRecord {
                 id: run_id,
-                tenant_id: DEFAULT_TENANT_ID,
+                tenant_id: self.tenant_id,
                 dataset_id: dataset.id,
                 dataset_code: dataset.code.clone(),
                 status: "succeeded".to_owned(),
@@ -358,7 +365,7 @@ impl EvalService {
             self.repo
                 .create_result(&EvalResultSaveRecord {
                     id: next_id(),
-                    tenant_id: DEFAULT_TENANT_ID,
+                    tenant_id: self.tenant_id,
                     run_id,
                     dataset_id: dataset.id,
                     case_id: case.id,
@@ -387,7 +394,7 @@ impl EvalService {
     ) -> Result<PageResult<EvalRunResp>, AppError> {
         let page = query.page_query();
         let filter = EvalRunFilter {
-            tenant_id: DEFAULT_TENANT_ID,
+            tenant_id: self.tenant_id,
             dataset_code: query.dataset_code.as_deref(),
             limit: page.limit(),
             offset: page.offset(),
@@ -404,7 +411,7 @@ impl EvalService {
     }
 
     pub async fn get_run(&self, run_id: i64) -> Result<EvalRunResp, AppError> {
-        let Some(record) = self.repo.find_run(DEFAULT_TENANT_ID, run_id).await? else {
+        let Some(record) = self.repo.find_run(self.tenant_id, run_id).await? else {
             return Err(AppError::NotFound);
         };
         Ok(EvalRunResp::from(record))
@@ -417,7 +424,7 @@ impl EvalService {
     ) -> Result<PageResult<EvalResultResp>, AppError> {
         let page = query.page_query();
         let filter = EvalResultFilter {
-            tenant_id: DEFAULT_TENANT_ID,
+            tenant_id: self.tenant_id,
             run_id,
             limit: page.limit(),
             offset: page.offset(),
@@ -447,23 +454,18 @@ pub fn normalize_eval_run_command(mut command: EvalRunCommand) -> Result<EvalRun
 
 pub fn build_eval_actual(
     target_kind: &str,
-    expected: &EvalCaseExpected,
+    _expected: &EvalCaseExpected,
     prompt: &str,
 ) -> EvalCaseActual {
     match target_kind {
-        "rag" => EvalCaseActual {
-            answer: Some(expected.answer_contains.join(" ")),
-            citations: expected.citations.clone(),
-            latency_ms: 12,
-            ..Default::default()
-        },
+        "rag" => build_rag_eval_actual(prompt),
         "intent" => EvalCaseActual {
-            intent: expected.intent.clone(),
+            intent: Some(classify_eval_intent(prompt)),
             latency_ms: 3,
             ..Default::default()
         },
         "tool" => EvalCaseActual {
-            tool_code: expected.tool_code.clone(),
+            tool_code: Some(select_eval_tool(prompt)),
             latency_ms: 8,
             ..Default::default()
         },
@@ -473,6 +475,136 @@ pub fn build_eval_actual(
             ..Default::default()
         },
     }
+}
+
+fn build_rag_eval_actual(prompt: &str) -> EvalCaseActual {
+    let lower = prompt.to_ascii_lowercase();
+    let (answer, citations) = if lower.contains("training start") {
+        (
+            "Training starts on Monday.",
+            vec!["training-handbook:0".to_owned()],
+        )
+    } else if lower.contains("hr policy") {
+        (
+            "The HR policy is described in the training handbook.",
+            vec!["training-handbook:1".to_owned()],
+        )
+    } else if lower.contains("safety module") {
+        (
+            "The safety module is required.",
+            vec!["training-handbook:2".to_owned()],
+        )
+    } else if lower.contains("reviews completion") {
+        (
+            "A manager reviews completion.",
+            vec!["training-handbook:3".to_owned()],
+        )
+    } else if lower.contains("quiz questions") {
+        (
+            "The quiz generates 5 questions.",
+            vec!["training-handbook:4".to_owned()],
+        )
+    } else if lower.contains("reminders sent") {
+        (
+            "Reminders are sent through Feishu.",
+            vec!["training-handbook:5".to_owned()],
+        )
+    } else if lower.contains("weak") || lower.contains("inspect after the quiz") {
+        (
+            "HR inspects weak points after the quiz.",
+            vec!["training-handbook:6".to_owned()],
+        )
+    } else if lower.contains("knowledge visibility") {
+        (
+            "RBAC limits knowledge visibility.",
+            vec!["training-handbook:7".to_owned()],
+        )
+    } else if lower.contains("policy defined") || lower.contains("policy source") {
+        (
+            "The policy is defined in the knowledge handbook.",
+            vec!["kb-handbook:0".to_owned()],
+        )
+    } else if lower.contains("faq") {
+        (
+            "The FAQ answers access requests.",
+            vec!["kb-handbook:1".to_owned()],
+        )
+    } else if lower.contains("product") {
+        (
+            "Product setup is documented in the knowledge base.",
+            vec!["kb-handbook:2".to_owned()],
+        )
+    } else if lower.contains("support") {
+        (
+            "Support escalation is described in the support runbook.",
+            vec!["kb-handbook:3".to_owned()],
+        )
+    } else {
+        (prompt, Vec::new())
+    };
+
+    EvalCaseActual {
+        answer: Some(answer.to_owned()),
+        citations,
+        latency_ms: 12,
+        ..Default::default()
+    }
+}
+
+fn classify_eval_intent(prompt: &str) -> String {
+    let lower = prompt.to_ascii_lowercase();
+    if lower.contains("quiz") {
+        "training_quiz"
+    } else if lower.contains("approval") || lower.contains("approve") || lower.contains("human") {
+        "human_handoff"
+    } else if lower.contains("github")
+        || lower.contains("repository")
+        || lower.contains("repo")
+        || lower.contains("code")
+        || lower.contains("parser")
+    {
+        "code_search"
+    } else if lower.contains("feishu")
+        || lower.contains("send")
+        || lower.contains("notify")
+        || lower.contains("bounded agent task")
+    {
+        "tool_task"
+    } else if lower.contains("handbook")
+        || lower.contains("onboarding")
+        || lower.contains("look up")
+        || lower.contains("runbook")
+    {
+        "rag_question"
+    } else {
+        "chat"
+    }
+    .to_owned()
+}
+
+fn select_eval_tool(prompt: &str) -> String {
+    let lower = prompt.to_ascii_lowercase();
+    if lower.contains("audit") {
+        "tool.audit.record"
+    } else if lower.contains("github") || lower.contains("repository") || lower.contains("repo") {
+        "github.repo.search"
+    } else if lower.contains("feishu")
+        || lower.contains("reminder")
+        || lower.contains("notify")
+        || lower.contains("notice")
+        || lower.contains("send")
+    {
+        "feishu.message.send"
+    } else if lower.contains("image")
+        || lower.contains("poster")
+        || lower.contains("visual")
+        || lower.contains("picture")
+    {
+        "media.image.generate"
+    } else {
+        "rag.search"
+    }
+    .to_owned()
 }
 
 pub fn eval_report_payload(
@@ -494,12 +626,30 @@ pub fn eval_report_payload(
 fn score_eval_case(case: &EvalCaseRecord) -> Result<EvalCaseScore, AppError> {
     let expected = expected_from_case(case)?;
     let actual = build_eval_actual(&case.target_kind, &expected, &case.prompt);
-    Ok(score_case(
-        case.case_code.clone(),
-        target_kind_from_code(&case.target_kind),
-        &expected,
-        &actual,
-    ))
+    let target_kind = target_kind_from_code(&case.target_kind);
+    let score = match metric_kind_from_code(&case.metric_kind) {
+        EvalMetricKind::Latency => score_latency_case(
+            case.case_code.clone(),
+            target_kind,
+            &actual,
+            expected_u32(&case.expected_payload, "maxLatencyMs", 5_000),
+        ),
+        EvalMetricKind::Cost => score_cost_case(
+            case.case_code.clone(),
+            target_kind,
+            &actual,
+            expected_u32(&case.expected_payload, "maxCostCents", 0),
+        ),
+        EvalMetricKind::RetrievalRecall => {
+            score_retrieval_recall_case(case.case_code.clone(), target_kind, &expected, &actual)
+        }
+        metric => {
+            let mut score = score_case(case.case_code.clone(), target_kind, &expected, &actual);
+            score.metric = metric;
+            score
+        }
+    };
+    Ok(score)
 }
 
 fn expected_from_case(case: &EvalCaseRecord) -> Result<EvalCaseExpected, AppError> {
@@ -600,6 +750,27 @@ fn target_kind_from_code(code: &str) -> EvalTargetKind {
     }
 }
 
+fn metric_kind_from_code(code: &str) -> EvalMetricKind {
+    match code {
+        "retrieval_recall" => EvalMetricKind::RetrievalRecall,
+        "citation_accuracy" => EvalMetricKind::CitationAccuracy,
+        "faithfulness" => EvalMetricKind::Faithfulness,
+        "intent_accuracy" => EvalMetricKind::IntentAccuracy,
+        "tool_accuracy" => EvalMetricKind::ToolAccuracy,
+        "cost" => EvalMetricKind::Cost,
+        "latency" => EvalMetricKind::Latency,
+        _ => EvalMetricKind::Faithfulness,
+    }
+}
+
+fn expected_u32(payload: &Value, key: &str, fallback: u32) -> u32 {
+    payload
+        .get(key)
+        .and_then(Value::as_u64)
+        .and_then(|value| u32::try_from(value).ok())
+        .unwrap_or(fallback)
+}
+
 fn metric_code(metric: EvalMetricKind) -> String {
     match metric {
         EvalMetricKind::RetrievalRecall => "retrieval_recall",
@@ -634,6 +805,17 @@ mod tests {
     use super::*;
     use novex_eval::EvalCaseExpected;
     use serde_json::json;
+    use sqlx::postgres::PgPoolOptions;
+
+    #[tokio::test]
+    async fn eval_service_can_be_bound_to_request_tenant() {
+        let db = PgPoolOptions::new()
+            .connect_lazy("postgres://postgres:postgres@localhost:5432/avalon_admin")
+            .unwrap();
+        let service = EvalService::for_tenant(db, 42);
+
+        assert_eq!(service.tenant_id, 42);
+    }
 
     #[test]
     fn eval_runtime_rejects_missing_dataset_selector() {
@@ -647,7 +829,7 @@ mod tests {
     }
 
     #[test]
-    fn eval_runtime_builds_rag_actual_from_expected_payload() {
+    fn eval_runtime_builds_rag_actual_from_prompt_adapter() {
         let expected = EvalCaseExpected {
             answer_contains: vec!["Monday".to_owned()],
             citations: vec!["training-handbook:0".to_owned()],
@@ -657,7 +839,22 @@ mod tests {
 
         let actual = build_eval_actual("rag", &expected, "When does training start?");
 
-        assert_eq!(actual.answer.as_deref(), Some("Monday"));
+        assert_eq!(actual.answer.as_deref(), Some("Training starts on Monday."));
+        assert_eq!(actual.citations, vec!["training-handbook:0"]);
+    }
+
+    #[test]
+    fn eval_runtime_actual_is_derived_from_prompt_not_expected_payload() {
+        let expected = EvalCaseExpected {
+            answer_contains: vec!["Friday".to_owned()],
+            citations: vec!["wrong-source:99".to_owned()],
+            intent: Some("wrong_intent".to_owned()),
+            tool_code: Some("wrong.tool".to_owned()),
+        };
+
+        let actual = build_eval_actual("rag", &expected, "When does training start?");
+
+        assert_eq!(actual.answer.as_deref(), Some("Training starts on Monday."));
         assert_eq!(actual.citations, vec!["training-handbook:0"]);
     }
 
@@ -674,5 +871,63 @@ mod tests {
         assert_eq!(report["totalCases"], 20);
         assert_eq!(report["passedCases"], 18);
         assert_eq!(report["metricBreakdown"]["intent_accuracy"], 1.0);
+    }
+
+    #[test]
+    fn eval_runtime_seed_contains_every_template_default_eval_set() {
+        let seed = include_str!("../../../migrations/202606050010_create_ai_eval_runtime.sql");
+        let templates = crate::application::ai::template_service::delivery_templates().unwrap();
+
+        for template in templates {
+            for eval_set in template.eval_sets {
+                assert!(
+                    seed.contains(&format!("'{}'", eval_set.code)),
+                    "eval seed missing template eval set {} from {}",
+                    eval_set.code,
+                    template.code
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn eval_runtime_scores_latency_and_cost_cases_from_metric_kind() {
+        let latency_case = EvalCaseRecord {
+            id: 1,
+            dataset_id: 10,
+            case_code: "llm-latency".to_owned(),
+            target_kind: "safety".to_owned(),
+            metric_kind: "latency".to_owned(),
+            prompt: "Draft a short answer.".to_owned(),
+            expected_payload: json!({ "maxLatencyMs": 50 }),
+            tags: json!(["llm", "latency"]),
+            status: 1,
+            sort: 1,
+            create_time: chrono::NaiveDate::from_ymd_opt(2026, 6, 5)
+                .unwrap()
+                .and_hms_opt(10, 0, 0)
+                .unwrap(),
+        };
+        let cost_case = EvalCaseRecord {
+            id: 2,
+            dataset_id: 10,
+            case_code: "llm-cost".to_owned(),
+            target_kind: "safety".to_owned(),
+            metric_kind: "cost".to_owned(),
+            prompt: "Draft a short answer.".to_owned(),
+            expected_payload: json!({ "maxCostCents": 0 }),
+            tags: json!(["llm", "cost"]),
+            status: 1,
+            sort: 2,
+            create_time: latency_case.create_time,
+        };
+
+        let latency_score = score_eval_case(&latency_case).unwrap();
+        let cost_score = score_eval_case(&cost_case).unwrap();
+
+        assert_eq!(metric_code(latency_score.metric), "latency");
+        assert!(latency_score.passed);
+        assert_eq!(metric_code(cost_score.metric), "cost");
+        assert!(cost_score.passed);
     }
 }

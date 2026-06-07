@@ -72,6 +72,15 @@ ORDER BY m.sort ASC, m.id ASC;
         &self,
         user_id: i64,
     ) -> Result<Vec<Menu>, AppError> {
+        self.enabled_route_menus_by_user_id_for_tenant(user_id, 1)
+            .await
+    }
+
+    pub async fn enabled_route_menus_by_user_id_for_tenant(
+        &self,
+        user_id: i64,
+        tenant_id: i64,
+    ) -> Result<Vec<Menu>, AppError> {
         let menus = sqlx::query_as::<_, MenuRow>(
             r#"
 WITH RECURSIVE assigned_menus AS (
@@ -95,7 +104,10 @@ WITH RECURSIVE assigned_menus AS (
     JOIN sys_role_menu AS rm ON rm.menu_id = m.id
     JOIN sys_user_role AS ur ON ur.role_id = rm.role_id
     JOIN sys_role AS r ON r.id = ur.role_id
+    JOIN sys_tenant_role AS tr ON tr.role_id = r.id
     WHERE ur.user_id = $1
+      AND tr.tenant_id = $2
+      AND tr.status = 1
       AND r.status = 1
       AND m.status = 1
       AND m.type <> 3
@@ -145,6 +157,7 @@ ORDER BY m.sort ASC, m.id ASC;
 "#,
         )
         .bind(user_id)
+        .bind(tenant_id)
         .fetch_all(&self.db)
         .await?
         .into_iter()
@@ -174,5 +187,18 @@ impl From<MenuRow> for Menu {
             sort: row.sort,
             status: row.status,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn route_menu_query_uses_active_tenant_role_binding_for_non_admin_users() {
+        let source = include_str!("rbac_repository.rs");
+
+        assert!(source.contains("enabled_route_menus_by_user_id_for_tenant"));
+        assert!(source.matches("JOIN sys_tenant_role AS tr").count() >= 2);
+        assert!(source.matches("tr.tenant_id = $2").count() >= 2);
+        assert!(source.matches("tr.status = 1").count() >= 2);
     }
 }

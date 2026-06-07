@@ -1,5 +1,5 @@
-import { ChatAppClient } from "@/app-client";
+import { ChatWorkbenchPage } from "./workbench";
 
 export default function Page() {
-  return <ChatAppClient />;
+  return <ChatWorkbenchPage />;
 }

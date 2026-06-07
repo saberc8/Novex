@@ -14,8 +14,11 @@ M5 package:
 | --- | --- | --- |
 | `ask` | `/knowledge` | `app:knowledge:ask` |
 | `sources` | `/knowledge/sources` | `ai:knowledge:list` |
+| `share` | `/share/[token]` | `app:knowledge:ask` |
 
 ## Smoke checks
+
+Script: `templates/knowledge-base-chat/smoke.sh`
 
 | Code | Workdir | Command |
 | --- | --- | --- |

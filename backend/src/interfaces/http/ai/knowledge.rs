@@ -7,10 +7,10 @@ use serde::Serialize;
 
 use crate::{
     application::ai::knowledge_service::{
-        parse_job_command_from_uploaded_file, DatasetCommand, DatasetQuery, DatasetResp,
-        DocumentParseJobCommand, DocumentQuery, DocumentResp, DocumentUploadCommand, FeedbackResp,
-        KnowledgeService, ParsedDocumentUploadCommand, ParserJobResp, ParserJobStatusUpdateCommand,
-        RagAskCommand, RagAskResp, RagFeedbackCommand,
+        parse_job_command_from_uploaded_file, AiFeedbackCommand, AiFeedbackResp, DatasetCommand,
+        DatasetQuery, DatasetResp, DocumentParseJobCommand, DocumentQuery, DocumentResp,
+        DocumentUploadCommand, FeedbackResp, KnowledgeService, ParsedDocumentUploadCommand,
+        ParserJobResp, ParserJobStatusUpdateCommand, RagAskCommand, RagAskResp, RagFeedbackCommand,
     },
     application::system::file_service::{FileResp, FileService},
     domain::auth::model::CurrentUser,
@@ -34,6 +34,12 @@ struct KnowledgeFileUploadResp {
     parse_job: ParserJobResp,
 }
 
+fn dataset_access_context(current_user: &CurrentUser) -> (Vec<i64>, bool) {
+    let role_ids = current_user.roles.iter().map(|role| role.id).collect();
+    let is_admin = current_user.roles.iter().any(|role| role.is_admin());
+    (role_ids, is_admin)
+}
+
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route(
@@ -44,6 +50,7 @@ pub fn routes() -> Router<AppState> {
             "/ai/knowledge/feedback",
             axum::routing::post(submit_rag_feedback),
         )
+        .route("/ai/feedback", axum::routing::post(submit_ai_feedback))
         .route(
             "/ai/knowledge/datasets/:dataset_id/documents/text",
             axum::routing::post(upload_text_document),
@@ -85,10 +92,17 @@ async fn list_datasets(
 ) -> Result<Json<ApiResponse<PageResult<DatasetResp>>>, AppError> {
     require_permission(&current_user, DATASET_LIST_PERMISSION)?;
     let service = KnowledgeService::new(state.db);
+    let (role_ids, is_admin) = dataset_access_context(&current_user);
 
     Ok(Json(ApiResponse::ok(
         service
-            .list_datasets_for_tenant(current_user.tenant_id, query)
+            .list_datasets_for_user(
+                current_user.tenant_id,
+                current_user.id,
+                &role_ids,
+                is_admin,
+                query,
+            )
             .await?,
     )))
 }
@@ -116,10 +130,18 @@ async fn list_documents(
 ) -> Result<Json<ApiResponse<PageResult<DocumentResp>>>, AppError> {
     require_permission(&current_user, DOCUMENT_LIST_PERMISSION)?;
     let service = KnowledgeService::new(state.db);
+    let (role_ids, is_admin) = dataset_access_context(&current_user);
 
     Ok(Json(ApiResponse::ok(
         service
-            .list_documents_for_tenant(current_user.tenant_id, dataset_id, query)
+            .list_documents_for_user(
+                current_user.tenant_id,
+                current_user.id,
+                &role_ids,
+                is_admin,
+                dataset_id,
+                query,
+            )
             .await?,
     )))
 }
@@ -259,10 +281,18 @@ async fn ask_dataset_handler(
 ) -> Result<Json<ApiResponse<RagAskResp>>, AppError> {
     require_permission(&current_user, RAG_ASK_PERMISSION)?;
     let service = KnowledgeService::new(state.db);
+    let (role_ids, is_admin) = dataset_access_context(&current_user);
 
     Ok(Json(ApiResponse::ok(
         service
-            .ask_dataset_for_tenant(current_user.tenant_id, current_user.id, dataset_id, command)
+            .ask_dataset_for_user(
+                current_user.tenant_id,
+                current_user.id,
+                &role_ids,
+                is_admin,
+                dataset_id,
+                command,
+            )
             .await?,
     )))
 }
@@ -278,6 +308,21 @@ async fn submit_rag_feedback(
     Ok(Json(ApiResponse::ok(
         service
             .submit_rag_feedback_for_tenant(current_user.tenant_id, current_user.id, command)
+            .await?,
+    )))
+}
+
+async fn submit_ai_feedback(
+    State(state): State<AppState>,
+    current_user: CurrentUser,
+    Json(command): Json<AiFeedbackCommand>,
+) -> Result<Json<ApiResponse<AiFeedbackResp>>, AppError> {
+    require_permission(&current_user, RAG_ASK_PERMISSION)?;
+    let service = KnowledgeService::new(state.db);
+
+    Ok(Json(ApiResponse::ok(
+        service
+            .submit_ai_feedback_for_tenant(current_user.tenant_id, current_user.id, command)
             .await?,
     )))
 }
@@ -298,7 +343,7 @@ mod tests {
     use super::*;
     use crate::{
         application::ai::knowledge_service::{
-            DatasetCommand, DatasetQuery, DocumentQuery, DocumentUploadCommand,
+            AiFeedbackCommand, DatasetCommand, DatasetQuery, DocumentQuery, DocumentUploadCommand,
             ParsedDocumentUploadCommand, ParserJobStatusUpdateCommand, RagAskCommand,
             RagFeedbackCommand,
         },
@@ -358,15 +403,33 @@ mod tests {
             .unwrap();
 
         for needle in [
-            ".list_datasets_for_tenant(",
+            ".list_datasets_for_user(",
             ".create_dataset_for_tenant(",
-            ".list_documents_for_tenant(",
+            ".list_documents_for_user(",
             ".upload_text_document_for_tenant(",
-            ".ask_dataset_for_tenant(",
+            ".ask_dataset_for_user(",
         ] {
             assert!(source.contains(needle), "{needle} missing from handler");
         }
         assert!(source.matches("current_user.tenant_id").count() >= 10);
+    }
+
+    #[test]
+    fn knowledge_handlers_pass_current_user_identity_to_dataset_access_checks() {
+        let source = include_str!("knowledge.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+
+        for needle in [
+            ".list_datasets_for_user(",
+            ".list_documents_for_user(",
+            ".ask_dataset_for_user(",
+            "current_user.roles",
+            "current_user.roles.iter().any(|role| role.is_admin())",
+        ] {
+            assert!(source.contains(needle), "{needle} missing from handler");
+        }
     }
 
     #[tokio::test]
@@ -565,6 +628,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn ai_feedback_handler_rejects_missing_permission() {
+        let err = submit_ai_feedback(
+            State(test_state()),
+            user_with_permissions(vec![]),
+            Json(AiFeedbackCommand {
+                resource_type: "training_quiz".to_owned(),
+                resource_id: "900".to_owned(),
+                trace_id: Some("agent-900".to_owned()),
+                rating: "quiz_wrong_answer".to_owned(),
+                reason: "错题答案需要复核".to_owned(),
+                metadata: serde_json::json!({ "source": "training-web" }),
+            }),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(matches!(err, AppError::Forbidden));
+    }
+
+    #[tokio::test]
     async fn knowledge_dataset_route_is_registered_and_requires_auth() {
         let db = PgPoolOptions::new()
             .connect_lazy("postgres://postgres:postgres@localhost:5432/avalon_admin")
@@ -736,6 +819,59 @@ mod tests {
                     .uri("/ai/knowledge/feedback")
                     .header(header::CONTENT_TYPE, "application/json")
                     .body(Body::from(r#"{"traceId":42,"rating":"helpful"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let body = serde_json::from_slice::<Value>(&body).unwrap();
+        assert_eq!(body["code"], "401");
+    }
+
+    #[tokio::test]
+    async fn ai_feedback_route_is_registered_and_requires_auth() {
+        let db = PgPoolOptions::new()
+            .connect_lazy("postgres://postgres:postgres@localhost:5432/avalon_admin")
+            .unwrap();
+        let jwt = JwtService::new("test-secret".to_owned(), 24);
+        let app = build_router(db, &["http://localhost:4399".to_owned()], jwt).unwrap();
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/ai/feedback")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        r#"{"resourceType":"training_quiz","resourceId":"900","rating":"quiz_wrong_answer"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let body = serde_json::from_slice::<Value>(&body).unwrap();
+        assert_eq!(body["code"], "401");
+    }
+
+    #[tokio::test]
+    async fn training_learning_records_route_is_registered_and_requires_auth() {
+        let db = PgPoolOptions::new()
+            .connect_lazy("postgres://postgres:postgres@localhost:5432/avalon_admin")
+            .unwrap();
+        let jwt = JwtService::new("test-secret".to_owned(), 24);
+        let app = build_router(db, &["http://localhost:4399".to_owned()], jwt).unwrap();
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/ai/training/learning-records?scope=self")
+                    .header(header::ACCEPT, "application/json")
+                    .body(Body::empty())
                     .unwrap(),
             )
             .await

@@ -115,17 +115,30 @@ LIMIT 1;
     }
 
     pub async fn roles_by_user_id(&self, user_id: i64) -> Result<Vec<RoleContext>, AppError> {
+        let tenant_id = self.active_tenant_id_by_user_id(user_id).await?;
+        self.roles_by_user_id_for_tenant(user_id, tenant_id).await
+    }
+
+    pub async fn roles_by_user_id_for_tenant(
+        &self,
+        user_id: i64,
+        tenant_id: i64,
+    ) -> Result<Vec<RoleContext>, AppError> {
         let roles = sqlx::query_as::<_, RoleContextRow>(
             r#"
 SELECT r.id, r.name, r.code, r.data_scope
 FROM sys_role AS r
 JOIN sys_user_role AS ur ON ur.role_id = r.id
+JOIN sys_tenant_role AS tr ON tr.role_id = r.id
 WHERE ur.user_id = $1
+  AND tr.tenant_id = $2
+  AND tr.status = 1
   AND r.status = 1
 ORDER BY r.sort ASC, r.id ASC;
 "#,
         )
         .bind(user_id)
+        .bind(tenant_id)
         .fetch_all(&self.db)
         .await?
         .into_iter()
@@ -136,6 +149,16 @@ ORDER BY r.sort ASC, r.id ASC;
     }
 
     pub async fn permissions_by_user_id(&self, user_id: i64) -> Result<Vec<String>, AppError> {
+        let tenant_id = self.active_tenant_id_by_user_id(user_id).await?;
+        self.permissions_by_user_id_for_tenant(user_id, tenant_id)
+            .await
+    }
+
+    pub async fn permissions_by_user_id_for_tenant(
+        &self,
+        user_id: i64,
+        tenant_id: i64,
+    ) -> Result<Vec<String>, AppError> {
         let permissions = sqlx::query_as::<_, PermissionRow>(
             r#"
 SELECT DISTINCT m.permission
@@ -143,7 +166,10 @@ FROM sys_menu AS m
 JOIN sys_role_menu AS rm ON rm.menu_id = m.id
 JOIN sys_user_role AS ur ON ur.role_id = rm.role_id
 JOIN sys_role AS r ON r.id = ur.role_id
+JOIN sys_tenant_role AS tr ON tr.role_id = r.id
 WHERE ur.user_id = $1
+  AND tr.tenant_id = $2
+  AND tr.status = 1
   AND r.status = 1
   AND m.status = 1
   AND m.permission IS NOT NULL
@@ -152,6 +178,7 @@ ORDER BY m.permission ASC;
 "#,
         )
         .bind(user_id)
+        .bind(tenant_id)
         .fetch_all(&self.db)
         .await?
         .into_iter()
@@ -172,9 +199,11 @@ ORDER BY m.permission ASC;
             return Ok(None);
         }
 
-        let roles = self.roles_by_user_id(user_id).await?;
-        let permissions = self.permissions_for_roles(user_id, &roles).await?;
         let tenant_id = self.active_tenant_id_by_user_id(user_id).await?;
+        let roles = self.roles_by_user_id_for_tenant(user_id, tenant_id).await?;
+        let permissions = self
+            .permissions_for_roles_in_tenant(user_id, tenant_id, &roles)
+            .await?;
 
         Ok(Some(CurrentUser {
             id: user.id,
@@ -211,11 +240,23 @@ LIMIT 1;
         user_id: i64,
         roles: &[RoleContext],
     ) -> Result<Vec<String>, AppError> {
+        let tenant_id = self.active_tenant_id_by_user_id(user_id).await?;
+        self.permissions_for_roles_in_tenant(user_id, tenant_id, roles)
+            .await
+    }
+
+    pub async fn permissions_for_roles_in_tenant(
+        &self,
+        user_id: i64,
+        tenant_id: i64,
+        roles: &[RoleContext],
+    ) -> Result<Vec<String>, AppError> {
         if roles.iter().any(RoleContext::is_admin) {
             return Ok(vec![ALL_PERMISSION.to_owned()]);
         }
 
-        self.permissions_by_user_id(user_id).await
+        self.permissions_by_user_id_for_tenant(user_id, tenant_id)
+            .await
     }
 }
 
@@ -294,5 +335,16 @@ mod tests {
         };
 
         assert_eq!(user.tenant_id, 7);
+    }
+
+    #[test]
+    fn current_user_permissions_are_scoped_by_active_tenant_role_binding() {
+        let source = include_str!("user_repository.rs");
+
+        assert!(source.contains("permissions_by_user_id_for_tenant"));
+        assert!(source.contains("roles_by_user_id_for_tenant"));
+        assert!(source.matches("JOIN sys_tenant_role AS tr").count() >= 3);
+        assert!(source.matches("tr.tenant_id = $2").count() >= 3);
+        assert!(source.matches("tr.status = 1").count() >= 3);
     }
 }

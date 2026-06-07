@@ -166,6 +166,84 @@ pub fn score_tool_case(expected: &EvalCaseExpected, actual: &EvalCaseActual) -> 
     }
 }
 
+pub fn score_latency_case(
+    case_id: impl Into<String>,
+    target_kind: EvalTargetKind,
+    actual: &EvalCaseActual,
+    max_latency_ms: u32,
+) -> EvalCaseScore {
+    let passed = actual.latency_ms <= max_latency_ms;
+    EvalCaseScore {
+        case_id: case_id.into(),
+        target_kind,
+        metric: EvalMetricKind::Latency,
+        score: if passed { 1.0 } else { 0.0 },
+        passed,
+        reason: if passed {
+            format!(
+                "latency {}ms within {}ms",
+                actual.latency_ms, max_latency_ms
+            )
+        } else {
+            format!(
+                "latency {}ms exceeded {}ms",
+                actual.latency_ms, max_latency_ms
+            )
+        },
+        cost_cents: actual.cost_cents,
+        latency_ms: actual.latency_ms,
+    }
+}
+
+pub fn score_cost_case(
+    case_id: impl Into<String>,
+    target_kind: EvalTargetKind,
+    actual: &EvalCaseActual,
+    max_cost_cents: u32,
+) -> EvalCaseScore {
+    let passed = actual.cost_cents <= max_cost_cents;
+    EvalCaseScore {
+        case_id: case_id.into(),
+        target_kind,
+        metric: EvalMetricKind::Cost,
+        score: if passed { 1.0 } else { 0.0 },
+        passed,
+        reason: if passed {
+            format!("cost {}c within {}c", actual.cost_cents, max_cost_cents)
+        } else {
+            format!("cost {}c exceeded {}c", actual.cost_cents, max_cost_cents)
+        },
+        cost_cents: actual.cost_cents,
+        latency_ms: actual.latency_ms,
+    }
+}
+
+pub fn score_retrieval_recall_case(
+    case_id: impl Into<String>,
+    target_kind: EvalTargetKind,
+    expected: &EvalCaseExpected,
+    actual: &EvalCaseActual,
+) -> EvalCaseScore {
+    let passed = expected
+        .citations
+        .iter()
+        .all(|citation| actual.citations.iter().any(|actual| actual == citation));
+    EvalCaseScore {
+        case_id: case_id.into(),
+        target_kind,
+        metric: EvalMetricKind::RetrievalRecall,
+        score: if passed { 1.0 } else { 0.0 },
+        passed,
+        reason: if passed {
+            "retrieval references matched".to_owned()
+        } else {
+            "retrieval references missing".to_owned()
+        },
+        cost_cents: actual.cost_cents,
+        latency_ms: actual.latency_ms,
+    }
+}
+
 pub fn build_regression_report(scores: &[EvalCaseScore]) -> RegressionReport {
     let total_cases = scores.len();
     let passed_cases = scores.iter().filter(|score| score.passed).count();
@@ -345,6 +423,70 @@ mod tests {
         assert!(score.passed);
         assert_eq!(score.metric, EvalMetricKind::ToolAccuracy);
         assert_eq!(score.score, 1.0);
+    }
+
+    #[test]
+    fn eval_runtime_scores_latency_case_with_max_threshold() {
+        let actual = EvalCaseActual {
+            answer: None,
+            citations: vec![],
+            intent: None,
+            tool_code: None,
+            cost_cents: 0,
+            latency_ms: 51,
+        };
+
+        let score = score_latency_case("latency-1", EvalTargetKind::Safety, &actual, 50);
+
+        assert!(!score.passed);
+        assert_eq!(score.metric, EvalMetricKind::Latency);
+        assert_eq!(score.score, 0.0);
+        assert_eq!(score.reason, "latency 51ms exceeded 50ms");
+    }
+
+    #[test]
+    fn eval_runtime_scores_cost_case_with_max_threshold() {
+        let actual = EvalCaseActual {
+            answer: None,
+            citations: vec![],
+            intent: None,
+            tool_code: None,
+            cost_cents: 0,
+            latency_ms: 12,
+        };
+
+        let score = score_cost_case("cost-1", EvalTargetKind::Safety, &actual, 0);
+
+        assert!(score.passed);
+        assert_eq!(score.metric, EvalMetricKind::Cost);
+        assert_eq!(score.score, 1.0);
+        assert_eq!(score.reason, "cost 0c within 0c");
+    }
+
+    #[test]
+    fn eval_runtime_scores_retrieval_recall_by_expected_citations() {
+        let expected = EvalCaseExpected {
+            answer_contains: vec![],
+            citations: vec!["handbook:0".to_owned(), "policy:2".to_owned()],
+            intent: None,
+            tool_code: None,
+        };
+        let actual = EvalCaseActual {
+            answer: None,
+            citations: vec!["handbook:0".to_owned()],
+            intent: None,
+            tool_code: None,
+            cost_cents: 0,
+            latency_ms: 8,
+        };
+
+        let score =
+            score_retrieval_recall_case("recall-1", EvalTargetKind::Rag, &expected, &actual);
+
+        assert!(!score.passed);
+        assert_eq!(score.metric, EvalMetricKind::RetrievalRecall);
+        assert_eq!(score.score, 0.0);
+        assert_eq!(score.reason, "retrieval references missing");
     }
 
     #[test]

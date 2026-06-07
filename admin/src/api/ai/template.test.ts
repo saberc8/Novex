@@ -1,8 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  applyCustomerPackage,
   generateCustomerPackage,
   getDeliveryTemplate,
-  listDeliveryTemplates
+  listDeliveryTemplates,
+  runTemplateSmoke
 } from "@/api/ai/template";
 
 function okResponse(data: unknown = true) {
@@ -47,6 +49,20 @@ describe("delivery template api wrappers", () => {
       primaryColor: "#2563eb",
       publicUrl: "https://training.example.com"
     });
+    await applyCustomerPackage({
+      templateCode: "training_app",
+      customerName: "Acme",
+      appName: "Acme Training",
+      industry: "training",
+      brandName: "Acme Academy",
+      primaryColor: "#2563eb",
+      publicUrl: "https://training.example.com"
+    });
+    await runTemplateSmoke({
+      templateCode: "training_app",
+      packageId: "pkg_training_app_acme",
+      dryRun: true
+    });
 
     expect(fetchMock.mock.calls[0]?.[0]).toBe(
       "http://localhost:4398/ai/templates?page=1&size=20&category=training"
@@ -63,6 +79,28 @@ describe("delivery template api wrappers", () => {
         brandName: "Acme Academy",
         primaryColor: "#2563eb",
         publicUrl: "https://training.example.com"
+      })
+    });
+    expect(fetchMock.mock.calls[3]?.[0]).toBe("http://localhost:4398/ai/templates/packages/apply");
+    expect(fetchMock.mock.calls[3]?.[1]).toMatchObject({
+      method: "POST",
+      body: JSON.stringify({
+        templateCode: "training_app",
+        customerName: "Acme",
+        appName: "Acme Training",
+        industry: "training",
+        brandName: "Acme Academy",
+        primaryColor: "#2563eb",
+        publicUrl: "https://training.example.com"
+      })
+    });
+    expect(fetchMock.mock.calls[4]?.[0]).toBe("http://localhost:4398/ai/templates/smoke/runs");
+    expect(fetchMock.mock.calls[4]?.[1]).toMatchObject({
+      method: "POST",
+      body: JSON.stringify({
+        templateCode: "training_app",
+        packageId: "pkg_training_app_acme",
+        dryRun: true
       })
     });
   });

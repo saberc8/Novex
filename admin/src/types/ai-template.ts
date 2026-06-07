@@ -88,6 +88,7 @@ export interface DeliveryTemplateResp {
   frontendApp: string;
   frontendPages: TemplateFrontendPage[];
   smokeChecks: TemplateSmokeCheck[];
+  smokeScript: string;
   sort: number;
   status: number;
   branding: TemplateBranding;
@@ -121,11 +122,39 @@ export interface CustomerTenantConfig {
   frontendApp: string;
 }
 
+export interface CustomerFrontendConfig {
+  app: string;
+  entry: string;
+  entryUrl: string;
+  branding: TemplateBranding;
+  defaultPage: TemplateFrontendPage;
+  navigation: TemplateFrontendPage[];
+  allowedRoles: TemplateRole[];
+}
+
+export interface CustomerProvisioningStep {
+  code: string;
+  title: string;
+  target: string;
+  operation: string;
+  payload: Record<string, unknown>;
+}
+
+export interface CustomerProvisioningPlan {
+  planId: string;
+  mode: string;
+  tenantCode: string;
+  idempotencyKey: string;
+  steps: CustomerProvisioningStep[];
+}
+
 export interface CustomerPackageResp {
   packageId: string;
   template: DeliveryTemplateResp;
   tenantConfig: CustomerTenantConfig;
   branding: TemplateBranding;
+  frontendConfig: CustomerFrontendConfig;
+  provisioningPlan: CustomerProvisioningPlan;
   roles: TemplateRole[];
   menus: TemplateMenu[];
   frontendPages: TemplateFrontendPage[];
@@ -136,6 +165,46 @@ export interface CustomerPackageResp {
   triggers: TemplateTrigger[];
   evalSets: TemplateEvalSet[];
   deploymentChecklist: string[];
+  smokeScript: string;
   smokeChecks: TemplateSmokeCheck[];
   deploymentSteps: string[];
+}
+
+export interface CustomerPackageApplyResp {
+  package: CustomerPackageResp;
+  tenantId: number;
+  tenantCode: string;
+  appliedSteps: CustomerProvisioningStep[];
+  pendingOperatorSteps: CustomerProvisioningStep[];
+}
+
+export interface TemplateSmokeRunCommand {
+  templateCode: string;
+  packageId?: string;
+  dryRun?: boolean;
+}
+
+export interface TemplateSmokeCheckRunResp {
+  code: string;
+  name: string;
+  workdir: string;
+  command: string;
+  status: string;
+  exitCode: number | null;
+  stdout: string;
+  stderr: string;
+  durationMs: number;
+}
+
+export interface TemplateSmokeRunResp {
+  runId: number;
+  templateCode: string;
+  packageId?: string | null;
+  smokeScript: string;
+  status: string;
+  dryRun: boolean;
+  totalChecks: number;
+  passedChecks: number;
+  failedChecks: number;
+  checks: TemplateSmokeCheckRunResp[];
 }

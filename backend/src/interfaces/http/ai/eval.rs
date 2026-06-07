@@ -34,7 +34,7 @@ async fn list_datasets(
     Query(query): Query<EvalDatasetQuery>,
 ) -> Result<Json<ApiResponse<PageResult<EvalDatasetResp>>>, AppError> {
     require_permission(&current_user, EVAL_LIST_PERMISSION)?;
-    let service = EvalService::new(state.db);
+    let service = EvalService::for_tenant(state.db, current_user.tenant_id);
 
     Ok(Json(ApiResponse::ok(service.list_datasets(query).await?)))
 }
@@ -46,7 +46,7 @@ async fn list_cases(
     Query(query): Query<EvalCaseQuery>,
 ) -> Result<Json<ApiResponse<PageResult<EvalCaseResp>>>, AppError> {
     require_permission(&current_user, EVAL_CASE_LIST_PERMISSION)?;
-    let service = EvalService::new(state.db);
+    let service = EvalService::for_tenant(state.db, current_user.tenant_id);
 
     Ok(Json(ApiResponse::ok(
         service.list_cases(dataset_id, query).await?,
@@ -59,7 +59,7 @@ async fn run_eval(
     Json(command): Json<EvalRunCommand>,
 ) -> Result<Json<ApiResponse<EvalRunResp>>, AppError> {
     require_permission(&current_user, EVAL_RUN_PERMISSION)?;
-    let service = EvalService::new(state.db);
+    let service = EvalService::for_tenant(state.db, current_user.tenant_id);
 
     Ok(Json(ApiResponse::ok(
         service.run_eval(current_user.id, command).await?,
@@ -72,7 +72,7 @@ async fn list_runs(
     Query(query): Query<EvalRunQuery>,
 ) -> Result<Json<ApiResponse<PageResult<EvalRunResp>>>, AppError> {
     require_permission(&current_user, EVAL_REPORT_PERMISSION)?;
-    let service = EvalService::new(state.db);
+    let service = EvalService::for_tenant(state.db, current_user.tenant_id);
 
     Ok(Json(ApiResponse::ok(service.list_runs(query).await?)))
 }
@@ -83,7 +83,7 @@ async fn get_run(
     Path(run_id): Path<i64>,
 ) -> Result<Json<ApiResponse<EvalRunResp>>, AppError> {
     require_permission(&current_user, EVAL_REPORT_PERMISSION)?;
-    let service = EvalService::new(state.db);
+    let service = EvalService::for_tenant(state.db, current_user.tenant_id);
 
     Ok(Json(ApiResponse::ok(service.get_run(run_id).await?)))
 }
@@ -95,7 +95,7 @@ async fn list_results(
     Query(query): Query<EvalResultQuery>,
 ) -> Result<Json<ApiResponse<PageResult<EvalResultResp>>>, AppError> {
     require_permission(&current_user, EVAL_REPORT_PERMISSION)?;
-    let service = EvalService::new(state.db);
+    let service = EvalService::for_tenant(state.db, current_user.tenant_id);
 
     Ok(Json(ApiResponse::ok(
         service.list_results(run_id, query).await?,
@@ -176,6 +176,18 @@ mod tests {
                 "missing permission seed: {permission}"
             );
         }
+    }
+
+    #[test]
+    fn eval_handlers_bind_runtime_to_current_tenant() {
+        let source = include_str!("eval.rs");
+
+        assert!(
+            source
+                .matches("EvalService::for_tenant(state.db, current_user.tenant_id)")
+                .count()
+                >= 6
+        );
     }
 
     #[tokio::test]

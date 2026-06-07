@@ -35,7 +35,7 @@ async fn create_run(
     Json(command): Json<AgentRunCommand>,
 ) -> Result<Json<ApiResponse<AgentRunResp>>, AppError> {
     require_permission(&current_user, AGENT_RUN_PERMISSION)?;
-    let service = AgentService::new(state.db);
+    let service = AgentService::for_tenant(state.db, current_user.tenant_id);
 
     Ok(Json(ApiResponse::ok(
         service.create_run(current_user.id, command).await?,
@@ -48,7 +48,7 @@ async fn list_runs(
     Query(query): Query<AgentRunQuery>,
 ) -> Result<Json<ApiResponse<PageResult<AgentRunResp>>>, AppError> {
     require_permission(&current_user, AGENT_LIST_PERMISSION)?;
-    let service = AgentService::new(state.db);
+    let service = AgentService::for_tenant(state.db, current_user.tenant_id);
 
     Ok(Json(ApiResponse::ok(service.list_runs(query).await?)))
 }
@@ -59,7 +59,7 @@ async fn get_run(
     Path(run_id): Path<i64>,
 ) -> Result<Json<ApiResponse<AgentRunResp>>, AppError> {
     require_permission(&current_user, AGENT_LIST_PERMISSION)?;
-    let service = AgentService::new(state.db);
+    let service = AgentService::for_tenant(state.db, current_user.tenant_id);
 
     Ok(Json(ApiResponse::ok(service.get_run(run_id).await?)))
 }
@@ -71,7 +71,7 @@ async fn list_events(
     Query(query): Query<AgentRunEventQuery>,
 ) -> Result<Json<ApiResponse<PageResult<AgentRunEventResp>>>, AppError> {
     require_permission(&current_user, AGENT_EVENT_LIST_PERMISSION)?;
-    let service = AgentService::new(state.db);
+    let service = AgentService::for_tenant(state.db, current_user.tenant_id);
 
     Ok(Json(ApiResponse::ok(
         service.list_events(run_id, query).await?,
@@ -85,7 +85,7 @@ async fn resume_run(
     Json(command): Json<AgentRunResumeCommand>,
 ) -> Result<Json<ApiResponse<AgentRunResp>>, AppError> {
     require_permission(&current_user, AGENT_RESUME_PERMISSION)?;
-    let service = AgentService::new(state.db);
+    let service = AgentService::for_tenant(state.db, current_user.tenant_id);
 
     Ok(Json(ApiResponse::ok(
         service.resume_run(current_user.id, run_id, command).await?,
@@ -98,7 +98,7 @@ async fn cancel_run(
     Path(run_id): Path<i64>,
 ) -> Result<Json<ApiResponse<AgentRunResp>>, AppError> {
     require_permission(&current_user, AGENT_CANCEL_PERMISSION)?;
-    let service = AgentService::new(state.db);
+    let service = AgentService::for_tenant(state.db, current_user.tenant_id);
 
     Ok(Json(ApiResponse::ok(
         service.cancel_run(current_user.id, run_id).await?,
@@ -163,6 +163,18 @@ mod tests {
         assert_eq!(AGENT_EVENT_LIST_PERMISSION, "ai:agent:event:list");
         assert_eq!(AGENT_RESUME_PERMISSION, "ai:agent:resume");
         assert_eq!(AGENT_CANCEL_PERMISSION, "ai:agent:cancel");
+    }
+
+    #[test]
+    fn agent_handlers_bind_runtime_to_current_tenant() {
+        let source = include_str!("agent.rs");
+
+        assert!(
+            source
+                .matches("AgentService::for_tenant(state.db, current_user.tenant_id)")
+                .count()
+                >= 6
+        );
     }
 
     #[tokio::test]

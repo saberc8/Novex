@@ -109,3 +109,20 @@ export interface RagFeedbackResp {
   traceId: number;
   rating: RagFeedbackRating;
 }
+
+export interface AiFeedbackCommand {
+  resourceType: string;
+  resourceId: string;
+  traceId?: string;
+  rating: string;
+  reason?: string;
+  metadata?: Record<string, unknown>;
+}
+
+export interface AiFeedbackResp {
+  id: number;
+  resourceType: string;
+  resourceId: string;
+  traceId?: string | null;
+  rating: string;
+}

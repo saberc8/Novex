@@ -117,6 +117,42 @@ impl AuthService {
         })
     }
 
+    pub async fn login_external_account(
+        &self,
+        user_id: i64,
+        provider_code: &str,
+        client_id: Option<String>,
+        meta: LoginMeta,
+    ) -> Result<LoginResult, AppError> {
+        let Some(user) = self.users.find_by_id(user_id).await? else {
+            return Err(AppError::Unauthorized);
+        };
+        if user.status != ACTIVE_USER_STATUS {
+            return Err(AppError::Unauthorized);
+        }
+
+        let issued = self.jwt.issue_with_expire(user.id, &user.username)?;
+        self.record_successful_login(
+            &user,
+            &LoginCommand {
+                username: user.username.clone(),
+                password: String::new(),
+                auth_type: Some(provider_code.to_owned()),
+                client_id,
+                captcha: None,
+                captcha_key: None,
+                uuid: None,
+            },
+            &issued.token,
+            &meta,
+        )
+        .await?;
+        Ok(LoginResult {
+            token: issued.token,
+            expire: issued.expire,
+        })
+    }
+
     async fn record_successful_login(
         &self,
         user: &UserAccount,

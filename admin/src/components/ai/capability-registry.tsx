@@ -1,14 +1,17 @@
 "use client";
 
 import type { ColumnDef } from "@tanstack/react-table";
-import { Play, RefreshCw } from "lucide-react";
+import { PackageCheck, Play, RefreshCw } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
 import {
   dryRunTool,
+  installPlugin,
   listConnectors,
   listMcpServers,
+  listPluginInstallations,
   listPlugins,
+  listSkills,
   listToolAudits,
   listTools,
   listTriggers
@@ -18,9 +21,9 @@ import { DataTable } from "@/components/table/data-table";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import type { PageResult } from "@/types/api";
-import type { CapabilityItemResp, ToolCallAuditResp } from "@/types/ai-capability";
+import type { CapabilityItemResp, PluginInstallationResp, ToolCallAuditResp } from "@/types/ai-capability";
 
-type CapabilityResource = "tools" | "connectors" | "plugins" | "triggers" | "mcpServers";
+type CapabilityResource = "skills" | "tools" | "connectors" | "plugins" | "triggers" | "mcpServers";
 
 interface CapabilityRegistryProps {
   title: string;
@@ -32,6 +35,7 @@ const LOADERS: Record<
   CapabilityResource,
   () => Promise<PageResult<CapabilityItemResp>>
 > = {
+  skills: () => listSkills({ page: 1, size: 50 }),
   tools: () => listTools({ page: 1, size: 50 }),
   connectors: () => listConnectors({ page: 1, size: 50 }),
   plugins: () => listPlugins({ page: 1, size: 50 }),
@@ -43,9 +47,11 @@ export function CapabilityRegistry({ title, resource, permission }: CapabilityRe
   const [items, setItems] = useState<CapabilityItemResp[]>([]);
   const [total, setTotal] = useState(0);
   const [audits, setAudits] = useState<ToolCallAuditResp[]>([]);
+  const [pluginInstallations, setPluginInstallations] = useState<PluginInstallationResp[]>([]);
   const [loading, setLoading] = useState(false);
   const [auditLoading, setAuditLoading] = useState(false);
   const [runningToolCode, setRunningToolCode] = useState<string | null>(null);
+  const [installingPluginCode, setInstallingPluginCode] = useState<string | null>(null);
 
   const loadItems = useCallback(async () => {
     setLoading(true);
@@ -76,6 +82,19 @@ export function CapabilityRegistry({ title, resource, permission }: CapabilityRe
     }
   }, [resource]);
 
+  const loadPluginInstallations = useCallback(async () => {
+    if (resource !== "plugins") {
+      setPluginInstallations([]);
+      return;
+    }
+    try {
+      const result = await listPluginInstallations({ page: 1, size: 50 });
+      setPluginInstallations(result.list);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "插件安装状态加载失败");
+    }
+  }, [resource]);
+
   useEffect(() => {
     void loadItems();
   }, [loadItems]);
@@ -83,6 +102,14 @@ export function CapabilityRegistry({ title, resource, permission }: CapabilityRe
   useEffect(() => {
     void loadAudits();
   }, [loadAudits]);
+
+  useEffect(() => {
+    void loadPluginInstallations();
+  }, [loadPluginInstallations]);
+
+  const pluginInstallationsByCode = useMemo(() => {
+    return new Map(pluginInstallations.map((installation) => [installation.pluginCode, installation]));
+  }, [pluginInstallations]);
 
   const columns = useMemo<ColumnDef<CapabilityItemResp>[]>(
     () => [
@@ -105,6 +132,23 @@ export function CapabilityRegistry({ title, resource, permission }: CapabilityRe
         cell: ({ row }) => <Badge variant="secondary">{statusLabel(row.original.status)}</Badge>
       },
       {
+        header: "配置",
+        cell: ({ row }) => <CapabilityMetadata item={row.original} resource={resource} />
+      },
+      {
+        header: "安装",
+        cell: ({ row }) => {
+          if (resource !== "plugins") {
+            return "-";
+          }
+          const installation = pluginInstallationsByCode.get(row.original.code);
+          if (!installation) {
+            return <Badge variant="outline">未安装</Badge>;
+          }
+          return <Badge variant={installation.enabled ? "secondary" : "outline"}>{installation.enabled ? "已启用" : "已停用"}</Badge>;
+        }
+      },
+      {
         header: "风险",
         cell: ({ row }) =>
           row.original.riskLevel ? <Badge variant="outline">{riskLabel(row.original.riskLevel)}</Badge> : "-"
@@ -112,8 +156,9 @@ export function CapabilityRegistry({ title, resource, permission }: CapabilityRe
       {
         id: "actions",
         header: "操作",
-        cell: ({ row }) =>
-          resource === "tools" ? (
+        cell: ({ row }) => {
+          if (resource === "tools") {
+            return (
             <PermissionGate permissions={["ai:tool:dryRun"]}>
               <Button
                 size="sm"
@@ -125,10 +170,29 @@ export function CapabilityRegistry({ title, resource, permission }: CapabilityRe
                 试运行
               </Button>
             </PermissionGate>
-          ) : null
+            );
+          }
+          if (resource === "plugins") {
+            const installation = pluginInstallationsByCode.get(row.original.code);
+            return (
+              <PermissionGate permissions={["ai:plugin:install"]}>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  disabled={installingPluginCode === row.original.code}
+                  onClick={() => void enablePlugin(row.original)}
+                >
+                  <PackageCheck />
+                  {installation?.enabled ? "重新启用" : "启用插件"}
+                </Button>
+              </PermissionGate>
+            );
+          }
+          return null;
+        }
       }
     ],
-    [resource, runningToolCode]
+    [installingPluginCode, pluginInstallationsByCode, resource, runningToolCode]
   );
 
   async function runTool(item: CapabilityItemResp) {
@@ -147,6 +211,25 @@ export function CapabilityRegistry({ title, resource, permission }: CapabilityRe
       toast.error(error instanceof Error ? error.message : "工具试运行失败");
     } finally {
       setRunningToolCode(null);
+    }
+  }
+
+  async function enablePlugin(item: CapabilityItemResp) {
+    setInstallingPluginCode(item.code);
+    try {
+      const result = await installPlugin({
+        pluginCode: item.code,
+        version: pluginVersion(item),
+        enabled: true,
+        permissionGrants: pluginPermissionGrants(item),
+        config: {}
+      });
+      toast.success(`${result.pluginName} 已启用`);
+      await loadPluginInstallations();
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "插件启用失败");
+    } finally {
+      setInstallingPluginCode(null);
     }
   }
 
@@ -212,4 +295,58 @@ function riskLabel(riskLevel: number) {
       3: "高"
     }[riskLevel] ?? String(riskLevel)
   );
+}
+
+function pluginVersion(item: CapabilityItemResp) {
+  const version = item.metadata.version;
+  return typeof version === "string" && version.trim() ? version.trim() : "0.1.0";
+}
+
+function pluginPermissionGrants(item: CapabilityItemResp) {
+  const manifest = item.metadata.manifest;
+  if (!isRecord(manifest) || !Array.isArray(manifest.permissions)) {
+    return [];
+  }
+  return manifest.permissions.filter((permission): permission is string => typeof permission === "string");
+}
+
+function CapabilityMetadata({
+  item,
+  resource
+}: {
+  item: CapabilityItemResp;
+  resource: CapabilityResource;
+}) {
+  if (resource === "skills") {
+    const routeValues = Object.values(recordValue(item.metadata.modelRoutePolicy))
+      .filter((value): value is string => typeof value === "string" && value.trim().length > 0)
+      .slice(0, 3);
+    const capabilityRefs = arrayValue(item.metadata.capabilityRefs)
+      .map((value) => recordValue(value).code)
+      .filter((value): value is string => typeof value === "string" && value.trim().length > 0)
+      .slice(0, 3);
+    return (
+      <div className="flex max-w-72 flex-wrap gap-1">
+        {[...routeValues, ...capabilityRefs].map((value) => (
+          <Badge key={value} variant="outline">
+            {value}
+          </Badge>
+        ))}
+        {!routeValues.length && !capabilityRefs.length ? "-" : null}
+      </div>
+    );
+  }
+  return "-";
+}
+
+function recordValue(value: unknown): Record<string, unknown> {
+  return isRecord(value) ? value : {};
+}
+
+function arrayValue(value: unknown): unknown[] {
+  return Array.isArray(value) ? value : [];
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }

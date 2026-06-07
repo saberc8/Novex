@@ -1654,6 +1654,7 @@ name = "novex-agent"
 version = "0.1.0"
 dependencies = [
  "novex-ai-core",
+ "novex-memory",
  "novex-model",
  "novex-rag",
  "novex-tools",
@@ -1664,6 +1665,7 @@ dependencies = [
 name = "novex-ai-core"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "serde",
 ]
 
@@ -1673,6 +1675,7 @@ version = "0.1.0"
 dependencies = [
  "novex-ai-core",
  "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -1690,6 +1693,7 @@ version = "0.1.0"
 dependencies = [
  "novex-ai-core",
  "serde",
+ "url",
 ]
 
 [[package]]
@@ -1706,6 +1710,7 @@ version = "0.1.0"
 dependencies = [
  "novex-ai-core",
  "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -1726,6 +1731,7 @@ dependencies = [
  "novex-ai-core",
  "novex-model",
  "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -1737,14 +1743,18 @@ dependencies = [
  "novex-mcp",
  "novex-model",
  "serde",
+ "serde_json",
 ]
 
 [[package]]
 name = "novex-trigger"
 version = "0.1.0"
 dependencies = [
+ "hmac",
  "novex-ai-core",
  "serde",
+ "serde_json",
+ "sha2",
 ]
 
 [[package]]

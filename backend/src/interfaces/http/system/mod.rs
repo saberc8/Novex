@@ -4,9 +4,11 @@ pub mod client;
 pub mod dept;
 pub mod dict;
 pub mod file;
+pub mod identity;
 pub mod menu;
 pub mod option;
 pub mod role;
+pub mod secret;
 pub mod storage;
 pub mod user;
 

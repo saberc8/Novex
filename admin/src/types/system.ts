@@ -381,3 +381,34 @@ export interface ClientCommand {
   timeout: number;
   status: number;
 }
+
+export interface SecretQuery extends PageQuery {
+  scopeType?: string;
+  scopeId?: string;
+  code?: string;
+}
+
+export interface SecretCommand {
+  scopeType: "platform" | "tenant" | "user" | "app";
+  scopeId: string;
+  code: string;
+  plaintext: string;
+  metadata?: Record<string, unknown>;
+  status?: number;
+}
+
+export interface SecretResp {
+  id: number;
+  scopeType: string;
+  scopeId: string;
+  code: string;
+  keyVersion: number;
+  maskedValue: string;
+  expiresAt?: string | null;
+  rotatedAt?: string | null;
+  lastUsedAt?: string | null;
+  metadata: Record<string, unknown>;
+  status: number;
+  createTime: string;
+  updateTime?: string | null;
+}

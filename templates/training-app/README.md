@@ -22,6 +22,8 @@ M5 package:
 
 ## Smoke checks
 
+Script: `templates/training-app/smoke.sh`
+
 | Code | Workdir | Command |
 | --- | --- | --- |
 | `training_web_unit` | `apps/training-web` | `pnpm test` |

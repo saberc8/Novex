@@ -20,6 +20,7 @@ import {
   listEvalRuns,
   runEvalDataset
 } from "@/api/ai/eval";
+import { listTrainingLearningRecords } from "@/api/ai/training";
 import { PermissionGate } from "@/components/permission/permission-gate";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -31,18 +32,24 @@ import {
   SelectValue
 } from "@/components/ui/select";
 import type { EvalCaseResp, EvalDatasetResp, EvalPayload, EvalResultResp, EvalRunResp } from "@/types/ai-eval";
+import type { TrainingLearningRecordsResp } from "@/types/ai-training";
 
 const DEFAULT_DATASET_CODE = "training_regression";
 const TARGET_FILTERS = [
   { value: "all", label: "全部" },
   { value: "rag", label: "RAG" },
   { value: "intent", label: "Intent" },
-  { value: "tool", label: "Tool" }
+  { value: "tool", label: "Tool" },
+  { value: "react", label: "ReAct" },
+  { value: "safety", label: "Safety" }
 ];
 const BREAKDOWN_METRICS = [
   { key: "citation_accuracy", label: "RAG Citation" },
+  { key: "retrieval_recall", label: "Retrieval Recall" },
   { key: "intent_accuracy", label: "Intent Accuracy" },
-  { key: "tool_accuracy", label: "Tool Accuracy" }
+  { key: "tool_accuracy", label: "Tool Accuracy" },
+  { key: "latency", label: "Latency" },
+  { key: "cost", label: "Cost" }
 ];
 
 export default function AiEvalsPage() {
@@ -57,10 +64,12 @@ export default function AiEvalsPage() {
   const [caseTotal, setCaseTotal] = useState(0);
   const [runTotal, setRunTotal] = useState(0);
   const [resultTotal, setResultTotal] = useState(0);
+  const [learningRecords, setLearningRecords] = useState<TrainingLearningRecordsResp | null>(null);
   const [datasetsLoading, setDatasetsLoading] = useState(false);
   const [casesLoading, setCasesLoading] = useState(false);
   const [runsLoading, setRunsLoading] = useState(false);
   const [resultsLoading, setResultsLoading] = useState(false);
+  const [learningLoading, setLearningLoading] = useState(false);
   const [running, setRunning] = useState(false);
 
   const selectedDataset = useMemo(
@@ -161,6 +170,18 @@ export default function AiEvalsPage() {
     }
   }, [selectedRun?.runId]);
 
+  const loadLearningRecords = useCallback(async () => {
+    setLearningLoading(true);
+    try {
+      const result = await listTrainingLearningRecords({ scope: "tenant" });
+      setLearningRecords(result);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Training Learning Records 加载失败");
+    } finally {
+      setLearningLoading(false);
+    }
+  }, []);
+
   useEffect(() => {
     void loadDatasets();
   }, [loadDatasets]);
@@ -176,6 +197,10 @@ export default function AiEvalsPage() {
   useEffect(() => {
     void loadResults();
   }, [loadResults]);
+
+  useEffect(() => {
+    void loadLearningRecords();
+  }, [loadLearningRecords]);
 
   async function runSelectedDataset() {
     if (!selectedDataset) {
@@ -330,6 +355,82 @@ export default function AiEvalsPage() {
               );
             })}
           </div>
+
+          {selectedRun ? (
+            <div className="mt-4 rounded-md border bg-muted/20 p-3">
+              <div className="text-xs font-medium text-muted-foreground">Regression Payload</div>
+              <pre className="mt-2 max-h-36 overflow-auto whitespace-pre-wrap break-words text-xs leading-5 text-muted-foreground">
+                {payloadPretty(selectedRun.reportPayload)}
+              </pre>
+            </div>
+          ) : null}
+
+          <div className="mt-4 border-t pt-4">
+            <div className="flex items-center justify-between gap-3">
+              <div className="min-w-0">
+                <h3 className="truncate text-sm font-medium">Training Learning Records</h3>
+                <p className="text-xs text-muted-foreground">
+                  {learningRecords ? `${learningRecords.records.length} Records · ${learningRecords.weakPoints.length} Weak Points` : "暂无学习记录"}
+                </p>
+              </div>
+              <Button
+                variant="outline"
+                size="icon"
+                title="刷新学习记录"
+                onClick={() => void loadLearningRecords()}
+                disabled={learningLoading}
+              >
+                <RefreshCw />
+              </Button>
+            </div>
+
+            {learningRecords ? (
+              <>
+                <div className="mt-3 grid gap-2 sm:grid-cols-4">
+                  <Metric label="Completion" value={`${learningRecords.summary.completionRate}%`} />
+                  <Metric label="Pending" value={String(learningRecords.summary.pendingTaskCount)} />
+                  <Metric label="Quiz Avg" value={String(learningRecords.summary.quizAverageScore)} />
+                  <Metric label="Weak Points" value={String(learningRecords.summary.weakPointCount)} />
+                </div>
+
+                <div className="mt-3 grid gap-3 lg:grid-cols-2">
+                  <div className="grid gap-2">
+                    {learningRecords.records.slice(0, 4).map((record) => (
+                      <div key={`${record.kind}-${record.id}`} className="rounded-md border p-3">
+                        <div className="flex min-w-0 items-center justify-between gap-2">
+                          <span className="truncate text-sm font-medium">{record.title}</span>
+                          <Badge variant={record.status === "needs_review" ? "destructive" : "outline"}>{record.status}</Badge>
+                        </div>
+                        <div className="mt-1 flex flex-wrap gap-2 text-xs text-muted-foreground">
+                          <span>{record.learnerName}</span>
+                          <span>{record.createTime}</span>
+                          {typeof record.score === "number" ? <span>{percent(record.score)}</span> : null}
+                        </div>
+                        <p className="mt-2 line-clamp-2 text-xs text-muted-foreground">{record.detail}</p>
+                      </div>
+                    ))}
+                  </div>
+
+                  <div className="grid content-start gap-2">
+                    {learningRecords.weakPoints.slice(0, 4).map((weakPoint) => (
+                      <div key={`${weakPoint.topic}-${weakPoint.evidence}`} className="rounded-md border p-3">
+                        <div className="flex min-w-0 items-center justify-between gap-2">
+                          <span className="truncate text-sm font-medium">{weakPoint.topic}</span>
+                          <Badge variant="outline">{weakPoint.count}</Badge>
+                        </div>
+                        <div className="mt-1 text-xs text-muted-foreground">
+                          {weakPoint.evidence} · {weakPoint.lastSeenAt}
+                        </div>
+                      </div>
+                    ))}
+                    {!learningRecords.weakPoints.length ? (
+                      <div className="rounded-md border border-dashed p-6 text-center text-sm text-muted-foreground">暂无薄弱点</div>
+                    ) : null}
+                  </div>
+                </div>
+              </>
+            ) : null}
+          </div>
         </div>
 
         <div className="grid gap-4 lg:grid-cols-[0.9fr_1.1fr]">
@@ -466,6 +567,16 @@ function payloadPreview(payload: EvalPayload) {
     return "-";
   }
   return text.length > 180 ? `${text.slice(0, 180)}...` : text;
+}
+
+function payloadPretty(payload: EvalPayload) {
+  if (payload === null || payload === undefined) {
+    return "-";
+  }
+  if (typeof payload === "string") {
+    return payload || "-";
+  }
+  return JSON.stringify(payload, null, 2);
 }
 
 function statusVariant(status: string) {

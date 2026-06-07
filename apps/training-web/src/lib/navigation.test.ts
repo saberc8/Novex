@@ -1,3 +1,5 @@
+import { existsSync } from "node:fs";
+import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { trainingNavItems } from "./navigation";
 
@@ -10,5 +12,18 @@ describe("training navigation", () => {
       "/records",
       "/notifications"
     ]);
+  });
+
+  it("has a Next page route for every customer navigation target", () => {
+    const appDir = path.join(process.cwd(), "app");
+
+    for (const item of trainingNavItems) {
+      const routeFile =
+        item.href === "/"
+          ? path.join(appDir, "page.tsx")
+          : path.join(appDir, item.href.slice(1), "page.tsx");
+
+      expect(existsSync(routeFile), `${item.href} route missing`).toBe(true);
+    }
   });
 });

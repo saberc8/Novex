@@ -1,4 +1,9 @@
 use novex_ai_core::{normalize_task_budget, BudgetValidationError, FoundationModule, TaskBudget};
+use novex_memory::MemoryContext;
+use novex_tools::{
+    evaluate_tool_execution_policy, ApprovalPolicy, ToolExecutionPolicyDecision,
+    ToolExecutionPolicyInput, ToolRiskLevel,
+};
 use serde::{Deserialize, Serialize};
 
 pub const CRATE_ID: &str = "novex-agent";
@@ -28,6 +33,7 @@ pub struct SelectedTool {
     pub code: String,
     pub risk_level: u8,
     pub requires_approval: bool,
+    pub policy_decision: ToolExecutionPolicyDecision,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -37,6 +43,7 @@ pub struct AgentRunPlan {
     pub loop_kind: AgentLoopKind,
     pub selected_tool: Option<SelectedTool>,
     pub requires_approval: bool,
+    pub memory_context: MemoryContext,
     pub budget: TaskBudget,
     pub steps: Vec<String>,
 }
@@ -99,6 +106,42 @@ pub fn select_tool(input: &str) -> Option<SelectedTool> {
     if contains_any(
         &normalized,
         &[
+            "read github",
+            "github file",
+            "read repo file",
+            "read file",
+            "读取 github",
+            "读取仓库文件",
+        ],
+    ) {
+        return Some(selected_tool(
+            "github.repo.read",
+            ToolRiskLevel::Low,
+            ApprovalPolicy::OnRisk,
+            "ai:tool:dryRun",
+        ));
+    }
+    if contains_any(
+        &normalized,
+        &[
+            "github",
+            "repo search",
+            "search repo",
+            "repository search",
+            "代码仓库",
+            "仓库搜索",
+        ],
+    ) {
+        return Some(selected_tool(
+            "github.repo.search",
+            ToolRiskLevel::Low,
+            ApprovalPolicy::OnRisk,
+            "ai:tool:dryRun",
+        ));
+    }
+    if contains_any(
+        &normalized,
+        &[
             "feishu",
             "飞书",
             "message",
@@ -109,11 +152,12 @@ pub fn select_tool(input: &str) -> Option<SelectedTool> {
             "通知",
         ],
     ) {
-        return Some(SelectedTool {
-            code: "feishu.message.send".to_owned(),
-            risk_level: 2,
-            requires_approval: true,
-        });
+        return Some(selected_tool(
+            "feishu.message.send",
+            ToolRiskLevel::Medium,
+            ApprovalPolicy::OnRisk,
+            "ai:agent:run",
+        ));
     }
     if contains_any(
         &normalized,
@@ -127,11 +171,12 @@ pub fn select_tool(input: &str) -> Option<SelectedTool> {
             "海报",
         ],
     ) {
-        return Some(SelectedTool {
-            code: "media.image.generate".to_owned(),
-            risk_level: 2,
-            requires_approval: true,
-        });
+        return Some(selected_tool(
+            "media.image.generate",
+            ToolRiskLevel::Medium,
+            ApprovalPolicy::OnRisk,
+            "ai:tool:dryRun",
+        ));
     }
     if contains_any(
         &normalized,
@@ -146,16 +191,54 @@ pub fn select_tool(input: &str) -> Option<SelectedTool> {
             "知识库",
         ],
     ) {
-        return Some(SelectedTool {
-            code: "rag.search".to_owned(),
-            risk_level: 1,
-            requires_approval: false,
-        });
+        return Some(selected_tool(
+            "rag.search",
+            ToolRiskLevel::Low,
+            ApprovalPolicy::OnRisk,
+            "ai:knowledge:ask",
+        ));
     }
     None
 }
 
+fn selected_tool(
+    code: &str,
+    risk_level: ToolRiskLevel,
+    approval_policy: ApprovalPolicy,
+    permission_code: &str,
+) -> SelectedTool {
+    let decision = evaluate_tool_execution_policy(ToolExecutionPolicyInput {
+        tool_code: code.to_owned(),
+        risk_level,
+        approval_policy,
+        permission_code: Some(permission_code.to_owned()),
+        auto_approved: false,
+    });
+    SelectedTool {
+        code: code.to_owned(),
+        risk_level: risk_level_value(risk_level),
+        requires_approval: decision.requires_approval,
+        policy_decision: decision,
+    }
+}
+
+fn risk_level_value(risk_level: ToolRiskLevel) -> u8 {
+    match risk_level {
+        ToolRiskLevel::Low => 1,
+        ToolRiskLevel::Medium => 2,
+        ToolRiskLevel::High => 3,
+    }
+}
+
 pub fn plan_react_run(input: &str, budget: TaskBudget) -> Result<AgentRunPlan, AgentPlanError> {
+    plan_react_run_with_memory(input, budget, MemoryContext::empty())
+}
+
+pub fn plan_react_run_with_memory(
+    input: &str,
+    budget: TaskBudget,
+    memory_context: MemoryContext,
+) -> Result<AgentRunPlan, AgentPlanError> {
     let budget = normalize_task_budget(budget).map_err(AgentPlanError::Budget)?;
     let intent = route_intent(input);
     let selected_tool = select_tool(input);
@@ -176,6 +259,7 @@ pub fn plan_react_run(input: &str, budget: TaskBudget) -> Result<AgentRunPlan, A
         loop_kind: AgentLoopKind::ReAct,
         selected_tool,
         requires_approval,
+        memory_context,
         budget,
         steps,
     })
@@ -198,6 +282,10 @@ pub fn module() -> FoundationModule {
 mod tests {
     use super::*;
     use novex_ai_core::{FoundationStatus, TaskBudget};
+    use novex_memory::{
+        build_memory_context, MemoryAccessContext, MemoryScope, MemoryScopeRef, MemorySnippet,
+        MemoryWritePolicy,
+    };
 
     #[test]
     fn module_describes_agent_boundary() {
@@ -243,6 +331,33 @@ mod tests {
             select_tool("send a Feishu notification").unwrap().code,
             "feishu.message.send"
         );
+        assert_eq!(
+            select_tool("search GitHub repo for parser worker")
+                .unwrap()
+                .code,
+            "github.repo.search"
+        );
+        assert_eq!(
+            select_tool("read GitHub file src/lib.rs").unwrap().code,
+            "github.repo.read"
+        );
+    }
+
+    #[test]
+    fn agent_runtime_selected_tool_carries_shared_policy_decision() {
+        let tool = select_tool("send a Feishu notification").unwrap();
+
+        assert_eq!(tool.code, "feishu.message.send");
+        assert_eq!(tool.policy_decision.tool_code, tool.code);
+        assert!(tool.policy_decision.requires_approval);
+        assert_eq!(
+            tool.policy_decision.pause_reason.as_deref(),
+            Some("approval")
+        );
+        assert_eq!(
+            tool.requires_approval,
+            tool.policy_decision.requires_approval
+        );
     }
 
     #[test]
@@ -269,6 +384,44 @@ mod tests {
         assert!(plan.steps.iter().any(|step| step == "thought"));
         assert!(plan.steps.iter().any(|step| step == "action"));
         assert!(plan.steps.iter().any(|step| step == "observation"));
+    }
+
+    #[test]
+    fn agent_runtime_plan_carries_filtered_memory_context() {
+        let memory_context = build_memory_context(
+            vec![MemorySnippet {
+                tenant_id: "tenant-a".to_owned(),
+                scope: MemoryScope::User,
+                scope_id: "user-1".to_owned(),
+                key: "profile.locale".to_owned(),
+                content: "Prefers Chinese answers".to_owned(),
+                write_policy: MemoryWritePolicy::UserApproved,
+            }],
+            &MemoryAccessContext {
+                tenant_id: "tenant-a".to_owned(),
+                subject_id: "user-1".to_owned(),
+                allowed_scopes: vec![MemoryScopeRef {
+                    scope: MemoryScope::User,
+                    scope_id: "user-1".to_owned(),
+                }],
+                max_snippets: 4,
+            },
+        );
+
+        let plan = plan_react_run_with_memory(
+            "answer in my preferred language",
+            TaskBudget {
+                max_steps: Some(4),
+                max_tool_calls: Some(1),
+                max_seconds: Some(20),
+                max_cost_cents: Some(0),
+            },
+            memory_context,
+        )
+        .unwrap();
+
+        assert_eq!(plan.memory_context.snippets.len(), 1);
+        assert_eq!(plan.memory_context.snippets[0].key, "profile.locale");
     }
 
     #[test]

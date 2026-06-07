@@ -73,7 +73,7 @@ const navItems = [
 
 const availableTools = [
   { code: "rag.search", risk: "low", permission: "ai:knowledge:ask" },
-  { code: "feishu.message.send", risk: "medium", permission: "ai:agent:resume" },
+  { code: "feishu.message.send", risk: "medium", permission: "ai:agent:run" },
   { code: "media.image.generate", risk: "medium", permission: "ai:tool:dryRun" }
 ];
 
@@ -441,24 +441,38 @@ export function AgentWorkspaceClient() {
                   No events
                 </div>
               ) : null}
-              {events.map((event) => (
-                <article className="rounded-lg border border-slate-200 p-3" key={event.id}>
-                  <div className="flex flex-wrap items-center justify-between gap-2">
-                    <div className="flex min-w-0 items-center gap-2">
-                      <span className="inline-flex h-6 items-center rounded-md bg-slate-100 px-2 text-xs font-semibold text-slate-600">
-                        #{event.sequenceNo}
+              {events.map((event) => {
+                const assetUrl = mediaAssetUrl(event.payload);
+
+                return (
+                  <article className="rounded-lg border border-slate-200 p-3" key={event.id}>
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <div className="flex min-w-0 items-center gap-2">
+                        <span className="inline-flex h-6 items-center rounded-md bg-slate-100 px-2 text-xs font-semibold text-slate-600">
+                          #{event.sequenceNo}
+                        </span>
+                        <span className="truncate text-sm font-semibold text-slate-900">{event.eventType}</span>
+                      </div>
+                      <span className={`inline-flex rounded-md px-2 py-1 text-xs font-medium ${statusClass(event.status)}`}>
+                        {event.status}
                       </span>
-                      <span className="truncate text-sm font-semibold text-slate-900">{event.eventType}</span>
                     </div>
-                    <span className={`inline-flex rounded-md px-2 py-1 text-xs font-medium ${statusClass(event.status)}`}>
-                      {event.status}
-                    </span>
-                  </div>
-                  <pre className="mt-3 max-h-40 overflow-auto rounded-md bg-slate-50 p-3 text-xs leading-5 text-slate-600">
-                    {payloadPreview(event.payload)}
-                  </pre>
-                </article>
-              ))}
+                    <pre className="mt-3 max-h-40 overflow-auto rounded-md bg-slate-50 p-3 text-xs leading-5 text-slate-600">
+                      {payloadPreview(event.payload)}
+                    </pre>
+                    {assetUrl ? (
+                      <a
+                        className="mt-3 inline-flex h-8 items-center rounded-md border border-teal-200 bg-teal-50 px-3 text-xs font-semibold text-teal-900 hover:bg-teal-100"
+                        href={assetUrl}
+                        rel="noreferrer"
+                        target="_blank"
+                      >
+                        Generated asset
+                      </a>
+                    ) : null}
+                  </article>
+                );
+              })}
             </div>
           </section>
         </section>
@@ -586,6 +600,28 @@ function payloadPreview(payload: AgentRunEventResp["payload"]) {
     return "-";
   }
   return text.length > 900 ? `${text.slice(0, 900)}...` : text;
+}
+
+function mediaAssetUrl(payload: AgentRunEventResp["payload"]): string | null {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    return null;
+  }
+  const payloadRecord = payload as Record<string, unknown>;
+  const direct = stringValue(payloadRecord, "assetUrl") ?? stringValue(payloadRecord, "asset_url");
+  if (direct) {
+    return direct;
+  }
+  const response = payloadRecord.response;
+  if (response && typeof response === "object" && !Array.isArray(response)) {
+    const responseRecord = response as Record<string, unknown>;
+    return stringValue(responseRecord, "assetUrl") ?? stringValue(responseRecord, "asset_url");
+  }
+  return null;
+}
+
+function stringValue(value: Record<string, unknown>, key: string): string | null {
+  const raw = value[key];
+  return typeof raw === "string" && raw.trim() ? raw.trim() : null;
 }
 
 function upsertRun(runs: AgentRunResp[], run: AgentRunResp) {

@@ -1,5 +1,5 @@
-import { AgentWorkspaceClient } from "@/app-client";
+import { AgentWorkbenchPage } from "./workbench";
 
 export default function Page() {
-  return <AgentWorkspaceClient />;
+  return <AgentWorkbenchPage />;
 }

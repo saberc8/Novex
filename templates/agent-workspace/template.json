@@ -28,6 +28,7 @@
       "permission": "ai:trace:list"
     }
   ],
+  "smokeScript": "templates/agent-workspace/smoke.sh",
   "smokeChecks": [
     {
       "code": "agent_runtime_api",

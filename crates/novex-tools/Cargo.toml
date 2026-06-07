@@ -9,3 +9,4 @@ novex-connectors = { path = "../novex-connectors" }
 novex-mcp = { path = "../novex-mcp" }
 novex-model = { path = "../novex-model" }
 serde.workspace = true
+serde_json = "1"

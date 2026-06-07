@@ -101,6 +101,7 @@ describe("Agent workspace page", () => {
     expect(screen.getByRole("button", { name: "Memory" })).toBeTruthy();
     await waitFor(() => expect(listAgentRunsMock).toHaveBeenCalledWith({ page: 1, size: 20 }));
     expect(await screen.findByText("feishu.message.send")).toBeTruthy();
+    expect(await screen.findByText("ai:agent:run")).toBeTruthy();
     expect(await screen.findByText("approval_requested")).toBeTruthy();
   });
 
@@ -151,5 +152,29 @@ describe("Agent workspace page", () => {
 
     await waitFor(() => expect(cancelAgentRunMock).toHaveBeenCalledWith(42));
     expect(await screen.findByText("Agent run cancelled.")).toBeTruthy();
+  });
+
+  it("surfaces generated media assets from tool events", async () => {
+    listAgentRunEventsMock.mockResolvedValueOnce({
+      list: [
+        event({
+          id: 101,
+          eventType: "tool_called",
+          status: "succeeded",
+          payload: {
+            toolCode: "media.image.generate",
+            assetUrl: "https://cdn.example.com/training-poster.png",
+            providerAssetId: "img-101"
+          }
+        })
+      ],
+      total: 1
+    });
+
+    render(<Page />);
+
+    const link = await screen.findByRole("link", { name: "Generated asset" });
+    expect(link.getAttribute("href")).toBe("https://cdn.example.com/training-poster.png");
+    expect((await screen.findAllByText(/media\.image\.generate/)).length).toBeGreaterThan(0);
   });
 });

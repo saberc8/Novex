@@ -19,8 +19,16 @@
       "path": "/knowledge/sources",
       "navLabel": "Sources",
       "permission": "ai:knowledge:list"
+    },
+    {
+      "code": "share",
+      "title": "Public Share",
+      "path": "/share/[token]",
+      "navLabel": "Share",
+      "permission": "app:knowledge:ask"
     }
   ],
+  "smokeScript": "templates/knowledge-base-chat/smoke.sh",
   "smokeChecks": [
     {
       "code": "chat_web_frontend",
@@ -47,12 +55,31 @@
     {
       "code": "knowledge_admin",
       "name": "Knowledge Admin",
-      "permissions": ["ai:knowledge:list", "ai:knowledge:create", "ai:rag:ask", "ai:eval:run", "ai:template:list"]
+      "permissions": [
+        "app:knowledge:ask",
+        "ai:knowledge:list",
+        "ai:knowledge:create",
+        "ai:knowledge:document:list",
+        "ai:knowledge:document:create",
+        "ai:knowledge:ask",
+        "ai:chatFlow:list",
+        "ai:chatFlow:create",
+        "ai:chatFlow:message",
+        "ai:eval:run",
+        "ai:template:list"
+      ]
     },
     {
       "code": "knowledge_user",
       "name": "Knowledge User",
-      "permissions": ["app:knowledge:ask"]
+      "permissions": [
+        "app:knowledge:ask",
+        "ai:knowledge:list",
+        "ai:knowledge:ask",
+        "ai:chatFlow:list",
+        "ai:chatFlow:create",
+        "ai:chatFlow:message"
+      ]
     }
   ],
   "menus": [

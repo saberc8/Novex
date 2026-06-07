@@ -35,7 +35,7 @@ import {
   uploadKnowledgeFile
 } from "@/api/knowledge";
 import { getAuthToken, setAuthToken as persistAuthToken } from "@/lib/auth";
-import type { ChatFlowMessageResp, ChatFlowSessionResp } from "@/types/chat-flow";
+import type { ChatFlowMessageResp, ChatFlowMode, ChatFlowSessionResp } from "@/types/chat-flow";
 import type { ImageCaptchaResp } from "@/types/auth";
 import type { CitationResp, DatasetResp, ParserJobResp, RagFeedbackRating } from "@/types/knowledge";
 
@@ -53,7 +53,8 @@ const studioItems = [
   ["数据表格", "bg-blue-50 text-blue-800"]
 ];
 
-export function ChatAppClient() {
+export function ChatAppClient({ mode = "knowledge" }: { mode?: ChatFlowMode } = {}) {
+  const isModelMode = mode === "model";
   const [authToken, setAuthToken] = useState<string | null>(() => getAuthToken());
   const [loginUsername, setLoginUsername] = useState("admin");
   const [loginPassword, setLoginPassword] = useState("admin123");
@@ -67,7 +68,9 @@ export function ChatAppClient() {
   const [activeSessionId, setActiveSessionId] = useState<number | null>(null);
   const [messages, setMessages] = useState<ChatFlowMessageResp[]>([]);
   const [notebookOpen, setNotebookOpen] = useState(false);
-  const [input, setInput] = useState("Which source should I trust?");
+  const [input, setInput] = useState(() =>
+    isModelMode ? "Draft a concise rollout note." : "Which source should I trust?"
+  );
   const [parseJobs, setParseJobs] = useState<Record<number, ParserJobResp>>({});
   const [creating, setCreating] = useState(false);
   const [uploading, setUploading] = useState(false);
@@ -83,18 +86,32 @@ export function ChatAppClient() {
   }, []);
 
   const refreshSessions = useCallback(async () => {
-    const nextSessions = await listChatFlowSessions({ mode: "knowledge" });
+    const nextSessions = await listChatFlowSessions({ mode });
     setSessions(nextSessions);
     return nextSessions;
-  }, []);
+  }, [mode]);
 
   useEffect(() => {
     if (!authToken) {
       return;
     }
+    if (isModelMode) {
+      void refreshSessions()
+        .then(async (nextSessions) => {
+          const existing = nextSessions.find((session) => session.mode === "model");
+          setActiveSessionId(existing?.id ?? null);
+          if (existing) {
+            setMessages(await listChatFlowMessages(existing.id).catch(() => []));
+          } else {
+            setMessages([]);
+          }
+        })
+        .catch(() => setSessions([]));
+      return;
+    }
     void refreshDatasets().catch(() => setDatasets([]));
     void refreshSessions().catch(() => setSessions([]));
-  }, [authToken, refreshDatasets, refreshSessions]);
+  }, [authToken, isModelMode, refreshDatasets, refreshSessions]);
 
   useEffect(() => {
     let mounted = true;
@@ -239,6 +256,25 @@ export function ChatAppClient() {
     return created.id;
   }
 
+  async function ensureModelSession() {
+    if (activeSessionId) {
+      return activeSessionId;
+    }
+    const latestSessions = sessions.length > 0 ? sessions : await refreshSessions().catch(() => []);
+    const existing = latestSessions.find((session) => session.mode === "model");
+    if (existing) {
+      setActiveSessionId(existing.id);
+      return existing.id;
+    }
+    const created = await createChatFlowSession({
+      mode: "model",
+      title: "Model Chat"
+    });
+    setSessions((current) => [created, ...current.filter((item) => item.id !== created.id)]);
+    setActiveSessionId(created.id);
+    return created.id;
+  }
+
   async function handleSourceUpload(files: FileList | null) {
     if (!activeDataset || !files || files.length === 0 || uploading) {
       return;
@@ -258,12 +294,23 @@ export function ChatAppClient() {
 
   async function handleSend() {
     const content = input.trim();
-    if (!activeDataset || !content || sending) {
+    if (!content || sending) {
       return;
     }
     setSending(true);
     setFeedbackStatus("");
     try {
+      if (isModelMode) {
+        const sessionId = await ensureModelSession();
+        const response = await sendChatFlowMessage(sessionId, { content });
+        setSessions((current) => [response.session, ...current.filter((item) => item.id !== response.session.id)]);
+        setActiveSessionId(response.session.id);
+        setMessages((current) => [...current, response.userMessage, response.assistantMessage]);
+        return;
+      }
+      if (!activeDataset) {
+        return;
+      }
       const sessionId = await ensureKnowledgeSession(activeDataset);
       const response = await sendChatFlowMessage(sessionId, { content, limit: 5 });
       setSessions((current) => [response.session, ...current.filter((item) => item.id !== response.session.id)]);
@@ -306,6 +353,62 @@ export function ChatAppClient() {
         onPasswordChange={setLoginPassword}
         onUsernameChange={setLoginUsername}
       />
+    );
+  }
+
+  if (isModelMode) {
+    return (
+      <main className="min-h-screen bg-[#eef0fb] text-neutral-950">
+        <TopBar
+          showCreateNotebook={false}
+          title="Novex Chat"
+          onCreateNotebook={handleCreateNotebook}
+        />
+        <div className="grid min-h-[calc(100vh-88px)] grid-cols-1 gap-4 px-5 pb-4 xl:grid-cols-[minmax(0,1fr)_360px]">
+          <section className="flex min-h-[520px] min-w-0 flex-col overflow-hidden rounded-lg bg-white">
+            <PanelHeader title="对话">
+              <SlidersHorizontal aria-hidden="true" className="h-5 w-5 text-neutral-600" />
+              <MoreVertical aria-hidden="true" className="h-5 w-5 text-neutral-600" />
+            </PanelHeader>
+            <div className="min-h-0 flex-1 overflow-auto px-6 py-5">
+              <Conversation emptyText="开始新的模型会话。" messages={messages} />
+            </div>
+            <div className="px-6 pb-5">
+              <div className="mx-auto max-w-5xl rounded-2xl border border-neutral-400 bg-white px-5 py-4">
+                <div className="flex items-center gap-3">
+                  <input
+                    aria-label="提问或创作内容"
+                    className="min-w-0 flex-1 bg-transparent text-base outline-none"
+                    onChange={(event) => setInput(event.target.value)}
+                    placeholder="提问或创作内容"
+                    value={input}
+                  />
+                  <span className="hidden text-sm text-neutral-500 sm:inline">Model Chat</span>
+                  <button
+                    aria-label="发送消息"
+                    className="flex h-12 w-12 shrink-0 items-center justify-center rounded-full bg-neutral-100 text-neutral-800 hover:bg-neutral-200 disabled:opacity-50"
+                    disabled={sending}
+                    onClick={() => void handleSend()}
+                    type="button"
+                  >
+                    <ArrowRight aria-hidden="true" className="h-6 w-6" />
+                  </button>
+                </div>
+              </div>
+              <div className="mt-3 text-center text-xs text-neutral-500">
+                模型输出需要结合业务上下文复核。
+              </div>
+            </div>
+          </section>
+
+          <aside className="flex min-h-[520px] flex-col overflow-hidden rounded-lg bg-white">
+            <PanelHeader title="Runtime" />
+            <div className="min-h-0 flex-1 overflow-auto p-5">
+              <ModelSessionPanel activeSession={activeSession} latestAssistant={latestAssistant} />
+            </div>
+          </aside>
+        </div>
+      </main>
     );
   }
 
@@ -451,13 +554,17 @@ export function ChatAppClient() {
     </main>
   );
 
-  function Conversation({ messages }: { messages: ChatFlowMessageResp[] }) {
+  function Conversation({
+    messages,
+    emptyText = "选择左侧来源后，可以直接提问。回答会绑定当前笔记本、保存会话，并返回可追踪引用。"
+  }: {
+    messages: ChatFlowMessageResp[];
+    emptyText?: string;
+  }) {
     if (messages.length === 0) {
       return (
         <div className="mx-auto max-w-4xl pt-6 text-base leading-8 text-neutral-800">
-          <p>
-            选择左侧来源后，可以直接提问。回答会绑定当前笔记本、保存会话，并返回可追踪引用。
-          </p>
+          <p>{emptyText}</p>
         </div>
       );
     }
@@ -486,7 +593,15 @@ export function ChatAppClient() {
   }
 }
 
-function TopBar({ title, onCreateNotebook }: { title: string; onCreateNotebook: () => void }) {
+function TopBar({
+  title,
+  onCreateNotebook,
+  showCreateNotebook = true
+}: {
+  title: string;
+  onCreateNotebook: () => void;
+  showCreateNotebook?: boolean;
+}) {
   return (
     <header className="flex h-[88px] items-center justify-between px-6">
       <div className="flex min-w-0 items-center gap-4">
@@ -496,14 +611,16 @@ function TopBar({ title, onCreateNotebook }: { title: string; onCreateNotebook: 
         <h1 className="truncate text-3xl font-medium tracking-normal">{title}</h1>
       </div>
       <div className="flex shrink-0 items-center gap-3">
-        <button
-          className="hidden h-11 items-center gap-2 rounded-full bg-black px-5 text-sm font-semibold text-white md:flex"
-          onClick={onCreateNotebook}
-          type="button"
-        >
-          <Plus aria-hidden="true" className="h-4 w-4" />
-          创建笔记本
-        </button>
+        {showCreateNotebook ? (
+          <button
+            className="hidden h-11 items-center gap-2 rounded-full bg-black px-5 text-sm font-semibold text-white md:flex"
+            onClick={onCreateNotebook}
+            type="button"
+          >
+            <Plus aria-hidden="true" className="h-4 w-4" />
+            创建笔记本
+          </button>
+        ) : null}
         <button className="hidden h-11 items-center gap-2 rounded-full border border-slate-200 px-4 text-sm font-medium md:flex" type="button">
           <Share2 aria-hidden="true" className="h-4 w-4" />
           分享
@@ -671,6 +788,7 @@ function AssistantAnswer({
 }) {
   const retrievalHitCount = Number(message.metadata.retrievalHitCount ?? 0);
   const answerStrategy = String(message.metadata.answerStrategy ?? "rag");
+  const isModelAnswer = !message.ragTraceId;
 
   return (
     <article className="text-base leading-8 text-neutral-800">
@@ -678,51 +796,67 @@ function AssistantAnswer({
         <Bot aria-hidden="true" className="mt-1 h-5 w-5 shrink-0 text-neutral-600" />
         <div className="min-w-0 flex-1">
           <div>{message.content}</div>
-          <div className="mt-3 flex flex-wrap gap-2 text-sm text-neutral-500">
-            <span>Trace #{message.ragTraceId ?? 0}</span>
-            <span>·</span>
-            <span>{retrievalHitCount} hits</span>
-            <span>·</span>
-            <span>{answerStrategy}</span>
-          </div>
+          {isModelAnswer ? (
+            <div className="mt-3 flex flex-wrap gap-2 text-sm text-neutral-500">
+              {message.routeId ? <span>{message.routeId}</span> : null}
+              {message.routeId && message.model ? <span>·</span> : null}
+              {message.model ? <span>{message.model}</span> : null}
+              {message.tokenCount > 0 ? (
+                <>
+                  {(message.routeId || message.model) ? <span>·</span> : null}
+                  <span>{message.tokenCount} tokens</span>
+                </>
+              ) : null}
+            </div>
+          ) : (
+            <div className="mt-3 flex flex-wrap gap-2 text-sm text-neutral-500">
+              <span>Trace #{message.ragTraceId ?? 0}</span>
+              <span>·</span>
+              <span>{retrievalHitCount} hits</span>
+              <span>·</span>
+              <span>{answerStrategy}</span>
+            </div>
+          )}
           <CitationList citations={message.citations} />
-          <div className="mt-4 flex flex-wrap items-center gap-3">
-            <button
-              className="rounded-full border border-slate-200 px-3 py-1.5 text-sm"
-              disabled={!message.ragTraceId || feedbackSubmitting}
-              type="button"
-            >
-              保存到笔记
-            </button>
-            <button
-              aria-label="有帮助"
-              className="text-neutral-600 disabled:opacity-40"
-              disabled={!message.ragTraceId || feedbackSubmitting}
-              onClick={() => onFeedback("helpful")}
-              type="button"
-            >
-              <ThumbsUp aria-hidden="true" className="h-5 w-5" />
-            </button>
-            <button
-              aria-label="答案不准确"
-              className="text-neutral-600 disabled:opacity-40"
-              disabled={!message.ragTraceId || feedbackSubmitting}
-              onClick={() => onFeedback("not_helpful")}
-              type="button"
-            >
-              <ThumbsDown aria-hidden="true" className="h-5 w-5" />
-            </button>
-            <button
-              aria-label="引用问题"
-              className="text-neutral-600 disabled:opacity-40"
-              disabled={!message.ragTraceId || feedbackSubmitting}
-              onClick={() => onFeedback("citation_issue")}
-              type="button"
-            >
-              <Quote aria-hidden="true" className="h-5 w-5" />
-            </button>
-            {feedbackStatus ? <span className="text-sm text-neutral-500">{feedbackStatus}</span> : null}
-          </div>
+          {!isModelAnswer ? (
+            <div className="mt-4 flex flex-wrap items-center gap-3">
+              <button
+                className="rounded-full border border-slate-200 px-3 py-1.5 text-sm"
+                disabled={!message.ragTraceId || feedbackSubmitting}
+                type="button"
+              >
+                保存到笔记
+              </button>
+              <button
+                aria-label="有帮助"
+                className="text-neutral-600 disabled:opacity-40"
+                disabled={!message.ragTraceId || feedbackSubmitting}
+                onClick={() => onFeedback("helpful")}
+                type="button"
+              >
+                <ThumbsUp aria-hidden="true" className="h-5 w-5" />
+              </button>
+              <button
+                aria-label="答案不准确"
+                className="text-neutral-600 disabled:opacity-40"
+                disabled={!message.ragTraceId || feedbackSubmitting}
+                onClick={() => onFeedback("not_helpful")}
+                type="button"
+              >
+                <ThumbsDown aria-hidden="true" className="h-5 w-5" />
+              </button>
+              <button
+                aria-label="引用问题"
+                className="text-neutral-600 disabled:opacity-40"
+                disabled={!message.ragTraceId || feedbackSubmitting}
+                onClick={() => onFeedback("citation_issue")}
+                type="button"
+              >
+                <Quote aria-hidden="true" className="h-5 w-5" />
+              </button>
+              {feedbackStatus ? <span className="text-sm text-neutral-500">{feedbackStatus}</span> : null}
+            </div>
+          ) : null}
         </div>
       </div>
     </article>
@@ -741,6 +875,29 @@ function CitationList({ citations }: { citations: CitationResp[] }) {
           {citation.pageNo ? ` · page ${citation.pageNo}` : ""}
         </span>
       ))}
+    </div>
+  );
+}
+
+function ModelSessionPanel({
+  activeSession,
+  latestAssistant
+}: {
+  activeSession: ChatFlowSessionResp | null;
+  latestAssistant: ChatFlowMessageResp | null;
+}) {
+  return (
+    <div className="space-y-4 text-sm text-neutral-700">
+      <div className="rounded-lg border border-slate-200 p-4">
+        <div className="font-semibold text-neutral-950">{activeSession?.title ?? "Model Chat"}</div>
+        <div className="mt-2 text-neutral-500">{activeSession?.messageCount ?? 0} 条消息</div>
+      </div>
+      <div className="rounded-lg border border-slate-200 p-4">
+        <div className="font-semibold text-neutral-950">Latest Output</div>
+        <div className="mt-2 leading-6 text-neutral-500">
+          {latestAssistant ? `${latestAssistant.tokenCount} tokens` : "No model output yet."}
+        </div>
+      </div>
     </div>
   );
 }

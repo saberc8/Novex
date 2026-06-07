@@ -28,10 +28,27 @@ impl RbacService {
             self.menus.all_enabled_route_menus().await?
         } else {
             self.menus
-                .enabled_route_menus_by_user_id(current_user.id)
+                .enabled_route_menus_by_user_id_for_tenant(current_user.id, current_user.tenant_id)
                 .await?
         };
 
         Ok(build_route_tree(menus, role_codes))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn non_admin_route_tree_uses_current_user_active_tenant() {
+        let source = include_str!("service.rs");
+
+        assert!(
+            source
+                .matches(
+                    "enabled_route_menus_by_user_id_for_tenant(current_user.id, current_user.tenant_id)"
+                )
+                .count()
+                >= 2
+        );
     }
 }

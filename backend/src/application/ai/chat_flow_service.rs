@@ -1,4 +1,5 @@
 use chrono::{NaiveDateTime, Utc};
+use novex_model::estimate_model_text_tokens;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sqlx::PgPool;
@@ -287,7 +288,7 @@ impl ChatFlowService {
             model: None,
             rag_trace_id: Some(rag.trace_id),
             citations,
-            token_count: tokenish_count(&rag.answer),
+            token_count: estimate_model_text_tokens(&rag.answer),
             metadata: json!({
                 "source": "ai.chatFlow.knowledge",
                 "datasetId": dataset_id,
@@ -319,17 +320,21 @@ impl ChatFlowService {
         session: ChatFlowSessionRow,
         command: ChatFlowMessageCommand,
     ) -> Result<ChatFlowSendMessageResp, AppError> {
-        let response = ModelRuntimeService::chat_completion(ModelChatCommand {
-            messages: vec![ModelChatMessage {
-                role: "user".to_owned(),
-                content: command.content.clone(),
-            }],
-            file_contexts: command.file_contexts.clone(),
-            temperature: command.temperature,
-            max_tokens: command.max_tokens,
-            ..ModelChatCommand::default()
-        })
-        .await?;
+        let response = ModelRuntimeService::for_tenant(self.db.clone(), tenant_id)
+            .chat_completion_for_chat_flow(
+                user_id,
+                ModelChatCommand {
+                    messages: vec![ModelChatMessage {
+                        role: "user".to_owned(),
+                        content: command.content.clone(),
+                    }],
+                    file_contexts: command.file_contexts.clone(),
+                    temperature: command.temperature,
+                    max_tokens: command.max_tokens,
+                    ..ModelChatCommand::default()
+                },
+            )
+            .await?;
         let now = Utc::now().naive_utc();
         let user_message = user_chat_flow_message(
             tenant_id,
@@ -355,7 +360,7 @@ impl ChatFlowService {
             token_count: response
                 .usage
                 .completion_tokens
-                .unwrap_or_else(|| tokenish_count(&response.answer) as i64)
+                .unwrap_or_else(|| estimate_model_text_tokens(&response.answer) as i64)
                 .max(0)
                 .min(i32::MAX as i64) as i32,
             metadata: json!({
@@ -509,7 +514,7 @@ fn user_chat_flow_message(
         model: None,
         rag_trace_id: None,
         citations: json!([]),
-        token_count: tokenish_count(content),
+        token_count: estimate_model_text_tokens(content),
         metadata,
         user_id,
         now,
@@ -527,13 +532,6 @@ fn file_context_metadata(files: &[ModelChatFileContext]) -> Vec<Value> {
             })
         })
         .collect()
-}
-
-fn tokenish_count(text: &str) -> i32 {
-    text.split_whitespace()
-        .count()
-        .max((text.chars().count() / 4).max(1))
-        .min(i32::MAX as usize) as i32
 }
 
 fn preview_chars(text: &str, limit: usize) -> String {
@@ -638,5 +636,40 @@ mod tests {
 
         assert_eq!(command.content, "哪个制度有效？");
         assert_eq!(command.limit, Some(10));
+    }
+
+    #[test]
+    fn model_mode_uses_tenant_bound_metered_model_runtime() {
+        let source = include_str!("chat_flow_service.rs");
+        let bypass_call = ["ModelRuntimeService::", "chat_completion(ModelChatCommand"].concat();
+
+        assert!(
+            source.contains("ModelRuntimeService::for_tenant(self.db.clone(), tenant_id)"),
+            "chat-flow model mode must bind model runtime to request tenant"
+        );
+        assert!(
+            source.contains(".chat_completion_for_chat_flow(user_id"),
+            "chat-flow model mode must record ai_model_usage with a chat-flow source"
+        );
+        assert!(
+            !source.contains(&bypass_call),
+            "chat-flow model mode must not bypass usage metering"
+        );
+    }
+
+    #[test]
+    fn chat_flow_token_counts_use_model_accounting_contract() {
+        let source = include_str!("chat_flow_service.rs");
+        let estimator_call = ["estimate_model", "_text_tokens("].concat();
+        let private_estimator = ["fn ", "tokenish", "_count"].concat();
+
+        assert!(
+            source.matches(&estimator_call).count() >= 3,
+            "chat-flow token counts must use novex-model accounting"
+        );
+        assert!(
+            !source.contains(&private_estimator),
+            "chat-flow must not keep a private token estimator"
+        );
     }
 }

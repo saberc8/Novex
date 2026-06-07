@@ -2,12 +2,14 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import type { ReactNode } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import AiTemplatesPage from "./page";
-import { generateCustomerPackage, listDeliveryTemplates } from "@/api/ai/template";
-import type { CustomerPackageResp, DeliveryTemplateResp } from "@/types/ai-template";
+import { applyCustomerPackage, generateCustomerPackage, listDeliveryTemplates, runTemplateSmoke } from "@/api/ai/template";
+import type { CustomerPackageApplyResp, CustomerPackageResp, DeliveryTemplateResp, TemplateSmokeRunResp } from "@/types/ai-template";
 
 vi.mock("@/api/ai/template", () => ({
+  applyCustomerPackage: vi.fn(),
   generateCustomerPackage: vi.fn(),
-  listDeliveryTemplates: vi.fn()
+  listDeliveryTemplates: vi.fn(),
+  runTemplateSmoke: vi.fn()
 }));
 
 vi.mock("@/components/permission/permission-gate", () => ({
@@ -22,7 +24,9 @@ vi.mock("sonner", () => ({
 }));
 
 const generateCustomerPackageMock = vi.mocked(generateCustomerPackage);
+const applyCustomerPackageMock = vi.mocked(applyCustomerPackage);
 const listDeliveryTemplatesMock = vi.mocked(listDeliveryTemplates);
+const runTemplateSmokeMock = vi.mocked(runTemplateSmoke);
 const writeTextMock = vi.fn<(text: string) => Promise<void>>(() => Promise.resolve());
 
 function trainingTemplate(): DeliveryTemplateResp {
@@ -50,6 +54,7 @@ function trainingTemplate(): DeliveryTemplateResp {
         command: "pnpm test"
       }
     ],
+    smokeScript: "templates/training-app/smoke.sh",
     sort: 4,
     status: 1,
     branding: {
@@ -115,6 +120,58 @@ function customerPackage(): CustomerPackageResp {
       primaryColor: "#2563eb",
       publicUrl: "https://training.example.com"
     },
+    frontendConfig: {
+      app: "training-web",
+      entry: "apps/training-web",
+      entryUrl: "https://training.example.com",
+      branding: {
+        brandName: "Acme Academy",
+        logoText: "TA",
+        primaryColor: "#2563eb",
+        publicUrl: "https://training.example.com"
+      },
+      defaultPage: {
+        code: "learn",
+        title: "Learning Tasks",
+        path: "/",
+        navLabel: "学习",
+        permission: "app:training:learn"
+      },
+      navigation: template.frontendPages,
+      allowedRoles: [
+        {
+          code: "learner",
+          name: "Learner",
+          permissions: ["app:training:learn", "app:training:ask"]
+        }
+      ]
+    },
+    provisioningPlan: {
+      planId: "prov_pkg_training_app_acme",
+      mode: "operator_applied",
+      tenantCode: "acme",
+      idempotencyKey: "training_app:acme",
+      steps: [
+        {
+          code: "tenant",
+          title: "Create or update tenant",
+          target: "sys_tenant",
+          operation: "upsert",
+          payload: {
+            tenantCode: "acme"
+          }
+        },
+        {
+          code: "roles",
+          title: "Create roles and bind permissions",
+          target: "sys_role",
+          operation: "upsert_and_bind",
+          payload: {
+            roles: template.roles
+          }
+        }
+      ]
+    },
     roles: template.roles,
     menus: template.menus,
     frontendPages: template.frontendPages,
@@ -125,8 +182,55 @@ function customerPackage(): CustomerPackageResp {
     triggers: template.triggers,
     evalSets: template.evalSets,
     deploymentChecklist: template.deploymentChecklist,
+    smokeScript: template.smokeScript,
     smokeChecks: template.smokeChecks,
     deploymentSteps: ["Initialize customer Acme from template training_app"]
+  };
+}
+
+function customerPackageApply(): CustomerPackageApplyResp {
+  const pkg = customerPackage();
+  return {
+    package: pkg,
+    tenantId: 42,
+    tenantCode: "acme",
+    appliedSteps: pkg.provisioningPlan.steps,
+    pendingOperatorSteps: [
+      {
+        code: "frontend",
+        title: "Apply branding and frontend publish config",
+        target: "frontend_config",
+        operation: "upsert",
+        payload: {}
+      }
+    ]
+  };
+}
+
+function templateSmokeRun(): TemplateSmokeRunResp {
+  return {
+    runId: 9001,
+    templateCode: "training_app",
+    packageId: "pkg_training_app_acme",
+    smokeScript: "templates/training-app/smoke.sh",
+    status: "planned",
+    dryRun: true,
+    totalChecks: 1,
+    passedChecks: 0,
+    failedChecks: 0,
+    checks: [
+      {
+        code: "training_web_unit",
+        name: "Training Web Unit Tests",
+        workdir: "apps/training-web",
+        command: "pnpm test",
+        status: "planned",
+        exitCode: null,
+        stdout: "",
+        stderr: "",
+        durationMs: 0
+      }
+    ]
   };
 }
 
@@ -144,6 +248,8 @@ describe("AiTemplatesPage", () => {
       total: 1
     });
     generateCustomerPackageMock.mockResolvedValue(customerPackage());
+    applyCustomerPackageMock.mockResolvedValue(customerPackageApply());
+    runTemplateSmokeMock.mockResolvedValue(templateSmokeRun());
   });
 
   it("generates a customer package and copies the delivery JSON", async () => {
@@ -164,6 +270,13 @@ describe("AiTemplatesPage", () => {
       })
     );
     expect(await screen.findByText("pkg_training_app_acme")).toBeTruthy();
+    expect(await screen.findByText("templates/training-app/smoke.sh")).toBeTruthy();
+    expect(await screen.findByText("Frontend Publish")).toBeTruthy();
+    expect(await screen.findByText("Provisioning Plan")).toBeTruthy();
+    expect(await screen.findByText("sys_tenant: upsert")).toBeTruthy();
+    expect(await screen.findByText("https://training.example.com")).toBeTruthy();
+    expect(await screen.findByText("Default: /")).toBeTruthy();
+    expect(await screen.findByText("Learner")).toBeTruthy();
 
     fireEvent.click(screen.getByRole("button", { name: "Copy JSON" }));
 
@@ -171,5 +284,33 @@ describe("AiTemplatesPage", () => {
     const copied = writeTextMock.mock.calls[0]?.[0] ?? "";
     expect(copied).toContain("\"packageId\": \"pkg_training_app_acme\"");
     expect(copied).toContain("\"templateCode\": \"training_app\"");
+    expect(copied).toContain("\"frontendConfig\"");
+    expect(copied).toContain("\"provisioningPlan\"");
+
+    fireEvent.click(screen.getByRole("button", { name: "Apply" }));
+    await waitFor(() =>
+      expect(applyCustomerPackageMock).toHaveBeenCalledWith({
+        templateCode: "training_app",
+        customerName: "Acme",
+        appName: "Acme Training",
+        industry: "training",
+        brandName: "Novex Academy",
+        primaryColor: "#db2777",
+        publicUrl: "https://training.example.com"
+      })
+    );
+    expect(await screen.findByText("tenant acme")).toBeTruthy();
+    expect(await screen.findByText("Applied Steps")).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "Plan Smoke" }));
+    await waitFor(() =>
+      expect(runTemplateSmokeMock).toHaveBeenCalledWith({
+        templateCode: "training_app",
+        packageId: "pkg_training_app_acme",
+        dryRun: true
+      })
+    );
+    expect(await screen.findByText("Smoke Result")).toBeTruthy();
+    expect(await screen.findByText("run #9001 planned")).toBeTruthy();
   });
 });

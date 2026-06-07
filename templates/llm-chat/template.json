@@ -19,9 +19,23 @@
       "path": "/chat/history",
       "navLabel": "History",
       "permission": "app:chat:use"
+    },
+    {
+      "code": "share",
+      "title": "Public Share",
+      "path": "/share/[token]",
+      "navLabel": "Share",
+      "permission": "app:chat:use"
     }
   ],
+  "smokeScript": "templates/llm-chat/smoke.sh",
   "smokeChecks": [
+    {
+      "code": "llm_chat_frontend",
+      "name": "LLM Chat Frontend Smoke",
+      "workdir": "apps/chat-web",
+      "command": "pnpm test"
+    },
     {
       "code": "llm_chat_api",
       "name": "LLM Chat API Smoke",

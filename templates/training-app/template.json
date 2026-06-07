@@ -42,6 +42,7 @@
       "permission": "app:training:learn"
     }
   ],
+  "smokeScript": "templates/training-app/smoke.sh",
   "smokeChecks": [
     {
       "code": "training_web_unit",
@@ -68,37 +69,79 @@
     {
       "code": "training_admin",
       "name": "Training Admin",
-      "permissions": ["ai:knowledge:list", "ai:agent:run", "ai:tool:dryRun", "ai:eval:list", "ai:eval:run", "ai:eval:report", "ai:template:init"]
+      "permissions": [
+        "app:training:learn",
+        "app:training:ask",
+        "app:training:quiz",
+        "app:training:manage",
+        "ai:knowledge:list",
+        "ai:knowledge:ask",
+        "ai:knowledge:document:create",
+        "ai:agent:run",
+        "ai:tool:dryRun",
+        "ai:eval:list",
+        "ai:eval:case:list",
+        "ai:eval:run",
+        "ai:eval:report",
+        "ai:template:init"
+      ]
     },
     {
       "code": "trainer",
       "name": "Trainer",
-      "permissions": ["app:training:manage", "app:training:quiz"]
+      "permissions": [
+        "app:training:learn",
+        "app:training:ask",
+        "app:training:quiz",
+        "app:training:manage",
+        "ai:knowledge:list",
+        "ai:knowledge:ask",
+        "ai:agent:run"
+      ]
     },
     {
       "code": "learner",
       "name": "Learner",
-      "permissions": ["app:training:learn", "app:training:ask"]
+      "permissions": [
+        "app:training:learn",
+        "app:training:ask",
+        "app:training:quiz",
+        "ai:knowledge:list",
+        "ai:knowledge:ask",
+        "ai:agent:run"
+      ]
     }
   ],
   "menus": [
     {
       "code": "training.home",
       "title": "Training",
-      "path": "/training",
+      "path": "/",
       "permission": "app:training:learn"
+    },
+    {
+      "code": "training.ask",
+      "title": "Ask",
+      "path": "/ask",
+      "permission": "app:training:ask"
     },
     {
       "code": "training.quiz",
       "title": "Quiz",
-      "path": "/training/quiz",
+      "path": "/quiz",
       "permission": "app:training:quiz"
     },
     {
       "code": "training.records",
       "title": "Records",
-      "path": "/training/records",
-      "permission": "app:training:manage"
+      "path": "/records",
+      "permission": "app:training:learn"
+    },
+    {
+      "code": "training.notifications",
+      "title": "Notifications",
+      "path": "/notifications",
+      "permission": "app:training:learn"
     }
   ],
   "prompts": [

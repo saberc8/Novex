@@ -1,5 +1,5 @@
-import { TrainingAppClient } from "@/app-client";
+import { TrainingWorkbenchPage } from "./workbench";
 
 export default function Page() {
-  return <TrainingAppClient />;
+  return <TrainingWorkbenchPage />;
 }

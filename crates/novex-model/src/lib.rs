@@ -1,5 +1,6 @@
 use novex_ai_core::FoundationModule;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::{env, fmt};
 
 pub const CRATE_ID: &str = "novex-model";
@@ -291,6 +292,350 @@ pub struct ModelRuntimeRouteSummary {
     pub env_keys: Vec<String>,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelTokenUsage {
+    pub prompt_tokens: Option<i64>,
+    pub completion_tokens: Option<i64>,
+    pub total_tokens: Option<i64>,
+}
+
+impl ModelTokenUsage {
+    pub fn accounting_counts(&self) -> ModelTokenUsageCounts {
+        let prompt_tokens = self.prompt_tokens.unwrap_or_default().max(0);
+        let completion_tokens = self.completion_tokens.unwrap_or_default().max(0);
+        let derived_total = prompt_tokens.saturating_add(completion_tokens);
+        let total_tokens = self
+            .total_tokens
+            .unwrap_or(derived_total)
+            .max(0)
+            .max(derived_total);
+
+        ModelTokenUsageCounts {
+            prompt_tokens,
+            completion_tokens,
+            total_tokens,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelTokenUsageCounts {
+    pub prompt_tokens: i64,
+    pub completion_tokens: i64,
+    pub total_tokens: i64,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelUsageCostInput {
+    pub prompt_tokens: i64,
+    pub completion_tokens: i64,
+    pub total_tokens: i64,
+    pub request_count: i64,
+    pub vector_count: i64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ModelRoutePolicyInput<'a> {
+    pub network_zone: &'a str,
+    pub fallback_network_zone: Option<&'a str>,
+    pub fallback_policy: &'a Value,
+    pub route_policy: &'a Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelRoutePolicyStatus {
+    pub network_zone: String,
+    pub fallback_network_zone: Option<String>,
+    pub fallback_enabled: bool,
+    pub cross_zone_fallback_allowed: bool,
+    pub max_retries: u32,
+    pub circuit_breaker_seconds: u32,
+    pub violations: Vec<String>,
+}
+
+pub fn normalize_model_provider_usage(body: &Value) -> ModelTokenUsage {
+    let usage = body.get("usage").unwrap_or(body);
+    let prompt_tokens = json_i64_field(
+        usage,
+        &[
+            "prompt_tokens",
+            "promptTokens",
+            "input_tokens",
+            "inputTokens",
+        ],
+    );
+    let completion_tokens = json_i64_field(
+        usage,
+        &[
+            "completion_tokens",
+            "completionTokens",
+            "output_tokens",
+            "outputTokens",
+        ],
+    );
+    let total_tokens = json_i64_field(usage, &["total_tokens", "totalTokens"]).or_else(|| {
+        match (prompt_tokens, completion_tokens) {
+            (Some(prompt_tokens), Some(completion_tokens)) => {
+                Some(prompt_tokens.saturating_add(completion_tokens))
+            }
+            _ => None,
+        }
+    });
+
+    ModelTokenUsage {
+        prompt_tokens,
+        completion_tokens,
+        total_tokens,
+    }
+}
+
+pub fn estimate_model_text_tokens(text: &str) -> i32 {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return 0;
+    }
+
+    let whitespace_count = trimmed.split_whitespace().count();
+    if whitespace_count > 1 {
+        whitespace_count.min(i32::MAX as usize) as i32
+    } else {
+        trimmed.chars().count().min(i32::MAX as usize) as i32
+    }
+}
+
+pub fn estimate_model_cost_cents(cost_spec: &Value, input: &ModelUsageCostInput) -> f64 {
+    let unit = json_string_field(cost_spec, &["unit"])
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let request_cost = non_negative(input.request_count)
+        * json_f64_field(
+            cost_spec,
+            &["requestCents", "request_cents", "centsPerRequest"],
+        )
+        .unwrap_or_default();
+
+    let cost = match unit.as_str() {
+        "token" | "tokens" => token_cost_cents(cost_spec, input) + request_cost,
+        "request" | "requests" => request_cost,
+        "vector" | "vectors" => {
+            non_negative(input.vector_count)
+                * json_f64_field(
+                    cost_spec,
+                    &["vectorCents", "vector_cents", "centsPerVector"],
+                )
+                .unwrap_or_default()
+        }
+        _ => request_cost,
+    };
+
+    if cost.is_finite() {
+        cost.max(0.0)
+    } else {
+        0.0
+    }
+}
+
+pub fn evaluate_model_route_policy(input: ModelRoutePolicyInput<'_>) -> ModelRoutePolicyStatus {
+    let network_zone = normalize_network_zone(input.network_zone);
+    let fallback_network_zone = input.fallback_network_zone.map(normalize_network_zone);
+    let fallback_enabled = policy_bool_field(
+        input.route_policy,
+        input.fallback_policy,
+        &["fallbackEnabled", "fallback_enabled", "enabled"],
+    )
+    .unwrap_or(false);
+    let cross_zone_fallback_allowed = policy_bool_field(
+        input.route_policy,
+        input.fallback_policy,
+        &[
+            "allowCrossZone",
+            "allow_cross_zone",
+            "allowCrossNetworkZone",
+            "allow_cross_network_zone",
+            "crossZoneFallback",
+            "cross_zone_fallback",
+        ],
+    )
+    .unwrap_or(false);
+    let max_retries = policy_u32_field(
+        input.route_policy,
+        input.fallback_policy,
+        &["maxRetries", "max_retries", "retryCount", "retry_count"],
+    )
+    .unwrap_or(0);
+    let circuit_breaker_seconds = policy_u32_field(
+        input.route_policy,
+        input.fallback_policy,
+        &[
+            "circuitBreakerSeconds",
+            "circuit_breaker_seconds",
+            "circuitBreakerCooldownSeconds",
+            "circuit_breaker_cooldown_seconds",
+        ],
+    )
+    .unwrap_or(0);
+
+    let mut violations = Vec::new();
+    if fallback_enabled
+        && fallback_network_zone
+            .as_deref()
+            .is_some_and(|fallback_zone| fallback_zone != network_zone)
+        && !cross_zone_fallback_allowed
+    {
+        violations.push("cross_zone_fallback_not_allowed".to_owned());
+    }
+
+    ModelRoutePolicyStatus {
+        network_zone,
+        fallback_network_zone,
+        fallback_enabled,
+        cross_zone_fallback_allowed,
+        max_retries,
+        circuit_breaker_seconds,
+        violations,
+    }
+}
+
+fn token_cost_cents(cost_spec: &Value, input: &ModelUsageCostInput) -> f64 {
+    let prompt_rate = json_f64_field(
+        cost_spec,
+        &[
+            "promptCentsPer1kTokens",
+            "promptTokenCentsPer1k",
+            "inputCentsPer1kTokens",
+            "inputTokenCentsPer1k",
+        ],
+    );
+    let completion_rate = json_f64_field(
+        cost_spec,
+        &[
+            "completionCentsPer1kTokens",
+            "completionTokenCentsPer1k",
+            "outputCentsPer1kTokens",
+            "outputTokenCentsPer1k",
+        ],
+    );
+    if prompt_rate.is_some() || completion_rate.is_some() {
+        return non_negative(input.prompt_tokens) * prompt_rate.unwrap_or_default() / 1000.0
+            + non_negative(input.completion_tokens) * completion_rate.unwrap_or_default() / 1000.0;
+    }
+
+    non_negative(input.total_tokens)
+        * json_f64_field(
+            cost_spec,
+            &["totalCentsPer1kTokens", "totalTokenCentsPer1k"],
+        )
+        .unwrap_or_default()
+        / 1000.0
+}
+
+fn json_i64_field(value: &Value, keys: &[&str]) -> Option<i64> {
+    json_field(value, keys).and_then(json_i64)
+}
+
+fn json_f64_field(value: &Value, keys: &[&str]) -> Option<f64> {
+    json_field(value, keys).and_then(json_f64)
+}
+
+fn json_string_field(value: &Value, keys: &[&str]) -> Option<String> {
+    json_field(value, keys)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+}
+
+fn json_bool_field(value: &Value, keys: &[&str]) -> Option<bool> {
+    json_field(value, keys).and_then(json_bool)
+}
+
+fn policy_bool_field(route_policy: &Value, fallback_policy: &Value, keys: &[&str]) -> Option<bool> {
+    json_bool_field(route_policy, keys).or_else(|| json_bool_field(fallback_policy, keys))
+}
+
+fn policy_u32_field(route_policy: &Value, fallback_policy: &Value, keys: &[&str]) -> Option<u32> {
+    json_i64_field(route_policy, keys)
+        .or_else(|| json_i64_field(fallback_policy, keys))
+        .map(|value| value.min(u32::MAX as i64) as u32)
+}
+
+fn json_field<'a>(value: &'a Value, keys: &[&str]) -> Option<&'a Value> {
+    let object = value.as_object()?;
+    for key in keys {
+        if let Some(value) = object.get(*key) {
+            return Some(value);
+        }
+    }
+
+    let normalized_keys = keys
+        .iter()
+        .map(|key| normalize_json_key(key))
+        .collect::<Vec<_>>();
+    object.iter().find_map(|(key, value)| {
+        normalized_keys
+            .iter()
+            .any(|expected| *expected == normalize_json_key(key))
+            .then_some(value)
+    })
+}
+
+fn normalize_json_key(key: &str) -> String {
+    key.chars()
+        .filter(|ch| !matches!(ch, '_' | '-'))
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+fn json_i64(value: &Value) -> Option<i64> {
+    let parsed = value
+        .as_i64()
+        .or_else(|| value.as_u64().and_then(|value| i64::try_from(value).ok()))
+        .or_else(|| value.as_str()?.trim().parse::<i64>().ok())?;
+    Some(parsed.max(0))
+}
+
+fn json_f64(value: &Value) -> Option<f64> {
+    let parsed = value
+        .as_f64()
+        .or_else(|| value.as_str()?.trim().parse::<f64>().ok())?;
+    parsed.is_finite().then_some(parsed.max(0.0))
+}
+
+fn json_bool(value: &Value) -> Option<bool> {
+    if let Some(value) = value.as_bool() {
+        return Some(value);
+    }
+    if let Some(value) = value.as_i64() {
+        return Some(value > 0);
+    }
+    if let Some(value) = value.as_u64() {
+        return Some(value > 0);
+    }
+
+    match value.as_str()?.trim().to_ascii_lowercase().as_str() {
+        "true" | "1" | "yes" | "y" | "enabled" | "allow" | "allowed" => Some(true),
+        "false" | "0" | "no" | "n" | "disabled" | "deny" | "denied" => Some(false),
+        _ => None,
+    }
+}
+
+fn normalize_network_zone(value: &str) -> String {
+    let value = value.trim().to_ascii_lowercase();
+    if value.is_empty() {
+        "unknown".to_owned()
+    } else {
+        value
+    }
+}
+
+fn non_negative(value: i64) -> f64 {
+    value.max(0) as f64
+}
+
 struct RouteSpec {
     target: ModelRuntimeTarget,
     kind: ModelKind,
@@ -500,5 +845,110 @@ mod tests {
                 "RIGHT_CODE_DRAW_BASE_URL",
             ]
         );
+    }
+
+    #[test]
+    fn model_usage_normalizes_provider_token_aliases_and_estimates_text_tokens() {
+        let body = serde_json::json!({
+            "usage": {
+                "input_tokens": "11",
+                "outputTokens": 7
+            }
+        });
+
+        let usage = normalize_model_provider_usage(&body);
+
+        assert_eq!(usage.prompt_tokens, Some(11));
+        assert_eq!(usage.completion_tokens, Some(7));
+        assert_eq!(usage.total_tokens, Some(18));
+        assert_eq!(usage.accounting_counts().total_tokens, 18);
+        assert_eq!(estimate_model_text_tokens("hello world"), 2);
+        assert_eq!(estimate_model_text_tokens("你好"), 2);
+    }
+
+    #[test]
+    fn model_usage_cost_estimate_applies_token_cost_spec() {
+        let cost_spec = serde_json::json!({
+            "unit": "token",
+            "promptCentsPer1kTokens": 0.2,
+            "completionCentsPer1kTokens": 0.8,
+            "requestCents": 0.05
+        });
+        let input = ModelUsageCostInput {
+            prompt_tokens: 1000,
+            completion_tokens: 500,
+            total_tokens: 1500,
+            request_count: 1,
+            vector_count: 0,
+        };
+
+        let cost_cents = estimate_model_cost_cents(&cost_spec, &input);
+
+        assert!((cost_cents - 0.65).abs() < 0.000_001);
+    }
+
+    #[test]
+    fn model_route_policy_defaults_to_disabled_fallback() {
+        let status = evaluate_model_route_policy(ModelRoutePolicyInput {
+            network_zone: "public",
+            fallback_network_zone: None,
+            fallback_policy: &Value::Null,
+            route_policy: &Value::Null,
+        });
+
+        assert_eq!(status.network_zone, "public");
+        assert!(!status.fallback_enabled);
+        assert!(!status.cross_zone_fallback_allowed);
+        assert_eq!(status.max_retries, 0);
+        assert_eq!(status.circuit_breaker_seconds, 0);
+        assert!(status.violations.is_empty());
+    }
+
+    #[test]
+    fn model_route_policy_blocks_cross_zone_fallback_without_explicit_policy() {
+        let policy = serde_json::json!({
+            "enabled": true,
+            "maxRetries": 2,
+            "circuitBreakerSeconds": 45
+        });
+
+        let status = evaluate_model_route_policy(ModelRoutePolicyInput {
+            network_zone: "private",
+            fallback_network_zone: Some("public"),
+            fallback_policy: &policy,
+            route_policy: &Value::Null,
+        });
+
+        assert!(status.fallback_enabled);
+        assert_eq!(status.max_retries, 2);
+        assert_eq!(status.circuit_breaker_seconds, 45);
+        assert!(!status.cross_zone_fallback_allowed);
+        assert_eq!(
+            status.violations,
+            vec!["cross_zone_fallback_not_allowed".to_owned()]
+        );
+    }
+
+    #[test]
+    fn model_route_policy_allows_cross_zone_fallback_when_policy_explicit() {
+        let policy = serde_json::json!({
+            "enabled": true,
+            "allowCrossZone": true,
+            "max_retries": 1,
+            "circuit_breaker_seconds": 30
+        });
+
+        let status = evaluate_model_route_policy(ModelRoutePolicyInput {
+            network_zone: "private",
+            fallback_network_zone: Some("public"),
+            fallback_policy: &policy,
+            route_policy: &Value::Null,
+        });
+
+        assert!(status.fallback_enabled);
+        assert!(status.cross_zone_fallback_allowed);
+        assert_eq!(status.max_retries, 1);
+        assert_eq!(status.circuit_breaker_seconds, 30);
+        assert!(status.violations.is_empty());
     }
 }

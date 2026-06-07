@@ -1,8 +1,14 @@
-use std::time::{Duration, Instant};
+use std::{
+    collections::HashMap,
+    time::{Duration, Instant},
+};
 
 use chrono::{NaiveDateTime, Utc};
 use novex_model::{
-    mask_api_key, ModelRuntimeConfig, ModelRuntimeRoute, ModelRuntimeSummary, ModelRuntimeTarget,
+    estimate_model_cost_cents, estimate_model_text_tokens, evaluate_model_route_policy,
+    mask_api_key, normalize_model_provider_usage, ModelRoutePolicyInput, ModelRoutePolicyStatus,
+    ModelRuntimeConfig, ModelRuntimeRoute, ModelRuntimeSummary, ModelRuntimeTarget,
+    ModelTokenUsage, ModelUsageCostInput,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -31,8 +37,11 @@ const MODEL_CHAT_HISTORY_LIMIT: i64 = 30;
 const MODEL_CHAT_TITLE_CHARS: usize = 60;
 const MODEL_CHAT_PREVIEW_CHARS: usize = 160;
 
-#[derive(Debug, Clone, Default)]
-pub struct ModelRuntimeService;
+#[derive(Debug, Clone)]
+pub struct ModelRuntimeService {
+    db: PgPool,
+    tenant_id: i64,
+}
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -82,13 +91,7 @@ pub struct ModelChatFileContext {
     pub content: String,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ModelChatUsage {
-    pub prompt_tokens: Option<i64>,
-    pub completion_tokens: Option<i64>,
-    pub total_tokens: Option<i64>,
-}
+pub type ModelChatUsage = ModelTokenUsage;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -185,6 +188,7 @@ pub struct ModelProfileRegistryResp {
     pub name: String,
     pub model_name: String,
     pub model_kind: String,
+    pub fallback_policy: Value,
     pub status: i16,
 }
 
@@ -196,7 +200,9 @@ pub struct ModelRouteRegistryResp {
     pub route_purpose: String,
     pub model_profile_id: i64,
     pub priority: i32,
+    pub fallback_route_id: Option<i64>,
     pub status: i16,
+    pub policy_status: ModelRoutePolicyStatus,
     pub masked_credential: Option<String>,
 }
 
@@ -220,7 +226,7 @@ pub struct ModelDeploymentRegistryRow {
     pub status: i16,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, FromRow)]
+#[derive(Debug, Clone, PartialEq, FromRow)]
 pub struct ModelProfileRegistryRow {
     pub id: i64,
     pub deployment_id: i64,
@@ -228,17 +234,20 @@ pub struct ModelProfileRegistryRow {
     pub name: String,
     pub model_name: String,
     pub model_kind: String,
+    pub fallback_policy: Value,
     pub status: i16,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, FromRow)]
+#[derive(Debug, Clone, PartialEq, FromRow)]
 pub struct ModelRouteRegistryRow {
     pub id: i64,
     pub code: String,
     pub route_purpose: String,
     pub model_profile_id: i64,
     pub priority: i32,
+    pub fallback_route_id: Option<i64>,
     pub status: i16,
+    pub policy: Value,
     pub credential_ref: Option<String>,
     pub masked_value: Option<String>,
 }
@@ -267,6 +276,13 @@ struct ModelUsageSaveRecord {
     pub metadata: Value,
     pub user_id: i64,
     pub now: NaiveDateTime,
+}
+
+#[derive(Debug, Clone, PartialEq, FromRow)]
+struct ModelUsageRouteAccountingRow {
+    pub route_id: i64,
+    pub model_profile_id: i64,
+    pub cost_spec: Value,
 }
 
 #[derive(Debug, Clone)]
@@ -304,6 +320,14 @@ struct ModelChatHistorySaveRecords {
 }
 
 impl ModelRuntimeService {
+    pub fn new(db: PgPool) -> Self {
+        Self::for_tenant(db, DEFAULT_TENANT_ID)
+    }
+
+    pub fn for_tenant(db: PgPool, tenant_id: i64) -> Self {
+        Self { db, tenant_id }
+    }
+
     pub fn runtime_config_summary(config: ModelRuntimeConfig) -> ModelRuntimeSummary {
         config.summary()
     }
@@ -404,34 +428,44 @@ impl ModelRuntimeService {
     }
 
     pub async fn registry_summary(db: &PgPool) -> Result<ModelRegistrySummary, AppError> {
+        Self::registry_summary_for_tenant(db, DEFAULT_TENANT_ID).await
+    }
+
+    pub async fn registry_summary_for_tenant(
+        db: &PgPool,
+        tenant_id: i64,
+    ) -> Result<ModelRegistrySummary, AppError> {
         let providers = sqlx::query_as::<_, ModelProviderRegistryRow>(
             r#"
 SELECT id, code, name, provider_type, status
 FROM ai_model_provider
-WHERE tenant_id = 1
+WHERE tenant_id = $1
 ORDER BY id
 "#,
         )
+        .bind(tenant_id)
         .fetch_all(db)
         .await?;
         let deployments = sqlx::query_as::<_, ModelDeploymentRegistryRow>(
             r#"
 SELECT id, provider_id, code, name, endpoint, network_zone, status
 FROM ai_model_deployment
-WHERE tenant_id = 1
+WHERE tenant_id = $1
 ORDER BY id
 "#,
         )
+        .bind(tenant_id)
         .fetch_all(db)
         .await?;
         let profiles = sqlx::query_as::<_, ModelProfileRegistryRow>(
             r#"
-SELECT id, deployment_id, code, name, model_name, model_kind, status
+SELECT id, deployment_id, code, name, model_name, model_kind, fallback_policy, status
 FROM ai_model_profile
-WHERE tenant_id = 1
+WHERE tenant_id = $1
 ORDER BY id
 "#,
         )
+        .bind(tenant_id)
         .fetch_all(db)
         .await?;
         let routes = sqlx::query_as::<_, ModelRouteRegistryRow>(
@@ -442,15 +476,18 @@ SELECT
     r.route_purpose,
     r.model_profile_id,
     r.priority,
+    r.fallback_route_id,
     r.status,
+    r.policy,
     c.credential_ref,
     c.masked_value
 FROM ai_model_route r
 LEFT JOIN ai_model_credential c ON c.id = r.credential_id
-WHERE r.tenant_id = 1
+WHERE r.tenant_id = $1
 ORDER BY r.priority, r.id
 "#,
         )
+        .bind(tenant_id)
         .fetch_all(db)
         .await?;
 
@@ -468,6 +505,31 @@ ORDER BY r.priority, r.id
         profiles: Vec<ModelProfileRegistryRow>,
         routes: Vec<ModelRouteRegistryRow>,
     ) -> ModelRegistrySummary {
+        let deployment_zones = deployments
+            .iter()
+            .map(|row| (row.id, row.network_zone.clone()))
+            .collect::<HashMap<_, _>>();
+        let profile_policy_contexts = profiles
+            .iter()
+            .map(|row| {
+                let network_zone = deployment_zones
+                    .get(&row.deployment_id)
+                    .cloned()
+                    .unwrap_or_else(|| "unknown".to_owned());
+                (row.id, (network_zone, row.fallback_policy.clone()))
+            })
+            .collect::<HashMap<_, _>>();
+        let route_network_zones = routes
+            .iter()
+            .map(|row| {
+                let network_zone = profile_policy_contexts
+                    .get(&row.model_profile_id)
+                    .map(|(network_zone, _)| network_zone.clone())
+                    .unwrap_or_else(|| "unknown".to_owned());
+                (row.id, network_zone)
+            })
+            .collect::<HashMap<_, _>>();
+
         ModelRegistrySummary {
             provider_count: providers.len(),
             deployment_count: deployments.len(),
@@ -504,19 +566,38 @@ ORDER BY r.priority, r.id
                     name: row.name,
                     model_name: row.model_name,
                     model_kind: row.model_kind,
+                    fallback_policy: row.fallback_policy,
                     status: row.status,
                 })
                 .collect(),
             routes: routes
                 .into_iter()
-                .map(|row| ModelRouteRegistryResp {
-                    id: row.id,
-                    code: row.code,
-                    route_purpose: row.route_purpose,
-                    model_profile_id: row.model_profile_id,
-                    priority: row.priority,
-                    status: row.status,
-                    masked_credential: public_masked_credential(row.masked_value),
+                .map(|row| {
+                    let (network_zone, fallback_policy) = profile_policy_contexts
+                        .get(&row.model_profile_id)
+                        .cloned()
+                        .unwrap_or_else(|| ("unknown".to_owned(), Value::Null));
+                    let fallback_network_zone = row.fallback_route_id.and_then(|route_id| {
+                        route_network_zones.get(&route_id).map(String::as_str)
+                    });
+                    let policy_status = evaluate_model_route_policy(ModelRoutePolicyInput {
+                        network_zone: &network_zone,
+                        fallback_network_zone,
+                        fallback_policy: &fallback_policy,
+                        route_policy: &row.policy,
+                    });
+
+                    ModelRouteRegistryResp {
+                        id: row.id,
+                        code: row.code,
+                        route_purpose: row.route_purpose,
+                        model_profile_id: row.model_profile_id,
+                        priority: row.priority,
+                        fallback_route_id: row.fallback_route_id,
+                        status: row.status,
+                        policy_status,
+                        masked_credential: public_masked_credential(row.masked_value),
+                    }
                 })
                 .collect(),
         }
@@ -545,28 +626,68 @@ ORDER BY r.priority, r.id
     }
 
     pub async fn chat_completion_with_usage(
-        db: &PgPool,
+        &self,
         user_id: i64,
         command: ModelChatCommand,
     ) -> Result<ModelChatResp, AppError> {
         let command = normalize_model_chat_command(command)?;
         if let Some(conversation_id) = command.conversation_id {
-            ensure_model_chat_conversation_owner(db, DEFAULT_TENANT_ID, user_id, conversation_id)
-                .await?;
+            ensure_model_chat_conversation_owner(
+                &self.db,
+                self.tenant_id,
+                user_id,
+                conversation_id,
+            )
+            .await?;
         }
         let conversation_id = command.conversation_id.unwrap_or_else(next_id);
         let response = execute_normalized_chat_completion(&command, Some(conversation_id)).await?;
         let now = Utc::now().naive_utc();
         let history =
-            model_chat_history_records(DEFAULT_TENANT_ID, user_id, &command, &response, now)?;
-        persist_model_chat_history(db, &history).await?;
-        let record = model_chat_usage_record(user_id, &response, Utc::now().naive_utc());
-        record_model_chat_usage(db, &record).await?;
+            model_chat_history_records(self.tenant_id, user_id, &command, &response, now)?;
+        persist_model_chat_history(&self.db, &history).await?;
+        let record = model_chat_usage_record(
+            self.tenant_id,
+            user_id,
+            &response,
+            Utc::now().naive_utc(),
+            "ai.models.chat",
+        );
+        record_model_chat_usage(&self.db, &record).await?;
+        Ok(response)
+    }
+
+    pub async fn chat_completion_for_chat_flow(
+        &self,
+        user_id: i64,
+        command: ModelChatCommand,
+    ) -> Result<ModelChatResp, AppError> {
+        self.chat_completion_for_source(user_id, command, "ai.chatFlow.model")
+            .await
+    }
+
+    pub async fn chat_completion_for_source(
+        &self,
+        user_id: i64,
+        command: ModelChatCommand,
+        source: &str,
+    ) -> Result<ModelChatResp, AppError> {
+        let command = normalize_model_chat_command(command)?;
+        let response =
+            execute_normalized_chat_completion(&command, command.conversation_id).await?;
+        let record = model_chat_usage_record(
+            self.tenant_id,
+            user_id,
+            &response,
+            Utc::now().naive_utc(),
+            source,
+        );
+        record_model_chat_usage(&self.db, &record).await?;
         Ok(response)
     }
 
     pub async fn list_chat_conversations(
-        db: &PgPool,
+        &self,
         user_id: i64,
     ) -> Result<Vec<ModelChatConversationResp>, AppError> {
         let rows = sqlx::query_as::<_, ModelChatConversationRow>(
@@ -587,10 +708,10 @@ ORDER BY COALESCE(update_time, create_time) DESC, id DESC
 LIMIT $3;
 "#,
         )
-        .bind(DEFAULT_TENANT_ID)
+        .bind(self.tenant_id)
         .bind(user_id)
         .bind(MODEL_CHAT_HISTORY_LIMIT)
-        .fetch_all(db)
+        .fetch_all(&self.db)
         .await?;
 
         Ok(rows
@@ -760,19 +881,13 @@ fn model_chat_response_from_provider(
         .filter(|value| !value.is_empty())
         .map(str::to_owned)
         .ok_or_else(|| AppError::bad_request("LLM 响应为空"))?;
-    let usage = body.get("usage").unwrap_or(&Value::Null);
-
     Ok(ModelChatResp {
         conversation_id,
         answer,
         route_id: route.summary().route_id,
         model: route.model().map(str::to_owned),
         latency_ms,
-        usage: ModelChatUsage {
-            prompt_tokens: usage.get("prompt_tokens").and_then(Value::as_i64),
-            completion_tokens: usage.get("completion_tokens").and_then(Value::as_i64),
-            total_tokens: usage.get("total_tokens").and_then(Value::as_i64),
-        },
+        usage: normalize_model_provider_usage(&body),
     })
 }
 
@@ -806,7 +921,7 @@ fn model_chat_history_records(
     let assistant_token_count = response
         .usage
         .completion_tokens
-        .unwrap_or_else(|| tokenish_count(&response.answer) as i64)
+        .unwrap_or_else(|| estimate_model_text_tokens(&response.answer) as i64)
         .max(0)
         .min(i32::MAX as i64) as i32;
 
@@ -831,7 +946,7 @@ fn model_chat_history_records(
                 content: user_message.content.clone(),
                 route_id: None,
                 model: None,
-                token_count: tokenish_count(&user_message.content),
+                token_count: estimate_model_text_tokens(&user_message.content),
                 metadata: json!({
                     "source": "ai.models.chat",
                     "messageCount": command.messages.len(),
@@ -975,24 +1090,28 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11);
 }
 
 fn model_chat_usage_record(
+    tenant_id: i64,
     user_id: i64,
     response: &ModelChatResp,
     now: NaiveDateTime,
+    source: &str,
 ) -> ModelUsageSaveRecord {
+    let counts = response.usage.accounting_counts();
+
     ModelUsageSaveRecord {
         id: next_id(),
-        tenant_id: 1,
+        tenant_id,
         usage_kind: "chat".to_owned(),
-        prompt_tokens: response.usage.prompt_tokens.unwrap_or(0).max(0),
-        completion_tokens: response.usage.completion_tokens.unwrap_or(0).max(0),
-        total_tokens: response.usage.total_tokens.unwrap_or(0).max(0),
+        prompt_tokens: counts.prompt_tokens,
+        completion_tokens: counts.completion_tokens,
+        total_tokens: counts.total_tokens,
         latency_ms: Some(u128_to_i64(response.latency_ms)),
         metadata: json!({
             "routeId": response.route_id,
             "model": response.model,
             "conversationId": response.conversation_id,
             "target": "llm",
-            "source": "ai.models.chat"
+            "source": source
         }),
         user_id,
         now,
@@ -1003,36 +1122,67 @@ async fn record_model_chat_usage(
     db: &PgPool,
     record: &ModelUsageSaveRecord,
 ) -> Result<(), AppError> {
+    let route = sqlx::query_as::<_, ModelUsageRouteAccountingRow>(
+        r#"
+SELECT
+    r.id AS route_id,
+    r.model_profile_id,
+    p.cost_spec
+FROM ai_model_route r
+JOIN ai_model_profile p
+  ON p.tenant_id = r.tenant_id
+ AND p.id = r.model_profile_id
+WHERE r.tenant_id = $1
+  AND r.route_purpose = 'chat'
+  AND r.status = 1
+ORDER BY r.priority ASC, r.id ASC
+LIMIT 1;
+"#,
+    )
+    .bind(record.tenant_id)
+    .fetch_optional(db)
+    .await?;
+    let (route_id, model_profile_id, cost_spec) = route
+        .map(|route| {
+            (
+                Some(route.route_id),
+                Some(route.model_profile_id),
+                route.cost_spec,
+            )
+        })
+        .unwrap_or((None, None, Value::Null));
+    let cost_cents = estimate_model_cost_cents(
+        &cost_spec,
+        &ModelUsageCostInput {
+            prompt_tokens: record.prompt_tokens,
+            completion_tokens: record.completion_tokens,
+            total_tokens: record.total_tokens,
+            request_count: 1,
+            vector_count: 0,
+        },
+    );
+
     sqlx::query(
         r#"
-WITH selected_route AS (
-    SELECT id, model_profile_id
-    FROM ai_model_route
-    WHERE tenant_id = $2
-      AND route_purpose = 'chat'
-      AND status = 1
-    ORDER BY priority ASC, id ASC
-    LIMIT 1
-)
 INSERT INTO ai_model_usage (
     id, tenant_id, route_id, model_profile_id, run_id, usage_kind,
     prompt_tokens, completion_tokens, total_tokens, request_count, vector_count,
     cost_cents, latency_ms, metadata, create_user, create_time
 )
 VALUES (
-    $1, $2,
-    (SELECT id FROM selected_route),
-    (SELECT model_profile_id FROM selected_route),
-    NULL, $3, $4, $5, $6, 1, 0, 0, $7, $8, $9, $10
+    $1, $2, $3, $4, NULL, $5, $6, $7, $8, 1, 0, $9::numeric, $10, $11, $12, $13
 );
 "#,
     )
     .bind(record.id)
     .bind(record.tenant_id)
+    .bind(route_id)
+    .bind(model_profile_id)
     .bind(&record.usage_kind)
     .bind(record.prompt_tokens)
     .bind(record.completion_tokens)
     .bind(record.total_tokens)
+    .bind(cost_cents)
     .bind(record.latency_ms)
     .bind(&record.metadata)
     .bind(record.user_id)
@@ -1048,19 +1198,6 @@ fn u128_to_i64(value: u128) -> i64 {
 
 fn preview_chars(text: &str, max_chars: usize) -> String {
     text.trim().chars().take(max_chars).collect()
-}
-
-fn tokenish_count(text: &str) -> i32 {
-    let trimmed = text.trim();
-    if trimmed.is_empty() {
-        return 0;
-    }
-    let whitespace_count = trimmed.split_whitespace().count();
-    if whitespace_count > 1 {
-        whitespace_count.min(i32::MAX as usize) as i32
-    } else {
-        trimmed.chars().count().min(i32::MAX as usize) as i32
-    }
 }
 
 fn health_check_targets(target: Option<&str>) -> Result<Vec<ModelRuntimeTarget>, AppError> {
@@ -1328,6 +1465,17 @@ mod tests {
 
     use super::*;
 
+    #[tokio::test]
+    async fn model_runtime_service_can_be_bound_to_request_tenant() {
+        let db = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://postgres:postgres@localhost:5432/avalon_admin")
+            .unwrap();
+
+        let service = ModelRuntimeService::for_tenant(db, 42);
+
+        assert_eq!(service.tenant_id, 42);
+    }
+
     #[test]
     fn runtime_config_summary_masks_keys_and_reports_routes() {
         let config = ModelRuntimeConfig::from_env_map(|key| match key {
@@ -1390,6 +1538,7 @@ mod tests {
                 name: "DeepSeek V4 Flash".to_owned(),
                 model_name: "deepseek-v4-flash".to_owned(),
                 model_kind: "llm".to_owned(),
+                fallback_policy: Value::Null,
                 status: 1,
             }],
             vec![ModelRouteRegistryRow {
@@ -1398,7 +1547,9 @@ mod tests {
                 route_purpose: "chat".to_owned(),
                 model_profile_id: 20,
                 priority: 100,
+                fallback_route_id: None,
                 status: 1,
+                policy: Value::Null,
                 credential_ref: Some("env:LLM_API_KEY".to_owned()),
                 masked_value: Some("sk-****508d".to_owned()),
             }],
@@ -1416,6 +1567,100 @@ mod tests {
     }
 
     #[test]
+    fn model_registry_summary_marks_cross_zone_fallback_policy_violation() {
+        let summary = ModelRuntimeService::registry_summary_from_rows(
+            vec![ModelProviderRegistryRow {
+                id: 1,
+                code: "private-llm".to_owned(),
+                name: "Private LLM".to_owned(),
+                provider_type: "openai-compatible".to_owned(),
+                status: 1,
+            }],
+            vec![
+                ModelDeploymentRegistryRow {
+                    id: 10,
+                    provider_id: 1,
+                    code: "llm-private".to_owned(),
+                    name: "Private LLM".to_owned(),
+                    endpoint: "https://llm.internal".to_owned(),
+                    network_zone: "private".to_owned(),
+                    status: 1,
+                },
+                ModelDeploymentRegistryRow {
+                    id: 11,
+                    provider_id: 1,
+                    code: "llm-public".to_owned(),
+                    name: "Public LLM".to_owned(),
+                    endpoint: "https://api.example.com".to_owned(),
+                    network_zone: "public".to_owned(),
+                    status: 1,
+                },
+            ],
+            vec![
+                ModelProfileRegistryRow {
+                    id: 20,
+                    deployment_id: 10,
+                    code: "private-chat".to_owned(),
+                    name: "Private Chat".to_owned(),
+                    model_name: "private-chat".to_owned(),
+                    model_kind: "llm".to_owned(),
+                    fallback_policy: json!({
+                        "enabled": true,
+                        "maxRetries": 2,
+                        "circuitBreakerSeconds": 45
+                    }),
+                    status: 1,
+                },
+                ModelProfileRegistryRow {
+                    id: 21,
+                    deployment_id: 11,
+                    code: "public-chat".to_owned(),
+                    name: "Public Chat".to_owned(),
+                    model_name: "public-chat".to_owned(),
+                    model_kind: "llm".to_owned(),
+                    fallback_policy: Value::Null,
+                    status: 1,
+                },
+            ],
+            vec![
+                ModelRouteRegistryRow {
+                    id: 30,
+                    code: "runtime.llm.private".to_owned(),
+                    route_purpose: "chat".to_owned(),
+                    model_profile_id: 20,
+                    priority: 100,
+                    fallback_route_id: Some(31),
+                    status: 1,
+                    policy: Value::Null,
+                    credential_ref: None,
+                    masked_value: None,
+                },
+                ModelRouteRegistryRow {
+                    id: 31,
+                    code: "runtime.llm.public".to_owned(),
+                    route_purpose: "chat".to_owned(),
+                    model_profile_id: 21,
+                    priority: 200,
+                    fallback_route_id: None,
+                    status: 1,
+                    policy: Value::Null,
+                    credential_ref: None,
+                    masked_value: None,
+                },
+            ],
+        );
+
+        assert_eq!(summary.profiles[0].fallback_policy["enabled"], true);
+        assert_eq!(summary.routes[0].policy_status.network_zone, "private");
+        assert!(summary.routes[0].policy_status.fallback_enabled);
+        assert_eq!(
+            summary.routes[0].policy_status.violations,
+            vec!["cross_zone_fallback_not_allowed".to_owned()]
+        );
+        assert!(summary.routes[1].policy_status.violations.is_empty());
+    }
+
+    #[test]
     fn model_registry_summary_sanitizes_env_mask_placeholders() {
         let summary = ModelRuntimeService::registry_summary_from_rows(
             Vec::new(),
@@ -1427,7 +1672,9 @@ mod tests {
                 route_purpose: "chat".to_owned(),
                 model_profile_id: 20,
                 priority: 100,
+                fallback_route_id: None,
                 status: 1,
+                policy: Value::Null,
                 credential_ref: Some("env:LLM_API_KEY".to_owned()),
                 masked_value: Some("env:LLM_API_KEY".to_owned()),
             }],
@@ -1640,6 +1887,29 @@ mod tests {
     }
 
     #[test]
+    fn model_chat_response_normalizes_provider_usage_aliases_and_total() {
+        let route = llm_test_config()
+            .route(ModelRuntimeTarget::Llm)
+            .unwrap()
+            .clone();
+        let body = json!({
+            "choices": [
+                { "message": { "content": "Novex normalized provider usage." } }
+            ],
+            "usage": {
+                "input_tokens": "11",
+                "outputTokens": 7
+            }
+        });
+
+        let response = model_chat_response_from_provider(&route, body, 42, None).unwrap();
+
+        assert_eq!(response.usage.prompt_tokens, Some(11));
+        assert_eq!(response.usage.completion_tokens, Some(7));
+        assert_eq!(response.usage.total_tokens, Some(18));
+    }
+
+    #[test]
     fn model_chat_history_records_capture_latest_turn_metadata() {
         let now = chrono::NaiveDateTime::parse_from_str("2026-06-05 10:00:00", "%Y-%m-%d %H:%M:%S")
             .unwrap();
@@ -1745,7 +2015,7 @@ mod tests {
             },
         };
 
-        let record = model_chat_usage_record(99, &response, now);
+        let record = model_chat_usage_record(1, 99, &response, now, "ai.models.chat");
 
         assert_eq!(record.tenant_id, 1);
         assert_eq!(record.user_id, 99);
@@ -1760,6 +2030,30 @@ mod tests {
             .metadata
             .to_string()
             .contains("Do not persist this answer"));
+    }
+
+    #[test]
+    fn model_chat_usage_record_binds_request_tenant_and_source() {
+        let now = chrono::NaiveDateTime::parse_from_str("2026-06-05 10:00:00", "%Y-%m-%d %H:%M:%S")
+            .unwrap();
+        let response = ModelChatResp {
+            conversation_id: None,
+            answer: "Tenant scoped answer".to_owned(),
+            route_id: "runtime.llm".to_owned(),
+            model: Some("deepseek-v4-flash".to_owned()),
+            latency_ms: 24,
+            usage: ModelChatUsage {
+                prompt_tokens: Some(3),
+                completion_tokens: Some(5),
+                total_tokens: Some(8),
+            },
+        };
+
+        let record = model_chat_usage_record(42, 99, &response, now, "ai.chatFlow.model");
+
+        assert_eq!(record.tenant_id, 42);
+        assert_eq!(record.user_id, 99);
+        assert_eq!(record.metadata["source"], "ai.chatFlow.model");
     }
 
     #[test]

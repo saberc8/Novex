@@ -1,11 +1,17 @@
-use std::collections::{HashMap, HashSet};
+use std::{
+    collections::{HashMap, HashSet},
+    env,
+    time::Duration,
+};
 
 use chrono::{NaiveDateTime, Utc};
 use novex_model::{ModelRuntimeConfig, ModelRuntimeTarget};
 use novex_rag::{
     build_extractive_answer, build_semantic_search_text, chunk_document, keyword_retrieve,
-    parse_document_content, BoundingBox, ChunkMetadata, ChunkSegmentType, CitationRef, ContentRole,
-    DisplayCapability, DocumentChunk as RagDocumentChunk, RagAnswer, RetrievalHit,
+    parse_document_content, parse_milvus_search_hits, BoundingBox, ChunkMetadata, ChunkSegmentType,
+    CitationRef, ContentRole, DisplayCapability, DocumentChunk as RagDocumentChunk,
+    MilvusMetricType, MilvusSearchHit, MilvusSearchRequest, MilvusUpsertRequest, MilvusUpsertRow,
+    RagAnswer, RagModelRoutes, RetrievalHit, LOCAL_EMBEDDING_ROUTE,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -18,10 +24,10 @@ use crate::{
         ensure_max_chars, file_service::FileResp, format_datetime, format_optional_datetime,
     },
     infrastructure::persistence::ai_knowledge_repository::{
-        AiKnowledgeRepository, BlockSaveRecord, ChunkRecord, ChunkSaveRecord, DatasetFilter,
-        DatasetRecord, DatasetSaveRecord, DocumentFilter, DocumentRecord, DocumentSaveRecord,
-        FeedbackSaveRecord, ParserJobFilter, ParserJobRecord, ParserJobSaveRecord,
-        RagTraceHitSaveRecord, RagTraceSaveRecord,
+        AiKnowledgeRepository, BlockSaveRecord, ChunkRecord, ChunkSaveRecord, DatasetAccessFilter,
+        DatasetFilter, DatasetRecord, DatasetSaveRecord, DocumentFilter, DocumentRecord,
+        DocumentSaveRecord, FeedbackSaveRecord, ParserJobFilter, ParserJobRecord,
+        ParserJobSaveRecord, RagTraceHitSaveRecord, RagTraceSaveRecord, VectorCollectionRecord,
     },
     shared::{
         error::AppError,
@@ -54,9 +60,8 @@ const RERANK_CANDIDATE_MULTIPLIER: usize = 4;
 const MAX_RERANK_CANDIDATES: usize = 30;
 const LOCAL_EMBEDDING_DIMENSION: usize = 64;
 const MAX_LOCAL_RETRIEVAL_CHUNKS: i64 = 500;
-const LOCAL_EMBEDDING_ROUTE: &str = "local-keyword";
-const LOCAL_RERANK_ROUTE: &str = "none";
-const LOCAL_ANSWER_ROUTE: &str = "local-extractive";
+const VECTOR_COLLECTION_STATUS_READY: i16 = 1;
+const MILVUS_SEARCH_TIMEOUT: Duration = Duration::from_secs(5);
 const FEEDBACK_STATUS_OPEN: i16 = 1;
 const FEEDBACK_RESOURCE_RAG_TRACE: &str = "rag_trace";
 const FEEDBACK_RATING_HELPFUL: &str = "helpful";
@@ -64,10 +69,39 @@ const FEEDBACK_RATING_NOT_HELPFUL: &str = "not_helpful";
 const FEEDBACK_RATING_CITATION_ISSUE: &str = "citation_issue";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct RagModelRoutes {
-    embedding_model_route: String,
-    rerank_model_route: String,
-    answer_model_route: String,
+struct MilvusSearchConfig {
+    endpoint: String,
+    token: Option<String>,
+}
+
+impl MilvusSearchConfig {
+    fn from_env() -> Option<Self> {
+        Self::from_env_map(|key| env::var(key).ok())
+    }
+
+    fn from_env_map<F>(mut env_get: F) -> Option<Self>
+    where
+        F: FnMut(&str) -> Option<String>,
+    {
+        let endpoint = env_get("MILVUS_ENDPOINT")
+            .or_else(|| env_get("NOVEX_MILVUS_ENDPOINT"))
+            .map(|value| value.trim().trim_end_matches('/').to_owned())
+            .filter(|value| !value.is_empty())?;
+        let token = env_get("MILVUS_TOKEN")
+            .or_else(|| env_get("NOVEX_MILVUS_TOKEN"))
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty());
+
+        Some(Self { endpoint, token })
+    }
+
+    fn search_url(&self) -> String {
+        format!("{}/v2/vectordb/entities/search", self.endpoint)
+    }
+
+    fn upsert_url(&self) -> String {
+        format!("{}/v2/vectordb/entities/upsert", self.endpoint)
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -355,6 +389,23 @@ pub struct RagFeedbackCommand {
     pub reason: String,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AiFeedbackCommand {
+    #[serde(default)]
+    pub resource_type: String,
+    #[serde(default)]
+    pub resource_id: String,
+    #[serde(default)]
+    pub trace_id: Option<String>,
+    #[serde(default)]
+    pub rating: String,
+    #[serde(default)]
+    pub reason: String,
+    #[serde(default)]
+    pub metadata: Value,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DatasetResp {
@@ -449,6 +500,16 @@ pub struct FeedbackResp {
     pub rating: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AiFeedbackResp {
+    pub id: i64,
+    pub resource_type: String,
+    pub resource_id: String,
+    pub trace_id: Option<String>,
+    pub rating: String,
+}
+
 #[derive(Debug, Clone)]
 struct IndexedRagChunk {
     chunk_db_id: i64,
@@ -528,6 +589,36 @@ impl KnowledgeService {
         Ok(PageResult::new(list, total))
     }
 
+    pub async fn list_datasets_for_user(
+        &self,
+        tenant_id: i64,
+        user_id: i64,
+        role_ids: &[i64],
+        is_admin: bool,
+        query: DatasetQuery,
+    ) -> Result<PageResult<DatasetResp>, AppError> {
+        let page = query.page_query();
+        let filter = DatasetAccessFilter {
+            tenant_id,
+            user_id,
+            role_ids,
+            is_admin,
+            name: query.name.as_deref(),
+            status: query.status,
+            limit: page.limit(),
+            offset: page.offset(),
+        };
+        let total = self.repo.count_accessible_datasets(&filter).await?;
+        let list = self
+            .repo
+            .list_accessible_datasets(&filter)
+            .await?
+            .into_iter()
+            .map(DatasetResp::from)
+            .collect();
+        Ok(PageResult::new(list, total))
+    }
+
     pub async fn create_dataset(
         &self,
         user_id: i64,
@@ -569,6 +660,55 @@ impl KnowledgeService {
             return Err(AppError::bad_request("知识库 ID 不合法"));
         }
         if !self.repo.dataset_exists(tenant_id, dataset_id).await? {
+            return Err(AppError::NotFound);
+        }
+        let page = query.page_query();
+        let filter = DocumentFilter {
+            tenant_id,
+            dataset_id,
+            limit: page.limit(),
+            offset: page.offset(),
+        };
+        let total = self.repo.count_documents(&filter).await?;
+        let list = self
+            .repo
+            .list_documents(&filter)
+            .await?
+            .into_iter()
+            .map(DocumentResp::from)
+            .collect();
+        Ok(PageResult::new(list, total))
+    }
+
+    pub async fn list_documents_for_user(
+        &self,
+        tenant_id: i64,
+        user_id: i64,
+        role_ids: &[i64],
+        is_admin: bool,
+        dataset_id: i64,
+        query: DocumentQuery,
+    ) -> Result<PageResult<DocumentResp>, AppError> {
+        if dataset_id <= 0 {
+            return Err(AppError::bad_request("知识库 ID 不合法"));
+        }
+        if !self
+            .repo
+            .dataset_readable(
+                &DatasetAccessFilter {
+                    tenant_id,
+                    user_id,
+                    role_ids,
+                    is_admin,
+                    name: None,
+                    status: None,
+                    limit: 1,
+                    offset: 0,
+                },
+                dataset_id,
+            )
+            .await?
+        {
             return Err(AppError::NotFound);
         }
         let page = query.page_query();
@@ -651,6 +791,8 @@ impl KnowledgeService {
         self.repo
             .create_document_ingestion(&document, &parser_job, &[], &chunk_records)
             .await?;
+        self.upsert_chunks_to_milvus_after_ingestion(tenant_id, dataset_id, &chunk_records)
+            .await;
         Ok(document_id)
     }
 
@@ -715,7 +857,35 @@ impl KnowledgeService {
                 )
                 .await?;
         }
+        self.upsert_chunks_to_milvus_after_ingestion(tenant_id, dataset_id, &parts.chunks)
+            .await;
         Ok(document_id)
+    }
+
+    async fn upsert_chunks_to_milvus_after_ingestion(
+        &self,
+        tenant_id: i64,
+        dataset_id: i64,
+        chunks: &[ChunkSaveRecord],
+    ) {
+        let Some(config) = MilvusSearchConfig::from_env() else {
+            return;
+        };
+        let collection = match self.repo.get_vector_collection(tenant_id, dataset_id).await {
+            Ok(Some(collection)) => collection,
+            Ok(None) => return,
+            Err(err) => {
+                tracing::warn!(error = %err, tenant_id, dataset_id, "Milvus collection lookup failed after ingestion");
+                return;
+            }
+        };
+        let Some(request) = milvus_upsert_request_for_collection(&collection, chunks) else {
+            return;
+        };
+
+        if let Err(err) = milvus_upsert_chunks(&config, &request).await {
+            tracing::warn!(error = %err, tenant_id, dataset_id, "Milvus upsert failed after ingestion");
+        }
     }
 
     pub async fn create_parse_job(
@@ -923,15 +1093,68 @@ impl KnowledgeService {
         if !self.repo.dataset_exists(tenant_id, dataset_id).await? {
             return Err(AppError::NotFound);
         }
+        self.ask_existing_dataset_for_tenant(tenant_id, user_id, dataset_id, command)
+            .await
+    }
+
+    pub async fn ask_dataset_for_user(
+        &self,
+        tenant_id: i64,
+        user_id: i64,
+        role_ids: &[i64],
+        is_admin: bool,
+        dataset_id: i64,
+        command: RagAskCommand,
+    ) -> Result<RagAskResp, AppError> {
+        if dataset_id <= 0 {
+            return Err(AppError::bad_request("知识库 ID 不合法"));
+        }
+        if !self
+            .repo
+            .dataset_readable(
+                &DatasetAccessFilter {
+                    tenant_id,
+                    user_id,
+                    role_ids,
+                    is_admin,
+                    name: None,
+                    status: None,
+                    limit: 1,
+                    offset: 0,
+                },
+                dataset_id,
+            )
+            .await?
+        {
+            return Err(AppError::NotFound);
+        }
+        self.ask_existing_dataset_for_tenant(tenant_id, user_id, dataset_id, command)
+            .await
+    }
+
+    async fn ask_existing_dataset_for_tenant(
+        &self,
+        tenant_id: i64,
+        user_id: i64,
+        dataset_id: i64,
+        command: RagAskCommand,
+    ) -> Result<RagAskResp, AppError> {
         let command = normalize_rag_ask_command(command)?;
         let chunk_records = self
             .repo
             .list_indexed_chunks(tenant_id, dataset_id, MAX_LOCAL_RETRIEVAL_CHUNKS)
             .await?;
         let indexed_chunks = indexed_rag_chunks(chunk_records);
+        let vector_collection = self
+            .repo
+            .get_vector_collection(tenant_id, dataset_id)
+            .await?;
         let candidate_limit = rerank_candidate_limit(command.limit);
-        let candidate_hits = hybrid_retrieve_indexed_chunks_with_runtime_embeddings(
+        let candidate_hits = hybrid_retrieve_indexed_chunks_with_milvus_or_local(
             &command.question,
+            tenant_id,
+            dataset_id,
+            vector_collection.as_ref(),
             &indexed_chunks,
             candidate_limit,
         )
@@ -996,6 +1219,38 @@ impl KnowledgeService {
             rating: command.rating,
         })
     }
+
+    pub async fn submit_ai_feedback_for_tenant(
+        &self,
+        tenant_id: i64,
+        user_id: i64,
+        command: AiFeedbackCommand,
+    ) -> Result<AiFeedbackResp, AppError> {
+        let command = normalize_ai_feedback_command(command)?;
+        let feedback_id = next_id();
+        let record = FeedbackSaveRecord {
+            id: feedback_id,
+            tenant_id,
+            resource_type: command.resource_type.clone(),
+            resource_id: command.resource_id.clone(),
+            trace_id: command.trace_id.clone(),
+            rating: command.rating.clone(),
+            reason: command.reason.clone(),
+            metadata: ai_feedback_metadata(&command),
+            status: FEEDBACK_STATUS_OPEN,
+            user_id,
+            now: Utc::now().naive_utc(),
+        };
+
+        self.repo.create_feedback(&record).await?;
+        Ok(AiFeedbackResp {
+            id: feedback_id,
+            resource_type: command.resource_type,
+            resource_id: command.resource_id,
+            trace_id: command.trace_id,
+            rating: command.rating,
+        })
+    }
 }
 
 impl From<DatasetRecord> for DatasetResp {
@@ -1045,6 +1300,8 @@ impl From<DocumentRecord> for DocumentResp {
 
 impl From<ParserJobRecord> for ParserJobResp {
     fn from(record: ParserJobRecord) -> Self {
+        let parser_request = parser_request_from_result_summary(&record.result_summary);
+
         Self {
             id: record.id,
             tenant_id: record.tenant_id,
@@ -1062,13 +1319,20 @@ impl From<ParserJobRecord> for ParserJobResp {
             parse_status: record.parse_status,
             ingestion_status: record.ingestion_status,
             chunk_count: record.chunk_count,
-            parser_request: None,
+            parser_request,
             create_user_string: record.create_user_string,
             create_time: format_datetime(record.create_time),
             update_user_string: record.update_user_string,
             update_time: format_optional_datetime(record.update_time),
         }
     }
+}
+
+fn parser_request_from_result_summary(result_summary: &Value) -> Option<Value> {
+    result_summary
+        .get("parserRequest")
+        .filter(|value| value.is_object())
+        .cloned()
 }
 
 pub fn normalize_dataset_command(mut command: DatasetCommand) -> Result<DatasetCommand, AppError> {
@@ -1419,12 +1683,49 @@ pub fn normalize_rag_feedback_command(
     Ok(command)
 }
 
+pub fn normalize_ai_feedback_command(
+    mut command: AiFeedbackCommand,
+) -> Result<AiFeedbackCommand, AppError> {
+    command.resource_type = command.resource_type.trim().to_owned();
+    command.resource_id = command.resource_id.trim().to_owned();
+    command.trace_id = command
+        .trace_id
+        .map(|trace_id| trace_id.trim().to_owned())
+        .filter(|trace_id| !trace_id.is_empty());
+    command.rating = command.rating.trim().to_ascii_lowercase();
+    command.reason = command.reason.trim().to_owned();
+    if command.resource_type.is_empty() {
+        return Err(AppError::bad_request("反馈资源类型不能为空"));
+    }
+    if command.resource_id.is_empty() {
+        return Err(AppError::bad_request("反馈资源 ID 不能为空"));
+    }
+    if command.rating.is_empty() {
+        return Err(AppError::bad_request("反馈类型不能为空"));
+    }
+    ensure_max_chars("反馈资源类型", &command.resource_type, 64)?;
+    ensure_max_chars("反馈资源 ID", &command.resource_id, 128)?;
+    if let Some(trace_id) = &command.trace_id {
+        ensure_max_chars("Trace ID", trace_id, 128)?;
+    }
+    ensure_max_chars("反馈类型", &command.rating, 64)?;
+    ensure_max_chars("反馈原因", &command.reason, 1000)?;
+    if command.metadata.is_null() {
+        command.metadata = json!({});
+    }
+    Ok(command)
+}
+
 fn rag_feedback_metadata(command: &RagFeedbackCommand) -> Value {
     json!({
         "rating": command.rating,
         "reasonLength": command.reason.chars().count(),
         "source": "training-web"
     })
+}
+
+fn ai_feedback_metadata(command: &AiFeedbackCommand) -> Value {
+    command.metadata.clone()
 }
 
 fn document_upload_chunks(
@@ -2414,14 +2715,44 @@ fn hybrid_retrieve_indexed_chunks(
     )
 }
 
-async fn hybrid_retrieve_indexed_chunks_with_runtime_embeddings(
+async fn hybrid_retrieve_indexed_chunks_with_milvus_or_local(
     question: &str,
+    tenant_id: i64,
+    dataset_id: i64,
+    vector_collection: Option<&VectorCollectionRecord>,
     indexed_chunks: &[IndexedRagChunk],
     limit: usize,
 ) -> Vec<RetrievalHit> {
-    let mut query_embeddings = vec![local_embedding_vector(question)];
-    if let Some(runtime_embedding) = runtime_query_embedding(question).await {
-        query_embeddings.push(runtime_embedding);
+    if limit == 0 {
+        return Vec::new();
+    }
+
+    let query_embeddings = query_embeddings_for_retrieval(question).await;
+    if let (Some(config), Some(collection), Some(query_vector)) = (
+        MilvusSearchConfig::from_env(),
+        vector_collection,
+        query_embeddings.last().cloned(),
+    ) {
+        if let Some(request) = milvus_search_request_for_collection(
+            tenant_id,
+            dataset_id,
+            collection,
+            query_vector,
+            limit,
+        ) {
+            if let Ok(milvus_hits) = milvus_search_hits(&config, &request).await {
+                let embedding_hits =
+                    retrieval_hits_from_milvus_hits(&milvus_hits, indexed_chunks, limit);
+                if !embedding_hits.is_empty() {
+                    let rag_chunks = indexed_chunks
+                        .iter()
+                        .map(|chunk| chunk.chunk.clone())
+                        .collect::<Vec<_>>();
+                    let keyword_hits = keyword_retrieve(question, &rag_chunks, limit);
+                    return merge_hybrid_retrieval_hits(keyword_hits, embedding_hits, limit);
+                }
+            }
+        }
     }
 
     hybrid_retrieve_indexed_chunks_with_query_embeddings(
@@ -2432,6 +2763,14 @@ async fn hybrid_retrieve_indexed_chunks_with_runtime_embeddings(
     )
 }
 
+async fn query_embeddings_for_retrieval(question: &str) -> Vec<Vec<f32>> {
+    let mut query_embeddings = vec![local_embedding_vector(question)];
+    if let Some(runtime_embedding) = runtime_query_embedding(question).await {
+        query_embeddings.push(runtime_embedding);
+    }
+    query_embeddings
+}
+
 async fn runtime_query_embedding(question: &str) -> Option<Vec<f32>> {
     let config = ModelRuntimeConfig::from_env();
     let route = config.route(ModelRuntimeTarget::Embedding)?;
@@ -2440,6 +2779,215 @@ async fn runtime_query_embedding(question: &str) -> Option<Vec<f32>> {
         .ok()?;
     vectors.sort_by_key(|vector| vector.index);
     vectors.into_iter().next().map(|vector| vector.vector)
+}
+
+fn milvus_search_request_for_collection(
+    tenant_id: i64,
+    dataset_id: i64,
+    collection: &VectorCollectionRecord,
+    query_vector: Vec<f32>,
+    limit: usize,
+) -> Option<MilvusSearchRequest> {
+    if limit == 0
+        || query_vector.is_empty()
+        || collection.status != VECTOR_COLLECTION_STATUS_READY
+        || !collection
+            .vector_backend
+            .trim()
+            .eq_ignore_ascii_case("milvus")
+    {
+        return None;
+    }
+    if collection.dimension > 0 && collection.dimension as usize != query_vector.len() {
+        return None;
+    }
+
+    let provider_collection = collection.provider_collection.trim();
+    if provider_collection.is_empty() {
+        return None;
+    }
+
+    Some(
+        MilvusSearchRequest::new(
+            provider_collection,
+            query_vector,
+            limit,
+            tenant_id,
+            dataset_id,
+        )
+        .with_metric_type(milvus_metric_type(&collection.metric_type)),
+    )
+}
+
+fn milvus_upsert_request_for_collection(
+    collection: &VectorCollectionRecord,
+    chunks: &[ChunkSaveRecord],
+) -> Option<MilvusUpsertRequest> {
+    if collection.status != VECTOR_COLLECTION_STATUS_READY
+        || !collection
+            .vector_backend
+            .trim()
+            .eq_ignore_ascii_case("milvus")
+    {
+        return None;
+    }
+
+    let provider_collection = collection.provider_collection.trim();
+    if provider_collection.is_empty() {
+        return None;
+    }
+
+    let rows = chunks
+        .iter()
+        .filter_map(|chunk| milvus_upsert_row_for_chunk(collection, chunk))
+        .collect::<Vec<_>>();
+    if rows.is_empty() {
+        return None;
+    }
+
+    Some(MilvusUpsertRequest::new(provider_collection, rows))
+}
+
+fn milvus_upsert_row_for_chunk(
+    collection: &VectorCollectionRecord,
+    chunk: &ChunkSaveRecord,
+) -> Option<MilvusUpsertRow> {
+    let embedding = chunk_save_record_embedding_vector(chunk)?;
+    if collection.dimension > 0 && collection.dimension as usize != embedding.len() {
+        return None;
+    }
+
+    Some(MilvusUpsertRow {
+        id: chunk.id,
+        tenant_id: chunk.tenant_id,
+        dataset_id: chunk.dataset_id,
+        document_id: chunk.document_id,
+        chunk_uid: chunk.chunk_uid.clone(),
+        chunk_index: chunk.chunk_index,
+        embedding,
+        semantic_search_text: non_empty_parser_string(&chunk.semantic_search_text)
+            .unwrap_or_else(|| chunk.content.clone()),
+        segment_type: chunk.segment_type.clone(),
+        content_role: chunk.content_role.clone(),
+    })
+}
+
+fn chunk_save_record_embedding_vector(chunk: &ChunkSaveRecord) -> Option<Vec<f32>> {
+    let vector = chunk
+        .metadata
+        .get("embedding")?
+        .get("vector")?
+        .as_array()?
+        .iter()
+        .filter_map(json_value_f32)
+        .filter(|value| value.is_finite())
+        .collect::<Vec<_>>();
+    if vector.is_empty() {
+        None
+    } else {
+        Some(vector)
+    }
+}
+
+fn milvus_metric_type(metric_type: &str) -> MilvusMetricType {
+    match metric_type.trim().to_ascii_lowercase().as_str() {
+        "ip" | "inner_product" => MilvusMetricType::Ip,
+        "l2" | "euclidean" => MilvusMetricType::L2,
+        _ => MilvusMetricType::Cosine,
+    }
+}
+
+async fn milvus_search_hits(
+    config: &MilvusSearchConfig,
+    request: &MilvusSearchRequest,
+) -> Result<Vec<MilvusSearchHit>, AppError> {
+    let client = milvus_http_client()?;
+    let mut builder = client
+        .post(config.search_url())
+        .json(&request.to_rest_search_body());
+    if let Some(token) = config.token.as_deref() {
+        builder = builder.bearer_auth(token);
+    }
+
+    let response = builder
+        .send()
+        .await
+        .map_err(|err| AppError::bad_request(format!("Milvus 检索请求失败: {err}")))?;
+    if !response.status().is_success() {
+        return Err(AppError::bad_request(format!(
+            "Milvus 检索请求失败: HTTP {}",
+            response.status()
+        )));
+    }
+
+    let payload = response
+        .json::<Value>()
+        .await
+        .map_err(|err| AppError::bad_request(format!("Milvus 检索响应解析失败: {err}")))?;
+    if let Some(code) = payload.get("code").and_then(Value::as_i64) {
+        if code != 0 {
+            let message = payload
+                .get("message")
+                .or_else(|| payload.get("msg"))
+                .and_then(Value::as_str)
+                .unwrap_or("unknown error");
+            return Err(AppError::bad_request(format!("Milvus 检索失败: {message}")));
+        }
+    }
+
+    Ok(parse_milvus_search_hits(&payload))
+}
+
+async fn milvus_upsert_chunks(
+    config: &MilvusSearchConfig,
+    request: &MilvusUpsertRequest,
+) -> Result<(), AppError> {
+    if request.is_empty() {
+        return Ok(());
+    }
+
+    let client = milvus_http_client()?;
+    let mut builder = client
+        .post(config.upsert_url())
+        .json(&request.to_rest_upsert_body());
+    if let Some(token) = config.token.as_deref() {
+        builder = builder.bearer_auth(token);
+    }
+
+    let response = builder
+        .send()
+        .await
+        .map_err(|err| AppError::bad_request(format!("Milvus 写入请求失败: {err}")))?;
+    if !response.status().is_success() {
+        return Err(AppError::bad_request(format!(
+            "Milvus 写入请求失败: HTTP {}",
+            response.status()
+        )));
+    }
+
+    let payload = response
+        .json::<Value>()
+        .await
+        .map_err(|err| AppError::bad_request(format!("Milvus 写入响应解析失败: {err}")))?;
+    if let Some(code) = payload.get("code").and_then(Value::as_i64) {
+        if code != 0 {
+            let message = payload
+                .get("message")
+                .or_else(|| payload.get("msg"))
+                .and_then(Value::as_str)
+                .unwrap_or("unknown error");
+            return Err(AppError::bad_request(format!("Milvus 写入失败: {message}")));
+        }
+    }
+
+    Ok(())
+}
+
+fn milvus_http_client() -> Result<reqwest::Client, AppError> {
+    reqwest::Client::builder()
+        .timeout(MILVUS_SEARCH_TIMEOUT)
+        .build()
+        .map_err(|err| AppError::bad_request(format!("Milvus 客户端初始化失败: {err}")))
 }
 
 fn hybrid_retrieve_indexed_chunks_with_query_embeddings(
@@ -2528,6 +3076,39 @@ fn embedding_retrieve_indexed_chunks(
             score,
             citation: chunk.citation.clone(),
             chunk,
+        })
+        .collect()
+}
+
+fn retrieval_hits_from_milvus_hits(
+    hits: &[MilvusSearchHit],
+    indexed_chunks: &[IndexedRagChunk],
+    limit: usize,
+) -> Vec<RetrievalHit> {
+    if limit == 0 {
+        return Vec::new();
+    }
+
+    let chunk_by_uid = indexed_chunks
+        .iter()
+        .map(|chunk| (chunk.chunk.chunk_id.as_str(), chunk))
+        .collect::<HashMap<_, _>>();
+
+    hits.iter()
+        .filter_map(|hit| {
+            let indexed_chunk = chunk_by_uid.get(hit.chunk_uid.as_str())?;
+            Some(RetrievalHit {
+                rank: 0,
+                score: hit.score,
+                citation: indexed_chunk.chunk.citation.clone(),
+                chunk: indexed_chunk.chunk.clone(),
+            })
+        })
+        .take(limit)
+        .enumerate()
+        .map(|(index, mut hit)| {
+            hit.rank = index + 1;
+            hit
         })
         .collect()
 }
@@ -2735,18 +3316,7 @@ fn rag_model_routes() -> RagModelRoutes {
 }
 
 fn rag_model_routes_from_config(config: &ModelRuntimeConfig) -> RagModelRoutes {
-    RagModelRoutes {
-        embedding_model_route: runtime_route_id(config, ModelRuntimeTarget::Embedding)
-            .unwrap_or_else(|| LOCAL_EMBEDDING_ROUTE.to_owned()),
-        rerank_model_route: runtime_route_id(config, ModelRuntimeTarget::Reranker)
-            .unwrap_or_else(|| LOCAL_RERANK_ROUTE.to_owned()),
-        answer_model_route: runtime_route_id(config, ModelRuntimeTarget::Llm)
-            .unwrap_or_else(|| LOCAL_ANSWER_ROUTE.to_owned()),
-    }
-}
-
-fn runtime_route_id(config: &ModelRuntimeConfig, target: ModelRuntimeTarget) -> Option<String> {
-    config.route(target).map(|route| route.summary().route_id)
+    RagModelRoutes::from_runtime_config(config)
 }
 
 fn rag_trace_hit_records(
@@ -3209,6 +3779,59 @@ mod tests {
     }
 
     #[test]
+    fn parser_job_response_restores_persisted_parser_request() {
+        let parser_request = serde_json::json!({
+            "tenantId": 1,
+            "datasetId": 7,
+            "documentId": 42,
+            "parserJobId": 99,
+            "source": {
+                "kind": "objectStorage",
+                "contentType": "application/pdf",
+                "name": "training.pdf",
+                "uri": "/file/knowledge/88.pdf"
+            },
+            "options": {
+                "maxChunkChars": DEFAULT_CHUNK_MAX_CHARS,
+                "chunkOverlapChars": DEFAULT_CHUNK_OVERLAP_CHARS
+            },
+            "trace": {
+                "requestId": "parser-job-99"
+            }
+        });
+        let now = Utc::now().naive_utc();
+
+        let resp = ParserJobResp::from(ParserJobRecord {
+            id: 99,
+            tenant_id: 1,
+            dataset_id: 7,
+            document_id: 42,
+            job_type: PARSER_JOB_TYPE_WORKER,
+            status: PARSER_JOB_STATUS_SUBMITTED,
+            attempt_count: 0,
+            error_message: String::new(),
+            result_summary: serde_json::json!({
+                "parser": "parser-worker",
+                "status": "submitted",
+                "parserRequest": parser_request.clone()
+            }),
+            document_name: "training.pdf".to_owned(),
+            source_uri: "/file/knowledge/88.pdf".to_owned(),
+            file_id: Some(88),
+            content_type: "application/pdf".to_owned(),
+            parse_status: DOCUMENT_PARSE_STATUS_PARSING,
+            ingestion_status: DOCUMENT_INGESTION_STATUS_PENDING,
+            chunk_count: 0,
+            create_time: now,
+            create_user_string: "admin".to_owned(),
+            update_time: None,
+            update_user_string: String::new(),
+        });
+
+        assert_eq!(resp.parser_request, Some(parser_request));
+    }
+
+    #[test]
     fn parser_job_status_update_persists_deferred_mineru_task() {
         let command = serde_json::from_value::<ParserJobStatusUpdateCommand>(serde_json::json!({
             "status": " submitted ",
@@ -3475,6 +4098,127 @@ mod tests {
 
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].chunk.chunk_id, "42:0");
+    }
+
+    #[test]
+    fn milvus_search_config_reads_endpoint_token_and_search_url() {
+        let config = MilvusSearchConfig::from_env_map(|key| match key {
+            "MILVUS_ENDPOINT" => Some(" http://localhost:19530/ ".to_owned()),
+            "MILVUS_TOKEN" => Some("root:Milvus".to_owned()),
+            _ => None,
+        })
+        .expect("milvus config should be present");
+
+        assert_eq!(config.endpoint, "http://localhost:19530");
+        assert_eq!(config.token.as_deref(), Some("root:Milvus"));
+        assert_eq!(
+            config.search_url(),
+            "http://localhost:19530/v2/vectordb/entities/search"
+        );
+    }
+
+    #[test]
+    fn milvus_request_uses_vector_collection_mapping_dimension_and_metric() {
+        let collection = VectorCollectionRecord {
+            id: 100,
+            vector_backend: "milvus".to_owned(),
+            provider_collection: "novex_t42_dataset_7".to_owned(),
+            dimension: 2,
+            metric_type: "ip".to_owned(),
+            status: VECTOR_COLLECTION_STATUS_READY,
+        };
+
+        let request = milvus_search_request_for_collection(42, 7, &collection, vec![0.1, 0.2], 4)
+            .expect("valid collection should build a milvus request");
+        let body = request.to_rest_search_body();
+
+        assert_eq!(body["collectionName"], "novex_t42_dataset_7");
+        assert_eq!(body["filter"], "tenant_id == 42 and dataset_id == 7");
+        assert_eq!(body["searchParams"]["metric_type"], "IP");
+        assert!(milvus_search_request_for_collection(42, 7, &collection, vec![0.1], 4).is_none());
+    }
+
+    #[test]
+    fn milvus_upsert_request_uses_chunk_embedding_and_collection_mapping() {
+        let command = normalize_document_upload_command(DocumentUploadCommand {
+            name: "training.txt".to_owned(),
+            content: "Onboarding training starts Monday.".to_owned(),
+            ..DocumentUploadCommand::default()
+        })
+        .unwrap();
+        let chunks = document_upload_chunks(77, &command);
+        let now = Utc::now().naive_utc();
+        let records = chunk_save_records(42, 7, 77, chunks, 9, now);
+        let collection = VectorCollectionRecord {
+            id: 100,
+            vector_backend: "milvus".to_owned(),
+            provider_collection: "novex_t42_dataset_7".to_owned(),
+            dimension: LOCAL_EMBEDDING_DIMENSION as i32,
+            metric_type: "cosine".to_owned(),
+            status: VECTOR_COLLECTION_STATUS_READY,
+        };
+
+        let request = milvus_upsert_request_for_collection(&collection, &records)
+            .expect("chunk records with vectors should build a milvus upsert request");
+        let body = request.to_rest_upsert_body();
+
+        assert_eq!(body["collectionName"], "novex_t42_dataset_7");
+        assert_eq!(body["data"][0]["id"], records[0].id);
+        assert_eq!(body["data"][0]["chunk_db_id"], records[0].id);
+        assert_eq!(body["data"][0]["tenant_id"], 42);
+        assert_eq!(body["data"][0]["dataset_id"], 7);
+        assert_eq!(body["data"][0]["document_id"], 77);
+        assert_eq!(body["data"][0]["chunk_uid"], records[0].chunk_uid);
+        assert!(body["data"][0]["embedding"].as_array().unwrap().len() > 1);
+        assert_eq!(body["data"][0]["segment_type"], records[0].segment_type);
+    }
+
+    #[test]
+    fn milvus_hits_are_mapped_back_to_indexed_postgres_chunks() {
+        let citation = CitationRef {
+            document_id: "42".to_owned(),
+            chunk_id: "42:1".to_owned(),
+            page_no: None,
+            section_path: vec![],
+        };
+        let indexed_chunks = vec![IndexedRagChunk {
+            chunk_db_id: 12,
+            document_id: 42,
+            embedding_vector: Some(vec![0.0, 1.0]),
+            chunk: RagDocumentChunk {
+                document_id: "42".to_owned(),
+                chunk_id: "42:1".to_owned(),
+                chunk_index: 1,
+                text: "Milvus indexed context".to_owned(),
+                semantic_search_text: "Milvus indexed context".to_owned(),
+                token_count: 3,
+                citation,
+                metadata: ChunkMetadata::default(),
+            },
+        }];
+        let milvus_hits = vec![
+            MilvusSearchHit {
+                chunk_uid: "missing".to_owned(),
+                score: 0.99,
+                chunk_db_id: None,
+                document_id: None,
+                fields: serde_json::json!({}),
+            },
+            MilvusSearchHit {
+                chunk_uid: "42:1".to_owned(),
+                score: 0.83,
+                chunk_db_id: Some(12),
+                document_id: Some(42),
+                fields: serde_json::json!({}),
+            },
+        ];
+
+        let hits = retrieval_hits_from_milvus_hits(&milvus_hits, &indexed_chunks, 5);
+
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].rank, 1);
+        assert_eq!(hits[0].chunk.chunk_id, "42:1");
+        assert!((hits[0].score - 0.83).abs() < f32::EPSILON);
     }
 
     #[test]
@@ -3911,6 +4655,30 @@ mod tests {
     }
 
     #[test]
+    fn ai_feedback_trims_resource_and_preserves_customer_metadata() {
+        let command = normalize_ai_feedback_command(AiFeedbackCommand {
+            resource_type: " training_quiz ".to_owned(),
+            resource_id: " 900 ".to_owned(),
+            trace_id: Some(" agent-900 ".to_owned()),
+            rating: " quiz_wrong_answer ".to_owned(),
+            reason: "  错题答案需要复核  ".to_owned(),
+            metadata: serde_json::json!({
+                "source": "training-web",
+                "quizRunId": 900
+            }),
+        })
+        .unwrap();
+
+        assert_eq!(command.resource_type, "training_quiz");
+        assert_eq!(command.resource_id, "900");
+        assert_eq!(command.trace_id.as_deref(), Some("agent-900"));
+        assert_eq!(command.rating, "quiz_wrong_answer");
+        assert_eq!(command.reason, "错题答案需要复核");
+        assert_eq!(ai_feedback_metadata(&command)["source"], "training-web");
+        assert_eq!(ai_feedback_metadata(&command)["quizRunId"], 900);
+    }
+
+    #[test]
     fn rag_model_routes_use_runtime_config_when_available() {
         let env = [
             ("LLM_API_KEY", "sk-fake-llm-secret-508d"),
@@ -3948,8 +4716,8 @@ mod tests {
         let routes = rag_model_routes_from_config(&config);
 
         assert_eq!(routes.embedding_model_route, LOCAL_EMBEDDING_ROUTE);
-        assert_eq!(routes.rerank_model_route, LOCAL_RERANK_ROUTE);
-        assert_eq!(routes.answer_model_route, LOCAL_ANSWER_ROUTE);
+        assert_eq!(routes.rerank_model_route, novex_rag::LOCAL_RERANK_ROUTE);
+        assert_eq!(routes.answer_model_route, novex_rag::LOCAL_ANSWER_ROUTE);
     }
 
     #[test]
