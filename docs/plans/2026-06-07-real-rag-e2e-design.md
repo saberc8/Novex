@@ -133,4 +133,3 @@ Those should be separate milestones after the RAG acceptance path is genuinely l
   - LLM provider generated the final answer;
   - citations are returned;
   - `ai_rag_trace` contains live-path metadata.
-
