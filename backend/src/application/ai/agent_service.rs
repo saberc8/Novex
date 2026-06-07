@@ -12,7 +12,7 @@ use novex_memory::{
     build_memory_context, MemoryAccessContext, MemoryContext, MemoryScope, MemoryScopeRef,
     MemorySnippet, MemoryWritePolicy,
 };
-use novex_model::{ModelRuntimeConfig, ModelRuntimeTarget};
+use novex_model::ModelRoutePurpose;
 use novex_tools::{
     evaluate_tool_execution_policy, parse_media_image_generation_response, ApprovalPolicy,
     MediaImageGenerationRequest, ToolExecutionPolicyDecision, ToolExecutionPolicyInput,
@@ -23,6 +23,7 @@ use serde_json::{json, Value};
 use sqlx::PgPool;
 
 use crate::{
+    application::ai::model_service::ModelRuntimeService,
     application::system::{ensure_max_chars, format_datetime},
     infrastructure::persistence::{
         ai_agent_repository::{
@@ -248,6 +249,7 @@ pub struct AgentService {
     capability_repo: AiCapabilityRepository,
     media_repo: AiMediaRepository,
     memory_repo: AiMemoryRepository,
+    model_runtime: ModelRuntimeService,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -273,7 +275,8 @@ impl AgentService {
             repo: AiAgentRepository::new(db.clone()),
             capability_repo: AiCapabilityRepository::new(db.clone()),
             media_repo: AiMediaRepository::new(db.clone()),
-            memory_repo: AiMemoryRepository::new(db),
+            memory_repo: AiMemoryRepository::new(db.clone()),
+            model_runtime: ModelRuntimeService::for_tenant(db.clone(), tenant_id),
         }
     }
 
@@ -791,7 +794,13 @@ impl AgentService {
         } else {
             None
         };
-        let execution = execute_agent_tool(&tool.code, &input, connector_credential.as_ref()).await;
+        let execution = execute_agent_tool(
+            &tool.code,
+            &input,
+            connector_credential.as_ref(),
+            Some(&self.model_runtime),
+        )
+        .await;
         let terminal_status = if execution.succeeded_status() {
             RunStatus::Succeeded
         } else {
@@ -1050,12 +1059,13 @@ async fn execute_agent_tool(
     tool_code: &str,
     input: &Value,
     connector_credential: Option<&ConnectorCredentialLookupRecord>,
+    model_runtime: Option<&ModelRuntimeService>,
 ) -> AgentToolExecution {
     if tool_code == FEISHU_TOOL_CODE {
         return execute_feishu_message_tool(input).await;
     }
     if tool_code == MEDIA_IMAGE_TOOL_CODE {
-        return execute_media_image_tool(input).await;
+        return execute_media_image_tool(input, model_runtime).await;
     }
     if tool_code == GITHUB_REPO_SEARCH_TOOL_CODE {
         return execute_github_repo_search_tool(input, connector_credential).await;
@@ -1288,24 +1298,83 @@ async fn execute_github_repo_read_tool(
     )
 }
 
-async fn execute_media_image_tool(input: &Value) -> AgentToolExecution {
+async fn execute_media_image_tool(
+    input: &Value,
+    model_runtime: Option<&ModelRuntimeService>,
+) -> AgentToolExecution {
     let request = media_image_request_from_tool_input(input);
     let request_payload = request.to_provider_payload();
-    let config = ModelRuntimeConfig::from_env();
-    let Some(route) = config.route(ModelRuntimeTarget::Draw) else {
+    let route = match model_runtime {
+        Some(model_runtime) => match model_runtime
+            .resolve_route_for_purpose(ModelRoutePurpose::MediaGeneration)
+            .await
+        {
+            Ok(Some(route)) => route,
+            Ok(None) => {
+                return AgentToolExecution::succeeded(
+                    json!({
+                        "dryRun": true,
+                        "toolCode": MEDIA_IMAGE_TOOL_CODE,
+                        "status": "succeeded",
+                        "provider": "right-code-draw",
+                        "requestPayload": request_payload,
+                        "message": "Draw model route not configured; dry-run only"
+                    }),
+                    true,
+                    "Agent dry-run prepared image generation request.".to_owned(),
+                );
+            }
+            Err(err) => {
+                let error = format!("图片生成模型路由解析失败: {err}");
+                return AgentToolExecution::failed(
+                    json!({
+                        "dryRun": false,
+                        "toolCode": MEDIA_IMAGE_TOOL_CODE,
+                        "status": "failed",
+                        "provider": "right-code-draw",
+                        "requestPayload": request_payload,
+                        "error": error,
+                    }),
+                    error,
+                    "Agent failed to generate image.".to_owned(),
+                );
+            }
+        },
+        None => {
+            return AgentToolExecution::succeeded(
+                json!({
+                    "dryRun": true,
+                    "toolCode": MEDIA_IMAGE_TOOL_CODE,
+                    "status": "succeeded",
+                    "provider": "right-code-draw",
+                    "requestPayload": request_payload,
+                    "message": "Draw model route not configured; dry-run only"
+                }),
+                true,
+                "Agent dry-run prepared image generation request.".to_owned(),
+            );
+        }
+    };
+    let route_id = route.route_id().to_owned();
+    let provider = route.provider().as_str().to_owned();
+    let model = route.model().map(ToOwned::to_owned);
+    let endpoint = route.endpoint().to_owned();
+
+    if endpoint.trim().is_empty() {
         return AgentToolExecution::succeeded(
             json!({
                 "dryRun": true,
                 "toolCode": MEDIA_IMAGE_TOOL_CODE,
                 "status": "succeeded",
-                "provider": "right-code-draw",
+                "provider": provider,
+                "modelRoute": route_id,
                 "requestPayload": request_payload,
                 "message": "Draw model route not configured; dry-run only"
             }),
             true,
             "Agent dry-run prepared image generation request.".to_owned(),
         );
-    };
+    }
 
     let client = match reqwest::Client::builder()
         .timeout(MEDIA_IMAGE_TIMEOUT)
@@ -1319,7 +1388,9 @@ async fn execute_media_image_tool(input: &Value) -> AgentToolExecution {
                     "dryRun": false,
                     "toolCode": MEDIA_IMAGE_TOOL_CODE,
                     "status": "failed",
-                    "provider": "right-code-draw",
+                    "provider": provider,
+                    "modelRoute": route_id,
+                    "model": model,
                     "requestPayload": request_payload,
                     "error": error,
                 }),
@@ -1330,7 +1401,7 @@ async fn execute_media_image_tool(input: &Value) -> AgentToolExecution {
     };
 
     let response = match client
-        .post(route.endpoint())
+        .post(&endpoint)
         .bearer_auth(route.api_key())
         .header("x-api-key", route.api_key())
         .json(&request_payload)
@@ -1345,7 +1416,9 @@ async fn execute_media_image_tool(input: &Value) -> AgentToolExecution {
                     "dryRun": false,
                     "toolCode": MEDIA_IMAGE_TOOL_CODE,
                     "status": "failed",
-                    "provider": "right-code-draw",
+                    "provider": provider,
+                    "modelRoute": route_id,
+                    "model": model,
                     "requestPayload": request_payload,
                     "error": error,
                 }),
@@ -1364,7 +1437,9 @@ async fn execute_media_image_tool(input: &Value) -> AgentToolExecution {
                 "dryRun": false,
                 "toolCode": MEDIA_IMAGE_TOOL_CODE,
                 "status": "failed",
-                "provider": "right-code-draw",
+                "provider": provider,
+                "modelRoute": route_id,
+                "model": model,
                 "requestPayload": request_payload,
                 "response": provider_payload,
                 "error": error,
@@ -1381,7 +1456,9 @@ async fn execute_media_image_tool(input: &Value) -> AgentToolExecution {
                 "dryRun": false,
                 "toolCode": MEDIA_IMAGE_TOOL_CODE,
                 "status": "failed",
-                "provider": "right-code-draw",
+                "provider": provider,
+                "modelRoute": route_id,
+                "model": model,
                 "requestPayload": request_payload,
                 "response": provider_payload,
                 "error": error,
@@ -1396,7 +1473,9 @@ async fn execute_media_image_tool(input: &Value) -> AgentToolExecution {
             "dryRun": false,
             "toolCode": MEDIA_IMAGE_TOOL_CODE,
             "status": "succeeded",
-            "provider": "right-code-draw",
+            "provider": provider,
+            "modelRoute": route_id,
+            "model": model,
             "assetUrl": result.asset_url,
             "providerAssetId": result.provider_asset_id,
             "requestPayload": request_payload,
@@ -1832,6 +1911,7 @@ fn media_records_from_tool_execution(
     let asset_url = non_empty_json_string(execution.response_payload.get("assetUrl"));
     let provider_asset_id =
         non_empty_json_string(execution.response_payload.get("providerAssetId"));
+    let model_route = non_empty_json_string(execution.response_payload.get("modelRoute"));
 
     let asset = asset_url.map(|asset_url| {
         let id = next_id();
@@ -1865,7 +1945,7 @@ fn media_records_from_tool_execution(
         tool_call_audit_id: Some(audit_id),
         tool_code: MEDIA_IMAGE_TOOL_CODE.to_owned(),
         provider,
-        model_route: (!execution.dry_run).then(|| "runtime.draw".to_owned()),
+        model_route: (!execution.dry_run).then_some(model_route).flatten(),
         prompt,
         request_payload,
         response_payload: execution.response_payload.clone(),
@@ -2554,6 +2634,45 @@ mod tests {
             records.job.asset_id,
             Some(records.asset.as_ref().unwrap().id)
         );
+    }
+
+    #[test]
+    fn media_tool_result_uses_dynamic_model_route_from_execution_payload() {
+        let now = Utc::now().naive_utc();
+        let execution = AgentToolExecution::succeeded(
+            serde_json::json!({
+                "dryRun": false,
+                "toolCode": MEDIA_IMAGE_TOOL_CODE,
+                "status": "succeeded",
+                "provider": "right-code-draw",
+                "modelRoute": "live.dynamic.draw",
+                "requestPayload": {
+                    "prompt": "Create a course poster"
+                },
+                "assetUrl": "https://cdn.example.com/poster.png"
+            }),
+            false,
+            "Agent generated image asset.".to_owned(),
+        );
+
+        let records = media_records_from_tool_execution(7, 42, 9, 123, &execution, now)
+            .expect("media execution should create persistence records");
+
+        assert_eq!(
+            records.job.model_route.as_deref(),
+            Some("live.dynamic.draw")
+        );
+    }
+
+    #[test]
+    fn media_image_tool_uses_tenant_bound_model_route() {
+        let source = include_str!("agent_service.rs");
+        assert!(source.contains("ModelRuntimeService::for_tenant(db.clone(), tenant_id)"));
+        assert!(source.contains("resolve_route_for_purpose(ModelRoutePurpose::MediaGeneration)"));
+        let static_env_config = ["ModelRuntimeConfig", "::from_env()"].concat();
+        let static_draw_persistence = ["then(|| ", "\"runtime.draw\".to_owned())"].concat();
+        assert!(!source.contains(&static_env_config));
+        assert!(!source.contains(&static_draw_persistence));
     }
 
     #[test]
