@@ -1,5 +1,7 @@
+use async_trait::async_trait;
 use axum::{
-    extract::{Multipart, Path, Query, State},
+    extract::{FromRequestParts, Multipart, Path, Query, State},
+    http::{header, request::Parts},
     routing::get,
     Json, Router,
 };
@@ -38,6 +40,100 @@ fn dataset_access_context(current_user: &CurrentUser) -> (Vec<i64>, bool) {
     let role_ids = current_user.roles.iter().map(|role| role.id).collect();
     let is_admin = current_user.roles.iter().any(|role| role.is_admin());
     (role_ids, is_admin)
+}
+
+enum KnowledgeWriteActor {
+    User(CurrentUser),
+    ParserCallback { user_id: i64 },
+}
+
+impl KnowledgeWriteActor {
+    fn require_permission(&self, permission: &'static str) -> Result<(), AppError> {
+        match self {
+            Self::User(current_user) => require_permission(current_user, permission),
+            Self::ParserCallback { .. } => Ok(()),
+        }
+    }
+
+    fn user_id(&self) -> i64 {
+        match self {
+            Self::User(current_user) => current_user.id,
+            Self::ParserCallback { user_id } => *user_id,
+        }
+    }
+
+    fn parsed_document_tenant_id(
+        &self,
+        command: &ParsedDocumentUploadCommand,
+    ) -> Result<i64, AppError> {
+        match self {
+            Self::User(current_user) => Ok(current_user.tenant_id),
+            Self::ParserCallback { .. } if command.parser_result.tenant_id > 0 => {
+                Ok(command.parser_result.tenant_id)
+            }
+            Self::ParserCallback { .. } => {
+                Err(AppError::bad_request("parser callback missing tenantId"))
+            }
+        }
+    }
+
+    fn parser_status_tenant_id(
+        &self,
+        command: &ParserJobStatusUpdateCommand,
+    ) -> Result<i64, AppError> {
+        match self {
+            Self::User(current_user) => Ok(current_user.tenant_id),
+            Self::ParserCallback { .. } => json_i64_field(&command.parser_result, "tenantId")
+                .filter(|tenant_id| *tenant_id > 0)
+                .ok_or_else(|| AppError::bad_request("parser callback missing tenantId")),
+        }
+    }
+}
+
+#[async_trait]
+impl FromRequestParts<AppState> for KnowledgeWriteActor {
+    type Rejection = AppError;
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &AppState,
+    ) -> Result<Self, Self::Rejection> {
+        let authorization = parts
+            .headers
+            .get(header::AUTHORIZATION)
+            .and_then(|value| value.to_str().ok());
+
+        if let (Some(expected), Some(actual)) = (
+            state.parser_callback_token.as_deref(),
+            authorization.and_then(bearer_token),
+        ) {
+            if actual == expected {
+                return Ok(Self::ParserCallback {
+                    user_id: state.parser_callback_user_id,
+                });
+            }
+        }
+
+        CurrentUser::from_request_parts(parts, state)
+            .await
+            .map(Self::User)
+    }
+}
+
+fn bearer_token(authorization: &str) -> Option<&str> {
+    authorization
+        .trim()
+        .strip_prefix("Bearer ")
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+}
+
+fn json_i64_field(value: &serde_json::Value, field: &str) -> Option<i64> {
+    value.get(field).and_then(|value| {
+        value
+            .as_i64()
+            .or_else(|| value.as_str().and_then(|text| text.parse::<i64>().ok()))
+    })
 }
 
 pub fn routes() -> Router<AppState> {
@@ -169,21 +265,18 @@ async fn upload_text_document(
 
 async fn upload_parsed_document(
     State(state): State<AppState>,
-    current_user: CurrentUser,
+    actor: KnowledgeWriteActor,
     Path(dataset_id): Path<i64>,
     Json(command): Json<ParsedDocumentUploadCommand>,
 ) -> Result<Json<ApiResponse<i64>>, AppError> {
-    require_permission(&current_user, DOCUMENT_CREATE_PERMISSION)?;
+    actor.require_permission(DOCUMENT_CREATE_PERMISSION)?;
+    let tenant_id = actor.parsed_document_tenant_id(&command)?;
+    let user_id = actor.user_id();
     let service = KnowledgeService::new(state.db);
 
     Ok(Json(ApiResponse::ok(
         service
-            .upload_parsed_document_for_tenant(
-                current_user.tenant_id,
-                current_user.id,
-                dataset_id,
-                command,
-            )
+            .upload_parsed_document_for_tenant(tenant_id, user_id, dataset_id, command)
             .await?,
     )))
 }
@@ -253,22 +346,18 @@ async fn get_parse_job(
 
 async fn update_parse_job_status(
     State(state): State<AppState>,
-    current_user: CurrentUser,
+    actor: KnowledgeWriteActor,
     Path((dataset_id, job_id)): Path<(i64, i64)>,
     Json(command): Json<ParserJobStatusUpdateCommand>,
 ) -> Result<Json<ApiResponse<ParserJobResp>>, AppError> {
-    require_permission(&current_user, DOCUMENT_CREATE_PERMISSION)?;
+    actor.require_permission(DOCUMENT_CREATE_PERMISSION)?;
+    let tenant_id = actor.parser_status_tenant_id(&command)?;
+    let user_id = actor.user_id();
     let service = KnowledgeService::new(state.db);
 
     Ok(Json(ApiResponse::ok(
         service
-            .update_parse_job_status_for_tenant(
-                current_user.tenant_id,
-                current_user.id,
-                dataset_id,
-                job_id,
-                command,
-            )
+            .update_parse_job_status_for_tenant(tenant_id, user_id, dataset_id, job_id, command)
             .await?,
     )))
 }
@@ -349,7 +438,7 @@ mod tests {
         },
         domain::auth::model::{CurrentUser, RoleContext},
         infrastructure::security::jwt::JwtService,
-        interfaces::http::{build_router, AppState},
+        interfaces::http::{build_router, build_router_with_parser_callback_token, AppState},
         shared::error::AppError,
     };
 
@@ -361,6 +450,8 @@ mod tests {
             jwt: JwtService::new("test-secret".to_owned(), 24),
             captcha: Default::default(),
             scheduler_http_safety: Default::default(),
+            parser_callback_token: None,
+            parser_callback_user_id: 1,
         }
     }
 
@@ -522,7 +613,7 @@ mod tests {
 
         let err = upload_parsed_document(
             State(test_state()),
-            user_with_permissions(vec![]),
+            KnowledgeWriteActor::User(user_with_permissions(vec![])),
             Path(1),
             Json(command),
         )
@@ -583,7 +674,7 @@ mod tests {
 
         let err = update_parse_job_status(
             State(test_state()),
-            user_with_permissions(vec![]),
+            KnowledgeWriteActor::User(user_with_permissions(vec![])),
             Path((1, 99)),
             Json(command),
         )
@@ -750,6 +841,42 @@ mod tests {
         let body = response.into_body().collect().await.unwrap().to_bytes();
         let body = serde_json::from_slice::<Value>(&body).unwrap();
         assert_eq!(body["code"], "401");
+    }
+
+    #[tokio::test]
+    async fn parse_job_status_route_accepts_parser_callback_token() {
+        let db = PgPoolOptions::new()
+            .connect_lazy("postgres://postgres:postgres@localhost:5432/avalon_admin")
+            .unwrap();
+        let jwt = JwtService::new("test-secret".to_owned(), 24);
+        let app = build_router_with_parser_callback_token(
+            db,
+            &["http://localhost:4399".to_owned()],
+            jwt,
+            Some("parser-callback-token".to_owned()),
+            1,
+        )
+        .unwrap();
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/ai/knowledge/datasets/1/parse-jobs/99/status")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header(header::AUTHORIZATION, "Bearer parser-callback-token")
+                    .body(Body::from(
+                        r#"{"status":"submitted","callbackStatus":"deferred","parserResult":{"tenantId":1,"datasetId":1,"documentId":42,"parserJobId":99,"status":"submitted"}}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let body = serde_json::from_slice::<Value>(&body).unwrap();
+        assert_ne!(body["code"], "401");
     }
 
     #[tokio::test]

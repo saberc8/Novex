@@ -43,6 +43,29 @@ class ParserWorkerRunnerTest(unittest.TestCase):
         self.assertEqual(payload["parserResult"]["parserJobId"], 99)
         self.assertGreater(len(payload["parserResult"]["chunks"]), 0)
 
+    def test_execute_inline_markdown_rejects_failed_backend_envelope(self):
+        poster = FakePoster(response={"statusCode": 200, "body": {"code": "401", "success": False, "msg": "未授权"}})
+
+        with self.assertRaisesRegex(RuntimeError, "backend callback failed"):
+            execute_parse_job(
+                {
+                    "tenantId": 1,
+                    "datasetId": 7,
+                    "documentId": 42,
+                    "parserJobId": 99,
+                    "source": {
+                        "kind": "inlineText",
+                        "contentType": "text/markdown",
+                        "name": "handbook.md",
+                        "content": "# 入职培训\n第一天完成安全培训。",
+                        "sourceHash": "abc123",
+                    },
+                },
+                backend_base_url="http://backend.local",
+                backend_token="token-1",
+                http_post=poster,
+            )
+
     def test_execute_relative_object_storage_text_fetches_source_before_parse(self):
         poster = FakePoster()
         fetcher = FakeFetcher({"http://backend.local/file/knowledge/88.md": "# 手册\n按时培训。"})
@@ -213,12 +236,13 @@ class ParserWorkerRunnerTest(unittest.TestCase):
 
 
 class FakePoster:
-    def __init__(self):
+    def __init__(self, response=None):
         self.calls = []
+        self.response = response or {"statusCode": 200, "body": {"code": "200", "success": True}}
 
     def __call__(self, url, *, headers, json):
         self.calls.append({"url": url, "headers": dict(headers), "json": json})
-        return {"statusCode": 200, "body": {"code": "200", "success": True}}
+        return self.response
 
 
 class FakeFetcher:

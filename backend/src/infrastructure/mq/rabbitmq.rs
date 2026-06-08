@@ -451,7 +451,10 @@ mod tests {
 
     #[test]
     fn rabbitmq_module_defines_parser_client_publish_path() {
-        let source = include_str!("rabbitmq.rs").split("#[cfg(test)]").next().unwrap();
+        let source = include_str!("rabbitmq.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
 
         for needle in [
             "ParserRabbitMqClient",
@@ -460,7 +463,10 @@ mod tests {
             "parser execute message",
             "novex.parser.execute",
         ] {
-            assert!(source.contains(needle), "{needle} missing from RabbitMQ module");
+            assert!(
+                source.contains(needle),
+                "{needle} missing from RabbitMQ module"
+            );
         }
     }
 }

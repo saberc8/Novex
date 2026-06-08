@@ -59,13 +59,20 @@ pub struct ParserOutboxPublishOutcome {
 }
 
 pub fn parser_message_from_outbox(record: &ParserOutboxRecord) -> ParserJobMessage {
+    let attempt = record
+        .payload
+        .get("attempt")
+        .and_then(|value| value.as_i64())
+        .unwrap_or(1)
+        .max(1) as i32;
+
     ParserJobMessage {
         outbox_id: record.id,
         tenant_id: record.tenant_id,
         dataset_id: record.dataset_id,
         document_id: record.document_id,
         parser_job_id: record.parser_job_id,
-        attempt: record.attempt_count,
+        attempt,
         max_attempts: record
             .payload
             .get("maxAttempts")
@@ -135,7 +142,10 @@ where
         } else {
             repo.mark_parser_outbox_publish_failed(
                 outcome.outbox_id,
-                outcome.error.as_deref().unwrap_or("parser queue publish failed"),
+                outcome
+                    .error
+                    .as_deref()
+                    .unwrap_or("parser queue publish failed"),
                 user_id,
                 now,
             )
@@ -208,7 +218,7 @@ mod tests {
     }
 
     #[test]
-    fn parser_message_uses_outbox_payload_parser_request() {
+    fn parser_message_starts_worker_attempt_at_one() {
         let record = parser_outbox_record();
 
         let message = parser_message_from_outbox(&record);
@@ -218,7 +228,7 @@ mod tests {
         assert_eq!(message.dataset_id, 7);
         assert_eq!(message.document_id, 42);
         assert_eq!(message.parser_job_id, 99);
-        assert_eq!(message.attempt, 2);
+        assert_eq!(message.attempt, 1);
         assert_eq!(message.max_attempts, 5);
         assert_eq!(message.parser_request["source"]["name"], "handbook.md");
     }
@@ -239,7 +249,11 @@ mod tests {
         assert!(outcomes[0].published);
         assert_eq!(outcomes[1].outbox_id, 11);
         assert!(!outcomes[1].published);
-        assert!(outcomes[1].error.as_deref().unwrap().contains("fake publish failure"));
+        assert!(outcomes[1]
+            .error
+            .as_deref()
+            .unwrap()
+            .contains("fake publish failure"));
     }
 
     #[test]
@@ -256,7 +270,10 @@ mod tests {
             "mark_parser_outbox_publish_failed",
             "publish_parser_outbox_records",
         ] {
-            assert!(source.contains(needle), "{needle} missing from parser queue runtime");
+            assert!(
+                source.contains(needle),
+                "{needle} missing from parser queue runtime"
+            );
         }
     }
 
@@ -269,7 +286,7 @@ mod tests {
             parser_job_id: 99,
             event_type: "parser.job.requested".to_owned(),
             payload: serde_json::json!({
-                "attempt": 2,
+                "attempt": 0,
                 "maxAttempts": 5,
                 "parserRequest": {
                     "source": {
@@ -278,7 +295,7 @@ mod tests {
                 }
             }),
             status: 1,
-            attempt_count: 2,
+            attempt_count: 0,
         }
     }
 
@@ -307,10 +324,7 @@ mod tests {
             &self,
             message: &crate::infrastructure::mq::rabbitmq::ParserJobMessage,
         ) -> Result<(), crate::shared::error::AppError> {
-            self.published
-                .lock()
-                .unwrap()
-                .push(message.parser_job_id);
+            self.published.lock().unwrap().push(message.parser_job_id);
             if message.parser_job_id == self.failing_parser_job_id {
                 return Err(crate::shared::error::AppError::Anyhow(anyhow::anyhow!(
                     "fake publish failure"

@@ -1584,7 +1584,7 @@ fn parser_outbox_save_record(
             "datasetId": dataset_id,
             "documentId": document_id,
             "parserJobId": parser_job_id,
-            "attempt": 0,
+            "attempt": 1,
             "maxAttempts": PARSER_OUTBOX_MAX_ATTEMPTS,
             "parserRequest": parser_request,
         }),
@@ -4273,7 +4273,7 @@ mod tests {
         assert_eq!(outbox.event_type, "parser.job.requested");
         assert_eq!(outbox.payload["parserRequest"], parser_request);
         assert_eq!(outbox.payload["maxAttempts"], 5);
-        assert_eq!(outbox.payload["attempt"], 0);
+        assert_eq!(outbox.payload["attempt"], 1);
     }
 
     #[test]

@@ -6,6 +6,7 @@ import type {
   DatasetQuery,
   DatasetResp,
   KnowledgeFileUploadResp,
+  ParserJobResp,
   RagAskCommand,
   RagAskResp,
   RagFeedbackCommand,
@@ -27,6 +28,10 @@ export function askDataset(datasetId: number, data: RagAskCommand) {
     method: "POST",
     body: data
   });
+}
+
+export function getParseJob(datasetId: number, jobId: number) {
+  return apiRequest<ParserJobResp>(`${DATASET_URL}/${datasetId}/parse-jobs/${jobId}`);
 }
 
 export function submitRagFeedback(data: RagFeedbackCommand) {

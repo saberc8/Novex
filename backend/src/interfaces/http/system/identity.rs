@@ -87,6 +87,8 @@ mod tests {
             jwt: JwtService::new("test-secret".to_owned(), 24),
             captcha: Default::default(),
             scheduler_http_safety: Default::default(),
+            parser_callback_token: None,
+            parser_callback_user_id: 1,
         }
     }
 

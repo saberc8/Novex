@@ -41,6 +41,8 @@ pub struct AppState {
     pub jwt: JwtService,
     pub captcha: captcha::CaptchaStore,
     pub scheduler_http_safety: HttpSafetyConfig,
+    pub parser_callback_token: Option<String>,
+    pub parser_callback_user_id: i64,
 }
 
 pub fn build_router(
@@ -62,12 +64,49 @@ pub fn build_router_with_scheduler_http_safety(
     jwt: JwtService,
     scheduler_http_safety: HttpSafetyConfig,
 ) -> Result<Router> {
+    build_router_inner(
+        db,
+        cors_allowed_origins,
+        jwt,
+        scheduler_http_safety,
+        parser_callback_token_from_env(),
+        parser_callback_user_id_from_env(),
+    )
+}
+
+pub fn build_router_with_parser_callback_token(
+    db: PgPool,
+    cors_allowed_origins: &[String],
+    jwt: JwtService,
+    parser_callback_token: Option<String>,
+    parser_callback_user_id: i64,
+) -> Result<Router> {
+    build_router_inner(
+        db,
+        cors_allowed_origins,
+        jwt,
+        HttpSafetyConfig::default(),
+        parser_callback_token,
+        parser_callback_user_id.max(1),
+    )
+}
+
+fn build_router_inner(
+    db: PgPool,
+    cors_allowed_origins: &[String],
+    jwt: JwtService,
+    scheduler_http_safety: HttpSafetyConfig,
+    parser_callback_token: Option<String>,
+    parser_callback_user_id: i64,
+) -> Result<Router> {
     let cors = cors_layer(cors_allowed_origins)?;
     let state = AppState {
         db,
         jwt,
         captcha: captcha::CaptchaStore::default(),
         scheduler_http_safety,
+        parser_callback_token,
+        parser_callback_user_id,
     };
 
     Ok(Router::new()
@@ -102,6 +141,21 @@ pub fn build_router_with_scheduler_http_safety(
             middleware::access_log::record_access_log,
         ))
         .layer(from_fn(vue_failure_envelope)))
+}
+
+fn parser_callback_token_from_env() -> Option<String> {
+    std::env::var("PARSER_CALLBACK_TOKEN")
+        .ok()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+}
+
+fn parser_callback_user_id_from_env() -> i64 {
+    std::env::var("PARSER_CALLBACK_USER_ID")
+        .ok()
+        .and_then(|value| value.trim().parse::<i64>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(1)
 }
 
 fn cors_layer(cors_allowed_origins: &[String]) -> Result<CorsLayer> {

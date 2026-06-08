@@ -1,5 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { askDataset, listDatasets, submitAiFeedback, submitRagFeedback, uploadKnowledgeFile } from "./knowledge";
+import {
+  askDataset,
+  getParseJob,
+  listDatasets,
+  submitAiFeedback,
+  submitRagFeedback,
+  uploadKnowledgeFile
+} from "./knowledge";
 import { getAuthToken } from "@/lib/auth";
 
 function okResponse(data: unknown) {
@@ -231,6 +238,43 @@ describe("training knowledge api", () => {
     expect(uploadedFile.name).toBe("handbook.md");
     expect(uploadedFile.type).toBe("text/markdown");
     expect((init?.body as FormData).get("parentPath")).toBe("/knowledge");
+  });
+
+  it("fetches parser job status for upload polling", async () => {
+    fetchMock.mockImplementationOnce(() =>
+      okResponse({
+        id: 99,
+        tenantId: 1,
+        datasetId: 10,
+        documentId: 42,
+        jobType: 2,
+        status: 3,
+        attemptCount: 1,
+        errorMessage: "",
+        resultSummary: {},
+        documentName: "handbook.md",
+        sourceUri: "/file/knowledge/88.md",
+        fileId: 88,
+        contentType: "text/markdown",
+        parseStatus: 3,
+        ingestionStatus: 4,
+        chunkCount: 3,
+        parserRequest: {},
+        createUserString: "",
+        createTime: "2026-06-05 10:00:00",
+        updateUserString: "",
+        updateTime: ""
+      })
+    );
+
+    await getParseJob(10, 99);
+
+    expect(fetchMock.mock.calls[0]?.[0]).toBe(
+      "http://localhost:4398/ai/knowledge/datasets/10/parse-jobs/99"
+    );
+    expect(fetchMock.mock.calls[0]?.[1]).toMatchObject({
+      method: "GET"
+    });
   });
 
   it("reads auth token safely when browser storage is unavailable", () => {
