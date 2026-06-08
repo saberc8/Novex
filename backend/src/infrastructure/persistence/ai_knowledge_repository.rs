@@ -189,6 +189,21 @@ pub struct ParserJobSaveRecord {
 }
 
 #[derive(Debug, Clone)]
+pub struct ParserOutboxSaveRecord {
+    pub id: i64,
+    pub tenant_id: i64,
+    pub dataset_id: i64,
+    pub document_id: i64,
+    pub parser_job_id: i64,
+    pub event_type: String,
+    pub payload: Value,
+    pub status: i16,
+    pub attempt_count: i32,
+    pub user_id: i64,
+    pub now: NaiveDateTime,
+}
+
+#[derive(Debug, Clone)]
 pub struct BlockSaveRecord {
     pub id: i64,
     pub tenant_id: i64,
@@ -627,6 +642,7 @@ WHERE tenant_id = $4 AND id = $5;
         &self,
         document: &DocumentSaveRecord,
         parser_job: &ParserJobSaveRecord,
+        parser_outbox: &ParserOutboxSaveRecord,
     ) -> Result<(), AppError> {
         let mut tx = self.db.begin().await?;
         sqlx::query(
@@ -673,6 +689,37 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9);
         .bind(&parser_job.result_summary)
         .bind(parser_job.user_id)
         .bind(parser_job.now)
+        .execute(&mut *tx)
+        .await?;
+
+        sqlx::query(
+            r#"
+INSERT INTO ai_parser_outbox (
+    id, tenant_id, dataset_id, document_id, parser_job_id, event_type, payload,
+    status, attempt_count, create_user, create_time
+)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+ON CONFLICT (tenant_id, parser_job_id, event_type) DO UPDATE
+SET payload = EXCLUDED.payload,
+    status = EXCLUDED.status,
+    attempt_count = EXCLUDED.attempt_count,
+    last_error = NULL,
+    published_time = NULL,
+    update_user = EXCLUDED.create_user,
+    update_time = EXCLUDED.create_time;
+"#,
+        )
+        .bind(parser_outbox.id)
+        .bind(parser_outbox.tenant_id)
+        .bind(parser_outbox.dataset_id)
+        .bind(parser_outbox.document_id)
+        .bind(parser_outbox.parser_job_id)
+        .bind(&parser_outbox.event_type)
+        .bind(&parser_outbox.payload)
+        .bind(parser_outbox.status)
+        .bind(parser_outbox.attempt_count)
+        .bind(parser_outbox.user_id)
+        .bind(parser_outbox.now)
         .execute(&mut *tx)
         .await?;
 
@@ -1853,6 +1900,26 @@ mod tests {
             "dataset_vector_collection_code",
             "chunk_embedding_vector",
             "embedding_status",
+        ] {
+            assert!(source.contains(needle), "{needle} missing from repository");
+        }
+    }
+
+    #[test]
+    fn repository_creates_parser_outbox_in_parse_job_transaction() {
+        let source = include_str!("ai_knowledge_repository.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+
+        for needle in [
+            "ParserOutboxSaveRecord",
+            "create_document_parse_job",
+            "INSERT INTO ai_parser_outbox",
+            "parser_job_id",
+            "event_type",
+            "payload",
+            "attempt_count",
         ] {
             assert!(source.contains(needle), "{needle} missing from repository");
         }
