@@ -59,6 +59,35 @@ services:
     volumes:
       - milvus-data:/var/lib/milvus
 
+  rabbitmq:
+    image: ${RABBITMQ_IMAGE:-rabbitmq:4.0-management-alpine}
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_DEFAULT_USER:-guest}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_DEFAULT_PASS:-guest}
+    ports:
+      - "${RABBITMQ_AMQP_PORT:-5672}:5672"
+      - "${RABBITMQ_MANAGEMENT_PORT:-15672}:15672"
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    volumes:
+      - rabbitmq-data:/var/lib/rabbitmq
+
+  redis:
+    image: ${REDIS_IMAGE:-redis:7-alpine}
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    volumes:
+      - redis-data:/data
+
   backend:
     image: ${RUST_IMAGE:-rust:1.85-bookworm}
     working_dir: /workspace
@@ -82,6 +111,22 @@ services:
       RIGHT_CODE_DRAW_API_KEY: ${RIGHT_CODE_DRAW_API_KEY:-}
       SCHEDULER_EMBEDDED: "false"
       SCHEDULER_WORKER_ENABLED: "false"
+      PARSER_QUEUE_ENABLED: "true"
+      PARSER_QUEUE_PUBLISHER_ENABLED: "true"
+      PARSER_QUEUE_TICK_SECONDS: "5"
+      PARSER_QUEUE_BATCH_SIZE: "50"
+      PARSER_CALLBACK_TOKEN: ${PARSER_CALLBACK_TOKEN:-local-parser-callback-token-change-me}
+      PARSER_CALLBACK_USER_ID: ${PARSER_CALLBACK_USER_ID:-1}
+      RABBITMQ_URL: amqp://${RABBITMQ_DEFAULT_USER:-guest}:${RABBITMQ_DEFAULT_PASS:-guest}@rabbitmq:5672/%2f
+      REDIS_URL: redis://redis:6379/0
+      RABBITMQ_PARSER_EXCHANGE: novex.parser
+      RABBITMQ_PARSER_EXECUTE_QUEUE: novex.parser.execute
+      RABBITMQ_PARSER_RETRY_QUEUE: novex.parser.retry
+      RABBITMQ_PARSER_DEAD_QUEUE: novex.parser.dead
+      RABBITMQ_PARSER_EXECUTE_ROUTING_KEY: parser.execute
+      RABBITMQ_PARSER_RETRY_ROUTING_KEY: parser.retry
+      RABBITMQ_PARSER_DEAD_ROUTING_KEY: parser.dead
+      RABBITMQ_PARSER_RETRY_TTL_MS: "30000"
       RUST_LOG: backend_rust=debug,tower_http=info
     ports:
       - "${BACKEND_PORT:-4398}:4398"
@@ -90,11 +135,48 @@ services:
         condition: service_healthy
       milvus:
         condition: service_started
+      rabbitmq:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
     volumes:
       - ..:/workspace:cached
       - cargo-registry:/usr/local/cargo/registry
       - cargo-git:/usr/local/cargo/git
       - cargo-target:/workspace/target
+
+  parser-worker:
+    image: ${PYTHON_IMAGE:-python:3.12-slim}
+    profiles: ["parser"]
+    working_dir: /workspace
+    command: sh -lc "python3 -m pip install --no-cache-dir -r services/parser-worker/requirements.txt && PYTHONPATH=services/parser-worker python3 -m parser_worker.worker"
+    environment:
+      PARSER_WORKER_ID: ${PARSER_WORKER_ID:-parser-worker-1}
+      PARSER_BACKEND_BASE_URL: http://backend:4398
+      PARSER_BACKEND_TOKEN: ${PARSER_CALLBACK_TOKEN:-local-parser-callback-token-change-me}
+      RABBITMQ_URL: amqp://${RABBITMQ_DEFAULT_USER:-guest}:${RABBITMQ_DEFAULT_PASS:-guest}@rabbitmq:5672/%2f
+      REDIS_URL: redis://redis:6379/0
+      RABBITMQ_PARSER_EXCHANGE: novex.parser
+      RABBITMQ_PARSER_EXECUTE_QUEUE: novex.parser.execute
+      RABBITMQ_PARSER_RETRY_QUEUE: novex.parser.retry
+      RABBITMQ_PARSER_DEAD_QUEUE: novex.parser.dead
+      RABBITMQ_PARSER_EXECUTE_ROUTING_KEY: parser.execute
+      RABBITMQ_PARSER_RETRY_ROUTING_KEY: parser.retry
+      RABBITMQ_PARSER_DEAD_ROUTING_KEY: parser.dead
+      RABBITMQ_PARSER_RETRY_TTL_MS: "30000"
+      PARSER_WORKER_PREFETCH: "4"
+      PARSER_WORKER_LEASE_TTL_SECONDS: "300"
+      PARSER_WORKER_IDEMPOTENCY_TTL_SECONDS: "86400"
+      MINERU_TOKEN: ${MINERU_TOKEN:-}
+    depends_on:
+      backend:
+        condition: service_started
+      rabbitmq:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ..:/workspace:cached
 
   admin:
     image: ${NODE_IMAGE:-node:24-bookworm-slim}
@@ -165,6 +247,8 @@ volumes:
   etcd-data:
   minio-data:
   milvus-data:
+  rabbitmq-data:
+  redis-data:
   cargo-registry:
   cargo-git:
   cargo-target:

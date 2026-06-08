@@ -106,6 +106,19 @@ pub struct ParserJobRecord {
     pub update_user_string: String,
 }
 
+#[derive(Debug, Clone, FromRow)]
+pub struct ParserOutboxRecord {
+    pub id: i64,
+    pub tenant_id: i64,
+    pub dataset_id: i64,
+    pub document_id: i64,
+    pub parser_job_id: i64,
+    pub event_type: String,
+    pub payload: Value,
+    pub status: i16,
+    pub attempt_count: i32,
+}
+
 #[derive(Debug, Clone)]
 pub struct DatasetFilter<'a> {
     pub tenant_id: i64,
@@ -184,6 +197,21 @@ pub struct ParserJobSaveRecord {
     pub job_type: i16,
     pub status: i16,
     pub result_summary: Value,
+    pub user_id: i64,
+    pub now: NaiveDateTime,
+}
+
+#[derive(Debug, Clone)]
+pub struct ParserOutboxSaveRecord {
+    pub id: i64,
+    pub tenant_id: i64,
+    pub dataset_id: i64,
+    pub document_id: i64,
+    pub parser_job_id: i64,
+    pub event_type: String,
+    pub payload: Value,
+    pub status: i16,
+    pub attempt_count: i32,
     pub user_id: i64,
     pub now: NaiveDateTime,
 }
@@ -627,6 +655,7 @@ WHERE tenant_id = $4 AND id = $5;
         &self,
         document: &DocumentSaveRecord,
         parser_job: &ParserJobSaveRecord,
+        parser_outbox: &ParserOutboxSaveRecord,
     ) -> Result<(), AppError> {
         let mut tx = self.db.begin().await?;
         sqlx::query(
@@ -673,6 +702,37 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9);
         .bind(&parser_job.result_summary)
         .bind(parser_job.user_id)
         .bind(parser_job.now)
+        .execute(&mut *tx)
+        .await?;
+
+        sqlx::query(
+            r#"
+INSERT INTO ai_parser_outbox (
+    id, tenant_id, dataset_id, document_id, parser_job_id, event_type, payload,
+    status, attempt_count, create_user, create_time
+)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+ON CONFLICT (tenant_id, parser_job_id, event_type) DO UPDATE
+SET payload = EXCLUDED.payload,
+    status = EXCLUDED.status,
+    attempt_count = EXCLUDED.attempt_count,
+    last_error = NULL,
+    published_time = NULL,
+    update_user = EXCLUDED.create_user,
+    update_time = EXCLUDED.create_time;
+"#,
+        )
+        .bind(parser_outbox.id)
+        .bind(parser_outbox.tenant_id)
+        .bind(parser_outbox.dataset_id)
+        .bind(parser_outbox.document_id)
+        .bind(parser_outbox.parser_job_id)
+        .bind(&parser_outbox.event_type)
+        .bind(&parser_outbox.payload)
+        .bind(parser_outbox.status)
+        .bind(parser_outbox.attempt_count)
+        .bind(parser_outbox.user_id)
+        .bind(parser_outbox.now)
         .execute(&mut *tx)
         .await?;
 
@@ -948,6 +1008,87 @@ SELECT EXISTS(
                 .fetch_optional(&self.db)
                 .await?,
         )
+    }
+
+    pub async fn list_pending_parser_outbox(
+        &self,
+        limit: i64,
+    ) -> Result<Vec<ParserOutboxRecord>, AppError> {
+        Ok(sqlx::query_as::<_, ParserOutboxRecord>(
+            r#"
+SELECT
+    id,
+    tenant_id,
+    dataset_id,
+    document_id,
+    parser_job_id,
+    event_type,
+    payload,
+    status,
+    attempt_count
+FROM ai_parser_outbox
+WHERE status = 1
+ORDER BY create_time ASC, id ASC
+LIMIT $1;
+"#,
+        )
+        .bind(limit.max(1))
+        .fetch_all(&self.db)
+        .await?)
+    }
+
+    pub async fn mark_parser_outbox_published(
+        &self,
+        outbox_id: i64,
+        user_id: i64,
+        now: NaiveDateTime,
+    ) -> Result<(), AppError> {
+        let result = sqlx::query(
+            r#"
+UPDATE ai_parser_outbox
+SET status = 2,
+    published_time = $1,
+    last_error = NULL,
+    update_user = $2,
+    update_time = $1
+WHERE id = $3;
+"#,
+        )
+        .bind(now)
+        .bind(user_id)
+        .bind(outbox_id)
+        .execute(&self.db)
+        .await?;
+        ensure_affected(result.rows_affected())?;
+        Ok(())
+    }
+
+    pub async fn mark_parser_outbox_publish_failed(
+        &self,
+        outbox_id: i64,
+        error: &str,
+        user_id: i64,
+        now: NaiveDateTime,
+    ) -> Result<(), AppError> {
+        let result = sqlx::query(
+            r#"
+UPDATE ai_parser_outbox
+SET status = 1,
+    attempt_count = attempt_count + 1,
+    last_error = $1,
+    update_user = $2,
+    update_time = $3
+WHERE id = $4;
+"#,
+        )
+        .bind(error)
+        .bind(user_id)
+        .bind(now)
+        .bind(outbox_id)
+        .execute(&self.db)
+        .await?;
+        ensure_affected(result.rows_affected())?;
+        Ok(())
     }
 
     pub async fn list_indexed_chunks(
@@ -1806,6 +1947,38 @@ mod tests {
     }
 
     #[test]
+    fn parser_outbox_migration_defines_durable_queue_contract() {
+        let migration_path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/migrations/202606080001_create_ai_parser_outbox.sql"
+        );
+        let migration =
+            std::fs::read_to_string(migration_path).expect("missing AI parser outbox migration");
+
+        for needle in [
+            "CREATE TABLE IF NOT EXISTS ai_parser_outbox",
+            "tenant_id",
+            "dataset_id",
+            "document_id",
+            "parser_job_id",
+            "event_type",
+            "payload JSONB",
+            "status",
+            "attempt_count",
+            "last_error",
+            "published_time",
+            "uq_ai_parser_outbox_parser_job",
+            "idx_ai_parser_outbox_status",
+            "idx_ai_parser_outbox_parser_job",
+        ] {
+            assert!(
+                migration.contains(needle),
+                "{needle} missing from parser outbox migration"
+            );
+        }
+    }
+
+    #[test]
     fn repository_persists_vector_collection_and_embedding_records() {
         let source = include_str!("ai_knowledge_repository.rs")
             .split("#[cfg(test)]")
@@ -1821,6 +1994,48 @@ mod tests {
             "dataset_vector_collection_code",
             "chunk_embedding_vector",
             "embedding_status",
+        ] {
+            assert!(source.contains(needle), "{needle} missing from repository");
+        }
+    }
+
+    #[test]
+    fn repository_creates_parser_outbox_in_parse_job_transaction() {
+        let source = include_str!("ai_knowledge_repository.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+
+        for needle in [
+            "ParserOutboxSaveRecord",
+            "create_document_parse_job",
+            "INSERT INTO ai_parser_outbox",
+            "parser_job_id",
+            "event_type",
+            "payload",
+            "attempt_count",
+        ] {
+            assert!(source.contains(needle), "{needle} missing from repository");
+        }
+    }
+
+    #[test]
+    fn repository_manages_parser_outbox_publish_state() {
+        let source = include_str!("ai_knowledge_repository.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+
+        for needle in [
+            "list_pending_parser_outbox",
+            "mark_parser_outbox_published",
+            "mark_parser_outbox_publish_failed",
+            "FROM ai_parser_outbox",
+            "status = 1",
+            "status = 2",
+            "published_time",
+            "attempt_count = attempt_count + 1",
+            "last_error",
         ] {
             assert!(source.contains(needle), "{needle} missing from repository");
         }

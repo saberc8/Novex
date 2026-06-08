@@ -86,6 +86,42 @@ cat parse-request.json | PYTHONPATH=services/parser-worker python3 -m parser_wor
 
 For uploaded text-like assets (`/file/...` Markdown, TXT, CSV, JSON, code, logs), the runner resolves relative backend file URLs, fetches the source text, converts the source to an inline parser request, then posts completed chunks. For PDF, Office, and image paths, the first runner step returns `callbackStatus=deferred` after MinerU submission. A follow-up call to `complete_mineru_parse_job` handles a done MinerU task by downloading the ZIP result, selecting `auto_full.md` / `full.md` / `result.md` when present, chunking the markdown, and callbacking the backend. Pending tasks remain deferred.
 
+## Queue Worker Mode
+
+Production uploads use RabbitMQ plus Redis instead of stdin execution. The Rust backend creates `ai_document`, `ai_parser_job`, and `ai_parser_outbox` in one database transaction. Its parser queue publisher publishes the outbox payload to the `novex.parser` direct exchange. The Python worker consumes `novex.parser.execute`, uses Redis leases to avoid concurrent execution of the same parser job, calls the existing runner callbacks, and republishes deferred or failed work to RabbitMQ retry/dead routes.
+
+Install the runtime queue dependencies:
+
+```bash
+python3 -m pip install pika redis
+```
+
+Run the worker:
+
+```bash
+export PARSER_BACKEND_BASE_URL="http://backend:4398"
+export PARSER_BACKEND_TOKEN="<backend service token>"
+export RABBITMQ_URL="amqp://guest:guest@rabbitmq:5672/%2f"
+export REDIS_URL="redis://redis:6379/0"
+export RABBITMQ_PARSER_EXCHANGE="novex.parser"
+export RABBITMQ_PARSER_EXECUTE_QUEUE="novex.parser.execute"
+export RABBITMQ_PARSER_RETRY_QUEUE="novex.parser.retry"
+export RABBITMQ_PARSER_DEAD_QUEUE="novex.parser.dead"
+PYTHONPATH=services/parser-worker python3 -m parser_worker.worker
+```
+
+Default queue topology:
+
+- Exchange: `novex.parser`
+- Execute queue/routing key: `novex.parser.execute` / `parser.execute`
+- Retry queue/routing key: `novex.parser.retry` / `parser.retry`
+- Dead queue/routing key: `novex.parser.dead` / `parser.dead`
+
+Redis keys are short-lived coordination state only:
+
+- `novex:parser:lease:{parserJobId}` protects a running parser job.
+- `novex:parser:idempotency:{parserJobId}:{sourceHash}` skips duplicate completed jobs.
+
 ## Local MinerU Configuration
 
 MinerU credentials are runtime secrets and must not be committed. Start the worker process with:

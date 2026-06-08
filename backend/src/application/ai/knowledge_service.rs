@@ -33,7 +33,8 @@ use crate::{
         AiKnowledgeRepository, BlockSaveRecord, ChunkRecord, ChunkSaveRecord, DatasetAccessFilter,
         DatasetFilter, DatasetRecord, DatasetSaveRecord, DocumentFilter, DocumentRecord,
         DocumentSaveRecord, FeedbackSaveRecord, ParserJobFilter, ParserJobRecord,
-        ParserJobSaveRecord, RagTraceHitSaveRecord, RagTraceSaveRecord, VectorCollectionRecord,
+        ParserJobSaveRecord, ParserOutboxSaveRecord, RagTraceHitSaveRecord, RagTraceSaveRecord,
+        VectorCollectionRecord,
     },
     shared::{
         error::AppError,
@@ -59,6 +60,9 @@ const PARSER_JOB_TYPE_WORKER: i16 = 2;
 const PARSER_JOB_STATUS_SUBMITTED: i16 = 2;
 const PARSER_JOB_STATUS_SUCCEEDED: i16 = 3;
 const PARSER_JOB_STATUS_FAILED: i16 = 4;
+const PARSER_OUTBOX_EVENT_PARSE_REQUESTED: &str = "parser.job.requested";
+const PARSER_OUTBOX_STATUS_PENDING: i16 = 1;
+const PARSER_OUTBOX_MAX_ATTEMPTS: i32 = 5;
 const CHUNK_EMBEDDING_STATUS_INDEXED: i16 = 4;
 const DEFAULT_RAG_LIMIT: usize = 5;
 const MAX_RAG_LIMIT: usize = 10;
@@ -987,9 +991,18 @@ impl KnowledgeService {
             user_id,
             now,
         };
+        let parser_outbox = parser_outbox_save_record(
+            tenant_id,
+            dataset_id,
+            document_id,
+            parser_job_id,
+            user_id,
+            &parser_request,
+            now,
+        );
 
         self.repo
-            .create_document_parse_job(&document, &parser_job)
+            .create_document_parse_job(&document, &parser_job, &parser_outbox)
             .await?;
 
         Ok(ParserJobResp {
@@ -1546,6 +1559,40 @@ fn parser_job_submitted_summary(
         "sourceHash": non_empty_parser_string(&command.source_hash),
         "parserRequest": parser_request,
     })
+}
+
+fn parser_outbox_save_record(
+    tenant_id: i64,
+    dataset_id: i64,
+    document_id: i64,
+    parser_job_id: i64,
+    user_id: i64,
+    parser_request: &Value,
+    now: NaiveDateTime,
+) -> ParserOutboxSaveRecord {
+    let id = next_id();
+    ParserOutboxSaveRecord {
+        id,
+        tenant_id,
+        dataset_id,
+        document_id,
+        parser_job_id,
+        event_type: PARSER_OUTBOX_EVENT_PARSE_REQUESTED.to_owned(),
+        payload: json!({
+            "outboxId": id,
+            "tenantId": tenant_id,
+            "datasetId": dataset_id,
+            "documentId": document_id,
+            "parserJobId": parser_job_id,
+            "attempt": 1,
+            "maxAttempts": PARSER_OUTBOX_MAX_ATTEMPTS,
+            "parserRequest": parser_request,
+        }),
+        status: PARSER_OUTBOX_STATUS_PENDING,
+        attempt_count: 0,
+        user_id,
+        now,
+    }
 }
 
 fn parser_job_status_update_record(
@@ -4200,6 +4247,33 @@ mod tests {
             DEFAULT_CHUNK_OVERLAP_CHARS
         );
         assert_eq!(request["trace"]["requestId"], "parser-job-99");
+    }
+
+    #[test]
+    fn parser_outbox_record_wraps_parser_worker_request_payload() {
+        let command = normalize_document_parse_job_command(DocumentParseJobCommand {
+            name: "training.pdf".to_owned(),
+            file_id: Some(88),
+            source_uri: "/file/knowledge/88.pdf".to_owned(),
+            content_type: "application/pdf".to_owned(),
+            source_hash: "file-hash".to_owned(),
+            source_kind: "objectStorage".to_owned(),
+        })
+        .unwrap();
+        let parser_request = parser_worker_request(DEFAULT_TENANT_ID, 7, 42, 99, &command);
+        let now = Utc::now().naive_utc();
+
+        let outbox =
+            parser_outbox_save_record(DEFAULT_TENANT_ID, 7, 42, 99, 9, &parser_request, now);
+
+        assert_eq!(outbox.tenant_id, DEFAULT_TENANT_ID);
+        assert_eq!(outbox.dataset_id, 7);
+        assert_eq!(outbox.document_id, 42);
+        assert_eq!(outbox.parser_job_id, 99);
+        assert_eq!(outbox.event_type, "parser.job.requested");
+        assert_eq!(outbox.payload["parserRequest"], parser_request);
+        assert_eq!(outbox.payload["maxAttempts"], 5);
+        assert_eq!(outbox.payload["attempt"], 1);
     }
 
     #[test]

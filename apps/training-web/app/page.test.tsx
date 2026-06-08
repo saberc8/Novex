@@ -5,7 +5,14 @@ import { accountLogin, getImageCaptcha } from "@/api/auth";
 import { createAgentRun } from "@/api/agent";
 import { dryRunTool } from "@/api/capability";
 import { listEvalDatasets, listEvalResults, listEvalRuns, runEval } from "@/api/eval";
-import { askDataset, listDatasets, submitAiFeedback, submitRagFeedback, uploadKnowledgeFile } from "@/api/knowledge";
+import {
+  askDataset,
+  getParseJob,
+  listDatasets,
+  submitAiFeedback,
+  submitRagFeedback,
+  uploadKnowledgeFile
+} from "@/api/knowledge";
 import { listTrainingLearningRecords } from "@/api/training";
 import type { DatasetResp } from "@/types/knowledge";
 
@@ -31,6 +38,7 @@ vi.mock("@/api/eval", () => ({
 
 vi.mock("@/api/knowledge", () => ({
   askDataset: vi.fn(),
+  getParseJob: vi.fn(),
   listDatasets: vi.fn(),
   submitAiFeedback: vi.fn(),
   submitRagFeedback: vi.fn(),
@@ -50,6 +58,7 @@ const askDatasetMock = vi.mocked(askDataset);
 const createAgentRunMock = vi.mocked(createAgentRun);
 const dryRunToolMock = vi.mocked(dryRunTool);
 const getImageCaptchaMock = vi.mocked(getImageCaptcha);
+const getParseJobMock = vi.mocked(getParseJob);
 const listEvalDatasetsMock = vi.mocked(listEvalDatasets);
 const listEvalResultsMock = vi.mocked(listEvalResults);
 const listEvalRunsMock = vi.mocked(listEvalRuns);
@@ -172,6 +181,29 @@ describe("Training home page", () => {
         updateUserString: "",
         updateTime: ""
       }
+    });
+    getParseJobMock.mockResolvedValue({
+      id: 99,
+      tenantId: 1,
+      datasetId: 10,
+      documentId: 42,
+      jobType: 2,
+      status: 3,
+      attemptCount: 1,
+      errorMessage: "",
+      resultSummary: {},
+      documentName: "handbook.md",
+      sourceUri: "/file/knowledge/88.md",
+      fileId: 88,
+      contentType: "text/markdown",
+      parseStatus: 3,
+      ingestionStatus: 4,
+      chunkCount: 3,
+      parserRequest: {},
+      createUserString: "",
+      createTime: "2026-06-05 10:00:00",
+      updateUserString: "",
+      updateTime: ""
     });
     createAgentRunMock.mockResolvedValue({
       runId: 900,
@@ -404,7 +436,7 @@ describe("Training home page", () => {
     expect(await screen.findByText("已记录反馈")).toBeTruthy();
   });
 
-  it("uploads training files from the customer workbench and creates a parse job", async () => {
+  it("uploads training files and polls until the parsed document is ready for questions", async () => {
     render(<Page />);
 
     await waitFor(() => expect(listDatasetsMock).toHaveBeenCalledWith({ page: 1, size: 20 }));
@@ -414,7 +446,9 @@ describe("Training home page", () => {
     });
 
     await waitFor(() => expect(uploadKnowledgeFileMock).toHaveBeenCalledWith(10, file));
-    expect(await screen.findByText("解析任务 #99 已创建")).toBeTruthy();
+    await waitFor(() => expect(getParseJobMock).toHaveBeenCalledWith(10, 99));
+    expect(await screen.findByText("handbook.md 已解析并索引 3 个片段，可提问")).toBeTruthy();
+    await waitFor(() => expect(listDatasetsMock).toHaveBeenCalledTimes(2));
   });
 
   it("runs the training regression eval set from the customer workbench", async () => {

@@ -42,35 +42,35 @@ def execute_parse_job(
 
     if status == "succeeded":
         payload = parsed_document_payload(prepared_request, parser_result)
-        callback = post_parsed_document(
+        callback = ensure_backend_callback_ok(post_parsed_document(
             dataset_id=positive_int(prepared_request.get("datasetId"), "datasetId"),
             payload=payload,
             backend_base_url=backend_base_url,
             backend_token=backend_token,
             http_post=http_post,
-        )
+        ))
         callback_status = "posted"
     elif status == "submitted":
         payload = parse_job_status_payload(prepared_request, parser_result, callback_status="deferred")
-        callback = post_parse_job_status(
+        callback = ensure_backend_callback_ok(post_parse_job_status(
             dataset_id=positive_int(prepared_request.get("datasetId"), "datasetId"),
             parser_job_id=positive_int(prepared_request.get("parserJobId"), "parserJobId"),
             payload=payload,
             backend_base_url=backend_base_url,
             backend_token=backend_token,
             http_post=http_post,
-        )
+        ))
         callback_status = "deferred"
     elif status == "failed":
         payload = parse_job_status_payload(prepared_request, parser_result, callback_status="failed")
-        callback = post_parse_job_status(
+        callback = ensure_backend_callback_ok(post_parse_job_status(
             dataset_id=positive_int(prepared_request.get("datasetId"), "datasetId"),
             parser_job_id=positive_int(prepared_request.get("parserJobId"), "parserJobId"),
             payload=payload,
             backend_base_url=backend_base_url,
             backend_token=backend_token,
             http_post=http_post,
-        )
+        ))
         callback_status = "failed"
 
     return {
@@ -112,7 +112,7 @@ def complete_mineru_parse_job(
                 "message": task.err_msg or "MinerU task failed",
                 "mineruTask": task_payload,
             }
-        callback = post_parse_job_status(
+        callback = ensure_backend_callback_ok(post_parse_job_status(
             dataset_id=positive_int(request.get("datasetId"), "datasetId"),
             parser_job_id=positive_int(request.get("parserJobId"), "parserJobId"),
             payload=parse_job_status_payload(
@@ -124,7 +124,7 @@ def complete_mineru_parse_job(
             backend_base_url=backend_base_url,
             backend_token=backend_token,
             http_post=http_post,
-        )
+        ))
         return {
             "status": status,
             "callbackStatus": callback_status,
@@ -147,13 +147,13 @@ def complete_mineru_parse_job(
         },
     )
     payload = parsed_document_payload(request, parser_result)
-    callback = post_parsed_document(
+    callback = ensure_backend_callback_ok(post_parsed_document(
         dataset_id=positive_int(request.get("datasetId"), "datasetId"),
         payload=payload,
         backend_base_url=backend_base_url,
         backend_token=backend_token,
         http_post=http_post,
-    )
+    ))
     return {
         "status": parser_result.get("status"),
         "callbackStatus": "posted",
@@ -304,6 +304,26 @@ def default_http_post(url: str, *, headers: Mapping[str, str], json: Mapping[str
             "statusCode": getattr(response, "status", response.getcode()),
             "body": response_body,
         }
+
+
+def ensure_backend_callback_ok(response: Mapping[str, Any]) -> Mapping[str, Any]:
+    status_code = int(response.get("statusCode") or response.get("status") or 0)
+    if status_code < 200 or status_code >= 300:
+        raise RuntimeError(f"backend callback failed with HTTP {status_code}")
+
+    body = response.get("body")
+    if isinstance(body, str):
+        try:
+            body = json.loads(body)
+        except json.JSONDecodeError:
+            body = None
+    if isinstance(body, Mapping):
+        success = body.get("success")
+        code = str(body.get("code") or "")
+        if success is False or (code and code != "200"):
+            message = str(body.get("msg") or body.get("message") or code or "unknown error")
+            raise RuntimeError(f"backend callback failed: {message}")
+    return response
 
 
 def default_source_fetcher(backend_token: str = ""):

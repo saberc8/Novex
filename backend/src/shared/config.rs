@@ -32,6 +32,19 @@ pub struct AppConfig {
     pub rabbitmq_retry_routing_key: String,
     pub rabbitmq_dead_routing_key: String,
     pub rabbitmq_retry_ttl_ms: u32,
+    pub parser_queue_enabled: bool,
+    pub parser_queue_publisher_enabled: bool,
+    pub parser_queue_tick_seconds: u64,
+    pub parser_queue_batch_size: i64,
+    pub redis_url: String,
+    pub rabbitmq_parser_exchange: String,
+    pub rabbitmq_parser_execute_queue: String,
+    pub rabbitmq_parser_retry_queue: String,
+    pub rabbitmq_parser_dead_queue: String,
+    pub rabbitmq_parser_execute_routing_key: String,
+    pub rabbitmq_parser_retry_routing_key: String,
+    pub rabbitmq_parser_dead_routing_key: String,
+    pub rabbitmq_parser_retry_ttl_ms: u32,
 }
 
 impl AppConfig {
@@ -98,6 +111,40 @@ impl AppConfig {
             "RABBITMQ_SCHEDULER_RETRY_TTL_MS",
             &env::var("RABBITMQ_SCHEDULER_RETRY_TTL_MS").unwrap_or_else(|_| "30000".to_owned()),
         )?;
+        let parser_queue_enabled =
+            parse_bool_env(env::var("PARSER_QUEUE_ENABLED").ok().as_deref(), false)?;
+        let parser_queue_publisher_enabled = parse_bool_env(
+            env::var("PARSER_QUEUE_PUBLISHER_ENABLED").ok().as_deref(),
+            parser_queue_enabled,
+        )?;
+        let parser_queue_tick_seconds = parse_positive_u64_env(
+            "PARSER_QUEUE_TICK_SECONDS",
+            &env::var("PARSER_QUEUE_TICK_SECONDS").unwrap_or_else(|_| "5".to_owned()),
+        )?;
+        let parser_queue_batch_size = parse_positive_i64_env(
+            "PARSER_QUEUE_BATCH_SIZE",
+            &env::var("PARSER_QUEUE_BATCH_SIZE").unwrap_or_else(|_| "50".to_owned()),
+        )?;
+        let redis_url =
+            env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379/0".to_owned());
+        let rabbitmq_parser_exchange =
+            env::var("RABBITMQ_PARSER_EXCHANGE").unwrap_or_else(|_| "novex.parser".to_owned());
+        let rabbitmq_parser_execute_queue = env::var("RABBITMQ_PARSER_EXECUTE_QUEUE")
+            .unwrap_or_else(|_| "novex.parser.execute".to_owned());
+        let rabbitmq_parser_retry_queue = env::var("RABBITMQ_PARSER_RETRY_QUEUE")
+            .unwrap_or_else(|_| "novex.parser.retry".to_owned());
+        let rabbitmq_parser_dead_queue = env::var("RABBITMQ_PARSER_DEAD_QUEUE")
+            .unwrap_or_else(|_| "novex.parser.dead".to_owned());
+        let rabbitmq_parser_execute_routing_key = env::var("RABBITMQ_PARSER_EXECUTE_ROUTING_KEY")
+            .unwrap_or_else(|_| "parser.execute".to_owned());
+        let rabbitmq_parser_retry_routing_key = env::var("RABBITMQ_PARSER_RETRY_ROUTING_KEY")
+            .unwrap_or_else(|_| "parser.retry".to_owned());
+        let rabbitmq_parser_dead_routing_key = env::var("RABBITMQ_PARSER_DEAD_ROUTING_KEY")
+            .unwrap_or_else(|_| "parser.dead".to_owned());
+        let rabbitmq_parser_retry_ttl_ms = parse_positive_u32_env(
+            "RABBITMQ_PARSER_RETRY_TTL_MS",
+            &env::var("RABBITMQ_PARSER_RETRY_TTL_MS").unwrap_or_else(|_| "30000".to_owned()),
+        )?;
 
         if cors_allowed_origins.is_empty() {
             bail!("CORS_ALLOWED_ORIGINS must include at least one origin");
@@ -127,6 +174,19 @@ impl AppConfig {
             rabbitmq_retry_routing_key,
             rabbitmq_dead_routing_key,
             rabbitmq_retry_ttl_ms,
+            parser_queue_enabled,
+            parser_queue_publisher_enabled,
+            parser_queue_tick_seconds,
+            parser_queue_batch_size,
+            redis_url,
+            rabbitmq_parser_exchange,
+            rabbitmq_parser_execute_queue,
+            rabbitmq_parser_retry_queue,
+            rabbitmq_parser_dead_queue,
+            rabbitmq_parser_execute_routing_key,
+            rabbitmq_parser_retry_routing_key,
+            rabbitmq_parser_dead_routing_key,
+            rabbitmq_parser_retry_ttl_ms,
         })
     }
 }

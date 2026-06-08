@@ -22,7 +22,14 @@ import {
 import { accountLogin, getImageCaptcha } from "@/api/auth";
 import { createAgentRun } from "@/api/agent";
 import { listEvalDatasets, listEvalResults, listEvalRuns, runEval } from "@/api/eval";
-import { askDataset, listDatasets, submitAiFeedback, submitRagFeedback, uploadKnowledgeFile } from "@/api/knowledge";
+import {
+  askDataset,
+  getParseJob,
+  listDatasets,
+  submitAiFeedback,
+  submitRagFeedback,
+  uploadKnowledgeFile
+} from "@/api/knowledge";
 import { listTrainingLearningRecords } from "@/api/training";
 import { CitationList, type CitationItem } from "@/components/citation-list";
 import { MetricStrip } from "@/components/metric-strip";
@@ -31,10 +38,15 @@ import { getAuthToken, setAuthToken as persistAuthToken } from "@/lib/auth";
 import type { AgentRunResp } from "@/types/agent";
 import type { ImageCaptchaResp } from "@/types/auth";
 import type { EvalDatasetResp, EvalResultResp, EvalRunResp } from "@/types/eval";
-import type { DatasetResp, RagAskResp, RagFeedbackRating } from "@/types/knowledge";
+import type { DatasetResp, ParserJobResp, RagAskResp, RagFeedbackRating } from "@/types/knowledge";
 import type { TrainingLearningRecordsResp } from "@/types/training";
 
 const TRAINING_CLIENT_ID = "novex-training-web";
+const DOCUMENT_PARSE_STATUS_PARSED = 3;
+const DOCUMENT_PARSE_STATUS_FAILED = 4;
+const DOCUMENT_INGESTION_STATUS_INDEXED = 4;
+const PARSE_JOB_POLL_INTERVAL_MS = 1500;
+const MAX_PARSE_JOB_POLLS = 20;
 
 const fallbackDataset: DatasetResp = {
   id: 10,
@@ -151,6 +163,45 @@ const fallbackLearningRecords: TrainingLearningRecordsResp = {
     }
   ]
 };
+
+function isParseJobIndexed(job: ParserJobResp) {
+  return job.parseStatus === DOCUMENT_PARSE_STATUS_PARSED && job.ingestionStatus === DOCUMENT_INGESTION_STATUS_INDEXED;
+}
+
+function isParseJobFailed(job: ParserJobResp) {
+  return job.parseStatus === DOCUMENT_PARSE_STATUS_FAILED;
+}
+
+function parseJobUploadStatus(job: ParserJobResp) {
+  if (isParseJobIndexed(job)) {
+    return `${job.documentName} 已解析并索引 ${job.chunkCount} 个片段，可提问`;
+  }
+  if (isParseJobFailed(job)) {
+    return job.errorMessage ? `解析任务 #${job.id} 失败：${job.errorMessage}` : `解析任务 #${job.id} 失败`;
+  }
+  if (job.parseStatus === DOCUMENT_PARSE_STATUS_PARSED) {
+    return `解析任务 #${job.id} 已解析，等待索引`;
+  }
+  return `解析任务 #${job.id} 已创建，等待解析`;
+}
+
+async function pollParseJob(datasetId: number, jobId: number) {
+  let latest: ParserJobResp | null = null;
+  for (let index = 0; index < MAX_PARSE_JOB_POLLS; index += 1) {
+    latest = await getParseJob(datasetId, jobId);
+    if (isParseJobIndexed(latest) || isParseJobFailed(latest)) {
+      return latest;
+    }
+    await delay(PARSE_JOB_POLL_INTERVAL_MS);
+  }
+  return latest;
+}
+
+function delay(ms: number) {
+  return new Promise((resolve) => {
+    window.setTimeout(resolve, ms);
+  });
+}
 
 export function TrainingAppClient() {
   const [authToken, setAuthToken] = useState<string | null>(() => getAuthToken());
@@ -533,6 +584,17 @@ export function TrainingAppClient() {
     }
   }
 
+  async function refreshKnowledgeDatasets(preferredDatasetId: number) {
+    const page = await listDatasets({ page: 1, size: 20 });
+    const nextDatasets = page.list.length > 0 ? page.list : [fallbackDataset];
+    const preferred =
+      nextDatasets.find((dataset) => dataset.id === preferredDatasetId) ??
+      nextDatasets.find((dataset) => dataset.documentCount > 0) ??
+      nextDatasets[0];
+    setDatasets(nextDatasets);
+    setSelectedDatasetId(preferred.id);
+  }
+
   async function handleTrainingFileUpload(event: ChangeEvent<HTMLInputElement>) {
     const file = event.target.files?.[0];
     event.target.value = "";
@@ -544,7 +606,16 @@ export function TrainingAppClient() {
     setUploadStatus("");
     try {
       const response = await uploadKnowledgeFile(selectedDataset.id, file);
-      setUploadStatus(`解析任务 #${response.parseJob.id} 已创建`);
+      setUploadStatus(parseJobUploadStatus(response.parseJob));
+      const finalJob = isParseJobIndexed(response.parseJob) || isParseJobFailed(response.parseJob)
+        ? response.parseJob
+        : await pollParseJob(selectedDataset.id, response.parseJob.id);
+      if (finalJob) {
+        setUploadStatus(parseJobUploadStatus(finalJob));
+        if (isParseJobIndexed(finalJob)) {
+          await refreshKnowledgeDatasets(selectedDataset.id);
+        }
+      }
       setApiStatus("live");
     } catch {
       setUploadStatus("上传失败");
