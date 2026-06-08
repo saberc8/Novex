@@ -239,6 +239,157 @@ impl RabbitMqClient {
     }
 }
 
+#[derive(Clone)]
+pub struct ParserRabbitMqClient {
+    channel: Channel,
+    config: ParserRabbitMqConfig,
+}
+
+impl ParserRabbitMqClient {
+    pub async fn connect(config: ParserRabbitMqConfig) -> Result<Self, AppError> {
+        let connection = Connection::connect(&config.url, ConnectionProperties::default())
+            .await
+            .map_err(|error| {
+                AppError::Anyhow(anyhow::anyhow!("connect parser RabbitMQ: {error}"))
+            })?;
+        let channel = connection.create_channel().await.map_err(|error| {
+            AppError::Anyhow(anyhow::anyhow!("create parser RabbitMQ channel: {error}"))
+        })?;
+        let client = Self { channel, config };
+        client.declare_parser_topology().await?;
+        Ok(client)
+    }
+
+    pub fn channel(&self) -> &Channel {
+        &self.channel
+    }
+
+    pub fn config(&self) -> &ParserRabbitMqConfig {
+        &self.config
+    }
+
+    pub async fn publish_parser_execute(&self, message: &ParserJobMessage) -> Result<(), AppError> {
+        self.publish(&self.config.execute_routing_key, message)
+            .await
+    }
+
+    pub async fn publish_parser_retry(&self, message: &ParserJobMessage) -> Result<(), AppError> {
+        self.publish(&self.config.retry_routing_key, message).await
+    }
+
+    pub async fn publish_parser_dead(&self, message: &ParserJobMessage) -> Result<(), AppError> {
+        self.publish(&self.config.dead_routing_key, message).await
+    }
+
+    async fn publish(&self, routing_key: &str, message: &ParserJobMessage) -> Result<(), AppError> {
+        let payload = serde_json::to_vec(message).map_err(|error| {
+            AppError::Anyhow(anyhow::anyhow!("encode parser execute message: {error}"))
+        })?;
+        let confirmation = self
+            .channel
+            .basic_publish(
+                &self.config.exchange,
+                routing_key,
+                BasicPublishOptions::default(),
+                &payload,
+                BasicProperties::default().with_content_type("application/json".into()),
+            )
+            .await
+            .map_err(|error| {
+                AppError::Anyhow(anyhow::anyhow!("publish parser execute message: {error}"))
+            })?
+            .await
+            .map_err(|error| {
+                AppError::Anyhow(anyhow::anyhow!("confirm parser execute message: {error}"))
+            })?;
+        if !matches!(confirmation, Confirmation::Ack(_)) {
+            return Err(AppError::Anyhow(anyhow::anyhow!(
+                "RabbitMQ did not ack parser execute message"
+            )));
+        }
+        Ok(())
+    }
+
+    async fn declare_parser_topology(&self) -> Result<(), AppError> {
+        self.channel
+            .exchange_declare(
+                &self.config.exchange,
+                ExchangeKind::Direct,
+                ExchangeDeclareOptions {
+                    durable: true,
+                    ..Default::default()
+                },
+                FieldTable::default(),
+            )
+            .await
+            .map_err(|error| {
+                AppError::Anyhow(anyhow::anyhow!("declare parser exchange: {error}"))
+            })?;
+
+        self.declare_queue(&self.config.execute_queue, FieldTable::default())
+            .await?;
+        self.bind_queue(&self.config.execute_queue, &self.config.execute_routing_key)
+            .await?;
+
+        let mut retry_args = FieldTable::default();
+        retry_args.insert(
+            "x-message-ttl".into(),
+            AMQPValue::LongUInt(self.config.retry_ttl_ms),
+        );
+        retry_args.insert(
+            "x-dead-letter-exchange".into(),
+            AMQPValue::LongString(self.config.exchange.clone().into()),
+        );
+        retry_args.insert(
+            "x-dead-letter-routing-key".into(),
+            AMQPValue::LongString(self.config.execute_routing_key.clone().into()),
+        );
+        self.declare_queue(&self.config.retry_queue, retry_args)
+            .await?;
+        self.bind_queue(&self.config.retry_queue, &self.config.retry_routing_key)
+            .await?;
+
+        self.declare_queue(&self.config.dead_queue, FieldTable::default())
+            .await?;
+        self.bind_queue(&self.config.dead_queue, &self.config.dead_routing_key)
+            .await?;
+        Ok(())
+    }
+
+    async fn declare_queue(&self, queue: &str, args: FieldTable) -> Result<(), AppError> {
+        self.channel
+            .queue_declare(
+                queue,
+                QueueDeclareOptions {
+                    durable: true,
+                    ..Default::default()
+                },
+                args,
+            )
+            .await
+            .map_err(|error| {
+                AppError::Anyhow(anyhow::anyhow!("declare parser queue {queue}: {error}"))
+            })?;
+        Ok(())
+    }
+
+    async fn bind_queue(&self, queue: &str, routing_key: &str) -> Result<(), AppError> {
+        self.channel
+            .queue_bind(
+                queue,
+                &self.config.exchange,
+                routing_key,
+                QueueBindOptions::default(),
+                FieldTable::default(),
+            )
+            .await
+            .map_err(|error| {
+                AppError::Anyhow(anyhow::anyhow!("bind parser queue {queue}: {error}"))
+            })?;
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -296,5 +447,20 @@ mod tests {
         assert_eq!(config.retry_routing_key, "parser.retry");
         assert_eq!(config.dead_routing_key, "parser.dead");
         assert_eq!(config.retry_ttl_ms, 30_000);
+    }
+
+    #[test]
+    fn rabbitmq_module_defines_parser_client_publish_path() {
+        let source = include_str!("rabbitmq.rs").split("#[cfg(test)]").next().unwrap();
+
+        for needle in [
+            "ParserRabbitMqClient",
+            "publish_parser_execute",
+            "declare_parser_topology",
+            "parser execute message",
+            "novex.parser.execute",
+        ] {
+            assert!(source.contains(needle), "{needle} missing from RabbitMQ module");
+        }
     }
 }
