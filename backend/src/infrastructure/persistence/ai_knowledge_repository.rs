@@ -1806,6 +1806,38 @@ mod tests {
     }
 
     #[test]
+    fn parser_outbox_migration_defines_durable_queue_contract() {
+        let migration_path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/migrations/202606080001_create_ai_parser_outbox.sql"
+        );
+        let migration =
+            std::fs::read_to_string(migration_path).expect("missing AI parser outbox migration");
+
+        for needle in [
+            "CREATE TABLE IF NOT EXISTS ai_parser_outbox",
+            "tenant_id",
+            "dataset_id",
+            "document_id",
+            "parser_job_id",
+            "event_type",
+            "payload JSONB",
+            "status",
+            "attempt_count",
+            "last_error",
+            "published_time",
+            "uq_ai_parser_outbox_parser_job",
+            "idx_ai_parser_outbox_status",
+            "idx_ai_parser_outbox_parser_job",
+        ] {
+            assert!(
+                migration.contains(needle),
+                "{needle} missing from parser outbox migration"
+            );
+        }
+    }
+
+    #[test]
     fn repository_persists_vector_collection_and_embedding_records() {
         let source = include_str!("ai_knowledge_repository.rs")
             .split("#[cfg(test)]")
