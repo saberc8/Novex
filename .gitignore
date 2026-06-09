@@ -44,6 +44,7 @@ target/
 # 日志与运行时文件
 logs/
 data/
+backend/data/file/knowledge/
 *.sqlite
 *.db
 
