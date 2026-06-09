@@ -2,7 +2,8 @@ use novex_ai_core::FoundationModule;
 use novex_model::{ModelRuntimeConfig, ModelRuntimeTarget};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use unicode_normalization::UnicodeNormalization;
 
 pub const CRATE_ID: &str = "novex-rag";
 pub const LOCAL_EMBEDDING_ROUTE: &str = "local-keyword";
@@ -1385,25 +1386,73 @@ pub fn keyword_retrieve(query: &str, chunks: &[DocumentChunk], limit: usize) -> 
     if limit == 0 {
         return vec![];
     }
-    let query_tokens = tokenize(query).into_iter().collect::<HashSet<_>>();
-    if query_tokens.is_empty() {
+    bm25_retrieve(query, chunks, limit)
+}
+
+const BM25_K1: f32 = 1.2;
+const BM25_B: f32 = 0.75;
+
+fn bm25_retrieve(query: &str, chunks: &[DocumentChunk], limit: usize) -> Vec<RetrievalHit> {
+    let query_terms = bm25_query_terms(query);
+    if query_terms.is_empty() {
         return vec![];
     }
 
-    let mut scored = chunks
+    let documents = chunks
         .iter()
-        .filter_map(|chunk| {
+        .map(|chunk| {
             let search_text = if chunk.semantic_search_text.trim().is_empty() {
                 &chunk.text
             } else {
                 &chunk.semantic_search_text
             };
-            let chunk_tokens = tokenize(search_text).into_iter().collect::<HashSet<_>>();
-            let overlap = query_tokens.intersection(&chunk_tokens).count();
-            if overlap == 0 {
+            let tokens = bm25_tokens(search_text);
+            let term_frequencies = term_frequencies(&tokens);
+            (chunk, tokens.len().max(1) as f32, term_frequencies)
+        })
+        .collect::<Vec<_>>();
+    if documents.is_empty() {
+        return vec![];
+    }
+
+    let document_count = documents.len() as f32;
+    let average_document_len = documents
+        .iter()
+        .map(|(_, length, _)| *length)
+        .sum::<f32>()
+        .max(1.0)
+        / document_count.max(1.0);
+    let mut document_frequencies = HashMap::<String, usize>::new();
+    for (_, _, frequencies) in &documents {
+        for term in frequencies.keys() {
+            *document_frequencies.entry(term.clone()).or_default() += 1;
+        }
+    }
+
+    let mut scored = documents
+        .into_iter()
+        .filter_map(|(chunk, document_len, frequencies)| {
+            let mut score = 0.0;
+            for term in &query_terms {
+                let Some(term_frequency) = frequencies.get(term).copied() else {
+                    continue;
+                };
+                let document_frequency = document_frequencies.get(term).copied().unwrap_or(0);
+                if document_frequency == 0 {
+                    continue;
+                }
+                score += bm25_term_score(
+                    term_frequency as f32,
+                    document_frequency as f32,
+                    document_count,
+                    document_len,
+                    average_document_len,
+                );
+            }
+
+            if score <= 0.0 {
                 return None;
             }
-            let score = overlap as f32 / query_tokens.len() as f32;
             Some((score, chunk.clone()))
         })
         .collect::<Vec<_>>();
@@ -1427,6 +1476,102 @@ pub fn keyword_retrieve(query: &str, chunks: &[DocumentChunk], limit: usize) -> 
             chunk,
         })
         .collect()
+}
+
+fn query_token_set(query: &str) -> HashSet<String> {
+    let mut tokens = bm25_tokens(query).into_iter().collect::<HashSet<_>>();
+    expand_numbered_range_tokens(query, &mut tokens);
+    tokens
+}
+
+fn bm25_query_terms(query: &str) -> Vec<String> {
+    let mut terms = query_token_set(query).into_iter().collect::<Vec<_>>();
+    terms.sort();
+    terms
+}
+
+fn term_frequencies(tokens: &[String]) -> HashMap<String, usize> {
+    let mut frequencies = HashMap::new();
+    for token in tokens {
+        *frequencies.entry(token.clone()).or_default() += 1;
+    }
+    frequencies
+}
+
+fn bm25_term_score(
+    term_frequency: f32,
+    document_frequency: f32,
+    document_count: f32,
+    document_len: f32,
+    average_document_len: f32,
+) -> f32 {
+    let idf = (((document_count - document_frequency + 0.5) / (document_frequency + 0.5)) + 1.0)
+        .ln()
+        .max(0.0);
+    let normalized_len = document_len / average_document_len.max(1.0);
+    let denominator = term_frequency + BM25_K1 * (1.0 - BM25_B + BM25_B * normalized_len);
+    idf * (term_frequency * (BM25_K1 + 1.0)) / denominator.max(f32::EPSILON)
+}
+
+fn expand_numbered_range_tokens(query: &str, tokens: &mut HashSet<String>) {
+    if !contains_range_indicator(query) {
+        return;
+    }
+    let mut labels = tokens
+        .iter()
+        .filter_map(|token| numbered_label_token(token))
+        .collect::<Vec<_>>();
+    labels.sort_unstable();
+    labels.dedup();
+
+    for pair in labels.windows(2) {
+        let [start, end] = pair else {
+            continue;
+        };
+        if start.prefix != end.prefix
+            || end.number <= start.number
+            || end.number - start.number > 12
+        {
+            continue;
+        }
+        for number in start.number..=end.number {
+            tokens.insert(format!("{}{number}", start.prefix));
+        }
+    }
+}
+
+fn contains_range_indicator(query: &str) -> bool {
+    let query = query.to_ascii_lowercase();
+    query.contains("到")
+        || query.contains("至")
+        || query.contains('-')
+        || query.contains('~')
+        || query.contains('～')
+        || query.contains("to")
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct NumberedLabel {
+    prefix: String,
+    number: u8,
+}
+
+fn numbered_label_token(token: &str) -> Option<NumberedLabel> {
+    let split_at = token.find(|character: char| character.is_ascii_digit())?;
+    let (prefix, number) = token.split_at(split_at);
+    if prefix.is_empty()
+        || !prefix
+            .chars()
+            .all(|character| character.is_ascii_alphabetic())
+        || number.is_empty()
+        || !number.chars().all(|character| character.is_ascii_digit())
+    {
+        return None;
+    }
+    Some(NumberedLabel {
+        prefix: prefix.to_owned(),
+        number: number.parse::<u8>().ok()?,
+    })
 }
 
 pub fn build_extractive_answer(question: &str, hits: &[RetrievalHit]) -> RagAnswer {
@@ -1478,24 +1623,111 @@ fn first_sentence(text: &str) -> String {
         .to_owned()
 }
 
-fn tokenize(text: &str) -> Vec<String> {
+fn bm25_tokens(text: &str) -> Vec<String> {
     let mut tokens = Vec::new();
-    let mut current = String::new();
-    for character in text.chars() {
-        if character.is_alphanumeric() {
-            for lower in character.to_lowercase() {
-                current.push(lower);
-            }
+    let mut current_ascii = String::new();
+    let mut current_cjk = Vec::new();
+
+    for character in text.nfkc().flat_map(char::to_lowercase) {
+        if character.is_ascii_alphanumeric() {
+            flush_cjk_bm25_tokens(&mut current_cjk, &mut tokens);
+            current_ascii.push(character);
             continue;
         }
-        if !current.is_empty() {
-            tokens.push(std::mem::take(&mut current));
+
+        if !current_ascii.is_empty() {
+            tokens.push(std::mem::take(&mut current_ascii));
+        }
+
+        if is_cjk_character(character) {
+            current_cjk.push(character);
+        } else {
+            flush_cjk_bm25_tokens(&mut current_cjk, &mut tokens);
         }
     }
-    if !current.is_empty() {
-        tokens.push(current);
+
+    if !current_ascii.is_empty() {
+        tokens.push(current_ascii);
+    }
+    flush_cjk_bm25_tokens(&mut current_cjk, &mut tokens);
+    tokens
+}
+
+fn flush_cjk_bm25_tokens(current_cjk: &mut Vec<char>, tokens: &mut Vec<String>) {
+    if current_cjk.is_empty() {
+        return;
+    }
+
+    for character in current_cjk.iter().copied() {
+        if !is_low_value_cjk_unigram(character) {
+            tokens.push(character.to_string());
+        }
+    }
+
+    for pair in current_cjk.windows(2) {
+        tokens.push(pair.iter().collect());
+    }
+
+    current_cjk.clear();
+}
+
+fn is_low_value_cjk_unigram(character: char) -> bool {
+    matches!(
+        character,
+        '的' | '了'
+            | '是'
+            | '在'
+            | '和'
+            | '与'
+            | '及'
+            | '或'
+            | '而'
+            | '这'
+            | '那'
+            | '什'
+            | '么'
+            | '个'
+            | '一'
+            | '不'
+            | '有'
+            | '到'
+            | '从'
+            | '中'
+            | '里'
+            | '上'
+            | '下'
+            | '为'
+            | '被'
+            | '把'
+    )
+}
+
+fn tokenize(text: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut current_ascii = String::new();
+    for character in text.chars().flat_map(char::to_lowercase) {
+        if character.is_ascii_alphanumeric() {
+            current_ascii.push(character);
+            continue;
+        }
+        if !current_ascii.is_empty() {
+            tokens.push(std::mem::take(&mut current_ascii));
+        }
+        if is_cjk_character(character) {
+            tokens.push(character.to_string());
+        }
+    }
+    if !current_ascii.is_empty() {
+        tokens.push(current_ascii);
     }
     tokens
+}
+
+fn is_cjk_character(character: char) -> bool {
+    matches!(
+        character as u32,
+        0x4E00..=0x9FFF | 0x3400..=0x4DBF | 0xF900..=0xFAFF
+    )
 }
 
 fn runtime_route_id(config: &ModelRuntimeConfig, target: ModelRuntimeTarget) -> Option<String> {
@@ -1563,6 +1795,158 @@ mod tests {
     }
 
     #[test]
+    fn keyword_retrieve_ranks_exact_chinese_phrase_over_noisy_overlap() {
+        let chunks = vec![
+            test_chunk(
+                0,
+                "AI 召集同学回看会议，比率口径准备中，确认概率指标在哪里提交到达，内容内容内容。",
+            ),
+            test_chunk(
+                1,
+                "不可能 N 角里明确提到 AI 召回率、准确率，要求在工作信息流场景里同时保证召回和答案质量。",
+            ),
+            test_chunk(
+                2,
+                "作者讨论 context 不平权，因为不同组织拥有的工作数据、权限、流程和协作语境不同。",
+            ),
+        ];
+
+        let hits = keyword_retrieve("AI 召回率、准确率在文中哪里被提到？", &chunks, 3);
+
+        assert_eq!(hits[0].chunk.chunk_index, 1);
+    }
+
+    #[test]
+    fn keyword_retrieve_ranks_date_fact_for_chinese_long_document_query() {
+        let chunks = vec![
+            test_chunk(
+                0,
+                "ONE 项目生意命令周报期限从前什么时间候选开会始终首席次数公司开放，信息很多但没有真实日期事实。",
+            ),
+            test_chunk(
+                1,
+                "ONE 生命周期：2025 年 4 月开始孕育，8 月 25 日发布会首次公开，DAU 巅峰稳定在 300 万左右。",
+            ),
+            test_chunk(
+                2,
+                "2025 年 AI 产品叙事从模型会聊天、总结、搜索，转向模型调工具、完成任务、进入真实工作流。",
+            ),
+        ];
+
+        let hits = keyword_retrieve(
+            "ONE 项目的生命周期从什么时候开始，什么时候首次公开？",
+            &chunks,
+            3,
+        );
+
+        assert_eq!(hits[0].chunk.chunk_index, 1);
+    }
+
+    #[test]
+    fn keyword_retrieve_normalizes_pdf_compatibility_cjk_forms() {
+        let chunks = vec![
+            test_chunk(0, "普通 PDF 背景，没有目标字形。"),
+            test_chunk(1, "PDF 抽取出的兼容字形：⽣。"),
+        ];
+
+        let hits = keyword_retrieve("生", &chunks, 2);
+
+        assert_eq!(hits[0].chunk.chunk_index, 1);
+    }
+
+    #[test]
+    fn keyword_retrieve_expands_numbered_label_ranges_in_cjk_queries() {
+        let chunks = ["P0", "P1", "P2", "P3", "P4", "P5"]
+            .into_iter()
+            .enumerate()
+            .map(|(index, label)| DocumentChunk {
+                document_id: "doc-numbered".to_owned(),
+                chunk_id: format!("doc-numbered:{index}"),
+                chunk_index: index,
+                text: format!("{label} 方案交付内容。"),
+                semantic_search_text: format!(
+                    "Novex Architecture / 阶段计划 / {label}: 阶段方案\n{label} 方案交付内容。"
+                ),
+                token_count: 8,
+                citation: CitationRef {
+                    document_id: "doc-numbered".to_owned(),
+                    chunk_id: format!("doc-numbered:{index}"),
+                    page_no: None,
+                    section_path: vec!["阶段计划".to_owned(), label.to_owned()],
+                },
+                metadata: ChunkMetadata::default(),
+            })
+            .chain(std::iter::once(DocumentChunk {
+                document_id: "doc-numbered".to_owned(),
+                chunk_id: "doc-numbered:generic".to_owned(),
+                chunk_index: 99,
+                text: "这是一个泛化方案片段，但不包含阶段编号。".to_owned(),
+                semantic_search_text: "架构 / 泛化方案\n这是一个泛化方案片段，但不包含里程碑编号。"
+                    .to_owned(),
+                token_count: 8,
+                citation: CitationRef {
+                    document_id: "doc-numbered".to_owned(),
+                    chunk_id: "doc-numbered:generic".to_owned(),
+                    page_no: None,
+                    section_path: vec!["泛化方案".to_owned()],
+                },
+                metadata: ChunkMetadata::default(),
+            }))
+            .collect::<Vec<_>>();
+
+        let hits = keyword_retrieve("按照这个方案，总结p0到p5的方案是否合理", &chunks, 6);
+        let hit_ids = hits
+            .iter()
+            .map(|hit| hit.chunk.chunk_id.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            hit_ids,
+            vec![
+                "doc-numbered:0",
+                "doc-numbered:1",
+                "doc-numbered:2",
+                "doc-numbered:3",
+                "doc-numbered:4",
+                "doc-numbered:5"
+            ]
+        );
+    }
+
+    #[test]
+    fn keyword_retrieve_expands_non_m_numbered_ranges() {
+        let chunks = ["P1", "P2", "P3"]
+            .into_iter()
+            .enumerate()
+            .map(|(index, phase)| DocumentChunk {
+                document_id: "doc-phase".to_owned(),
+                chunk_id: format!("doc-phase:{index}"),
+                chunk_index: index,
+                text: format!("{phase} 交付内容。"),
+                semantic_search_text: format!(
+                    "Novex Architecture / 计划 / {phase}: 阶段方案\n{phase} 交付内容。"
+                ),
+                token_count: 8,
+                citation: CitationRef {
+                    document_id: "doc-phase".to_owned(),
+                    chunk_id: format!("doc-phase:{index}"),
+                    page_no: None,
+                    section_path: vec!["计划".to_owned(), phase.to_owned()],
+                },
+                metadata: ChunkMetadata::default(),
+            })
+            .collect::<Vec<_>>();
+
+        let hits = keyword_retrieve("总结p1到p3是否合理", &chunks, 3);
+        let hit_ids = hits
+            .iter()
+            .map(|hit| hit.chunk.chunk_id.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(hit_ids, vec!["doc-phase:0", "doc-phase:1", "doc-phase:2"]);
+    }
+
+    #[test]
     fn build_extractive_answer_returns_answer_and_citations() {
         let parsed = parse_plain_text(
             "doc-3",
@@ -1577,6 +1961,24 @@ mod tests {
         assert_eq!(answer.citations.len(), 1);
         assert_eq!(answer.trace.retrieval_hit_count, 1);
         assert_eq!(answer.trace.answer_strategy, "extractive");
+    }
+
+    fn test_chunk(index: usize, text: &str) -> DocumentChunk {
+        DocumentChunk {
+            document_id: "doc-chinese".to_owned(),
+            chunk_id: format!("doc-chinese:{index}"),
+            chunk_index: index,
+            text: text.to_owned(),
+            semantic_search_text: text.to_owned(),
+            token_count: text.chars().count(),
+            citation: CitationRef {
+                document_id: "doc-chinese".to_owned(),
+                chunk_id: format!("doc-chinese:{index}"),
+                page_no: Some((index + 1) as i32),
+                section_path: vec!["测试".to_owned()],
+            },
+            metadata: ChunkMetadata::default(),
+        }
     }
 
     #[test]
