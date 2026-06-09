@@ -175,6 +175,12 @@ def handle_parser_message(
                 mineru_runner=mineru_runner,
             )
         except Exception as error:
+            if has_mineru_task(message.parser_request):
+                return publish_deferred_retry(
+                    publisher,
+                    message,
+                    last_error=str(error),
+                )
             return publish_retry_or_dead(
                 publisher,
                 message,
@@ -186,7 +192,7 @@ def handle_parser_message(
             mark_job_idempotency(redis_client, message, ttl_seconds=idempotency_ttl_seconds)
             return ParserWorkerOutcome(status="succeeded", ack=True, message=message)
         if status == "submitted":
-            return publish_retry_or_dead(
+            return publish_deferred_retry(
                 publisher,
                 message,
                 parser_request=parser_request_with_mineru_task(message.parser_request, result),
@@ -302,6 +308,25 @@ def publish_retry_or_dead(
     return ParserWorkerOutcome(status="dead_published", ack=True, message=dead, error=last_error)
 
 
+def publish_deferred_retry(
+    publisher,
+    message: ParserJobMessage,
+    *,
+    last_error: str,
+    parser_request: Mapping[str, Any] | None = None,
+) -> ParserWorkerOutcome:
+    retry = next_attempt_message(
+        message,
+        parser_request=parser_request,
+        last_error=last_error,
+    )
+    try:
+        publisher.publish_retry(retry)
+    except Exception as error:
+        return ParserWorkerOutcome(status="publish_failed", ack=False, message=message, error=str(error))
+    return ParserWorkerOutcome(status="retry_published", ack=True, message=retry, error=last_error)
+
+
 def next_attempt_message(
     message: ParserJobMessage,
     *,
@@ -360,6 +385,11 @@ def parser_request_with_mineru_task(
     if mineru_task is not None:
         request["mineruTask"] = dict(mineru_task)
     return request
+
+
+def has_mineru_task(parser_request: Mapping[str, Any]) -> bool:
+    mineru_task = parser_request.get("mineruTask")
+    return isinstance(mineru_task, Mapping) and bool(str(mineru_task.get("taskId") or "").strip())
 
 
 def parser_result_error(parser_result: Mapping[str, Any]) -> str:

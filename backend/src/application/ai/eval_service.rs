@@ -428,6 +428,7 @@ impl EvalService {
                     RagAskCommand {
                         question: case.prompt.clone(),
                         limit: 5,
+                        ..RagAskCommand::default()
                     },
                 )
                 .await?;

@@ -17,15 +17,34 @@ Local POC topology for Novex. The default compose path starts PostgreSQL, Milvus
 
 ## Run
 
+Start the full local POC stack with environment checks:
+
 ```bash
-docker compose -f infra/docker-compose.yml up postgres etcd minio milvus backend
+./scripts/run-poc.sh
+```
+
+The single local env entry for the POC stack is `infra/.env.poc`. The script creates it from `infra/.env.poc.example` when it is missing, loads only that file, checks live AI variables without printing raw secrets, verifies required Docker images already exist locally, then starts PostgreSQL, Milvus, RabbitMQ, Redis, the Rust backend, parser-worker, and all POC frontends. `up` runs with `--pull never`; use `./scripts/run-poc.sh pull` explicitly when you want to fetch only missing images.
+
+Useful commands:
+
+```bash
+./scripts/run-poc.sh env
+./scripts/run-poc.sh status
+./scripts/run-poc.sh logs
+./scripts/run-poc.sh down
+./scripts/run-poc.sh pull
+```
+
+Equivalent minimal backend stack:
+
+```bash
+docker compose --env-file infra/.env.poc -f infra/docker-compose.yml up postgres etcd minio milvus backend
 ```
 
 Run the durable parser pipeline:
 
 ```bash
-export PARSER_CALLBACK_TOKEN="local-parser-callback-token-change-me"
-docker compose -f infra/docker-compose.yml --profile parser up postgres etcd minio milvus rabbitmq redis backend parser-worker
+docker compose --env-file infra/.env.poc -f infra/docker-compose.yml --profile parser up postgres etcd minio milvus rabbitmq redis backend parser-worker
 ```
 
 The backend writes parser jobs to PostgreSQL outbox and publishes them to RabbitMQ. `parser-worker` consumes `novex.parser.execute`, coordinates in Redis, and callbacks the backend with `PARSER_CALLBACK_TOKEN`. Use a non-default token outside local POC.
@@ -33,17 +52,25 @@ The backend writes parser jobs to PostgreSQL outbox and publishes them to Rabbit
 Run Admin and the customer-facing app templates:
 
 ```bash
-docker compose -f infra/docker-compose.yml --profile apps up admin training-web chat-web agent-workspace
+docker compose --env-file infra/.env.poc -f infra/docker-compose.yml --profile apps up admin training-web chat-web agent-workspace
 ```
 
-Optional live integration credentials can be exported from `infra/.env.poc.example` values before starting compose:
+Put local POC environment variables in `infra/.env.poc`:
 
 ```bash
-set -a
-. infra/.env.poc
-set +a
-docker compose -f infra/docker-compose.yml --profile apps up
+$EDITOR infra/.env.poc
+./scripts/run-poc.sh
 ```
+
+`infra/.env.poc.example` is the committed schema/defaults file. Do not put secrets in the example file.
+
+Live RAG and parser capability groups use these variables:
+
+- LLM: `LLM_API_KEY`, `LLM_BASE_URL`, `LLM_MODEL`
+- Embedding: `EMBEDDING_API_KEY`, `EMBEDDING_BASE_URL`, `EMBEDDING_MODEL`
+- Reranker: `RERANKER_API_KEY`, `RERANKER_BASE_URL`, `RERANKER_MODEL`
+- Draw: `RIGHT_CODE_DRAW_BASE_URL`, `RIGHT_CODE_DRAW_API_KEY`
+- MinerU: `MINERU_TOKEN`, `PARSER_WORKER_MODE`, `MINERU_TIMEOUT_SECONDS`
 
 When a POC machine already has compatible local images, override compose image tags before starting the stack:
 
@@ -56,7 +83,7 @@ REDIS_IMAGE=redis:7-alpine \
 POSTGRES_PORT=55433 \
 MINIO_API_PORT=9900 \
 MINIO_CONSOLE_PORT=9901 \
-docker compose -f infra/docker-compose.yml up postgres etcd minio milvus backend
+docker compose --env-file infra/.env.poc -f infra/docker-compose.yml up postgres etcd minio milvus backend
 ```
 
 Host port overrides do not change container-to-container addresses. The backend still connects to `postgres:5432`, `milvus:19530`, `rabbitmq:5672`, and `redis:6379` inside compose.

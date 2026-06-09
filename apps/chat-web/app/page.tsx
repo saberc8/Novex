@@ -1,5 +1,5 @@
-import { ChatWorkbenchPage } from "./workbench";
+import { redirect } from "next/navigation";
 
 export default function Page() {
-  return <ChatWorkbenchPage />;
+  redirect("/knowledge");
 }

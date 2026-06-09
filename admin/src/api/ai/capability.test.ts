@@ -2,6 +2,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   dryRunTool,
   getCapabilitySummary,
+  importSkill,
+  importSkillFromSource,
+  importSkillPackage,
   installPlugin,
   listConnectorCredentials,
   listConnectors,
@@ -12,6 +15,7 @@ import {
   listToolAudits,
   listTools,
   listTriggers,
+  previewSkillImport,
   upsertMcpServer,
   upsertConnectorCredential
 } from "@/api/ai/capability";
@@ -164,5 +168,60 @@ describe("capability api wrappers", () => {
     expect(fetchMock.mock.calls[13]?.[0]).toBe(
       "http://localhost:4398/ai/capabilities/tools/audits?page=1&size=5&toolCode=rag.search"
     );
+  });
+
+  it("uploads skill imports as multipart form data", async () => {
+    const formData = new FormData();
+    formData.append("file", new File(["# Skill"], "SKILL.md", { type: "text/markdown" }));
+
+    await importSkill(formData);
+
+    expect(fetchMock.mock.calls[0]?.[0]).toBe(
+      "http://localhost:4398/ai/capabilities/skills/import"
+    );
+    expect(fetchMock.mock.calls[0]?.[1]).toMatchObject({
+      method: "POST",
+      body: formData
+    });
+  });
+
+  it("uses skill AI import preview, source install, and package endpoints", async () => {
+    await previewSkillImport({
+      source: "https://github.com/KKKKhazix/khazix-skills/tree/main/khazix-writer"
+    });
+    await importSkillFromSource({
+      source: "https://github.com/KKKKhazix/khazix-skills",
+      skillPath: "khazix-writer"
+    });
+    const packageData = new FormData();
+    packageData.append("file", new File(["zip"], "khazix-writer.zip", { type: "application/zip" }));
+    await importSkillPackage(packageData);
+
+    expect(fetchMock.mock.calls[0]?.[0]).toBe(
+      "http://localhost:4398/ai/capabilities/skills/import/preview"
+    );
+    expect(fetchMock.mock.calls[0]?.[1]).toMatchObject({
+      method: "POST",
+      body: JSON.stringify({
+        source: "https://github.com/KKKKhazix/khazix-skills/tree/main/khazix-writer"
+      })
+    });
+    expect(fetchMock.mock.calls[1]?.[0]).toBe(
+      "http://localhost:4398/ai/capabilities/skills/import/source"
+    );
+    expect(fetchMock.mock.calls[1]?.[1]).toMatchObject({
+      method: "POST",
+      body: JSON.stringify({
+        source: "https://github.com/KKKKhazix/khazix-skills",
+        skillPath: "khazix-writer"
+      })
+    });
+    expect(fetchMock.mock.calls[2]?.[0]).toBe(
+      "http://localhost:4398/ai/capabilities/skills/import/package"
+    );
+    expect(fetchMock.mock.calls[2]?.[1]).toMatchObject({
+      method: "POST",
+      body: packageData
+    });
   });
 });

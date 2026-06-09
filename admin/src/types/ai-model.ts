@@ -38,6 +38,7 @@ export interface ModelRuntimeRouteSummary {
   maskedApiKey: string;
   purposes: ModelRoutePurpose[];
   envKeys: string[];
+  purposeRouteIds: Partial<Record<ModelRoutePurpose, string>>;
 }
 
 export interface ModelRuntimeSummary {

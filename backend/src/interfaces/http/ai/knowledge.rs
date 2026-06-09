@@ -17,7 +17,8 @@ use crate::{
     application::system::file_service::{FileResp, FileService},
     domain::auth::model::CurrentUser,
     interfaces::http::{
-        middleware::permission::require_permission, system::file::multipart_upload_command,
+        middleware::permission::require_permission,
+        system::file::{file_upload_body_limit, multipart_upload_command},
         AppState,
     },
     shared::{error::AppError, pagination::PageResult, response::ApiResponse},
@@ -157,7 +158,7 @@ pub fn routes() -> Router<AppState> {
         )
         .route(
             "/ai/knowledge/datasets/:dataset_id/documents/files",
-            axum::routing::post(upload_file_document),
+            axum::routing::post(upload_file_document).layer(file_upload_body_limit()),
         )
         .route(
             "/ai/knowledge/datasets/:dataset_id/parse-jobs/:job_id",
@@ -174,6 +175,10 @@ pub fn routes() -> Router<AppState> {
         .route(
             "/ai/knowledge/datasets/:dataset_id/documents",
             get(list_documents),
+        )
+        .route(
+            "/ai/knowledge/datasets/:dataset_id",
+            axum::routing::delete(delete_dataset),
         )
         .route(
             "/ai/knowledge/datasets",
@@ -214,6 +219,21 @@ async fn create_dataset(
     Ok(Json(ApiResponse::ok(
         service
             .create_dataset_for_tenant(current_user.tenant_id, current_user.id, command)
+            .await?,
+    )))
+}
+
+async fn delete_dataset(
+    State(state): State<AppState>,
+    current_user: CurrentUser,
+    Path(dataset_id): Path<i64>,
+) -> Result<Json<ApiResponse<i64>>, AppError> {
+    require_permission(&current_user, DATASET_CREATE_PERMISSION)?;
+    let service = KnowledgeService::new(state.db);
+
+    Ok(Json(ApiResponse::ok(
+        service
+            .delete_dataset_for_tenant(current_user.tenant_id, dataset_id)
             .await?,
     )))
 }
@@ -484,6 +504,22 @@ mod tests {
     #[test]
     fn rag_ask_permission_matches_seeded_menu_permission() {
         assert_eq!(RAG_ASK_PERMISSION, "ai:knowledge:ask");
+    }
+
+    #[test]
+    fn knowledge_routes_expose_dataset_delete_endpoint() {
+        let source = include_str!("knowledge.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+
+        for needle in [
+            "\"/ai/knowledge/datasets/:dataset_id\"",
+            "axum::routing::delete(delete_dataset)",
+            ".delete_dataset_for_tenant(",
+        ] {
+            assert!(source.contains(needle), "{needle} missing from handler");
+        }
     }
 
     #[test]

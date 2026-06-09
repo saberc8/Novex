@@ -136,6 +136,39 @@ class ParserWorkerQueueTest(unittest.TestCase):
         self.assertEqual(retry.max_attempts, 5)
         self.assertEqual(retry.parser_request["mineruTask"]["taskId"], "task-1")
 
+    def test_handle_submitted_mineru_task_keeps_polling_after_max_attempts(self):
+        redis = FakeRedis()
+        publisher = FakePublisher()
+        runner = FakeRunner(
+            {
+                "status": "submitted",
+                "parserResult": {
+                    "mineruTask": {
+                        "taskId": "batch:batch-1",
+                        "state": "running",
+                        "fullZipUrl": "",
+                    }
+                },
+            }
+        )
+
+        outcome = handle_parser_message(
+            example_message(attempt=5, maxAttempts=5).to_payload(),
+            redis_client=redis,
+            publisher=publisher,
+            worker_id="worker-a",
+            backend_base_url="http://backend.local",
+            backend_token="token-1",
+            runner=runner,
+        )
+
+        self.assertTrue(outcome.ack)
+        self.assertEqual(outcome.status, "retry_published")
+        self.assertEqual(len(publisher.retry_messages), 1)
+        self.assertEqual(publisher.dead_messages, [])
+        self.assertEqual(publisher.retry_messages[0].attempt, 6)
+        self.assertEqual(publisher.retry_messages[0].parser_request["mineruTask"]["taskId"], "batch:batch-1")
+
     def test_handle_runner_exception_republishes_retry_message(self):
         redis = FakeRedis()
         publisher = FakePublisher()
@@ -157,6 +190,45 @@ class ParserWorkerQueueTest(unittest.TestCase):
         self.assertEqual(publisher.retry_messages[0].attempt, 2)
         self.assertIn("backend callback failed", publisher.retry_messages[0].parser_request["lastError"])
         self.assertEqual(publisher.dead_messages, [])
+
+    def test_handle_mineru_poll_exception_keeps_retrying_after_max_attempts(self):
+        redis = FakeRedis()
+        publisher = FakePublisher()
+
+        def mineru_runner(_request, *, task_id, backend_base_url, backend_token):
+            self.assertEqual(task_id, "batch:batch-1")
+            raise RuntimeError("MinerU network error")
+
+        outcome = handle_parser_message(
+            example_message(
+                attempt=5,
+                maxAttempts=5,
+                parserRequest={
+                    "tenantId": 1,
+                    "datasetId": 7,
+                    "documentId": 42,
+                    "parserJobId": 99,
+                    "source": {"kind": "objectStorage", "uri": "/file/knowledge/1.pdf"},
+                    "mineruTask": {
+                        "taskId": "batch:batch-1",
+                        "state": "running",
+                        "fullZipUrl": "",
+                    },
+                },
+            ).to_payload(),
+            redis_client=redis,
+            publisher=publisher,
+            worker_id="worker-a",
+            backend_base_url="http://backend.local",
+            backend_token="token-1",
+            mineru_runner=mineru_runner,
+        )
+
+        self.assertTrue(outcome.ack)
+        self.assertEqual(outcome.status, "retry_published")
+        self.assertEqual(len(publisher.retry_messages), 1)
+        self.assertEqual(publisher.dead_messages, [])
+        self.assertIn("MinerU network error", publisher.retry_messages[0].parser_request["lastError"])
 
     def test_handle_exhausted_attempts_publishes_dead_message(self):
         redis = FakeRedis()

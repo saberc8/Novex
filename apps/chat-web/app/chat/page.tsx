@@ -1,5 +1,5 @@
 import { ChatWorkbenchPage } from "../workbench";
 
 export default function Page() {
-  return <ChatWorkbenchPage mode="model" />;
+  return <ChatWorkbenchPage activeRoute="chat" mode="model" />;
 }

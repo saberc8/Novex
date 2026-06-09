@@ -1,11 +1,16 @@
+use base64::{engine::general_purpose, Engine as _};
 use chrono::Utc;
 use novex_mcp::{
     validate_mcp_registration_policy, McpAuthScope, McpAuthType, McpRegistrationPolicy,
     McpTransportKind,
 };
+use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, USER_AGENT};
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
+use sha2::{Digest, Sha256};
 use sqlx::PgPool;
+use std::{env, io::Read};
+use url::Url;
 
 use crate::{
     application::system::{ensure_max_chars, format_datetime},
@@ -13,7 +18,8 @@ use crate::{
         AiCapabilityRepository, CapabilityFilter, CapabilityRecord, CapabilityResource,
         ConnectorCredentialFilter, ConnectorCredentialRecord, ConnectorCredentialSaveRecord,
         McpServerRecord, McpServerSaveRecord, PluginInstallationFilter, PluginInstallationRecord,
-        PluginInstallationSaveRecord, ToolAuditFilter, ToolAuditRecord, ToolAuditSaveRecord,
+        PluginInstallationSaveRecord, SkillResourceSaveRecord, SkillSaveRecord, ToolAuditFilter,
+        ToolAuditRecord, ToolAuditSaveRecord,
     },
     shared::{
         error::AppError,
@@ -25,6 +31,11 @@ use crate::{
 const DEFAULT_TENANT_ID: i64 = 1;
 const DEFAULT_CAPABILITY_PAGE_SIZE: u64 = 20;
 const ENABLED_STATUS: i16 = 1;
+const MAX_SKILL_IMPORT_BYTES: usize = 512 * 1024;
+const MAX_SKILL_PACKAGE_BYTES: usize = 8 * 1024 * 1024;
+const MAX_SKILL_PACKAGE_FILES: usize = 200;
+const MAX_SKILL_PACKAGE_TEXT_BYTES: usize = 2 * 1024 * 1024;
+const MAX_SKILL_PREVIEW_ITEMS: usize = 20;
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -83,6 +94,127 @@ pub struct CapabilityItemResp {
     pub risk_level: Option<i16>,
     pub metadata: Value,
     pub create_time: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct SkillImportCommand {
+    pub code: String,
+    pub name: String,
+    pub description: String,
+    pub model_route_policy: Value,
+    pub capability_refs: Value,
+    pub metadata: Value,
+}
+
+#[derive(Debug, Clone)]
+pub struct SkillImportFile {
+    pub relative_path: String,
+    pub bytes: Vec<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct SkillImportResourceCommand {
+    pub resource_type: String,
+    pub relative_path: String,
+    pub mime_type: String,
+    pub content_text: Option<String>,
+    pub storage_ref: Option<String>,
+    pub content_sha256: String,
+    pub size_bytes: i64,
+    pub metadata: Value,
+}
+
+#[derive(Debug, Clone)]
+pub struct SkillDirectoryImportCommand {
+    pub skill: SkillImportCommand,
+    pub resources: Vec<SkillImportResourceCommand>,
+    pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GitHubSkillSource {
+    pub owner: String,
+    pub repo: String,
+    pub reference: String,
+    pub path: String,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillImportPreviewCommand {
+    #[serde(default)]
+    pub source: String,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillImportFromSourceCommand {
+    #[serde(default)]
+    pub source: String,
+    #[serde(default)]
+    pub skill_path: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillImportPreviewResp {
+    pub source_url: String,
+    pub skills: Vec<SkillImportPreviewItemResp>,
+    pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillImportPreviewItemResp {
+    pub code: String,
+    pub name: String,
+    pub description: String,
+    pub path: String,
+    pub reference_count: usize,
+    pub script_count: usize,
+    pub asset_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillImportResultResp {
+    pub skill: CapabilityItemResp,
+    pub resource_count: usize,
+    pub reference_count: usize,
+    pub script_count: usize,
+    pub asset_count: usize,
+    pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct CodexSkillFrontmatter {
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    description: String,
+    #[serde(default)]
+    metadata: Value,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct JsonSkillImport {
+    #[serde(default)]
+    code: String,
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    description: String,
+    #[serde(default)]
+    instruction: String,
+    #[serde(default)]
+    skill_md: Option<String>,
+    #[serde(default)]
+    model_route_policy: Value,
+    #[serde(default)]
+    capability_refs: Value,
+    #[serde(default)]
+    metadata: Value,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -359,6 +491,177 @@ impl CapabilityService {
         self.list(CapabilityResource::Skill, query).await
     }
 
+    pub async fn import_skill(
+        &self,
+        user_id: i64,
+        filename: Option<&str>,
+        bytes: &[u8],
+    ) -> Result<CapabilityItemResp, AppError> {
+        let command = parse_skill_import(filename, bytes)?;
+        let record = SkillSaveRecord {
+            id: next_id(),
+            tenant_id: self.tenant_id,
+            code: command.code,
+            name: command.name,
+            description: command.description,
+            status: ENABLED_STATUS,
+            model_route_policy: command.model_route_policy,
+            capability_refs: command.capability_refs,
+            metadata: command.metadata,
+            user_id,
+            now: Utc::now().naive_utc(),
+        };
+
+        Ok(CapabilityItemResp::from(
+            self.repo.upsert_skill(&record).await?,
+        ))
+    }
+
+    pub async fn preview_skill_import(
+        &self,
+        command: SkillImportPreviewCommand,
+    ) -> Result<SkillImportPreviewResp, AppError> {
+        let source_url = extract_skill_source_url(&command.source)?;
+        let source = parse_github_skill_source(&source_url)?;
+        let tree = fetch_github_skill_tree(&source).await?;
+        let mut warnings = Vec::new();
+        let skill_paths = discover_skill_paths(&source, &tree);
+        if skill_paths.len() > MAX_SKILL_PREVIEW_ITEMS {
+            warnings.push(format!(
+                "仅展示前 {} 个 Skill，建议粘贴更具体的目录地址",
+                MAX_SKILL_PREVIEW_ITEMS
+            ));
+        }
+
+        let mut skills = Vec::new();
+        for skill_path in skill_paths.into_iter().take(MAX_SKILL_PREVIEW_ITEMS) {
+            let Some(skill_md_path) = skill_md_path_for_dir(&skill_path) else {
+                continue;
+            };
+            let Some(skill_md_item) = tree_item_for_path(&tree, &skill_md_path) else {
+                continue;
+            };
+            let bytes = fetch_github_tree_item_file(&source, skill_md_item).await?;
+            let command = parse_skill_import(Some("SKILL.md"), &bytes)?;
+            let (reference_count, script_count, asset_count) =
+                skill_resource_counts(&tree, &skill_path);
+            skills.push(SkillImportPreviewItemResp {
+                code: command.code.clone(),
+                name: command.name,
+                description: command.description,
+                path: skill_path,
+                reference_count,
+                script_count,
+                asset_count,
+            });
+        }
+
+        Ok(SkillImportPreviewResp {
+            source_url,
+            skills,
+            warnings,
+        })
+    }
+
+    pub async fn import_skill_from_source(
+        &self,
+        user_id: i64,
+        command: SkillImportFromSourceCommand,
+    ) -> Result<SkillImportResultResp, AppError> {
+        let source_url = extract_skill_source_url(&command.source)?;
+        let mut source = parse_github_skill_source(&source_url)?;
+        if let Some(skill_path) = command
+            .skill_path
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            source.path = normalize_skill_package_path(skill_path)?;
+        }
+        let tree = fetch_github_skill_tree(&source).await?;
+        let skill_path =
+            if source.path.trim().is_empty() || !tree_contains_skill_dir(&tree, &source.path) {
+                let skill_paths = discover_skill_paths(&source, &tree);
+                match skill_paths.as_slice() {
+                    [only] => only.clone(),
+                    [] => return Err(AppError::bad_request("未在目标地址发现 SKILL.md")),
+                    _ => {
+                        return Err(AppError::bad_request(
+                            "目标地址包含多个 Skill，请先预览并选择具体目录",
+                        ))
+                    }
+                }
+            } else {
+                source.path.clone()
+            };
+        let files = fetch_github_skill_files(&source, &tree, &skill_path).await?;
+        self.import_skill_directory_from_files(user_id, Some(&source_url), files)
+            .await
+    }
+
+    pub async fn import_skill_package(
+        &self,
+        user_id: i64,
+        filename: Option<&str>,
+        bytes: &[u8],
+    ) -> Result<SkillImportResultResp, AppError> {
+        let files = parse_skill_zip_package(filename, bytes)?;
+        self.import_skill_directory_from_files(user_id, filename, files)
+            .await
+    }
+
+    pub async fn import_skill_directory_from_files(
+        &self,
+        user_id: i64,
+        source_url: Option<&str>,
+        files: Vec<SkillImportFile>,
+    ) -> Result<SkillImportResultResp, AppError> {
+        let command = parse_skill_directory_import(source_url, files)?;
+        let now = Utc::now().naive_utc();
+        let record = SkillSaveRecord {
+            id: next_id(),
+            tenant_id: self.tenant_id,
+            code: command.skill.code,
+            name: command.skill.name,
+            description: command.skill.description,
+            status: ENABLED_STATUS,
+            model_route_policy: command.skill.model_route_policy,
+            capability_refs: command.skill.capability_refs,
+            metadata: command.skill.metadata,
+            user_id,
+            now,
+        };
+        let skill = self.repo.upsert_skill(&record).await?;
+        let resources = command
+            .resources
+            .iter()
+            .map(|resource| SkillResourceSaveRecord {
+                id: next_id(),
+                tenant_id: self.tenant_id,
+                skill_id: skill.id,
+                resource_type: resource.resource_type.clone(),
+                relative_path: resource.relative_path.clone(),
+                mime_type: resource.mime_type.clone(),
+                content_text: resource.content_text.clone(),
+                storage_ref: resource.storage_ref.clone(),
+                content_sha256: resource.content_sha256.clone(),
+                size_bytes: resource.size_bytes,
+                metadata: resource.metadata.clone(),
+                user_id,
+                now,
+            })
+            .collect::<Vec<_>>();
+        self.repo
+            .replace_skill_resources(self.tenant_id, skill.id, &resources)
+            .await?;
+
+        Ok(skill_import_result(
+            skill,
+            &command.resources,
+            command.warnings,
+        ))
+    }
+
     pub async fn list_connectors(
         &self,
         query: CapabilityQuery,
@@ -621,6 +924,1067 @@ impl CapabilityService {
 
         Ok(PageResult::new(list, total))
     }
+}
+
+pub fn parse_skill_import(
+    filename: Option<&str>,
+    bytes: &[u8],
+) -> Result<SkillImportCommand, AppError> {
+    if bytes.is_empty() {
+        return Err(AppError::bad_request("Skill 导入文件不能为空"));
+    }
+    if bytes.len() > MAX_SKILL_IMPORT_BYTES {
+        return Err(AppError::bad_request("Skill 导入文件不能超过 512KB"));
+    }
+    let text = std::str::from_utf8(bytes)
+        .map_err(|_| AppError::bad_request("Skill 导入文件必须使用 UTF-8 编码"))?;
+    let source_filename = filename
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("SKILL.md");
+    let lower_filename = source_filename.to_ascii_lowercase();
+
+    if lower_filename.ends_with(".json") || text.trim_start().starts_with('{') {
+        return parse_json_skill_import(Some(source_filename), text);
+    }
+    parse_markdown_skill_import(Some(source_filename), text)
+}
+
+pub fn parse_skill_directory_import(
+    source_url: Option<&str>,
+    files: Vec<SkillImportFile>,
+) -> Result<SkillDirectoryImportCommand, AppError> {
+    if files.is_empty() {
+        return Err(AppError::bad_request("Skill 目录不能为空"));
+    }
+    if files.len() > MAX_SKILL_PACKAGE_FILES {
+        return Err(AppError::bad_request(format!(
+            "Skill 目录文件数不能超过 {}",
+            MAX_SKILL_PACKAGE_FILES
+        )));
+    }
+
+    let mut normalized_files = Vec::with_capacity(files.len());
+    let mut total_bytes = 0usize;
+    for file in files {
+        let relative_path = normalize_skill_package_path(&file.relative_path)?;
+        if file.bytes.is_empty() {
+            continue;
+        }
+        total_bytes = total_bytes.saturating_add(file.bytes.len());
+        if total_bytes > MAX_SKILL_PACKAGE_BYTES {
+            return Err(AppError::bad_request("Skill 目录总大小不能超过 8MB"));
+        }
+        normalized_files.push(SkillImportFile {
+            relative_path,
+            bytes: file.bytes,
+        });
+    }
+
+    let skill_md_index = selected_skill_md_index(&normalized_files)?;
+    let skill_md_path = normalized_files[skill_md_index].relative_path.clone();
+    let skill_root = skill_root_from_skill_md_path(&skill_md_path);
+    let skill_md_text = std::str::from_utf8(&normalized_files[skill_md_index].bytes)
+        .map_err(|_| AppError::bad_request("SKILL.md 必须使用 UTF-8 编码"))?;
+    let mut skill = parse_markdown_skill_import(Some("SKILL.md"), skill_md_text)?;
+    if let Value::Object(metadata) = &mut skill.metadata {
+        metadata.insert(
+            "sourceType".to_owned(),
+            Value::String(source_url.map_or("package".to_owned(), source_type_label)),
+        );
+        if let Some(source_url) = source_url {
+            metadata.insert("sourceUrl".to_owned(), Value::String(source_url.to_owned()));
+        }
+        metadata.insert("skillRoot".to_owned(), Value::String(skill_root.clone()));
+    }
+
+    let mut warnings = Vec::new();
+    let mut resources = Vec::new();
+    for file in normalized_files {
+        let Some(relative_path) = strip_skill_root(&skill_root, &file.relative_path) else {
+            continue;
+        };
+        let resource_type = skill_resource_type(&relative_path);
+        if resource_type == "ignored" {
+            continue;
+        }
+        let resource = skill_import_resource(resource_type, &relative_path, &file.bytes)?;
+        if resource.resource_type == "script" {
+            warnings.push(format!(
+                "{} 已保存为脚本资源，但 Novex 不会执行导入脚本",
+                resource.relative_path
+            ));
+        }
+        resources.push(resource);
+    }
+
+    if !resources
+        .iter()
+        .any(|resource| resource.relative_path == "SKILL.md")
+    {
+        return Err(AppError::bad_request("Skill 目录缺少 SKILL.md"));
+    }
+
+    Ok(SkillDirectoryImportCommand {
+        skill,
+        resources,
+        warnings,
+    })
+}
+
+pub fn parse_github_skill_source(value: &str) -> Result<GitHubSkillSource, AppError> {
+    let source_url = extract_skill_source_url(value)?;
+    let url =
+        Url::parse(&source_url).map_err(|_| AppError::bad_request("Skill GitHub 地址格式无效"))?;
+    let host = url.host_str().unwrap_or_default().to_ascii_lowercase();
+    let segments = url
+        .path_segments()
+        .map(|segments| segments.collect::<Vec<_>>())
+        .unwrap_or_default();
+
+    if host == "raw.githubusercontent.com" {
+        if segments.len() < 4 {
+            return Err(AppError::bad_request("GitHub raw 地址缺少 SKILL.md 路径"));
+        }
+        let owner = segments[0].to_owned();
+        let repo = segments[1].to_owned();
+        let reference = segments[2].to_owned();
+        let file_path = segments[3..].join("/");
+        let path = file_path
+            .strip_suffix("/SKILL.md")
+            .or_else(|| file_path.strip_suffix("SKILL.md"))
+            .unwrap_or(&file_path)
+            .trim_matches('/')
+            .to_owned();
+        return Ok(GitHubSkillSource {
+            owner,
+            repo,
+            reference,
+            path,
+        });
+    }
+
+    if host != "github.com" || segments.len() < 2 {
+        return Err(AppError::bad_request(
+            "目前仅支持 GitHub 仓库、tree、blob 或 raw SKILL.md 地址",
+        ));
+    }
+    let owner = segments[0].to_owned();
+    let repo = segments[1].trim_end_matches(".git").to_owned();
+    let mut reference = "main".to_owned();
+    let mut path = String::new();
+
+    if segments.len() >= 4 && matches!(segments[2], "tree" | "blob") {
+        reference = segments[3].to_owned();
+        path = if segments.len() > 4 {
+            segments[4..].join("/")
+        } else {
+            String::new()
+        };
+        if segments[2] == "blob" {
+            path = path
+                .strip_suffix("/SKILL.md")
+                .or_else(|| path.strip_suffix("SKILL.md"))
+                .unwrap_or(&path)
+                .trim_matches('/')
+                .to_owned();
+        }
+    }
+
+    Ok(GitHubSkillSource {
+        owner,
+        repo,
+        reference,
+        path: normalize_skill_package_path_or_empty(&path)?,
+    })
+}
+
+fn parse_skill_zip_package(
+    filename: Option<&str>,
+    bytes: &[u8],
+) -> Result<Vec<SkillImportFile>, AppError> {
+    if bytes.is_empty() {
+        return Err(AppError::bad_request("Skill 压缩包不能为空"));
+    }
+    if bytes.len() > MAX_SKILL_PACKAGE_BYTES {
+        return Err(AppError::bad_request("Skill 压缩包不能超过 8MB"));
+    }
+    let filename = filename.unwrap_or_default().to_ascii_lowercase();
+    if !filename.is_empty() && !filename.ends_with(".zip") {
+        return Err(AppError::bad_request("Skill 压缩包必须是 .zip 文件"));
+    }
+
+    let reader = std::io::Cursor::new(bytes);
+    let mut archive = zip::ZipArchive::new(reader)
+        .map_err(|err| AppError::bad_request(format!("Skill 压缩包解析失败: {err}")))?;
+    if archive.len() > MAX_SKILL_PACKAGE_FILES {
+        return Err(AppError::bad_request(format!(
+            "Skill 压缩包文件数不能超过 {}",
+            MAX_SKILL_PACKAGE_FILES
+        )));
+    }
+
+    let mut files = Vec::new();
+    let mut total_bytes = 0usize;
+    for index in 0..archive.len() {
+        let mut entry = archive
+            .by_index(index)
+            .map_err(|err| AppError::bad_request(format!("Skill 压缩包读取失败: {err}")))?;
+        if entry.is_dir() {
+            continue;
+        }
+        let relative_path = normalize_skill_package_path(entry.name())?;
+        let declared_size = usize::try_from(entry.size()).unwrap_or(usize::MAX);
+        if declared_size > MAX_SKILL_PACKAGE_TEXT_BYTES {
+            return Err(AppError::bad_request(format!(
+                "{relative_path} 不能超过 2MB"
+            )));
+        }
+        let mut content = Vec::new();
+        entry
+            .read_to_end(&mut content)
+            .map_err(|err| AppError::bad_request(format!("Skill 压缩包读取失败: {err}")))?;
+        total_bytes = total_bytes.saturating_add(content.len());
+        if total_bytes > MAX_SKILL_PACKAGE_BYTES {
+            return Err(AppError::bad_request("Skill 压缩包解压后不能超过 8MB"));
+        }
+        files.push(SkillImportFile {
+            relative_path,
+            bytes: content,
+        });
+    }
+    Ok(files)
+}
+
+fn parse_markdown_skill_import(
+    filename: Option<&str>,
+    text: &str,
+) -> Result<SkillImportCommand, AppError> {
+    let normalized = text.strip_prefix('\u{feff}').unwrap_or(text);
+    let normalized = normalized.replace("\r\n", "\n");
+    let (frontmatter_src, body) = split_skill_md_frontmatter(&normalized)?;
+    let (frontmatter, frontmatter_value) = parse_codex_skill_frontmatter(frontmatter_src)?;
+    let instruction = body.trim();
+    if instruction.is_empty() {
+        return Err(AppError::bad_request("SKILL.md instructions 不能为空"));
+    }
+
+    let short_description = string_field(
+        &frontmatter.metadata,
+        &["short-description", "shortDescription"],
+    );
+    let mut codex = Map::new();
+    codex.insert("frontmatter".to_owned(), frontmatter_value);
+    if let Some(short_description) = short_description {
+        codex.insert(
+            "shortDescription".to_owned(),
+            Value::String(short_description),
+        );
+    }
+    let metadata = json!({
+        "format": "codex.skill.v1",
+        "sourceFilename": skill_import_source_filename(filename),
+        "skillMd": normalized,
+        "instruction": instruction,
+        "codex": Value::Object(codex)
+    });
+
+    normalize_skill_import_command(SkillImportCommand {
+        code: frontmatter.name,
+        name: String::new(),
+        description: frontmatter.description,
+        model_route_policy: default_skill_model_route_policy(),
+        capability_refs: default_skill_capability_refs(),
+        metadata,
+    })
+}
+
+fn parse_json_skill_import(
+    filename: Option<&str>,
+    text: &str,
+) -> Result<SkillImportCommand, AppError> {
+    let manifest: JsonSkillImport = serde_json::from_str(text)
+        .map_err(|err| AppError::bad_request(format!("Skill JSON manifest 解析失败: {err}")))?;
+    if let Some(skill_md) = manifest.skill_md.as_deref() {
+        return parse_markdown_skill_import(filename, skill_md);
+    }
+
+    let mut metadata = match manifest.metadata {
+        Value::Object(map) => map,
+        Value::Null => Map::new(),
+        _ => return Err(AppError::bad_request("Skill metadata 必须是对象")),
+    };
+    metadata.insert(
+        "format".to_owned(),
+        Value::String("novex.skill.manifest.v1".to_owned()),
+    );
+    metadata.insert(
+        "sourceFilename".to_owned(),
+        Value::String(skill_import_source_filename(filename)),
+    );
+    if !manifest.instruction.trim().is_empty() && !metadata.contains_key("instruction") {
+        metadata.insert(
+            "instruction".to_owned(),
+            Value::String(manifest.instruction.trim().to_owned()),
+        );
+    }
+
+    normalize_skill_import_command(SkillImportCommand {
+        code: manifest.code,
+        name: manifest.name,
+        description: manifest.description,
+        model_route_policy: manifest.model_route_policy,
+        capability_refs: manifest.capability_refs,
+        metadata: Value::Object(metadata),
+    })
+}
+
+fn selected_skill_md_index(files: &[SkillImportFile]) -> Result<usize, AppError> {
+    if let Some(index) = files
+        .iter()
+        .position(|file| file.relative_path.eq_ignore_ascii_case("SKILL.md"))
+    {
+        return Ok(index);
+    }
+
+    let matches = files
+        .iter()
+        .enumerate()
+        .filter(|(_, file)| file.relative_path.ends_with("/SKILL.md"))
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+    match matches.as_slice() {
+        [index] => Ok(*index),
+        [] => Err(AppError::bad_request("Skill 目录缺少 SKILL.md")),
+        _ => Err(AppError::bad_request(
+            "压缩包包含多个 Skill，请上传单个 Skill 目录或使用 GitHub 预览选择",
+        )),
+    }
+}
+
+fn skill_root_from_skill_md_path(skill_md_path: &str) -> String {
+    skill_md_path
+        .strip_suffix("/SKILL.md")
+        .unwrap_or("")
+        .trim_matches('/')
+        .to_owned()
+}
+
+fn strip_skill_root(skill_root: &str, path: &str) -> Option<String> {
+    if skill_root.is_empty() {
+        return Some(path.to_owned());
+    }
+    path.strip_prefix(skill_root)
+        .and_then(|value| value.strip_prefix('/'))
+        .map(ToOwned::to_owned)
+}
+
+fn skill_resource_type(path: &str) -> &'static str {
+    let lower = path.to_ascii_lowercase();
+    if lower == "skill.md" {
+        "skill_md"
+    } else if lower.starts_with("references/") {
+        "reference"
+    } else if lower.starts_with("scripts/") {
+        "script"
+    } else if lower.starts_with("assets/") {
+        "asset"
+    } else if lower == "agents/openai.yaml" || lower == "agents/openai.yml" {
+        "metadata"
+    } else {
+        "ignored"
+    }
+}
+
+fn skill_import_resource(
+    resource_type: &str,
+    relative_path: &str,
+    bytes: &[u8],
+) -> Result<SkillImportResourceCommand, AppError> {
+    if bytes.len() > MAX_SKILL_PACKAGE_TEXT_BYTES {
+        return Err(AppError::bad_request(format!(
+            "{relative_path} 不能超过 2MB"
+        )));
+    }
+    let content_sha256 = sha256_hex(bytes);
+    let mime_type = mime_guess::from_path(relative_path)
+        .first_or_octet_stream()
+        .essence_str()
+        .to_owned();
+    let content_text = match std::str::from_utf8(bytes) {
+        Ok(text) if is_text_skill_resource(resource_type, &mime_type) => Some(text.to_owned()),
+        Ok(_) if resource_type == "asset" => None,
+        Ok(text) => Some(text.to_owned()),
+        Err(_) if resource_type == "asset" => None,
+        Err(_) => {
+            return Err(AppError::bad_request(format!(
+                "{relative_path} 必须使用 UTF-8 编码"
+            )))
+        }
+    };
+    let metadata = match resource_type {
+        "script" => json!({ "execution": "disabled" }),
+        "asset" => json!({ "embedded": false }),
+        _ => json!({}),
+    };
+    Ok(SkillImportResourceCommand {
+        resource_type: resource_type.to_owned(),
+        relative_path: relative_path.to_owned(),
+        mime_type,
+        content_text,
+        storage_ref: None,
+        content_sha256,
+        size_bytes: bytes.len() as i64,
+        metadata,
+    })
+}
+
+fn is_text_skill_resource(resource_type: &str, mime_type: &str) -> bool {
+    matches!(
+        resource_type,
+        "skill_md" | "reference" | "script" | "metadata"
+    ) || mime_type.starts_with("text/")
+        || matches!(
+            mime_type,
+            "application/json" | "application/yaml" | "application/x-yaml"
+        )
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    let digest = Sha256::digest(bytes);
+    digest.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+fn normalize_skill_package_path(path: &str) -> Result<String, AppError> {
+    let path = path.replace('\\', "/");
+    let path = path.trim().trim_start_matches("./").trim_matches('/');
+    if path.is_empty() {
+        return Err(AppError::bad_request("Skill 文件路径不能为空"));
+    }
+    if path.starts_with('/') || path.contains('\0') {
+        return Err(AppError::bad_request("Skill 文件路径无效"));
+    }
+    let mut parts = Vec::new();
+    for part in path.split('/') {
+        let part = part.trim();
+        if part.is_empty() || part == "." {
+            continue;
+        }
+        if part == ".." {
+            return Err(AppError::bad_request("Skill 文件路径不能包含 .."));
+        }
+        parts.push(part);
+    }
+    if parts.is_empty() {
+        return Err(AppError::bad_request("Skill 文件路径不能为空"));
+    }
+    Ok(parts.join("/"))
+}
+
+fn normalize_skill_package_path_or_empty(path: &str) -> Result<String, AppError> {
+    let path = path.trim().trim_matches('/');
+    if path.is_empty() {
+        Ok(String::new())
+    } else {
+        normalize_skill_package_path(path)
+    }
+}
+
+fn source_type_label(source_url: &str) -> String {
+    if source_url.contains("github.com") || source_url.contains("raw.githubusercontent.com") {
+        "github".to_owned()
+    } else if source_url.ends_with(".zip") {
+        "zip".to_owned()
+    } else {
+        "package".to_owned()
+    }
+}
+
+fn extract_skill_source_url(value: &str) -> Result<String, AppError> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Err(AppError::bad_request("Skill 导入来源不能为空"));
+    }
+    let start = value
+        .find("https://")
+        .or_else(|| value.find("http://"))
+        .ok_or_else(|| AppError::bad_request("请粘贴 GitHub Skill 地址或包含地址的需求描述"))?;
+    let candidate = &value[start..];
+    let end = candidate
+        .char_indices()
+        .find_map(|(index, ch)| {
+            if ch.is_whitespace()
+                || matches!(
+                    ch,
+                    ')' | ']' | '}' | '<' | '>' | '"' | '\'' | '`' | '，' | '。' | ','
+                )
+            {
+                Some(index)
+            } else {
+                None
+            }
+        })
+        .unwrap_or(candidate.len());
+    candidate
+        .get(..end)
+        .map(str::trim)
+        .map(|part| part.trim_end_matches('.').to_owned())
+        .filter(|part| !part.is_empty())
+        .ok_or_else(|| AppError::bad_request("请粘贴 GitHub Skill 地址或包含地址的需求描述"))
+}
+
+fn skill_import_result(
+    skill: CapabilityRecord,
+    resources: &[SkillImportResourceCommand],
+    warnings: Vec<String>,
+) -> SkillImportResultResp {
+    SkillImportResultResp {
+        skill: CapabilityItemResp::from(skill),
+        resource_count: resources.len(),
+        reference_count: resources
+            .iter()
+            .filter(|resource| resource.resource_type == "reference")
+            .count(),
+        script_count: resources
+            .iter()
+            .filter(|resource| resource.resource_type == "script")
+            .count(),
+        asset_count: resources
+            .iter()
+            .filter(|resource| resource.resource_type == "asset")
+            .count(),
+        warnings,
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct GitHubTreeResp {
+    tree: Vec<GitHubTreeItem>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct GitHubTreeItem {
+    path: String,
+    #[serde(default)]
+    sha: Option<String>,
+    #[serde(rename = "type")]
+    kind: String,
+    #[serde(default)]
+    size: Option<u64>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct GitHubBlobResp {
+    content: String,
+    encoding: String,
+    #[serde(default)]
+    size: Option<u64>,
+}
+
+async fn fetch_github_skill_tree(
+    source: &GitHubSkillSource,
+) -> Result<Vec<GitHubTreeItem>, AppError> {
+    let url = format!(
+        "https://api.github.com/repos/{}/{}/git/trees/{}?recursive=1",
+        source.owner, source.repo, source.reference
+    );
+    let response = github_client()
+        .get(&url)
+        .send()
+        .await
+        .map_err(|err| AppError::bad_request(format!("GitHub Skill 目录拉取失败: {err}")))?;
+    if !response.status().is_success() {
+        return Err(AppError::bad_request(format!(
+            "GitHub Skill 目录拉取失败: HTTP {}",
+            response.status()
+        )));
+    }
+    let tree = response
+        .json::<GitHubTreeResp>()
+        .await
+        .map_err(|err| AppError::bad_request(format!("GitHub Skill 目录解析失败: {err}")))?;
+    Ok(tree.tree)
+}
+
+async fn fetch_github_raw_file(
+    source: &GitHubSkillSource,
+    path: &str,
+) -> Result<Vec<u8>, AppError> {
+    let path = normalize_skill_package_path(path)?;
+    let url = format!(
+        "https://raw.githubusercontent.com/{}/{}/{}/{}",
+        source.owner, source.repo, source.reference, path
+    );
+    let response = github_client()
+        .get(&url)
+        .send()
+        .await
+        .map_err(|err| AppError::bad_request(format!("GitHub Skill 文件拉取失败: {err}")))?;
+    if !response.status().is_success() {
+        return Err(AppError::bad_request(format!(
+            "GitHub Skill 文件拉取失败: HTTP {}",
+            response.status()
+        )));
+    }
+    let bytes = response
+        .bytes()
+        .await
+        .map_err(|err| AppError::bad_request(format!("GitHub Skill 文件读取失败: {err}")))?;
+    if bytes.len() > MAX_SKILL_PACKAGE_TEXT_BYTES {
+        return Err(AppError::bad_request(format!("{path} 不能超过 2MB")));
+    }
+    Ok(bytes.to_vec())
+}
+
+async fn fetch_github_tree_item_file(
+    source: &GitHubSkillSource,
+    item: &GitHubTreeItem,
+) -> Result<Vec<u8>, AppError> {
+    if let Some(sha) = item.sha.as_deref() {
+        if let Ok(bytes) = fetch_github_blob_file(source, sha, &item.path).await {
+            return Ok(bytes);
+        }
+    }
+    fetch_github_raw_file(source, &item.path).await
+}
+
+async fn fetch_github_blob_file(
+    source: &GitHubSkillSource,
+    sha: &str,
+    path: &str,
+) -> Result<Vec<u8>, AppError> {
+    let url = format!(
+        "https://api.github.com/repos/{}/{}/git/blobs/{}",
+        source.owner, source.repo, sha
+    );
+    let response = github_client()
+        .get(&url)
+        .send()
+        .await
+        .map_err(|err| AppError::bad_request(format!("GitHub Skill 文件拉取失败: {err}")))?;
+    if !response.status().is_success() {
+        return Err(AppError::bad_request(format!(
+            "GitHub Skill 文件拉取失败: HTTP {}",
+            response.status()
+        )));
+    }
+    let blob = response
+        .json::<GitHubBlobResp>()
+        .await
+        .map_err(|err| AppError::bad_request(format!("GitHub Skill 文件解析失败: {err}")))?;
+    if blob.encoding != "base64" {
+        return Err(AppError::bad_request(format!(
+            "{path} 使用了不支持的 GitHub blob 编码"
+        )));
+    }
+    if blob.size.unwrap_or_default() as usize > MAX_SKILL_PACKAGE_TEXT_BYTES {
+        return Err(AppError::bad_request(format!("{path} 不能超过 2MB")));
+    }
+    let content = blob
+        .content
+        .chars()
+        .filter(|ch| !ch.is_whitespace())
+        .collect::<String>();
+    let bytes = general_purpose::STANDARD
+        .decode(content)
+        .map_err(|err| AppError::bad_request(format!("GitHub Skill 文件解码失败: {err}")))?;
+    if bytes.len() > MAX_SKILL_PACKAGE_TEXT_BYTES {
+        return Err(AppError::bad_request(format!("{path} 不能超过 2MB")));
+    }
+    Ok(bytes)
+}
+
+async fn fetch_github_skill_files(
+    source: &GitHubSkillSource,
+    tree: &[GitHubTreeItem],
+    skill_path: &str,
+) -> Result<Vec<SkillImportFile>, AppError> {
+    let skill_path = normalize_skill_package_path_or_empty(skill_path)?;
+    let mut files = Vec::new();
+    let mut total_bytes = 0usize;
+    for item in tree {
+        if item.kind != "blob" || !path_belongs_to_skill_dir(&item.path, &skill_path) {
+            continue;
+        }
+        let Some(relative_path) = strip_skill_root(&skill_path, &item.path) else {
+            continue;
+        };
+        let resource_type = skill_resource_type(&relative_path);
+        if resource_type == "ignored" {
+            continue;
+        }
+        if let Some(size) = item.size {
+            if size as usize > MAX_SKILL_PACKAGE_TEXT_BYTES {
+                return Err(AppError::bad_request(format!("{} 不能超过 2MB", item.path)));
+            }
+        }
+        let bytes = fetch_github_tree_item_file(source, item).await?;
+        total_bytes = total_bytes.saturating_add(bytes.len());
+        if total_bytes > MAX_SKILL_PACKAGE_BYTES {
+            return Err(AppError::bad_request("Skill 目录总大小不能超过 8MB"));
+        }
+        files.push(SkillImportFile {
+            relative_path,
+            bytes,
+        });
+        if files.len() > MAX_SKILL_PACKAGE_FILES {
+            return Err(AppError::bad_request(format!(
+                "Skill 目录文件数不能超过 {}",
+                MAX_SKILL_PACKAGE_FILES
+            )));
+        }
+    }
+    Ok(files)
+}
+
+fn github_client() -> reqwest::Client {
+    let mut headers = HeaderMap::new();
+    headers.insert(USER_AGENT, HeaderValue::from_static("Novex-Skill-Importer"));
+    if let Ok(token) = env::var("GITHUB_TOKEN").or_else(|_| env::var("GH_TOKEN")) {
+        if let Ok(value) = HeaderValue::from_str(&format!("Bearer {}", token.trim())) {
+            headers.insert(AUTHORIZATION, value);
+        }
+    }
+    reqwest::Client::builder()
+        .default_headers(headers)
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new())
+}
+
+fn discover_skill_paths(source: &GitHubSkillSource, tree: &[GitHubTreeItem]) -> Vec<String> {
+    let prefix = source.path.trim_matches('/');
+    let mut paths = tree
+        .iter()
+        .filter(|item| item.kind == "blob")
+        .filter(|item| item.path.ends_with("SKILL.md"))
+        .filter(|item| prefix.is_empty() || path_belongs_to_skill_dir(&item.path, prefix))
+        .map(|item| skill_root_from_skill_md_path(&item.path))
+        .collect::<Vec<_>>();
+    paths.sort();
+    paths.dedup();
+    if !prefix.is_empty() && tree_contains_skill_dir(tree, prefix) {
+        paths.retain(|path| path == prefix);
+    }
+    paths
+}
+
+fn tree_contains_skill_dir(tree: &[GitHubTreeItem], skill_path: &str) -> bool {
+    let Some(skill_md_path) = skill_md_path_for_dir(skill_path) else {
+        return false;
+    };
+    tree.iter()
+        .any(|item| item.kind == "blob" && item.path == skill_md_path)
+}
+
+fn tree_item_for_path<'a>(tree: &'a [GitHubTreeItem], path: &str) -> Option<&'a GitHubTreeItem> {
+    tree.iter()
+        .find(|item| item.kind == "blob" && item.path == path)
+}
+
+fn skill_resource_counts(tree: &[GitHubTreeItem], skill_path: &str) -> (usize, usize, usize) {
+    let mut reference_count = 0;
+    let mut script_count = 0;
+    let mut asset_count = 0;
+    for item in tree {
+        if item.kind != "blob" || !path_belongs_to_skill_dir(&item.path, skill_path) {
+            continue;
+        }
+        let Some(relative_path) = strip_skill_root(skill_path, &item.path) else {
+            continue;
+        };
+        match skill_resource_type(&relative_path) {
+            "reference" => reference_count += 1,
+            "script" => script_count += 1,
+            "asset" => asset_count += 1,
+            _ => {}
+        }
+    }
+    (reference_count, script_count, asset_count)
+}
+
+fn skill_md_path_for_dir(skill_path: &str) -> Option<String> {
+    let skill_path = skill_path.trim_matches('/');
+    if skill_path.is_empty() {
+        Some("SKILL.md".to_owned())
+    } else {
+        Some(format!("{skill_path}/SKILL.md"))
+    }
+}
+
+fn path_belongs_to_skill_dir(path: &str, skill_path: &str) -> bool {
+    let skill_path = skill_path.trim_matches('/');
+    if skill_path.is_empty() {
+        return true;
+    }
+    path == skill_path || path.starts_with(&format!("{skill_path}/"))
+}
+
+fn normalize_skill_import_command(
+    mut command: SkillImportCommand,
+) -> Result<SkillImportCommand, AppError> {
+    command.code = command.code.trim().to_owned();
+    command.name = command.name.trim().to_owned();
+    command.description = command.description.trim().to_owned();
+    if command.name.is_empty() {
+        command.name = command.code.clone();
+    }
+    if command.model_route_policy.is_null() {
+        command.model_route_policy = default_skill_model_route_policy();
+    }
+    if command.capability_refs.is_null() {
+        command.capability_refs = default_skill_capability_refs();
+    }
+
+    if command.code.is_empty() {
+        return Err(AppError::bad_request("Skill name 不能为空"));
+    }
+    validate_skill_code(&command.code)?;
+    if command.description.is_empty() {
+        return Err(AppError::bad_request("Skill description 不能为空"));
+    }
+    if !command.model_route_policy.is_object() {
+        return Err(AppError::bad_request("Skill modelRoutePolicy 必须是对象"));
+    }
+    if !command.capability_refs.is_array() {
+        return Err(AppError::bad_request("Skill capabilityRefs 必须是数组"));
+    }
+    if !command.metadata.is_object() {
+        return Err(AppError::bad_request("Skill metadata 必须是对象"));
+    }
+
+    ensure_max_chars("Skill name", &command.code, 128)?;
+    ensure_max_chars("Skill display name", &command.name, 128)?;
+    ensure_max_chars("Skill description", &command.description, 1024)?;
+    Ok(command)
+}
+
+fn split_skill_md_frontmatter(text: &str) -> Result<(&str, &str), AppError> {
+    let Some(rest) = text.strip_prefix("---\n") else {
+        return Err(AppError::bad_request(
+            "SKILL.md frontmatter 必须以 --- 开头",
+        ));
+    };
+    let Some((frontmatter, body)) = rest.split_once("\n---\n") else {
+        return Err(AppError::bad_request(
+            "SKILL.md frontmatter 必须以 --- 结束",
+        ));
+    };
+    Ok((frontmatter, body))
+}
+
+fn parse_codex_skill_frontmatter(source: &str) -> Result<(CodexSkillFrontmatter, Value), AppError> {
+    let mut root = Map::new();
+    let mut metadata = Map::new();
+    let mut section: Option<String> = None;
+    let lines = source.lines().collect::<Vec<_>>();
+    let mut index = 0usize;
+
+    while index < lines.len() {
+        let raw_line = lines[index];
+        if raw_line.trim().is_empty() || raw_line.trim_start().starts_with('#') {
+            index += 1;
+            continue;
+        }
+        let indent = raw_line
+            .chars()
+            .take_while(|ch| ch.is_ascii_whitespace())
+            .count();
+        let line = raw_line.trim();
+
+        if indent == 0 {
+            let Some((key, value)) = line.split_once(':') else {
+                return Err(AppError::bad_request("SKILL.md frontmatter 格式无效"));
+            };
+            let key = key.trim();
+            let value = value.trim();
+            if value.is_empty() {
+                section = Some(key.to_owned());
+                root.insert(key.to_owned(), Value::Object(Map::new()));
+                index += 1;
+            } else if let Some(folded) = yaml_block_scalar_style(value) {
+                let (block, next_index) =
+                    collect_yaml_block_scalar(&lines, index + 1, indent, folded);
+                section = None;
+                root.insert(key.to_owned(), Value::String(block));
+                index = next_index;
+            } else {
+                section = None;
+                root.insert(key.to_owned(), yaml_scalar(value));
+                index += 1;
+            }
+            continue;
+        }
+
+        if section.as_deref() == Some("metadata") {
+            let Some((key, value)) = line.split_once(':') else {
+                return Err(AppError::bad_request("SKILL.md metadata 格式无效"));
+            };
+            let key = key.trim();
+            let value = value.trim();
+            if let Some(folded) = yaml_block_scalar_style(value) {
+                let (block, next_index) =
+                    collect_yaml_block_scalar(&lines, index + 1, indent, folded);
+                metadata.insert(key.to_owned(), Value::String(block));
+                index = next_index;
+            } else {
+                metadata.insert(key.to_owned(), yaml_scalar(value));
+                index += 1;
+            }
+            continue;
+        }
+        index += 1;
+    }
+
+    if !metadata.is_empty() {
+        root.insert("metadata".to_owned(), Value::Object(metadata.clone()));
+    }
+
+    let frontmatter = CodexSkillFrontmatter {
+        name: root
+            .get("name")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned(),
+        description: root
+            .get("description")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned(),
+        metadata: Value::Object(metadata),
+    };
+    Ok((frontmatter, Value::Object(root)))
+}
+
+fn yaml_block_scalar_style(value: &str) -> Option<bool> {
+    let value = value.trim();
+    if value.starts_with('|') {
+        Some(false)
+    } else if value.starts_with('>') {
+        Some(true)
+    } else {
+        None
+    }
+}
+
+fn collect_yaml_block_scalar(
+    lines: &[&str],
+    start_index: usize,
+    parent_indent: usize,
+    folded: bool,
+) -> (String, usize) {
+    let mut index = start_index;
+    let mut block_lines = Vec::new();
+    while index < lines.len() {
+        let line = lines[index];
+        if !line.trim().is_empty() {
+            let indent = line
+                .chars()
+                .take_while(|ch| ch.is_ascii_whitespace())
+                .count();
+            if indent <= parent_indent {
+                break;
+            }
+        }
+        block_lines.push(line);
+        index += 1;
+    }
+
+    let min_indent = block_lines
+        .iter()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| {
+            line.chars()
+                .take_while(|ch| ch.is_ascii_whitespace())
+                .count()
+        })
+        .min()
+        .unwrap_or(parent_indent + 2);
+    let normalized = block_lines
+        .into_iter()
+        .map(|line| {
+            if line.trim().is_empty() {
+                String::new()
+            } else {
+                line.chars().skip(min_indent).collect::<String>()
+            }
+        })
+        .collect::<Vec<_>>();
+
+    let value = if folded {
+        normalized.join(" ")
+    } else {
+        normalized.join("\n")
+    };
+    (value.trim().to_owned(), index)
+}
+
+fn yaml_scalar(value: &str) -> Value {
+    let trimmed = value.trim();
+    if trimmed.eq_ignore_ascii_case("true") {
+        return Value::Bool(true);
+    }
+    if trimmed.eq_ignore_ascii_case("false") {
+        return Value::Bool(false);
+    }
+    if let Some(unquoted) = trimmed
+        .strip_prefix('"')
+        .and_then(|value| value.strip_suffix('"'))
+        .or_else(|| {
+            trimmed
+                .strip_prefix('\'')
+                .and_then(|value| value.strip_suffix('\''))
+        })
+    {
+        return Value::String(unquoted.to_owned());
+    }
+    Value::String(trimmed.to_owned())
+}
+
+fn validate_skill_code(code: &str) -> Result<(), AppError> {
+    let mut chars = code.chars();
+    let Some(first) = chars.next() else {
+        return Err(AppError::bad_request("Skill name 不能为空"));
+    };
+    if !first.is_ascii_alphanumeric() {
+        return Err(AppError::bad_request("Skill name 必须以英文字母或数字开头"));
+    }
+    if !chars.all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.' | ':')) {
+        return Err(AppError::bad_request(
+            "Skill name 只能包含字母、数字、下划线、中划线、点或冒号",
+        ));
+    }
+    Ok(())
+}
+
+fn string_field(value: &Value, keys: &[&str]) -> Option<String> {
+    keys.iter().find_map(|key| {
+        value
+            .get(*key)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned)
+    })
+}
+
+fn skill_import_source_filename(filename: Option<&str>) -> String {
+    filename
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("SKILL.md")
+        .to_owned()
+}
+
+fn default_skill_model_route_policy() -> Value {
+    json!({
+        "answerModel": "runtime.llm.rag_answer",
+        "embeddingModel": "runtime.embedding.default",
+        "rerankModel": "runtime.rerank.default"
+    })
+}
+
+fn default_skill_capability_refs() -> Value {
+    json!([{ "kind": "tool", "code": "rag.search" }])
 }
 
 pub fn normalize_tool_dry_run_command(
@@ -1011,6 +2375,8 @@ fn default_true() -> bool {
 mod tests {
     use super::*;
     use sqlx::postgres::PgPoolOptions;
+    use std::io::Write;
+    use zip::{write::SimpleFileOptions, ZipWriter};
 
     #[tokio::test]
     async fn capability_service_can_be_bound_to_request_tenant() {
@@ -1028,6 +2394,184 @@ mod tests {
 
         assert_eq!(query.status, Some(1));
         assert_eq!(query.page_query().limit(), 20);
+    }
+
+    #[test]
+    fn skill_import_parses_codex_skill_md_frontmatter_and_instructions() {
+        let source = br#"---
+name: knowledge-table-summarizer
+description: Summarize cited knowledge tables and preserve row evidence.
+metadata:
+  short-description: Summarize tables
+---
+# Table Summarizer
+
+Always cite the source rows.
+"#;
+
+        let command = parse_skill_import(Some("SKILL.md"), source).unwrap();
+
+        assert_eq!(command.code, "knowledge-table-summarizer");
+        assert_eq!(command.name, "knowledge-table-summarizer");
+        assert_eq!(
+            command.description,
+            "Summarize cited knowledge tables and preserve row evidence."
+        );
+        assert_eq!(
+            command.capability_refs,
+            json!([{ "kind": "tool", "code": "rag.search" }])
+        );
+        assert_eq!(
+            command.model_route_policy["answerModel"],
+            "runtime.llm.rag_answer"
+        );
+        assert_eq!(command.metadata["format"], "codex.skill.v1");
+        assert_eq!(
+            command.metadata["codex"]["shortDescription"],
+            "Summarize tables"
+        );
+        assert!(command.metadata["instruction"]
+            .as_str()
+            .unwrap()
+            .contains("Always cite the source rows."));
+    }
+
+    #[test]
+    fn skill_import_parses_yaml_block_scalar_description() {
+        let source = r#"---
+name: khazix-writer
+description: |
+  数字生命卡兹克的公众号长文写作skill。
+  当用户需要撰写公众号文章时使用。
+---
+# 卡兹克公众号长文写作
+
+按作者风格输出长文。
+"#;
+
+        let command = parse_skill_import(Some("SKILL.md"), source.as_bytes()).unwrap();
+
+        assert_eq!(command.code, "khazix-writer");
+        assert!(command.description.contains("数字生命卡兹克"));
+        assert!(command.description.contains("公众号文章"));
+        assert_ne!(command.description, "|");
+    }
+
+    #[test]
+    fn github_skill_source_parses_tree_skill_directory() {
+        let source = parse_github_skill_source(
+            "https://github.com/KKKKhazix/khazix-skills/tree/main/khazix-writer",
+        )
+        .unwrap();
+
+        assert_eq!(source.owner, "KKKKhazix");
+        assert_eq!(source.repo, "khazix-skills");
+        assert_eq!(source.reference, "main");
+        assert_eq!(source.path, "khazix-writer");
+    }
+
+    #[test]
+    fn github_skill_source_accepts_markdown_link_text() {
+        let source = parse_github_skill_source(
+            "[https://github.com/KKKKhazix/khazix-skills/tree/main/khazix-writer](https://github.com/KKKKhazix/khazix-skills/tree/main/khazix-writer)",
+        )
+        .unwrap();
+
+        assert_eq!(source.owner, "KKKKhazix");
+        assert_eq!(source.repo, "khazix-skills");
+        assert_eq!(source.reference, "main");
+        assert_eq!(source.path, "khazix-writer");
+    }
+
+    #[test]
+    fn skill_directory_import_keeps_references_and_disables_scripts() {
+        let source = vec![
+            SkillImportFile {
+                relative_path: "SKILL.md".to_owned(),
+                bytes: br#"---
+name: khazix-writer
+description: Generate cited long-form content.
+---
+# Khazix Writer
+
+Use the referenced methodology before drafting.
+"#
+                .to_vec(),
+            },
+            SkillImportFile {
+                relative_path: "references/content_methodology.md".to_owned(),
+                bytes: b"# Content Methodology\nPrefer evidence-first outlines.".to_vec(),
+            },
+            SkillImportFile {
+                relative_path: "scripts/md_to_pdf.py".to_owned(),
+                bytes: b"print('disabled by Novex')\n".to_vec(),
+            },
+        ];
+
+        let bundle =
+            parse_skill_directory_import(Some("https://github.com/x/y/tree/main/skill"), source)
+                .unwrap();
+
+        assert_eq!(bundle.skill.code, "khazix-writer");
+        assert!(bundle
+            .resources
+            .iter()
+            .any(|resource| resource.resource_type == "reference"
+                && resource.relative_path == "references/content_methodology.md"
+                && resource
+                    .content_text
+                    .as_deref()
+                    .unwrap_or_default()
+                    .contains("evidence-first")));
+        let script = bundle
+            .resources
+            .iter()
+            .find(|resource| resource.relative_path == "scripts/md_to_pdf.py")
+            .unwrap();
+        assert_eq!(script.resource_type, "script");
+        assert_eq!(script.metadata["execution"], "disabled");
+    }
+
+    #[test]
+    fn skill_zip_package_extracts_single_skill_directory() {
+        let package = skill_zip_bytes(&[
+            (
+                "khazix-writer/SKILL.md",
+                b"---\nname: khazix-writer\ndescription: Imported writer.\n---\n# Writer\nUse references.",
+            ),
+            (
+                "khazix-writer/references/style_examples.md",
+                b"# Style\nUse evidence first.",
+            ),
+        ]);
+
+        let files = parse_skill_zip_package(Some("khazix-writer.zip"), &package).unwrap();
+        let bundle = parse_skill_directory_import(Some("khazix-writer.zip"), files).unwrap();
+
+        assert_eq!(bundle.skill.code, "khazix-writer");
+        assert!(bundle.resources.iter().any(|resource| {
+            resource.resource_type == "reference"
+                && resource.relative_path == "references/style_examples.md"
+        }));
+    }
+
+    #[test]
+    fn skill_zip_package_rejects_path_traversal_entries() {
+        let package = skill_zip_bytes(&[(
+            "../SKILL.md",
+            b"---\nname: unsafe\ndescription: Unsafe.\n---\n# Unsafe",
+        )]);
+
+        let err = parse_skill_zip_package(Some("unsafe.zip"), &package).unwrap_err();
+
+        assert!(err.to_string().contains(".."));
+    }
+
+    #[test]
+    fn skill_import_rejects_markdown_without_codex_frontmatter() {
+        let err = parse_skill_import(Some("SKILL.md"), b"# Missing metadata").unwrap_err();
+
+        assert!(err.to_string().contains("SKILL.md frontmatter"));
     }
 
     #[test]
@@ -1298,5 +2842,16 @@ mod tests {
             .unwrap_or_else(|| panic!("{plugin_code} seed missing"));
         let end = (start + 1_600).min(seed.len());
         &seed[start..end]
+    }
+
+    fn skill_zip_bytes(entries: &[(&str, &[u8])]) -> Vec<u8> {
+        let cursor = std::io::Cursor::new(Vec::new());
+        let mut writer = ZipWriter::new(cursor);
+        let options = SimpleFileOptions::default();
+        for (path, content) in entries {
+            writer.start_file(*path, options).unwrap();
+            writer.write_all(content).unwrap();
+        }
+        writer.finish().unwrap().into_inner()
     }
 }

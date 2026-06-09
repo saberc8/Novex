@@ -211,7 +211,7 @@ mod tests {
             "${RABBITMQ_AMQP_PORT:-5672}:5672",
             "${RABBITMQ_MANAGEMENT_PORT:-15672}:15672",
             "${REDIS_PORT:-6379}:6379",
-            "${BACKEND_PORT:-4398}:4398",
+            "${BACKEND_PORT:-4398}:${HTTP_PORT:-4398}",
             "${ADMIN_PORT:-4399}:4399",
             "${TRAINING_WEB_PORT:-4401}:4401",
             "${CHAT_WEB_PORT:-4402}:4402",
@@ -226,6 +226,7 @@ mod tests {
             "REDIS_URL",
             "RABBITMQ_PARSER_EXCHANGE",
             "RABBITMQ_PARSER_EXECUTE_QUEUE",
+            "PARSER_WORKER_MODE",
             "python3 -m parser_worker.worker",
             "NEXT_PUBLIC_API_BASE_URL",
         ] {
@@ -234,5 +235,53 @@ mod tests {
                 "{contract} missing from compose"
             );
         }
+    }
+
+    #[test]
+    fn run_poc_script_starts_full_stack_and_checks_live_ai_env() {
+        let script = include_str!("../../../../../scripts/run-poc.sh");
+
+        assert!(
+            script.contains("infra/.env.poc"),
+            "run script should use infra/.env.poc as the single POC env entry"
+        );
+        assert!(
+            !script.contains("backend/.env"),
+            "run script should not load backend/.env for the POC stack"
+        );
+
+        for needle in [
+            "docker compose",
+            "--profile parser",
+            "--profile apps",
+            "--pull never",
+            "require_local_images",
+            "pull_missing_images",
+            "docker image inspect",
+            "docker pull",
+            "Run './scripts/run-poc.sh pull'",
+            "PARSER_CALLBACK_TOKEN",
+            "LLM_API_KEY",
+            "LLM_BASE_URL",
+            "LLM_MODEL",
+            "EMBEDDING_API_KEY",
+            "EMBEDDING_BASE_URL",
+            "EMBEDDING_MODEL",
+            "RERANKER_API_KEY",
+            "RERANKER_BASE_URL",
+            "RERANKER_MODEL",
+            "RIGHT_CODE_DRAW_BASE_URL",
+            "RIGHT_CODE_DRAW_API_KEY",
+            "MINERU_TOKEN",
+            "PARSER_WORKER_MODE",
+            "http://localhost:4401",
+            "http://localhost:15672",
+        ] {
+            assert!(script.contains(needle), "{needle} missing from run script");
+        }
+        assert!(
+            !script.contains("pull \"${POC_SERVICES[@]}\""),
+            "pull command should not refresh already-local compose images"
+        );
     }
 }

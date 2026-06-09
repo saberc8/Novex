@@ -12,6 +12,10 @@ import type {
   PluginInstallCommand,
   PluginInstallationQuery,
   PluginInstallationResp,
+  SkillImportFromSourceCommand,
+  SkillImportPreviewCommand,
+  SkillImportPreviewResp,
+  SkillImportResultResp,
   ToolCallAuditQuery,
   ToolCallAuditResp,
   ToolDryRunCommand,
@@ -30,6 +34,22 @@ export function listTools(query: CapabilityQuery = {}) {
 
 export function listSkills(query: CapabilityQuery = {}) {
   return api.get<PageResult<CapabilityItemResp>>(`${CAPABILITY_URL}/skills`, { ...query });
+}
+
+export function importSkill(data: FormData) {
+  return api.post<CapabilityItemResp>(`${CAPABILITY_URL}/skills/import`, data);
+}
+
+export function previewSkillImport(data: SkillImportPreviewCommand) {
+  return api.post<SkillImportPreviewResp>(`${CAPABILITY_URL}/skills/import/preview`, data);
+}
+
+export function importSkillFromSource(data: SkillImportFromSourceCommand) {
+  return api.post<SkillImportResultResp>(`${CAPABILITY_URL}/skills/import/source`, data);
+}
+
+export function importSkillPackage(data: FormData) {
+  return api.post<SkillImportResultResp>(`${CAPABILITY_URL}/skills/import/package`, data);
 }
 
 export function listConnectors(query: CapabilityQuery = {}) {

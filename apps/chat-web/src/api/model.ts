@@ -1,8 +1,18 @@
 import { apiRequest } from "@/lib/api";
-import type { ModelChatCommand, ModelChatConversationResp, ModelChatResp } from "@/types/model";
+import type {
+  ModelChatCommand,
+  ModelChatConversationResp,
+  ModelChatResp,
+  ModelRuntimeSummary
+} from "@/types/model";
 
+const MODEL_URL = "/ai/models";
 const MODEL_CHAT_URL = "/ai/models/chat";
 const MODEL_CHAT_CONVERSATIONS_URL = "/ai/models/chat/conversations";
+
+export function getModelRuntimeConfig() {
+  return apiRequest<ModelRuntimeSummary>(`${MODEL_URL}/runtime-config`);
+}
 
 export function chatCompletion(data: ModelChatCommand) {
   return apiRequest<ModelChatResp>(MODEL_CHAT_URL, {

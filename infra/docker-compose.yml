@@ -93,12 +93,12 @@ services:
     working_dir: /workspace
     command: bash -lc "cargo run -p backend-rust"
     environment:
-      HTTP_PORT: "4398"
+      HTTP_PORT: ${HTTP_PORT:-4398}
       DATABASE_URL: postgres://postgres:postgres@postgres:5432/avalon_admin
-      DATABASE_MAX_CONNECTIONS: "5"
-      DB_AUTO_MIGRATE: "true"
+      DATABASE_MAX_CONNECTIONS: ${DATABASE_MAX_CONNECTIONS:-5}
+      DB_AUTO_MIGRATE: ${DB_AUTO_MIGRATE:-true}
       AUTH_JWT_SECRET: ${AUTH_JWT_SECRET:-local-compose-change-this-secret-32chars-min}
-      AUTH_JWT_TTL_HOURS: "24"
+      AUTH_JWT_TTL_HOURS: ${AUTH_JWT_TTL_HOURS:-24}
       CORS_ALLOWED_ORIGINS: http://localhost:${ADMIN_PORT:-4399},http://127.0.0.1:${ADMIN_PORT:-4399},http://localhost:${TRAINING_WEB_PORT:-4401},http://127.0.0.1:${TRAINING_WEB_PORT:-4401},http://localhost:${CHAT_WEB_PORT:-4402},http://127.0.0.1:${CHAT_WEB_PORT:-4402},http://localhost:${AGENT_WORKSPACE_PORT:-4403},http://127.0.0.1:${AGENT_WORKSPACE_PORT:-4403}
       MILVUS_ENDPOINT: http://milvus:19530
       MILVUS_TOKEN: ${MILVUS_TOKEN:-root:Milvus}
@@ -109,6 +109,15 @@ services:
       FEISHU_WEBHOOK_URL: ${FEISHU_WEBHOOK_URL:-}
       RIGHT_CODE_DRAW_BASE_URL: ${RIGHT_CODE_DRAW_BASE_URL:-}
       RIGHT_CODE_DRAW_API_KEY: ${RIGHT_CODE_DRAW_API_KEY:-}
+      LLM_API_KEY: ${LLM_API_KEY:-}
+      LLM_BASE_URL: ${LLM_BASE_URL:-}
+      LLM_MODEL: ${LLM_MODEL:-}
+      EMBEDDING_API_KEY: ${EMBEDDING_API_KEY:-}
+      EMBEDDING_BASE_URL: ${EMBEDDING_BASE_URL:-}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-}
+      RERANKER_API_KEY: ${RERANKER_API_KEY:-}
+      RERANKER_BASE_URL: ${RERANKER_BASE_URL:-}
+      RERANKER_MODEL: ${RERANKER_MODEL:-}
       SCHEDULER_EMBEDDED: "false"
       SCHEDULER_WORKER_ENABLED: "false"
       PARSER_QUEUE_ENABLED: "true"
@@ -127,9 +136,9 @@ services:
       RABBITMQ_PARSER_RETRY_ROUTING_KEY: parser.retry
       RABBITMQ_PARSER_DEAD_ROUTING_KEY: parser.dead
       RABBITMQ_PARSER_RETRY_TTL_MS: "30000"
-      RUST_LOG: backend_rust=debug,tower_http=info
+      RUST_LOG: ${RUST_LOG:-backend_rust=debug,tower_http=info}
     ports:
-      - "${BACKEND_PORT:-4398}:4398"
+      - "${BACKEND_PORT:-4398}:${HTTP_PORT:-4398}"
     depends_on:
       postgres:
         condition: service_healthy
@@ -167,7 +176,9 @@ services:
       PARSER_WORKER_PREFETCH: "4"
       PARSER_WORKER_LEASE_TTL_SECONDS: "300"
       PARSER_WORKER_IDEMPOTENCY_TTL_SECONDS: "86400"
+      PARSER_WORKER_MODE: ${PARSER_WORKER_MODE:-type-routed}
       MINERU_TOKEN: ${MINERU_TOKEN:-}
+      MINERU_TIMEOUT_SECONDS: ${MINERU_TIMEOUT_SECONDS:-120}
     depends_on:
       backend:
         condition: service_started

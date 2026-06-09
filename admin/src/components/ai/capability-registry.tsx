@@ -1,11 +1,15 @@
 "use client";
 
 import type { ColumnDef } from "@tanstack/react-table";
-import { PackageCheck, Play, RefreshCw } from "lucide-react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { Bot, FileArchive, FileUp, PackageCheck, Play, RefreshCw } from "lucide-react";
+import type { RefObject } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 import {
   dryRunTool,
+  importSkill,
+  importSkillFromSource,
+  importSkillPackage,
   installPlugin,
   listConnectors,
   listMcpServers,
@@ -14,14 +18,30 @@ import {
   listSkills,
   listToolAudits,
   listTools,
-  listTriggers
+  listTriggers,
+  previewSkillImport
 } from "@/api/ai/capability";
 import { PermissionGate } from "@/components/permission/permission-gate";
 import { DataTable } from "@/components/table/data-table";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Label } from "@/components/ui/label";
+import {
+  Sheet,
+  SheetContent,
+  SheetDescription,
+  SheetHeader,
+  SheetTitle
+} from "@/components/ui/sheet";
+import { Textarea } from "@/components/ui/textarea";
 import type { PageResult } from "@/types/api";
-import type { CapabilityItemResp, PluginInstallationResp, ToolCallAuditResp } from "@/types/ai-capability";
+import type {
+  CapabilityItemResp,
+  PluginInstallationResp,
+  SkillImportPreviewResp,
+  SkillImportPreviewItemResp,
+  ToolCallAuditResp
+} from "@/types/ai-capability";
 
 type CapabilityResource = "skills" | "tools" | "connectors" | "plugins" | "triggers" | "mcpServers";
 
@@ -52,6 +72,14 @@ export function CapabilityRegistry({ title, resource, permission }: CapabilityRe
   const [auditLoading, setAuditLoading] = useState(false);
   const [runningToolCode, setRunningToolCode] = useState<string | null>(null);
   const [installingPluginCode, setInstallingPluginCode] = useState<string | null>(null);
+  const [importingSkill, setImportingSkill] = useState(false);
+  const [aiImportOpen, setAiImportOpen] = useState(false);
+  const [skillImportSource, setSkillImportSource] = useState("");
+  const [skillImportPreview, setSkillImportPreview] = useState<SkillImportPreviewResp | null>(null);
+  const [skillImportPreviewing, setSkillImportPreviewing] = useState(false);
+  const [installingSkillPath, setInstallingSkillPath] = useState<string | null>(null);
+  const skillFileInputRef = useRef<HTMLInputElement>(null);
+  const skillPackageInputRef = useRef<HTMLInputElement>(null);
 
   const loadItems = useCallback(async () => {
     setLoading(true);
@@ -233,6 +261,81 @@ export function CapabilityRegistry({ title, resource, permission }: CapabilityRe
     }
   }
 
+  async function handleSkillImportFile(file: File) {
+    const formData = new FormData();
+    formData.append("file", file);
+    setImportingSkill(true);
+    try {
+      const result = await importSkill(formData);
+      toast.success(`${result.name} 已导入`);
+      await loadItems();
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Skill 导入失败");
+    } finally {
+      setImportingSkill(false);
+    }
+  }
+
+  async function handleSkillPackageImport(file: File) {
+    const formData = new FormData();
+    formData.append("file", file);
+    setImportingSkill(true);
+    try {
+      const result = await importSkillPackage(formData);
+      toast.success(`${result.skill.name} 已导入，references ${result.referenceCount}`);
+      setAiImportOpen(false);
+      setSkillImportPreview(null);
+      await loadItems();
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Skill 压缩包导入失败");
+    } finally {
+      setImportingSkill(false);
+    }
+  }
+
+  async function handleSkillImportPreview() {
+    const source = skillImportSource.trim();
+    if (!source) {
+      toast.error("请先输入导入需求或 GitHub 地址");
+      return;
+    }
+    setSkillImportPreviewing(true);
+    try {
+      const result = await previewSkillImport({ source });
+      setSkillImportPreview(result);
+      if (!result.skills.length) {
+        toast.error("未发现可导入的 Skill");
+      }
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Skill 来源分析失败");
+    } finally {
+      setSkillImportPreviewing(false);
+    }
+  }
+
+  async function handleSourceSkillInstall(item: SkillImportPreviewItemResp) {
+    const source = skillImportSource.trim();
+    if (!source) {
+      toast.error("请先输入导入需求或 GitHub 地址");
+      return;
+    }
+    setInstallingSkillPath(item.path);
+    try {
+      const result = await importSkillFromSource({
+        source,
+        skillPath: item.path
+      });
+      toast.success(`${result.skill.name} 已安装，references ${result.referenceCount}`);
+      setAiImportOpen(false);
+      setSkillImportPreview(null);
+      await loadItems();
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Skill 安装失败");
+    } finally {
+      setInstallingSkillPath(null);
+    }
+  }
+
   return (
     <div className="mx-auto grid w-full max-w-7xl gap-4">
       <section className="flex flex-col gap-3 rounded-lg border bg-background p-4 md:flex-row md:items-center md:justify-between">
@@ -243,10 +346,35 @@ export function CapabilityRegistry({ title, resource, permission }: CapabilityRe
             <code className="rounded border bg-muted px-1.5 py-0.5">{permission}</code>
           </div>
         </div>
-        <Button variant="outline" onClick={() => void loadItems()} disabled={loading}>
-          <RefreshCw />
-          刷新
-        </Button>
+        <div className="flex flex-wrap gap-2">
+          {resource === "skills" ? (
+            <PermissionGate permissions={["ai:skill:import"]}>
+              <Button
+                variant="outline"
+                onClick={() => skillFileInputRef.current?.click()}
+                disabled={importingSkill}
+              >
+                <FileUp />
+                导入 Skill
+              </Button>
+              <input
+                ref={skillFileInputRef}
+                className="hidden"
+                type="file"
+                accept=".md,.json"
+                onChange={(event) => {
+                  const file = event.target.files?.[0];
+                  if (file) void handleSkillImportFile(file);
+                  event.target.value = "";
+                }}
+              />
+            </PermissionGate>
+          ) : null}
+          <Button variant="outline" onClick={() => void loadItems()} disabled={loading}>
+            <RefreshCw />
+            刷新
+          </Button>
+        </div>
       </section>
 
       <DataTable columns={columns} data={items} loading={loading} emptyText="暂无能力" />
@@ -279,7 +407,156 @@ export function CapabilityRegistry({ title, resource, permission }: CapabilityRe
           </div>
         </section>
       ) : null}
+
+      {resource === "skills" ? (
+        <PermissionGate permissions={["ai:skill:import"]}>
+          <Button
+            className="fixed bottom-5 right-5 z-40 shadow-lg"
+            onClick={() => setAiImportOpen(true)}
+          >
+            <Bot />
+            AI 导入 Skills
+          </Button>
+          <SkillImportAssistantSheet
+            open={aiImportOpen}
+            source={skillImportSource}
+            preview={skillImportPreview}
+            previewing={skillImportPreviewing}
+            importing={importingSkill}
+            installingPath={installingSkillPath}
+            packageInputRef={skillPackageInputRef}
+            onOpenChange={setAiImportOpen}
+            onSourceChange={setSkillImportSource}
+            onPreview={() => void handleSkillImportPreview()}
+            onInstall={(item) => void handleSourceSkillInstall(item)}
+            onPackageSelect={(file) => void handleSkillPackageImport(file)}
+          />
+        </PermissionGate>
+      ) : null}
     </div>
+  );
+}
+
+function SkillImportAssistantSheet({
+  open,
+  source,
+  preview,
+  previewing,
+  importing,
+  installingPath,
+  packageInputRef,
+  onOpenChange,
+  onSourceChange,
+  onPreview,
+  onInstall,
+  onPackageSelect
+}: {
+  open: boolean;
+  source: string;
+  preview: SkillImportPreviewResp | null;
+  previewing: boolean;
+  importing: boolean;
+  installingPath: string | null;
+  packageInputRef: RefObject<HTMLInputElement | null>;
+  onOpenChange: (open: boolean) => void;
+  onSourceChange: (value: string) => void;
+  onPreview: () => void;
+  onInstall: (item: SkillImportPreviewItemResp) => void;
+  onPackageSelect: (file: File) => void;
+}) {
+  return (
+    <Sheet open={open} onOpenChange={onOpenChange}>
+      <SheetContent className="flex w-full flex-col gap-4 sm:max-w-xl">
+        <SheetHeader>
+          <SheetTitle>AI 导入 Skills</SheetTitle>
+          <SheetDescription>
+            粘贴 GitHub Skill 地址或上传 zip 包，references 会保存并在对话中检索注入，scripts 仅保存不执行。
+          </SheetDescription>
+        </SheetHeader>
+
+        <div className="grid gap-2">
+          <Label htmlFor="skill-import-source">导入需求或 GitHub 地址</Label>
+          <Textarea
+            id="skill-import-source"
+            value={source}
+            onChange={(event) => onSourceChange(event.target.value)}
+            className="min-h-24"
+            placeholder="https://github.com/KKKKhazix/khazix-skills/tree/main/khazix-writer"
+          />
+        </div>
+
+        <div className="flex flex-wrap gap-2">
+          <Button onClick={onPreview} disabled={previewing || importing}>
+            <Bot />
+            {previewing ? "分析中" : "分析"}
+          </Button>
+          <Button
+            type="button"
+            variant="outline"
+            disabled={importing}
+            onClick={() => packageInputRef.current?.click()}
+          >
+            <FileArchive />
+            上传 zip
+          </Button>
+          <input
+            ref={packageInputRef}
+            className="hidden"
+            type="file"
+            accept=".zip,application/zip"
+            onChange={(event) => {
+              const file = event.target.files?.[0];
+              if (file) onPackageSelect(file);
+              event.target.value = "";
+            }}
+          />
+        </div>
+
+        <div className="min-h-0 flex-1 overflow-y-auto">
+          {preview ? (
+            <div className="grid gap-3">
+              {preview.warnings.map((warning) => (
+                <div key={warning} className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
+                  {warning}
+                </div>
+              ))}
+              {preview.skills.map((item) => (
+                <div key={item.path} className="grid gap-3 rounded-md border p-3">
+                  <div className="min-w-0">
+                    <div className="truncate text-sm font-medium">{item.name}</div>
+                    <div className="truncate text-xs text-muted-foreground">{item.description || item.path}</div>
+                  </div>
+                  <div className="flex flex-wrap gap-1">
+                    <Badge variant="outline">{item.path}</Badge>
+                    <Badge variant="secondary">references {item.referenceCount}</Badge>
+                    <Badge variant="outline">scripts {item.scriptCount}</Badge>
+                    <Badge variant="outline">assets {item.assetCount}</Badge>
+                  </div>
+                  <div className="flex justify-end">
+                    <Button
+                      size="sm"
+                      onClick={() => onInstall(item)}
+                      disabled={Boolean(installingPath) || importing}
+                    >
+                      {installingPath === item.path ? "安装中" : "安装"}
+                    </Button>
+                  </div>
+                </div>
+              ))}
+              {!preview.skills.length ? (
+                <div className="rounded-md border border-dashed p-6 text-center text-sm text-muted-foreground">
+                  未发现可导入的 Skill
+                </div>
+              ) : null}
+            </div>
+          ) : (
+            <div className="rounded-md border border-dashed p-6 text-center text-sm text-muted-foreground">
+              分析后会显示可安装的 Skill、references、scripts 和 assets 数量
+            </div>
+          )}
+        </div>
+      </SheetContent>
+    </Sheet>
   );
 }
 

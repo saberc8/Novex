@@ -64,7 +64,11 @@ describe("training knowledge api", () => {
         answer: "Training starts on Monday.",
         citations: [],
         retrievalHitCount: 1,
-        answerStrategy: "extractive"
+        answerStrategy: "extractive",
+        embeddingModelRoute: "runtime.embedding",
+        rerankModelRoute: "runtime.reranker",
+        answerModelRoute: "runtime.llm.rag_answer",
+        answerModel: "deepseek-v4-flash"
       })
     );
 

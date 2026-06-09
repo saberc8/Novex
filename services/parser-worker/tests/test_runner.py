@@ -1,9 +1,15 @@
+import inspect
 import unittest
 from io import BytesIO
 from zipfile import ZipFile
 
 from parser_worker.mineru_client import MineruTask
-from parser_worker.runner import complete_mineru_parse_job, execute_parse_job, extract_mineru_markdown_from_zip
+from parser_worker.runner import (
+    complete_mineru_parse_job,
+    default_zip_fetcher,
+    execute_parse_job,
+    extract_mineru_markdown_from_zip,
+)
 
 
 class ParserWorkerRunnerTest(unittest.TestCase):
@@ -148,6 +154,12 @@ class ParserWorkerRunnerTest(unittest.TestCase):
 
         self.assertIn("# 薪酬政策", markdown)
         self.assertIn("[[page: 5]]", markdown)
+
+    def test_default_zip_fetcher_uses_mineru_ssl_context(self):
+        source = inspect.getsource(default_zip_fetcher)
+
+        self.assertIn("default_ssl_context()", source)
+        self.assertIn("curl", source)
 
     def test_complete_done_mineru_task_downloads_zip_and_posts_parsed_document(self):
         poster = FakePoster()

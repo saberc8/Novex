@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, HashMap},
     env,
     time::{Duration, Instant},
 };
@@ -9,8 +9,8 @@ use novex_model::{
     estimate_model_cost_cents, estimate_model_text_tokens, evaluate_model_route_policy,
     mask_api_key, normalize_model_provider_usage, ModelKind, ModelProviderType,
     ModelRoutePolicyInput, ModelRoutePolicyStatus, ModelRoutePurpose, ModelRuntimeConfig,
-    ModelRuntimeRoute, ModelRuntimeSummary, ModelRuntimeTarget, ModelTokenUsage,
-    ModelUsageCostInput,
+    ModelRuntimeRoute, ModelRuntimeRouteSummary, ModelRuntimeSummary, ModelRuntimeTarget,
+    ModelTokenUsage, ModelUsageCostInput,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -23,13 +23,13 @@ use crate::{
 };
 
 const MODEL_HEALTH_TIMEOUT: Duration = Duration::from_secs(20);
-const MODEL_CHAT_TIMEOUT: Duration = Duration::from_secs(60);
+const MODEL_CHAT_TIMEOUT: Duration = Duration::from_secs(120);
 const MODEL_RERANK_TIMEOUT: Duration = Duration::from_secs(30);
 const MODEL_EMBEDDING_TIMEOUT: Duration = Duration::from_secs(30);
 const DEFAULT_MODEL_CHAT_TEMPERATURE: f64 = 0.2;
 const MAX_MODEL_CHAT_TEMPERATURE: f64 = 1.0;
 const DEFAULT_MODEL_CHAT_MAX_TOKENS: u32 = 1024;
-const MAX_MODEL_CHAT_MAX_TOKENS: u32 = 2048;
+const MAX_MODEL_CHAT_MAX_TOKENS: u32 = 4096;
 const MAX_MODEL_CHAT_MESSAGES: usize = 30;
 const MAX_MODEL_CHAT_CONTENT_CHARS: usize = 12_000;
 const MAX_MODEL_CHAT_FILE_CONTEXTS: usize = 3;
@@ -63,6 +63,8 @@ pub struct ModelHealthCheckResp {
 pub struct ModelChatCommand {
     #[serde(default)]
     pub conversation_id: Option<i64>,
+    #[serde(default)]
+    pub route_id: Option<String>,
     #[serde(default)]
     pub messages: Vec<ModelChatMessage>,
     #[serde(default)]
@@ -361,29 +363,37 @@ impl ModelRuntimeService {
             ModelRoutePurpose::Embedding,
             ModelRoutePurpose::Rerank,
             ModelRoutePurpose::EvalJudge,
+            ModelRoutePurpose::CodeAgent,
             ModelRoutePurpose::MediaGeneration,
         ] {
             if let Some(route) = self.resolve_route_for_purpose(purpose).await? {
-                let route_id = route.route_id().to_owned();
-                if !routes
-                    .iter()
-                    .any(|existing: &ModelRuntimeRoute| existing.route_id() == route_id)
-                {
-                    routes.push(route);
-                }
+                routes.push(route);
             }
         }
 
-        Ok(ModelRuntimeSummary {
-            routes: routes.iter().map(ModelRuntimeRoute::summary).collect(),
-            missing_env: ModelRuntimeConfig::from_env().missing_env().to_vec(),
-        })
+        Ok(effective_runtime_summary_from_routes(
+            routes,
+            ModelRuntimeConfig::from_env().missing_env().to_vec(),
+        ))
     }
 
     pub async fn resolve_route_for_purpose(
         &self,
         purpose: ModelRoutePurpose,
     ) -> Result<Option<ModelRuntimeRoute>, AppError> {
+        self.resolve_route_for_purpose_with_route_id(purpose, None)
+            .await
+    }
+
+    pub async fn resolve_route_for_purpose_with_route_id(
+        &self,
+        purpose: ModelRoutePurpose,
+        route_id: Option<&str>,
+    ) -> Result<Option<ModelRuntimeRoute>, AppError> {
+        let route_id = route_id
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned);
         let rows = sqlx::query_as::<_, ModelRuntimeRouteRow>(
             r#"
 SELECT
@@ -416,12 +426,14 @@ LEFT JOIN ai_model_credential credential
  AND credential.status = 1
 WHERE r.tenant_id = $1
   AND r.route_purpose = $2
+  AND ($3::text IS NULL OR r.code = $3)
   AND r.status = 1
 ORDER BY r.priority ASC, r.id ASC;
 "#,
         )
         .bind(self.tenant_id)
         .bind(purpose.as_str())
+        .bind(route_id.as_deref())
         .fetch_all(&self.db)
         .await?;
 
@@ -431,10 +443,12 @@ ORDER BY r.priority ASC, r.id ASC;
             }
         }
 
-        Ok(env_fallback_route_for_purpose(
-            purpose,
-            &ModelRuntimeConfig::from_env(),
-        ))
+        let fallback = env_fallback_route_for_purpose(purpose, &ModelRuntimeConfig::from_env());
+        match (route_id.as_deref(), fallback) {
+            (None, fallback) => Ok(fallback),
+            (Some(selected), Some(route)) if route.route_id() == selected => Ok(Some(route)),
+            (Some(_), _) => Err(AppError::bad_request("选择的模型路由不可用")),
+        }
     }
 
     pub fn parse_rerank_scores(body: &Value) -> Vec<ModelRerankScore> {
@@ -775,7 +789,10 @@ ORDER BY r.priority, r.id
         }
         let conversation_id = command.conversation_id.unwrap_or_else(next_id);
         let route = self
-            .resolve_route_for_purpose(ModelRoutePurpose::Chat)
+            .resolve_route_for_purpose_with_route_id(
+                ModelRoutePurpose::Chat,
+                command.route_id.as_deref(),
+            )
             .await?
             .ok_or_else(|| AppError::bad_request("LLM 模型环境变量未配置完整"))?;
         let response =
@@ -813,7 +830,10 @@ ORDER BY r.priority, r.id
     ) -> Result<ModelChatResp, AppError> {
         let command = normalize_model_chat_command(command)?;
         let route = self
-            .resolve_route_for_purpose(ModelRoutePurpose::Chat)
+            .resolve_route_for_purpose_with_route_id(
+                ModelRoutePurpose::Chat,
+                command.route_id.as_deref(),
+            )
             .await?
             .ok_or_else(|| AppError::bad_request("LLM 模型环境变量未配置完整"))?;
         let response = execute_normalized_chat_completion_with_route(
@@ -840,7 +860,7 @@ ORDER BY r.priority, r.id
     ) -> Result<ModelChatResp, AppError> {
         let command = normalize_model_chat_command(command)?;
         let route = self
-            .resolve_route_for_purpose(purpose)
+            .resolve_route_for_purpose_with_route_id(purpose, command.route_id.as_deref())
             .await?
             .ok_or_else(|| AppError::bad_request("LLM 模型环境变量未配置完整"))?;
         execute_normalized_chat_completion_with_route(&route, &command, command.conversation_id)
@@ -882,6 +902,144 @@ LIMIT $3;
     }
 }
 
+#[derive(Debug)]
+struct RuntimeRouteSummaryAccumulator {
+    summary: ModelRuntimeRouteSummary,
+    source_route_ids: Vec<String>,
+    purpose_route_ids: BTreeMap<String, String>,
+}
+
+fn effective_runtime_summary_from_routes(
+    routes: Vec<ModelRuntimeRoute>,
+    missing_env: Vec<String>,
+) -> ModelRuntimeSummary {
+    let mut groups: Vec<(String, RuntimeRouteSummaryAccumulator)> = Vec::new();
+
+    for route in routes {
+        let group_key = runtime_route_physical_key(&route);
+        let source_route_id = route.route_id().to_owned();
+        let route_summary = route.summary();
+        if let Some((_, accumulator)) = groups
+            .iter_mut()
+            .find(|(existing_key, _)| existing_key == &group_key)
+        {
+            accumulator.source_route_ids.push(source_route_id.clone());
+            merge_unique_model_purposes(&mut accumulator.summary.purposes, &route_summary.purposes);
+            merge_unique_strings(&mut accumulator.summary.env_keys, &route_summary.env_keys);
+            for purpose in &route_summary.purposes {
+                accumulator
+                    .purpose_route_ids
+                    .entry(purpose.as_str().to_owned())
+                    .or_insert_with(|| source_route_id.clone());
+            }
+            accumulator.summary.route_id =
+                merged_runtime_route_id(&accumulator.source_route_ids, accumulator.summary.target);
+            accumulator.summary.purposes =
+                sort_runtime_purposes(accumulator.summary.purposes.clone());
+            accumulator.summary.purpose_route_ids = accumulator.purpose_route_ids.clone();
+            continue;
+        }
+
+        let mut purpose_route_ids = BTreeMap::new();
+        for purpose in &route_summary.purposes {
+            purpose_route_ids.insert(purpose.as_str().to_owned(), source_route_id.clone());
+        }
+        let mut summary = route_summary;
+        summary.purposes = sort_runtime_purposes(summary.purposes);
+        summary.purpose_route_ids = purpose_route_ids.clone();
+        groups.push((
+            group_key,
+            RuntimeRouteSummaryAccumulator {
+                summary,
+                source_route_ids: vec![source_route_id],
+                purpose_route_ids,
+            },
+        ));
+    }
+
+    ModelRuntimeSummary {
+        routes: groups
+            .into_iter()
+            .map(|(_, accumulator)| accumulator.summary)
+            .collect(),
+        missing_env,
+    }
+}
+
+fn runtime_route_physical_key(route: &ModelRuntimeRoute) -> String {
+    [
+        route.target().as_str(),
+        route.kind().as_str(),
+        route.provider().as_str(),
+        route.model().unwrap_or_default(),
+        route.base_url(),
+        route.endpoint(),
+        route.api_key(),
+    ]
+    .join("\u{1f}")
+}
+
+fn merge_unique_model_purposes(
+    current: &mut Vec<ModelRoutePurpose>,
+    incoming: &[ModelRoutePurpose],
+) {
+    for purpose in incoming {
+        if !current.contains(purpose) {
+            current.push(*purpose);
+        }
+    }
+}
+
+fn merge_unique_strings(current: &mut Vec<String>, incoming: &[String]) {
+    for value in incoming {
+        if !current.contains(value) {
+            current.push(value.clone());
+        }
+    }
+}
+
+fn merged_runtime_route_id(route_ids: &[String], target: ModelRuntimeTarget) -> String {
+    if route_ids.len() <= 1 {
+        return route_ids
+            .first()
+            .cloned()
+            .unwrap_or_else(|| format!("runtime.{}", target.as_str()));
+    }
+    let Some(first) = route_ids.first() else {
+        return format!("runtime.{}", target.as_str());
+    };
+    let Some(prefix) = first.rsplit_once('.').map(|(prefix, _)| prefix) else {
+        return first.clone();
+    };
+    if route_ids
+        .iter()
+        .all(|route_id| route_id.starts_with(prefix) && route_id[prefix.len()..].starts_with('.'))
+    {
+        prefix.to_owned()
+    } else {
+        first.clone()
+    }
+}
+
+fn sort_runtime_purposes(mut purposes: Vec<ModelRoutePurpose>) -> Vec<ModelRoutePurpose> {
+    purposes.sort_by_key(|purpose| runtime_purpose_order(*purpose));
+    purposes.dedup();
+    purposes
+}
+
+fn runtime_purpose_order(purpose: ModelRoutePurpose) -> usize {
+    match purpose {
+        ModelRoutePurpose::Chat => 0,
+        ModelRoutePurpose::RagAnswer => 1,
+        ModelRoutePurpose::QueryRewrite => 2,
+        ModelRoutePurpose::Embedding => 3,
+        ModelRoutePurpose::Rerank => 4,
+        ModelRoutePurpose::EvalJudge => 5,
+        ModelRoutePurpose::CodeAgent => 6,
+        ModelRoutePurpose::MediaGeneration => 7,
+    }
+}
+
 async fn execute_chat_completion(command: ModelChatCommand) -> Result<ModelChatResp, AppError> {
     let command = normalize_model_chat_command(command)?;
     execute_normalized_chat_completion(&command, command.conversation_id).await
@@ -894,6 +1052,12 @@ async fn execute_normalized_chat_completion(
     let config = ModelRuntimeConfig::from_env();
     let route = config
         .route(ModelRuntimeTarget::Llm)
+        .filter(|route| {
+            command
+                .route_id
+                .as_deref()
+                .map_or(true, |route_id| route.route_id() == route_id)
+        })
         .ok_or_else(|| AppError::bad_request("LLM 模型环境变量未配置完整"))?;
     execute_normalized_chat_completion_with_route(route, command, conversation_id).await
 }
@@ -935,6 +1099,7 @@ fn normalize_model_chat_command(
     if matches!(command.conversation_id, Some(value) if value <= 0) {
         return Err(AppError::bad_request("会话 ID 不合法"));
     }
+    command.route_id = normalize_optional_runtime_route_id(command.route_id)?;
     if command.messages.is_empty() {
         return Err(AppError::bad_request("至少需要一条消息"));
     }
@@ -992,6 +1157,18 @@ fn normalize_model_chat_command(
     );
 
     Ok(command)
+}
+
+fn normalize_optional_runtime_route_id(
+    route_id: Option<String>,
+) -> Result<Option<String>, AppError> {
+    let route_id = route_id
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty());
+    if let Some(route_id) = &route_id {
+        ensure_max_chars("模型路由", route_id, 128)?;
+    }
+    Ok(route_id)
 }
 
 fn model_chat_request_payload(route: &ModelRuntimeRoute, command: &ModelChatCommand) -> Value {
@@ -1788,6 +1965,77 @@ mod tests {
     }
 
     #[test]
+    fn effective_runtime_summary_merges_same_physical_llm_and_preserves_purpose_routes() {
+        let chat_route = ModelRuntimeRoute::new(
+            "runtime.llm.chat",
+            ModelRuntimeTarget::Llm,
+            ModelKind::Llm,
+            ModelProviderType::DeepSeek,
+            Some("deepseek-v4-flash".to_owned()),
+            "https://api.deepseek.com",
+            "https://api.deepseek.com/chat/completions",
+            "sk-fake-llm-secret-508d",
+            vec![ModelRoutePurpose::Chat],
+            vec!["LLM_API_KEY".to_owned()],
+        )
+        .unwrap();
+        let rag_answer_route = ModelRuntimeRoute::new(
+            "runtime.llm.rag_answer",
+            ModelRuntimeTarget::Llm,
+            ModelKind::Llm,
+            ModelProviderType::DeepSeek,
+            Some("deepseek-v4-flash".to_owned()),
+            "https://api.deepseek.com",
+            "https://api.deepseek.com/chat/completions",
+            "sk-fake-llm-secret-508d",
+            vec![ModelRoutePurpose::RagAnswer],
+            vec!["LLM_API_KEY".to_owned()],
+        )
+        .unwrap();
+        let embedding_route = ModelRuntimeRoute::new(
+            "runtime.embedding",
+            ModelRuntimeTarget::Embedding,
+            ModelKind::Embedding,
+            ModelProviderType::DashScope,
+            Some("text-embedding-v4".to_owned()),
+            "https://dashscope.aliyuncs.com/compatible-mode/v1",
+            "https://dashscope.aliyuncs.com/compatible-mode/v1/embeddings",
+            "sk-fake-embedding-secret-ffff",
+            vec![ModelRoutePurpose::Embedding],
+            vec!["EMBEDDING_API_KEY".to_owned()],
+        )
+        .unwrap();
+
+        let summary = effective_runtime_summary_from_routes(
+            vec![chat_route, rag_answer_route, embedding_route],
+            Vec::new(),
+        );
+
+        let llm_routes = summary
+            .routes
+            .iter()
+            .filter(|route| route.target == ModelRuntimeTarget::Llm)
+            .collect::<Vec<_>>();
+        assert_eq!(llm_routes.len(), 1);
+        let llm = llm_routes[0];
+        assert_eq!(llm.route_id, "runtime.llm");
+        assert_eq!(
+            llm.purposes,
+            vec![ModelRoutePurpose::Chat, ModelRoutePurpose::RagAnswer]
+        );
+        assert_eq!(
+            llm.purpose_route_ids.get("chat").map(String::as_str),
+            Some("runtime.llm.chat")
+        );
+        assert_eq!(
+            llm.purpose_route_ids.get("rag_answer").map(String::as_str),
+            Some("runtime.llm.rag_answer")
+        );
+        assert_eq!(summary.routes.len(), 2);
+        assert!(!format!("{summary:?}").contains("sk-fake-llm-secret-508d"));
+    }
+
+    #[test]
     fn dynamic_route_from_registry_row_uses_route_code_and_env_secret() {
         let row = dynamic_route_test_row(
             "tenant42.rag_answer",
@@ -2113,7 +2361,7 @@ mod tests {
         assert_eq!(command.messages[0].content, "You are Novex.");
         assert_eq!(command.messages[1].role, "user");
         assert_eq!(command.temperature, Some(1.0));
-        assert_eq!(command.max_tokens, Some(2048));
+        assert_eq!(command.max_tokens, Some(4096));
     }
 
     #[test]

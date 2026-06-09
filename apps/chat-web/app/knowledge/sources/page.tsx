@@ -1,5 +1,5 @@
 import { ChatWorkbenchPage } from "../../workbench";
 
 export default function Page() {
-  return <ChatWorkbenchPage />;
+  return <ChatWorkbenchPage activeRoute="knowledge-sources" />;
 }

@@ -11,7 +11,7 @@ export class ApiClientError extends Error {
 }
 
 export interface RequestOptions {
-  method?: "GET" | "POST";
+  method?: "GET" | "POST" | "DELETE";
   body?: unknown;
   query?: object;
 }

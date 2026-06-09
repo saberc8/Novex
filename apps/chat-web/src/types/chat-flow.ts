@@ -33,6 +33,9 @@ export interface ChatFlowSessionResp {
 export interface ChatFlowMessageCommand {
   content: string;
   limit?: number;
+  modelRouteId?: string;
+  answerModelRouteId?: string;
+  skillCode?: string;
 }
 
 export interface ChatFlowMessageResp {

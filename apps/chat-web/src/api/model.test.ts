@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { chatCompletion, listChatConversations } from "./model";
+import { chatCompletion, getModelRuntimeConfig, listChatConversations } from "./model";
 
 function okResponse(data: unknown) {
   return Promise.resolve(
@@ -88,6 +88,20 @@ describe("chat model api", () => {
     await listChatConversations();
 
     expect(fetchMock.mock.calls[0]?.[0]).toBe("http://localhost:4398/ai/models/chat/conversations");
+    expect(fetchMock.mock.calls[0]?.[1]).toMatchObject({
+      method: "GET",
+      headers: expect.objectContaining({
+        Authorization: "Bearer token-1"
+      })
+    });
+  });
+
+  it("loads runtime config with bearer auth", async () => {
+    window.localStorage.setItem("novex_token", "token-1");
+
+    await getModelRuntimeConfig();
+
+    expect(fetchMock.mock.calls[0]?.[0]).toBe("http://localhost:4398/ai/models/runtime-config");
     expect(fetchMock.mock.calls[0]?.[1]).toMatchObject({
       method: "GET",
       headers: expect.objectContaining({

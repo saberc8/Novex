@@ -30,6 +30,12 @@ export function createDataset(data: DatasetCommand) {
   });
 }
 
+export function deleteDataset(datasetId: number) {
+  return apiRequest<number>(`${DATASET_URL}/${datasetId}`, {
+    method: "DELETE"
+  });
+}
+
 export function listDocuments(datasetId: number, query: DocumentQuery = {}) {
   return apiRequest<PageResult<DocumentResp>>(`${DATASET_URL}/${datasetId}/documents`, {
     query

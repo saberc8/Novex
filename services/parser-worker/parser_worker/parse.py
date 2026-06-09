@@ -240,6 +240,8 @@ def submit_mineru_pdf_parse(
         mineru_client = mineru_client or default_mineru_client()
         task = mineru_client.create_extract_task(
             normalized["uri"],
+            file_name=normalized["name"],
+            data_id=str(parser_job_id),
             model_version=non_empty_str(options.get("mineruModelVersion"), "vlm"),
             is_ocr=bool(options.get("ocr", is_image_source(source))),
             enable_formula=bool(options.get("extractFormula", True)),

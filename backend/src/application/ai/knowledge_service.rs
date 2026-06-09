@@ -5,6 +5,7 @@ use std::{
 };
 
 use chrono::{NaiveDateTime, Utc};
+use futures_util::future::join_all;
 #[cfg(test)]
 use novex_model::ModelRuntimeTarget;
 use novex_model::{ModelRoutePurpose, ModelRuntimeConfig};
@@ -65,12 +66,21 @@ const PARSER_OUTBOX_STATUS_PENDING: i16 = 1;
 const PARSER_OUTBOX_MAX_ATTEMPTS: i32 = 5;
 const CHUNK_EMBEDDING_STATUS_INDEXED: i16 = 4;
 const DEFAULT_RAG_LIMIT: usize = 5;
-const MAX_RAG_LIMIT: usize = 10;
+const MAX_RAG_LIMIT: usize = 24;
 const RERANK_CANDIDATE_MULTIPLIER: usize = 4;
-const MAX_RERANK_CANDIDATES: usize = 30;
-const DEFAULT_RAG_ANSWER_MAX_TOKENS: u32 = 1024;
+const MAX_RERANK_CANDIDATES: usize = 80;
+const DEFAULT_RETRIEVAL_PLAN_QUERIES: usize = 4;
+const MAX_RETRIEVAL_PLAN_QUERIES: usize = 8;
+const MAX_RETRIEVAL_PLAN_REQUIRED_SECTIONS: usize = 10;
+const MAX_RETRIEVAL_PLAN_OUTLINE_SECTIONS: usize = 300;
+const DEFAULT_RAG_ANSWER_MAX_TOKENS: u32 = 4096;
+const LARGE_DOCUMENT_CHUNK_THRESHOLD: usize = 800;
+const LARGE_DOCUMENT_TOKEN_THRESHOLD: usize = 80_000;
+const LARGE_DOCUMENT_TARGET_HIT_LIMIT: usize = 20;
+const LARGE_DOCUMENT_NOTES_BATCH_SIZE: usize = 5;
+const LARGE_DOCUMENT_MAX_NOTE_BATCHES: usize = 4;
 const LOCAL_EMBEDDING_DIMENSION: usize = 64;
-const MAX_LOCAL_RETRIEVAL_CHUNKS: i64 = 500;
+const MAX_LOCAL_RETRIEVAL_CHUNKS: i64 = 5000;
 const VECTOR_COLLECTION_STATUS_READY: i16 = 1;
 const MILVUS_SEARCH_TIMEOUT: Duration = Duration::from_secs(5);
 const FEEDBACK_STATUS_OPEN: i16 = 1;
@@ -386,6 +396,10 @@ pub struct RagAskCommand {
     pub question: String,
     #[serde(default = "default_rag_limit")]
     pub limit: usize,
+    #[serde(default)]
+    pub answer_model_route_id: Option<String>,
+    #[serde(skip)]
+    pub answer_instruction: Option<String>,
 }
 
 impl Default for RagAskCommand {
@@ -393,6 +407,8 @@ impl Default for RagAskCommand {
         Self {
             question: String::new(),
             limit: DEFAULT_RAG_LIMIT,
+            answer_model_route_id: None,
+            answer_instruction: None,
         }
     }
 }
@@ -509,6 +525,75 @@ pub struct RagAskResp {
     pub citations: Vec<CitationResp>,
     pub retrieval_hit_count: usize,
     pub answer_strategy: String,
+    pub embedding_model_route: String,
+    pub rerank_model_route: String,
+    pub answer_model_route: String,
+    pub answer_model: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct RagRetrievalPlan {
+    queries: Vec<String>,
+    required_sections: Vec<String>,
+}
+
+impl RagRetrievalPlan {
+    fn fallback(question: &str) -> Self {
+        Self {
+            queries: vec![question.trim().to_owned()]
+                .into_iter()
+                .filter(|query| !query.is_empty())
+                .collect(),
+            required_sections: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RagRetrievalPlanPayload {
+    #[serde(default)]
+    queries: Vec<String>,
+    #[serde(default, alias = "required_sections")]
+    required_sections: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RagGenerationMode {
+    SinglePass,
+    LargeDocumentLoop,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RagGenerationProfile {
+    mode: RagGenerationMode,
+    target_hit_limit: usize,
+    notes_batch_size: usize,
+    max_note_batches: usize,
+}
+
+impl RagGenerationProfile {
+    fn single_pass() -> Self {
+        Self {
+            mode: RagGenerationMode::SinglePass,
+            target_hit_limit: 0,
+            notes_batch_size: 0,
+            max_note_batches: 0,
+        }
+    }
+
+    fn large_document_loop() -> Self {
+        Self {
+            mode: RagGenerationMode::LargeDocumentLoop,
+            target_hit_limit: LARGE_DOCUMENT_TARGET_HIT_LIMIT,
+            notes_batch_size: LARGE_DOCUMENT_NOTES_BATCH_SIZE,
+            max_note_batches: LARGE_DOCUMENT_MAX_NOTE_BATCHES,
+        }
+    }
+
+    fn uses_loop(self) -> bool {
+        self.mode == RagGenerationMode::LargeDocumentLoop
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -660,6 +745,23 @@ impl KnowledgeService {
         let record = dataset_save_record(tenant_id, id, user_id, &command);
         self.repo.create_dataset(&record).await?;
         Ok(id)
+    }
+
+    pub async fn delete_dataset_for_tenant(
+        &self,
+        tenant_id: i64,
+        dataset_id: i64,
+    ) -> Result<i64, AppError> {
+        if dataset_id <= 0 {
+            return Err(AppError::bad_request("知识库 ID 不合法"));
+        }
+        if !self.repo.dataset_exists(tenant_id, dataset_id).await? {
+            return Err(AppError::NotFound);
+        }
+        self.repo
+            .delete_dataset_cascade(tenant_id, dataset_id)
+            .await?;
+        Ok(dataset_id)
     }
 
     pub async fn list_documents(
@@ -1204,10 +1306,25 @@ impl KnowledgeService {
             .repo
             .get_vector_collection(tenant_id, dataset_id)
             .await?;
-        let candidate_limit = rerank_candidate_limit(command.limit);
+        let generation_profile = rag_generation_profile(&indexed_chunks);
         let model_runtime = ModelRuntimeService::for_tenant(self.db.clone(), tenant_id);
-        let candidate_hits = hybrid_retrieve_indexed_chunks_with_milvus_or_local(
+        let retrieval_plan = build_rag_retrieval_plan(
             &command.question,
+            &indexed_chunks,
+            &model_runtime,
+            command.answer_model_route_id.as_deref(),
+        )
+        .await;
+        tracing::debug!(
+            queries = ?retrieval_plan.queries,
+            required_sections = ?retrieval_plan.required_sections,
+            "RAG retrieval plan"
+        );
+        let hit_limit =
+            retrieval_plan_hit_limit(&retrieval_plan, command.limit, &generation_profile);
+        let candidate_limit = rerank_candidate_limit(hit_limit);
+        let candidate_hits = retrieve_candidates_for_plan(
+            &retrieval_plan,
             &model_runtime,
             tenant_id,
             dataset_id,
@@ -1219,13 +1336,25 @@ impl KnowledgeService {
         let hits = rerank_dataset_hits(
             &command.question,
             candidate_hits,
-            command.limit,
+            hit_limit,
+            &retrieval_plan,
             &model_runtime,
         )
         .await?;
         let indexed_hits = indexed_retrieval_hits(&hits, &indexed_chunks);
-        let answer = generate_rag_answer(&command.question, &hits, &model_runtime).await?;
-        let model_routes = rag_model_routes_for_runtime(&model_runtime).await;
+        let generated_answer = generate_rag_answer(
+            &command.question,
+            &hits,
+            &model_runtime,
+            command.answer_model_route_id.as_deref(),
+            command.answer_instruction.as_deref(),
+            &generation_profile,
+        )
+        .await?;
+        let mut model_routes = rag_model_routes_for_runtime(&model_runtime).await;
+        model_routes.answer_model_route = generated_answer.answer_model_route.clone();
+        let answer = generated_answer.answer;
+        let answer_model = generated_answer.answer_model;
         let trace_id = next_id();
         let now = Utc::now().naive_utc();
         let trace = rag_trace_record(
@@ -1243,7 +1372,12 @@ impl KnowledgeService {
 
         self.repo.create_rag_trace(&trace, &trace_hits).await?;
 
-        Ok(rag_ask_response(trace_id, answer))
+        Ok(rag_ask_response(
+            trace_id,
+            answer,
+            &model_routes,
+            answer_model,
+        ))
     }
 
     pub async fn submit_rag_feedback(
@@ -1753,6 +1887,8 @@ fn parser_error_message(error: Option<&Value>) -> Option<String> {
 
 pub fn normalize_rag_ask_command(mut command: RagAskCommand) -> Result<RagAskCommand, AppError> {
     command.question = command.question.trim().to_owned();
+    command.answer_model_route_id =
+        normalize_optional_rag_model_route_id(command.answer_model_route_id)?;
     if command.limit == 0 {
         command.limit = DEFAULT_RAG_LIMIT;
     }
@@ -1762,6 +1898,18 @@ pub fn normalize_rag_ask_command(mut command: RagAskCommand) -> Result<RagAskCom
     }
     ensure_max_chars("问题", &command.question, 2000)?;
     Ok(command)
+}
+
+fn normalize_optional_rag_model_route_id(
+    route_id: Option<String>,
+) -> Result<Option<String>, AppError> {
+    let route_id = route_id
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty());
+    if let Some(route_id) = &route_id {
+        ensure_max_chars("模型路由", route_id, 128)?;
+    }
+    Ok(route_id)
 }
 
 pub fn normalize_rag_feedback_command(
@@ -3333,6 +3481,403 @@ fn hybrid_retrieve_indexed_chunks_with_query_embeddings(
     merge_hybrid_retrieval_hits(keyword_hits, embedding_hits, limit)
 }
 
+async fn build_rag_retrieval_plan(
+    question: &str,
+    indexed_chunks: &[IndexedRagChunk],
+    model_runtime: &ModelRuntimeService,
+    answer_model_route_id: Option<&str>,
+) -> RagRetrievalPlan {
+    let fallback = RagRetrievalPlan::fallback(question);
+    if fallback.queries.is_empty() {
+        return fallback;
+    }
+    let outline = retrieval_plan_outline(indexed_chunks);
+    if outline.is_empty() {
+        return fallback;
+    }
+
+    let query_limit = retrieval_plan_query_limit(question);
+    let command =
+        retrieval_plan_chat_command(question, &outline, query_limit, answer_model_route_id);
+    match model_runtime
+        .chat_completion_for_purpose(ModelRoutePurpose::RagAnswer, command)
+        .await
+    {
+        Ok(chat) => retrieval_plan_from_model_answer(&chat.answer, question),
+        Err(err) => {
+            tracing::warn!(error = %err, "RAG retrieval planner fell back to original question");
+            fallback
+        }
+    }
+}
+
+fn retrieval_plan_chat_command(
+    question: &str,
+    outline: &str,
+    query_limit: usize,
+    answer_model_route_id: Option<&str>,
+) -> ModelChatCommand {
+    ModelChatCommand {
+        conversation_id: None,
+        route_id: answer_model_route_id.map(str::to_owned),
+        messages: vec![
+            ModelChatMessage {
+                role: "system".to_owned(),
+                content: format!(
+                    "You are a retrieval planner for a grounded RAG system. Return strict JSON only. Do not answer the user. Produce at most {query_limit} focused search queries and at most 10 requiredSections that identify the document sections, topics, stages, modules, APIs, metrics, or constraints needed to answer. Use the provided section outline when helpful. If the question asks about a range, list, comparison, summary across stages, or multiple sections, include every matching section heading visible in the outline in requiredSections. Keep each string short. JSON shape: {{\"queries\":[\"...\"],\"requiredSections\":[\"...\"]}}."
+                ),
+            },
+            ModelChatMessage {
+                role: "user".to_owned(),
+                content: format!(
+                    "Question:\n{}\n\nAvailable section outline:\n{}\n\nReturn retrieval plan JSON only.",
+                    question.trim(),
+                    outline
+                ),
+            },
+        ],
+        file_contexts: vec![],
+        temperature: Some(0.0),
+        max_tokens: Some(1200),
+    }
+}
+
+fn retrieval_plan_outline(indexed_chunks: &[IndexedRagChunk]) -> String {
+    let mut seen = HashSet::new();
+    let mut lines = Vec::new();
+    for chunk in indexed_chunks {
+        let Some(line) = retrieval_plan_outline_line(&chunk.chunk) else {
+            continue;
+        };
+        let key = normalized_section_match_text(&line);
+        if key.is_empty() || !seen.insert(key) {
+            continue;
+        }
+        lines.push(format!("- {line}"));
+        if lines.len() >= MAX_RETRIEVAL_PLAN_OUTLINE_SECTIONS {
+            break;
+        }
+    }
+    lines.join("\n")
+}
+
+fn retrieval_plan_outline_line(chunk: &RagDocumentChunk) -> Option<String> {
+    if !chunk.metadata.section_path.is_empty() {
+        return Some(chunk.metadata.section_path.join(" / "));
+    }
+    let semantic = chunk.semantic_search_text.trim();
+    semantic
+        .lines()
+        .find(|line| line.contains(" / ") || line.contains(':') || line.contains('：'))
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(str::to_owned)
+}
+
+fn retrieval_plan_from_model_answer(answer: &str, question: &str) -> RagRetrievalPlan {
+    let Some(json_text) = extract_json_object(answer) else {
+        return RagRetrievalPlan::fallback(question);
+    };
+    let Ok(payload) = serde_json::from_str::<RagRetrievalPlanPayload>(&json_text) else {
+        return RagRetrievalPlan::fallback(question);
+    };
+    normalize_retrieval_plan_payload(question, payload)
+}
+
+fn extract_json_object(text: &str) -> Option<String> {
+    let trimmed = text.trim();
+    if trimmed.starts_with('{') && trimmed.ends_with('}') {
+        return Some(trimmed.to_owned());
+    }
+    let fenced = trimmed
+        .strip_prefix("```json")
+        .or_else(|| trimmed.strip_prefix("```"))
+        .and_then(|value| value.strip_suffix("```"))
+        .map(str::trim);
+    if let Some(value) = fenced {
+        if value.starts_with('{') && value.ends_with('}') {
+            return Some(value.to_owned());
+        }
+    }
+    let start = trimmed.find('{')?;
+    let end = trimmed.rfind('}')?;
+    (end > start).then(|| trimmed[start..=end].to_owned())
+}
+
+fn normalize_retrieval_plan_payload(
+    question: &str,
+    payload: RagRetrievalPlanPayload,
+) -> RagRetrievalPlan {
+    let query_limit = retrieval_plan_query_limit(question);
+    let mut queries = Vec::new();
+    push_unique_plan_text(&mut queries, question, query_limit);
+    for query in payload.queries {
+        push_unique_plan_text(&mut queries, &query, query_limit);
+    }
+
+    let mut required_sections = Vec::new();
+    for section in payload.required_sections {
+        push_unique_plan_text(
+            &mut required_sections,
+            &section,
+            MAX_RETRIEVAL_PLAN_REQUIRED_SECTIONS,
+        );
+    }
+    for section in &required_sections {
+        push_unique_plan_text(&mut queries, section, query_limit);
+    }
+
+    if queries.is_empty() {
+        return RagRetrievalPlan::fallback(question);
+    }
+    RagRetrievalPlan {
+        queries,
+        required_sections,
+    }
+}
+
+fn retrieval_plan_query_limit(question: &str) -> usize {
+    if question_needs_extended_retrieval(question) {
+        MAX_RETRIEVAL_PLAN_QUERIES
+    } else {
+        DEFAULT_RETRIEVAL_PLAN_QUERIES
+    }
+}
+
+fn question_needs_extended_retrieval(question: &str) -> bool {
+    let normalized = question.trim().to_ascii_lowercase();
+    let multi_section_terms = [
+        "比较", "对比", "分别", "逐个", "每个", "各个", "所有", "全部", "清单", "列表", "compare",
+        "each", "every", "all", "range", "from ",
+    ];
+    if multi_section_terms
+        .iter()
+        .any(|term| normalized.contains(term))
+    {
+        return true;
+    }
+
+    let has_digit = normalized.chars().any(|ch| ch.is_ascii_digit());
+    if !has_digit {
+        return false;
+    }
+    let range_markers = ["到", "至", "~", "～", "..", "-", "－", "—"];
+    if range_markers
+        .iter()
+        .any(|marker| normalized.contains(marker))
+    {
+        return true;
+    }
+
+    let list_markers = ["、", ",", "，", "/", "和"];
+    normalized.chars().filter(|ch| ch.is_ascii_digit()).count() >= 2
+        && list_markers
+            .iter()
+            .any(|marker| normalized.contains(marker))
+}
+
+fn push_unique_plan_text(items: &mut Vec<String>, value: &str, limit: usize) {
+    if items.len() >= limit {
+        return;
+    }
+    let normalized = value.trim().chars().take(160).collect::<String>();
+    if normalized.is_empty() {
+        return;
+    }
+    let key = normalized_section_match_text(&normalized);
+    if key.is_empty()
+        || items
+            .iter()
+            .any(|item| normalized_section_match_text(item) == key)
+    {
+        return;
+    }
+    items.push(normalized);
+}
+
+fn rag_generation_profile(indexed_chunks: &[IndexedRagChunk]) -> RagGenerationProfile {
+    let total_tokens = indexed_chunks
+        .iter()
+        .map(|chunk| chunk.chunk.token_count)
+        .sum::<usize>();
+    if indexed_chunks.len() >= LARGE_DOCUMENT_CHUNK_THRESHOLD
+        || total_tokens >= LARGE_DOCUMENT_TOKEN_THRESHOLD
+    {
+        RagGenerationProfile::large_document_loop()
+    } else {
+        RagGenerationProfile::single_pass()
+    }
+}
+
+fn retrieval_plan_hit_limit(
+    plan: &RagRetrievalPlan,
+    requested_limit: usize,
+    generation_profile: &RagGenerationProfile,
+) -> usize {
+    requested_limit
+        .max(plan.required_sections.len())
+        .max(generation_profile.target_hit_limit)
+        .min(MAX_RAG_LIMIT)
+}
+
+async fn retrieve_candidates_for_plan(
+    plan: &RagRetrievalPlan,
+    model_runtime: &ModelRuntimeService,
+    tenant_id: i64,
+    dataset_id: i64,
+    vector_collection: Option<&VectorCollectionRecord>,
+    indexed_chunks: &[IndexedRagChunk],
+    limit: usize,
+) -> Result<Vec<RetrievalHit>, AppError> {
+    if limit == 0 {
+        return Ok(Vec::new());
+    }
+    let queries = if plan.queries.is_empty() {
+        Vec::new()
+    } else {
+        plan.queries.clone()
+    };
+    let mut hit_sets = Vec::new();
+    for query in queries {
+        let hits = hybrid_retrieve_indexed_chunks_with_milvus_or_local(
+            &query,
+            model_runtime,
+            tenant_id,
+            dataset_id,
+            vector_collection,
+            indexed_chunks,
+            limit,
+        )
+        .await?;
+        hit_sets.push(hits);
+    }
+    let candidates = rank_fusion_retrieval_hits(hit_sets, limit);
+    Ok(expand_candidates_with_required_sections(
+        plan,
+        candidates,
+        indexed_chunks,
+        limit,
+    ))
+}
+
+fn rank_fusion_retrieval_hits(hit_sets: Vec<Vec<RetrievalHit>>, limit: usize) -> Vec<RetrievalHit> {
+    let mut merged = HashMap::<String, (RetrievalHit, f32)>::new();
+    for hits in hit_sets {
+        for (index, hit) in hits.into_iter().enumerate() {
+            let contribution = 1.0 / (60.0 + index as f32 + 1.0);
+            let key = hit.chunk.chunk_id.clone();
+            merged
+                .entry(key)
+                .and_modify(|(existing, score)| {
+                    *score += contribution;
+                    if hit.score > existing.score {
+                        *existing = hit.clone();
+                    }
+                })
+                .or_insert((hit, contribution));
+        }
+    }
+    let mut hits = merged
+        .into_values()
+        .map(|(mut hit, score)| {
+            hit.score = score;
+            hit
+        })
+        .collect::<Vec<_>>();
+    hits.sort_by(|left, right| {
+        right
+            .score
+            .partial_cmp(&left.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| left.chunk.chunk_index.cmp(&right.chunk.chunk_index))
+    });
+    hits.truncate(limit);
+    rank_retrieval_hits(hits)
+}
+
+fn expand_candidates_with_required_sections(
+    plan: &RagRetrievalPlan,
+    candidates: Vec<RetrievalHit>,
+    indexed_chunks: &[IndexedRagChunk],
+    limit: usize,
+) -> Vec<RetrievalHit> {
+    if limit == 0 || plan.required_sections.is_empty() {
+        return rank_retrieval_hits(candidates.into_iter().take(limit).collect());
+    }
+
+    let mut selected = Vec::new();
+    let mut used = HashSet::new();
+    for section in &plan.required_sections {
+        if selected.len() >= limit {
+            break;
+        }
+        let hit = best_required_section_candidate(section, &used, &candidates, indexed_chunks);
+        if let Some(hit) = hit {
+            used.insert(hit.chunk.chunk_id.clone());
+            selected.push(hit);
+        }
+    }
+
+    for hit in candidates {
+        if selected.len() >= limit {
+            break;
+        }
+        if used.insert(hit.chunk.chunk_id.clone()) {
+            selected.push(hit);
+        }
+    }
+
+    rank_retrieval_hits(selected)
+}
+
+fn best_required_section_candidate(
+    section: &str,
+    used: &HashSet<String>,
+    candidates: &[RetrievalHit],
+    indexed_chunks: &[IndexedRagChunk],
+) -> Option<RetrievalHit> {
+    let mut best = candidates
+        .iter()
+        .filter(|hit| !used.contains(hit.chunk.chunk_id.as_str()))
+        .filter(|hit| hit_matches_required_section(hit, section))
+        .cloned()
+        .max_by(compare_required_section_hits);
+
+    for indexed_chunk in indexed_chunks {
+        if used.contains(indexed_chunk.chunk.chunk_id.as_str()) {
+            continue;
+        }
+        let hit = retrieval_hit_from_indexed_chunk(indexed_chunk, 0.0);
+        if !hit_matches_required_section(&hit, section) {
+            continue;
+        }
+        if best
+            .as_ref()
+            .is_none_or(|current| compare_required_section_hits(&hit, current).is_gt())
+        {
+            best = Some(hit);
+        }
+    }
+
+    best
+}
+
+fn compare_required_section_hits(left: &RetrievalHit, right: &RetrievalHit) -> std::cmp::Ordering {
+    required_section_hit_quality(left)
+        .partial_cmp(&required_section_hit_quality(right))
+        .unwrap_or(std::cmp::Ordering::Equal)
+        .then_with(|| right.chunk.chunk_index.cmp(&left.chunk.chunk_index))
+}
+
+fn retrieval_hit_from_indexed_chunk(indexed_chunk: &IndexedRagChunk, score: f32) -> RetrievalHit {
+    RetrievalHit {
+        rank: 0,
+        score,
+        citation: indexed_chunk.chunk.citation.clone(),
+        chunk: indexed_chunk.chunk.clone(),
+    }
+}
+
 fn embedding_vector_from_metadata(metadata: &Value) -> Option<Vec<f32>> {
     let vector = metadata
         .get("embedding")?
@@ -3527,6 +4072,7 @@ async fn rerank_dataset_hits(
     question: &str,
     hits: Vec<RetrievalHit>,
     limit: usize,
+    plan: &RagRetrievalPlan,
     model_runtime: &ModelRuntimeService,
 ) -> Result<Vec<RetrievalHit>, AppError> {
     if hits.is_empty() || limit == 0 {
@@ -3540,17 +4086,25 @@ async fn rerank_dataset_hits(
         return if strict {
             Err(AppError::bad_request("Rerank 模型环境变量未配置完整"))
         } else {
-            Ok(rerank_retrieval_hits(&hits, &[], limit))
+            Ok(ensure_required_section_coverage(
+                plan,
+                rerank_retrieval_hits(&hits, &[], limit),
+                &hits,
+                limit,
+            ))
         };
     };
     let documents = hits.iter().map(rerank_document_text).collect::<Vec<_>>();
 
-    match ModelRuntimeService::rerank_documents(&route, question, &documents).await {
-        Ok(scores) if !scores.is_empty() => Ok(rerank_retrieval_hits(&hits, &scores, limit)),
-        Ok(_) if strict => Err(AppError::bad_request("Rerank 模型响应为空")),
-        Err(err) if strict => Err(err),
-        _ => Ok(rerank_retrieval_hits(&hits, &[], limit)),
-    }
+    let reranked = match ModelRuntimeService::rerank_documents(&route, question, &documents).await {
+        Ok(scores) if !scores.is_empty() => rerank_retrieval_hits(&hits, &scores, limit),
+        Ok(_) if strict => return Err(AppError::bad_request("Rerank 模型响应为空")),
+        Err(err) if strict => return Err(err),
+        _ => rerank_retrieval_hits(&hits, &[], limit),
+    };
+    Ok(ensure_required_section_coverage(
+        plan, reranked, &hits, limit,
+    ))
 }
 
 #[cfg(test)]
@@ -3608,6 +4162,71 @@ fn rerank_retrieval_hits(
     rank_retrieval_hits(ordered)
 }
 
+fn ensure_required_section_coverage(
+    plan: &RagRetrievalPlan,
+    reranked: Vec<RetrievalHit>,
+    candidates: &[RetrievalHit],
+    limit: usize,
+) -> Vec<RetrievalHit> {
+    if limit == 0 {
+        return Vec::new();
+    }
+    if plan.required_sections.is_empty() {
+        return rank_retrieval_hits(reranked.into_iter().take(limit).collect());
+    }
+
+    let mut selected = Vec::new();
+    let mut used = HashSet::new();
+    for section in &plan.required_sections {
+        if selected.len() >= limit {
+            break;
+        }
+        let hit = candidates
+            .iter()
+            .filter(|hit| !used.contains(hit.chunk.chunk_id.as_str()))
+            .filter(|hit| hit_matches_required_section(hit, section))
+            .max_by(|left, right| compare_required_section_hits(left, right));
+        if let Some(hit) = hit {
+            used.insert(hit.chunk.chunk_id.clone());
+            selected.push(hit.clone());
+        }
+    }
+
+    for hit in reranked {
+        if selected.len() >= limit {
+            break;
+        }
+        if used.insert(hit.chunk.chunk_id.clone()) {
+            selected.push(hit);
+        }
+    }
+
+    rank_retrieval_hits(selected)
+}
+
+fn hit_matches_required_section(hit: &RetrievalHit, section: &str) -> bool {
+    let section = normalized_section_match_text(section);
+    if section.is_empty() {
+        return false;
+    }
+    normalized_section_match_text(&rerank_document_text(hit)).contains(&section)
+        || normalized_section_match_text(&hit.chunk.text).contains(&section)
+        || hit
+            .chunk
+            .metadata
+            .section_path
+            .iter()
+            .any(|path| normalized_section_match_text(path).contains(&section))
+}
+
+fn required_section_hit_quality(hit: &RetrievalHit) -> f32 {
+    let text = rerank_document_text(hit);
+    let normalized_len = normalized_section_match_text(&text).chars().count();
+    let token_score = hit.chunk.token_count.min(300) as f32;
+    let text_score = (normalized_len.min(1200) as f32) / 20.0;
+    token_score + text_score + hit.score.max(0.0)
+}
+
 fn rank_retrieval_hits(mut hits: Vec<RetrievalHit>) -> Vec<RetrievalHit> {
     for (index, hit) in hits.iter_mut().enumerate() {
         hit.rank = index + 1;
@@ -3626,12 +4245,27 @@ fn rerank_candidate_limit(limit: usize) -> usize {
         .clamp(limit, MAX_RERANK_CANDIDATES)
 }
 
+fn normalized_section_match_text(value: &str) -> String {
+    value
+        .chars()
+        .flat_map(char::to_lowercase)
+        .filter(|character| character.is_ascii_alphanumeric() || is_cjk_character(*character))
+        .collect()
+}
+
 #[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RagAnswerMode {
     UseLlm,
     RequireLlm,
     ExtractiveFallback,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct GeneratedRagAnswer {
+    answer: RagAnswer,
+    answer_model_route: String,
+    answer_model: Option<String>,
 }
 
 #[cfg(test)]
@@ -3649,27 +4283,264 @@ async fn generate_rag_answer(
     question: &str,
     hits: &[RetrievalHit],
     model_runtime: &ModelRuntimeService,
-) -> Result<RagAnswer, AppError> {
+    answer_model_route_id: Option<&str>,
+    answer_instruction: Option<&str>,
+    generation_profile: &RagGenerationProfile,
+) -> Result<GeneratedRagAnswer, AppError> {
     let strict = strict_live_rag_required();
     let route = model_runtime
-        .resolve_route_for_purpose(ModelRoutePurpose::RagAnswer)
+        .resolve_route_for_purpose_with_route_id(
+            ModelRoutePurpose::RagAnswer,
+            answer_model_route_id,
+        )
         .await?;
     match (route, strict) {
         (Some(_), _) => {
-            let chat = model_runtime
-                .chat_completion_for_purpose(
-                    ModelRoutePurpose::RagAnswer,
-                    rag_answer_chat_command(question, hits, DEFAULT_RAG_ANSWER_MAX_TOKENS),
+            let answer_result = if generation_profile.uses_loop() && hits.len() > 1 {
+                generate_large_document_rag_answer(
+                    question,
+                    hits,
+                    model_runtime,
+                    answer_model_route_id,
+                    answer_instruction,
+                    generation_profile,
                 )
-                .await?;
-            let answer = rag_answer_from_model_chat(chat, hits);
+                .await
+            } else {
+                chat_completion_for_rag_answer_with_retry(
+                    model_runtime,
+                    rag_answer_chat_command(
+                        question,
+                        hits,
+                        DEFAULT_RAG_ANSWER_MAX_TOKENS,
+                        answer_model_route_id,
+                        answer_instruction,
+                    ),
+                    "single-pass answer",
+                )
+                .await
+                .map(|chat| (chat, "llm_grounded".to_owned()))
+            };
+            let (chat, answer_strategy) = match answer_result {
+                Ok(result) => result,
+                Err(err) if !strict => {
+                    tracing::warn!(error = %err, "RAG LLM answer failed; falling back to extractive answer");
+                    let mut answer = build_extractive_answer(question, hits);
+                    answer.trace.answer_strategy = "extractive_fallback_after_llm_error".to_owned();
+                    return Ok(GeneratedRagAnswer {
+                        answer,
+                        answer_model_route: novex_rag::LOCAL_ANSWER_ROUTE.to_owned(),
+                        answer_model: None,
+                    });
+                }
+                Err(err) => return Err(err),
+            };
+            let answer_model_route = chat.route_id.clone();
+            let answer_model = chat.model.clone();
+            let answer = rag_answer_from_model_chat(chat, hits, &answer_strategy);
             if answer.answer.trim().is_empty() {
                 return Err(AppError::bad_request("LLM RAG 回答为空"));
             }
-            Ok(answer)
+            Ok(GeneratedRagAnswer {
+                answer,
+                answer_model_route,
+                answer_model,
+            })
         }
         (None, true) => Err(AppError::bad_request("LLM 模型环境变量未配置完整")),
-        (None, false) => Ok(build_extractive_answer(question, hits)),
+        (None, false) => Ok(GeneratedRagAnswer {
+            answer: build_extractive_answer(question, hits),
+            answer_model_route: novex_rag::LOCAL_ANSWER_ROUTE.to_owned(),
+            answer_model: None,
+        }),
+    }
+}
+
+async fn generate_large_document_rag_answer(
+    question: &str,
+    hits: &[RetrievalHit],
+    model_runtime: &ModelRuntimeService,
+    answer_model_route_id: Option<&str>,
+    answer_instruction: Option<&str>,
+    generation_profile: &RagGenerationProfile,
+) -> Result<(ModelChatResp, String), AppError> {
+    let batches = large_document_hit_batches(hits, generation_profile);
+    if batches.len() <= 1 {
+        let chat = chat_completion_for_rag_answer_with_retry(
+            model_runtime,
+            rag_answer_chat_command(
+                question,
+                hits,
+                DEFAULT_RAG_ANSWER_MAX_TOKENS,
+                answer_model_route_id,
+                answer_instruction,
+            ),
+            "large-document single-batch answer",
+        )
+        .await?;
+        return Ok((chat, "llm_grounded".to_owned()));
+    }
+
+    let note_futures = batches.iter().enumerate().map(|(index, batch)| {
+        let model_runtime = model_runtime.clone();
+        let command = large_document_notes_chat_command(
+            question,
+            batch,
+            index + 1,
+            batches.len(),
+            answer_model_route_id,
+            answer_instruction,
+        );
+        async move {
+            chat_completion_for_rag_answer_with_retry(
+                &model_runtime,
+                command,
+                "large-document notes batch",
+            )
+            .await
+            .map(|chat| chat.answer.trim().to_owned())
+        }
+    });
+    let mut notes = Vec::new();
+    for result in join_all(note_futures).await {
+        match result {
+            Ok(note) if !note.is_empty() => notes.push(note),
+            Ok(_) => {}
+            Err(err) => {
+                tracing::warn!(error = %err, "RAG large-document notes batch failed");
+            }
+        }
+    }
+
+    let chat = chat_completion_for_rag_answer_with_retry(
+        model_runtime,
+        large_document_final_answer_chat_command(
+            question,
+            hits,
+            &notes,
+            answer_model_route_id,
+            answer_instruction,
+        ),
+        "large-document final answer",
+    )
+    .await?;
+    Ok((chat, "llm_grounded_loop".to_owned()))
+}
+
+async fn chat_completion_for_rag_answer_with_retry(
+    model_runtime: &ModelRuntimeService,
+    command: ModelChatCommand,
+    label: &str,
+) -> Result<ModelChatResp, AppError> {
+    let mut last_error = None;
+    for attempt in 1..=2 {
+        match model_runtime
+            .chat_completion_for_purpose(ModelRoutePurpose::RagAnswer, command.clone())
+            .await
+        {
+            Ok(chat) => return Ok(chat),
+            Err(err) => {
+                tracing::warn!(
+                    attempt,
+                    error = %err,
+                    "RAG LLM chat attempt failed: {label}"
+                );
+                last_error = Some(err);
+                if attempt < 2 {
+                    tokio::time::sleep(Duration::from_millis(800)).await;
+                }
+            }
+        }
+    }
+    Err(last_error.unwrap_or_else(|| AppError::bad_request("LLM RAG 回答为空")))
+}
+
+fn large_document_hit_batches<'a>(
+    hits: &'a [RetrievalHit],
+    generation_profile: &RagGenerationProfile,
+) -> Vec<&'a [RetrievalHit]> {
+    if hits.is_empty() {
+        return Vec::new();
+    }
+    let batch_size = generation_profile.notes_batch_size.max(1);
+    let max_batches = generation_profile.max_note_batches.max(1);
+    hits.chunks(batch_size).take(max_batches).collect()
+}
+
+fn large_document_notes_chat_command(
+    question: &str,
+    hits: &[RetrievalHit],
+    batch_index: usize,
+    batch_count: usize,
+    answer_model_route_id: Option<&str>,
+    answer_instruction: Option<&str>,
+) -> ModelChatCommand {
+    let mut system_prompt = "You are one step in a large-document grounded RAG loop. Do not write the final answer. Extract the facts, narrative hooks, tensions, concrete examples, and useful citation labels from this batch only. Keep it compact, faithful, and reusable by a later final-writing step. If a chunk looks like OCR noise or malformed diagram text, mark it as low-value instead of relying on it."
+        .to_owned();
+    if let Some(instruction) = answer_instruction
+        .map(str::trim)
+        .filter(|instruction| !instruction.is_empty())
+    {
+        system_prompt.push_str("\n\nSkill instruction for evidence selection:\n");
+        system_prompt.push_str(instruction);
+    }
+
+    ModelChatCommand {
+        conversation_id: None,
+        route_id: answer_model_route_id.map(str::to_owned),
+        messages: vec![
+            ModelChatMessage {
+                role: "system".to_owned(),
+                content: system_prompt,
+            },
+            ModelChatMessage {
+                role: "user".to_owned(),
+                content: format!(
+                    "Original user request:\n{}\n\nBatch {batch_index}/{batch_count} context:\n{}\n\nReturn concise grounded notes with citation labels.",
+                    question.trim(),
+                    rag_context_sections(hits)
+                ),
+            },
+        ],
+        file_contexts: vec![],
+        temperature: Some(0.1),
+        max_tokens: Some(1200),
+    }
+}
+
+fn large_document_final_answer_chat_command(
+    question: &str,
+    hits: &[RetrievalHit],
+    notes: &[String],
+    answer_model_route_id: Option<&str>,
+    answer_instruction: Option<&str>,
+) -> ModelChatCommand {
+    let mut system_prompt = "You are the final step of a large-document grounded RAG loop. Use the consolidated notes and selected citations to produce a complete answer. Prefer a finished, publishable response over a short fragment. Preserve user-requested writing style. Do not expose internal notes. Avoid raw citation labels unless they are useful for factual support; if the user asks for a publishable article, make citations unobtrusive and do not let them break the prose."
+        .to_owned();
+    if let Some(instruction) = answer_instruction
+        .map(str::trim)
+        .filter(|instruction| !instruction.is_empty())
+    {
+        system_prompt.push_str("\n\nSkill instruction:\n");
+        system_prompt.push_str(instruction);
+    }
+
+    ModelChatCommand {
+        conversation_id: None,
+        route_id: answer_model_route_id.map(str::to_owned),
+        messages: vec![
+            ModelChatMessage {
+                role: "system".to_owned(),
+                content: system_prompt,
+            },
+            ModelChatMessage {
+                role: "user".to_owned(),
+                content: large_document_final_context_message(question, hits, notes),
+            },
+        ],
+        file_contexts: vec![],
+        temperature: Some(0.2),
+        max_tokens: Some(DEFAULT_RAG_ANSWER_MAX_TOKENS),
     }
 }
 
@@ -3690,14 +4561,26 @@ fn rag_answer_chat_command(
     question: &str,
     hits: &[RetrievalHit],
     max_tokens: u32,
+    answer_model_route_id: Option<&str>,
+    answer_instruction: Option<&str>,
 ) -> ModelChatCommand {
+    let mut system_prompt = "Only answer from the provided context. You may synthesize, compare, summarize, and judge whether a plan is reasonable when the judgment can be grounded in the provided context. Prefer a clear, useful answer over a terse fragment. If the context lacks enough evidence, say what is missing instead of inventing facts. Mention the supporting citation labels like [1] only when they directly support a sentence. Do not invent citations."
+        .to_owned();
+    if let Some(instruction) = answer_instruction
+        .map(str::trim)
+        .filter(|instruction| !instruction.is_empty())
+    {
+        system_prompt.push_str("\n\nSkill instruction:\n");
+        system_prompt.push_str(instruction);
+    }
+
     ModelChatCommand {
         conversation_id: None,
+        route_id: answer_model_route_id.map(str::to_owned),
         messages: vec![
             ModelChatMessage {
                 role: "system".to_owned(),
-                content: "Only answer from the provided context. If the context does not contain enough evidence, say that the answer is not available in the provided context. Keep the answer concise and grounded. Do not invent citations."
-                    .to_owned(),
+                content: system_prompt,
             },
             ModelChatMessage {
                 role: "user".to_owned(),
@@ -3717,6 +4600,13 @@ fn rag_context_message(question: &str, hits: &[RetrievalHit]) -> String {
         return message;
     }
 
+    message.push_str(&rag_context_sections(hits));
+    message.push_str("\nAnswer with the facts supported by the context above.");
+    message
+}
+
+fn rag_context_sections(hits: &[RetrievalHit]) -> String {
+    let mut message = String::new();
     for (index, hit) in hits.iter().enumerate() {
         let label = index + 1;
         let chunk_id = hit.citation.chunk_id.trim();
@@ -3736,17 +4626,41 @@ fn rag_context_message(question: &str, hits: &[RetrievalHit]) -> String {
         ));
     }
 
-    message.push_str("Answer with the facts supported by the context above.");
     message
 }
 
-fn rag_answer_from_model_chat(chat: ModelChatResp, hits: &[RetrievalHit]) -> RagAnswer {
+fn large_document_final_context_message(
+    question: &str,
+    hits: &[RetrievalHit],
+    notes: &[String],
+) -> String {
+    let mut message = format!("Original user request:\n{}\n\n", question.trim());
+    if notes.is_empty() {
+        message.push_str("Consolidated notes:\n(no intermediate notes)\n\n");
+    } else {
+        message.push_str("Consolidated notes from document batches:\n");
+        for (index, note) in notes.iter().enumerate() {
+            message.push_str(&format!("\n[Batch note {}]\n{}\n", index + 1, note.trim()));
+        }
+        message.push('\n');
+    }
+    message.push_str("Citation map for final grounding:\n");
+    message.push_str(&rag_context_sections(hits));
+    message.push_str("\nWrite the final answer now.");
+    message
+}
+
+fn rag_answer_from_model_chat(
+    chat: ModelChatResp,
+    hits: &[RetrievalHit],
+    answer_strategy: &str,
+) -> RagAnswer {
     RagAnswer {
         answer: chat.answer.trim().to_owned(),
         citations: citations_from_retrieval_hits(hits),
         trace: novex_rag::RagTraceSnapshot {
             retrieval_hit_count: hits.len(),
-            answer_strategy: "llm_grounded".to_owned(),
+            answer_strategy: answer_strategy.to_owned(),
         },
     }
 }
@@ -3860,7 +4774,12 @@ fn rag_trace_hit_records(
         .collect()
 }
 
-fn rag_ask_response(trace_id: i64, answer: RagAnswer) -> RagAskResp {
+fn rag_ask_response(
+    trace_id: i64,
+    answer: RagAnswer,
+    model_routes: &RagModelRoutes,
+    answer_model: Option<String>,
+) -> RagAskResp {
     RagAskResp {
         trace_id,
         answer: answer.answer,
@@ -3871,6 +4790,10 @@ fn rag_ask_response(trace_id: i64, answer: RagAnswer) -> RagAskResp {
             .collect(),
         retrieval_hit_count: answer.trace.retrieval_hit_count,
         answer_strategy: answer.trace.answer_strategy,
+        embedding_model_route: model_routes.embedding_model_route.clone(),
+        rerank_model_route: model_routes.rerank_model_route.clone(),
+        answer_model_route: model_routes.answer_model_route.clone(),
+        answer_model,
     }
 }
 
@@ -5164,12 +6087,25 @@ mod tests {
             },
         };
 
-        let resp = rag_ask_response(42, answer);
+        let resp = rag_ask_response(
+            42,
+            answer,
+            &RagModelRoutes {
+                embedding_model_route: "runtime.embedding".to_owned(),
+                rerank_model_route: "runtime.reranker".to_owned(),
+                answer_model_route: "runtime.llm.rag_answer".to_owned(),
+            },
+            Some("deepseek-v4-flash".to_owned()),
+        );
 
         assert_eq!(resp.trace_id, 42);
         assert_eq!(resp.answer, "Training starts on Monday.");
         assert_eq!(resp.citations.len(), 1);
         assert_eq!(resp.citations[0].document_id, "7");
+        assert_eq!(resp.embedding_model_route, "runtime.embedding");
+        assert_eq!(resp.rerank_model_route, "runtime.reranker");
+        assert_eq!(resp.answer_model_route, "runtime.llm.rag_answer");
+        assert_eq!(resp.answer_model.as_deref(), Some("deepseek-v4-flash"));
     }
 
     #[test]
@@ -5347,7 +6283,7 @@ mod tests {
             "Training starts on Monday.",
         )];
 
-        let command = rag_answer_chat_command("When does training start?", &hits, 512);
+        let command = rag_answer_chat_command("When does training start?", &hits, 512, None, None);
 
         assert_eq!(command.temperature, Some(0.2));
         assert_eq!(command.max_tokens, Some(512));
@@ -5355,6 +6291,9 @@ mod tests {
         assert!(command.messages[0]
             .content
             .contains("Only answer from the provided context"));
+        assert!(command.messages[0]
+            .content
+            .contains("synthesize, compare, summarize, and judge"));
         assert!(command.messages[1]
             .content
             .contains("Question:\nWhen does training start?"));
@@ -5362,6 +6301,47 @@ mod tests {
         assert!(command.messages[1]
             .content
             .contains("Training starts on Monday."));
+    }
+
+    #[test]
+    fn rag_answer_prompt_includes_selected_skill_instruction() {
+        let hits = vec![test_retrieval_hit(
+            "chunk-a",
+            0,
+            "Training starts on Monday.",
+        )];
+
+        let command = rag_answer_chat_command(
+            "Build a quiz.",
+            &hits,
+            512,
+            None,
+            Some("Create three quiz questions and keep every answer cited."),
+        );
+
+        assert!(command.messages[0].content.contains("Skill instruction:"));
+        assert!(command.messages[0]
+            .content
+            .contains("Create three quiz questions and keep every answer cited."));
+    }
+
+    #[test]
+    fn rag_answer_default_token_budget_supports_long_form_skills() {
+        let hits = vec![test_retrieval_hit(
+            "chunk-a",
+            0,
+            "Training starts on Monday.",
+        )];
+
+        let command = rag_answer_chat_command(
+            "Write a long-form article with this skill.",
+            &hits,
+            DEFAULT_RAG_ANSWER_MAX_TOKENS,
+            None,
+            Some("Write a complete article and do not stop mid sentence."),
+        );
+
+        assert!(command.max_tokens.unwrap_or_default() >= 4096);
     }
 
     #[test]
@@ -5379,7 +6359,7 @@ mod tests {
             usage: ModelChatUsage::default(),
         };
 
-        let answer = rag_answer_from_model_chat(chat, &hits);
+        let answer = rag_answer_from_model_chat(chat, &hits, "llm_grounded");
 
         assert_eq!(answer.answer, "Training starts on Monday.");
         assert_eq!(answer.trace.answer_strategy, "llm_grounded");
@@ -5486,10 +6466,31 @@ mod tests {
     }
 
     #[test]
+    fn service_deletes_dataset_after_validating_tenant_scope() {
+        let source = include_str!("knowledge_service.rs")
+            .split("\n#[cfg(test)]\nmod tests")
+            .next()
+            .unwrap();
+
+        for needle in [
+            "delete_dataset_for_tenant",
+            "dataset_id <= 0",
+            "dataset_exists(tenant_id, dataset_id)",
+            "delete_dataset_cascade(tenant_id, dataset_id)",
+        ] {
+            assert!(
+                source.contains(needle),
+                "{needle} missing from knowledge service"
+            );
+        }
+    }
+
+    #[test]
     fn rag_trace_record_uses_explicit_live_model_routes() {
         let command = RagAskCommand {
             question: "When does training start?".to_owned(),
             limit: 3,
+            ..RagAskCommand::default()
         };
         let answer = RagAnswer {
             answer: "Training starts on Monday.".to_owned(),
@@ -5580,6 +6581,273 @@ mod tests {
         assert_eq!(reranked[2].chunk.chunk_id, "42:1");
         assert_eq!(reranked[2].rank, 3);
         assert!((reranked[2].score - 0.18).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn retrieval_plan_parser_normalizes_llm_json() {
+        let plan = retrieval_plan_from_model_answer(
+            r#"```json
+            {
+              "queries": ["知识库 MVP", "Agent Runtime", "客户交付模板"],
+              "requiredSections": ["Foundation Skeleton", "Knowledge MVP", "Eval"]
+            }
+            ```"#,
+            "总结 M0 到 M5 方案是否合理",
+        );
+
+        assert_eq!(
+            plan.queries,
+            vec![
+                "总结 M0 到 M5 方案是否合理",
+                "知识库 MVP",
+                "Agent Runtime",
+                "客户交付模板",
+                "Foundation Skeleton",
+                "Knowledge MVP",
+                "Eval"
+            ]
+        );
+        assert_eq!(
+            plan.required_sections,
+            vec!["Foundation Skeleton", "Knowledge MVP", "Eval"]
+        );
+    }
+
+    #[test]
+    fn retrieval_plan_caps_generic_summary_queries() {
+        let plan = retrieval_plan_from_model_answer(
+            r#"{
+              "queries": [
+                "Novex 本地链路验证文档 主题总结",
+                "Novex AI Agent Foundation Architecture 主题 概述",
+                "Novex 本地链路验证文档",
+                "Novex AI Agent Foundation Architecture / 1. 定位",
+                "Novex AI Agent Foundation Architecture / 2. 设计原则",
+                "Novex AI Agent Foundation Architecture / 3. 总体架构",
+                "Novex AI Agent Foundation Architecture / 22. 结论"
+              ],
+              "requiredSections": [
+                "Novex 本地链路验证文档",
+                "Novex AI Agent Foundation Architecture / 1. 定位",
+                "Novex AI Agent Foundation Architecture / 2. 设计原则",
+                "Novex AI Agent Foundation Architecture / 3. 总体架构",
+                "Novex AI Agent Foundation Architecture / 22. 结论"
+              ]
+            }"#,
+            "总结一下主题",
+        );
+
+        assert_eq!(plan.queries.len(), DEFAULT_RETRIEVAL_PLAN_QUERIES);
+        assert_eq!(plan.queries[0], "总结一下主题");
+        assert_eq!(plan.required_sections.len(), 5);
+    }
+
+    #[test]
+    fn retrieval_plan_hit_limit_uses_required_sections() {
+        let plan = RagRetrievalPlan {
+            queries: vec!["总结方案是否合理".to_owned()],
+            required_sections: vec![
+                "Foundation".to_owned(),
+                "Knowledge".to_owned(),
+                "Runtime".to_owned(),
+                "Eval".to_owned(),
+                "Delivery".to_owned(),
+                "Security".to_owned(),
+            ],
+        };
+
+        let profile = RagGenerationProfile::single_pass();
+        assert_eq!(retrieval_plan_hit_limit(&plan, 5, &profile), 6);
+        assert_eq!(
+            retrieval_plan_hit_limit(&RagRetrievalPlan::fallback("总结一下架构"), 5, &profile),
+            5
+        );
+    }
+
+    #[test]
+    fn retrieval_plan_hit_limit_respects_small_document_explicit_limit() {
+        let profile = RagGenerationProfile::single_pass();
+
+        assert_eq!(
+            retrieval_plan_hit_limit(&RagRetrievalPlan::fallback("只要两个证据"), 2, &profile),
+            2
+        );
+    }
+
+    #[test]
+    fn large_document_retrieval_reads_enough_chunks_for_pdf_scale() {
+        assert!(MAX_LOCAL_RETRIEVAL_CHUNKS >= 3000);
+    }
+
+    #[test]
+    fn large_document_generation_profile_enables_loop_and_more_hits() {
+        let chunks = (0..1482)
+            .map(|index| {
+                test_indexed_rag_chunk(
+                    &format!("chunk-{index}"),
+                    index,
+                    "置身钉内 ONE 产品定位 让事找人 组织上下文 AI 工作信息流",
+                )
+            })
+            .collect::<Vec<_>>();
+
+        let profile = rag_generation_profile(&chunks);
+
+        assert_eq!(profile.mode, RagGenerationMode::LargeDocumentLoop);
+        assert!(profile.target_hit_limit >= 20);
+        assert!(profile.notes_batch_size >= 4);
+    }
+
+    #[test]
+    fn retrieval_plan_hit_limit_expands_large_document_context() {
+        let profile = RagGenerationProfile {
+            mode: RagGenerationMode::LargeDocumentLoop,
+            target_hit_limit: 20,
+            notes_batch_size: 5,
+            max_note_batches: 4,
+        };
+
+        assert_eq!(
+            retrieval_plan_hit_limit(&RagRetrievalPlan::fallback("写一篇公众号文章"), 5, &profile),
+            20
+        );
+    }
+
+    #[test]
+    fn large_document_loop_batches_hits_for_section_notes() {
+        let hits = (0..13)
+            .map(|index| test_retrieval_hit(&format!("chunk-{index}"), index, "ONE 产品资料"))
+            .collect::<Vec<_>>();
+        let profile = RagGenerationProfile {
+            mode: RagGenerationMode::LargeDocumentLoop,
+            target_hit_limit: 20,
+            notes_batch_size: 5,
+            max_note_batches: 4,
+        };
+
+        let batches = large_document_hit_batches(&hits, &profile);
+
+        assert_eq!(batches.len(), 3);
+        assert_eq!(batches[0][0].chunk.chunk_id, "chunk-0");
+        assert_eq!(batches[2][2].chunk.chunk_id, "chunk-12");
+    }
+
+    #[test]
+    fn large_document_notes_prompt_keeps_skill_instruction() {
+        let hits = vec![test_retrieval_hit(
+            "chunk-1",
+            1,
+            "ONE 是工作信息流入口，适合公众号故事化表达。",
+        )];
+
+        let command = large_document_notes_chat_command(
+            "写一篇公众号文章",
+            &hits,
+            1,
+            1,
+            Some("runtime.llm.rag_answer"),
+            Some("用故事化结构，先讲人和场景，再讲产品判断。"),
+        );
+
+        assert_eq!(command.route_id.as_deref(), Some("runtime.llm.rag_answer"));
+        assert!(command.messages[0]
+            .content
+            .contains("Skill instruction for evidence selection"));
+        assert!(command.messages[0].content.contains("故事化结构"));
+    }
+
+    #[test]
+    fn retrieval_plan_outline_keeps_late_document_sections() {
+        let chunks = (0..180)
+            .map(|index| {
+                let text = if index == 170 {
+                    "Architecture / 16. 里程碑 / Eval"
+                } else {
+                    "Architecture / earlier section"
+                };
+                test_indexed_rag_chunk(&format!("chunk-{index}"), index, text)
+            })
+            .collect::<Vec<_>>();
+
+        let outline = retrieval_plan_outline(&chunks);
+
+        assert!(outline.contains("Architecture / 16. 里程碑 / Eval"));
+    }
+
+    #[test]
+    fn required_section_coverage_keeps_planner_sections_after_rerank() {
+        let candidates = vec![
+            test_retrieval_hit("foundation", 0, "Foundation Skeleton 基建骨架"),
+            test_retrieval_hit("knowledge", 1, "Knowledge MVP 知识库闭环"),
+            test_retrieval_hit("runtime", 2, "Agent Runtime 工具循环"),
+            test_retrieval_hit("eval-heading", 3, "Eval 交付："),
+            test_retrieval_hit(
+                "eval-content",
+                4,
+                "Eval eval dataset eval case eval runner RAG 指标 回归报告",
+            ),
+            test_retrieval_hit("delivery", 4, "Delivery Template 客户交付"),
+            test_retrieval_hit("generic", 99, "泛化方案片段"),
+        ];
+        let reranked = vec![
+            candidates[5].clone(),
+            candidates[0].clone(),
+            candidates[4].clone(),
+        ];
+        let plan = RagRetrievalPlan {
+            queries: vec!["总结方案是否合理".to_owned()],
+            required_sections: vec![
+                "Foundation Skeleton".to_owned(),
+                "Knowledge MVP".to_owned(),
+                "Agent Runtime".to_owned(),
+                "Eval".to_owned(),
+                "Delivery Template".to_owned(),
+            ],
+        };
+
+        let covered = ensure_required_section_coverage(&plan, reranked, &candidates, 5);
+        let ids = covered
+            .iter()
+            .map(|hit| hit.chunk.chunk_id.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            ids,
+            vec![
+                "foundation",
+                "knowledge",
+                "runtime",
+                "eval-content",
+                "delivery"
+            ]
+        );
+    }
+
+    #[test]
+    fn required_section_candidate_expansion_adds_informative_section_chunks() {
+        let plan = RagRetrievalPlan {
+            queries: vec!["总结方案是否合理".to_owned()],
+            required_sections: vec!["M4: Eval".to_owned()],
+        };
+        let candidates = vec![
+            test_retrieval_hit("eval-heading", 10, "Architecture / M4: Eval\n交付："),
+            test_retrieval_hit("generic", 99, "泛化方案片段"),
+        ];
+        let indexed_chunks = vec![
+            test_indexed_rag_chunk("eval-heading", 10, "Architecture / M4: Eval\n交付："),
+            test_indexed_rag_chunk(
+                "eval-content",
+                11,
+                "Architecture / M4: Eval\neval dataset。 eval case。 eval runner。 RAG 指标。 intent 指标。 tool 指标。 回归报告。",
+            ),
+            test_indexed_rag_chunk("generic", 99, "泛化方案片段"),
+        ];
+
+        let expanded =
+            expand_candidates_with_required_sections(&plan, candidates, &indexed_chunks, 3);
+
+        assert_eq!(expanded[0].chunk.chunk_id, "eval-content");
+        assert!(expanded[0].chunk.text.contains("eval runner"));
     }
 
     #[test]

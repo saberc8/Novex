@@ -1,5 +1,6 @@
 use chrono::{NaiveDateTime, Utc};
 use novex_model::estimate_model_text_tokens;
+use novex_rag::{ChunkMetadata, CitationRef, DocumentChunk};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sqlx::PgPool;
@@ -15,6 +16,10 @@ use crate::{
         system::{ensure_max_chars, format_datetime, format_optional_datetime},
     },
     infrastructure::persistence::{
+        ai_capability_repository::{
+            AiCapabilityRepository, CapabilityFilter, CapabilityRecord, CapabilityResource,
+            SkillResourceRecord,
+        },
         ai_chat_flow_repository::{
             AiChatFlowRepository, ChatFlowMessageRow, ChatFlowMessageSaveRecord,
             ChatFlowSessionFilter, ChatFlowSessionRow, ChatFlowSessionSaveRecord,
@@ -34,12 +39,12 @@ const MAX_RAG_LIMIT: usize = 10;
 const MAX_MESSAGE_CHARS: usize = 12_000;
 const SESSION_TITLE_CHARS: usize = 60;
 const MESSAGE_PREVIEW_CHARS: usize = 160;
-const RAG_ROUTE_ID: &str = "novex-rag";
 
 #[derive(Debug, Clone)]
 pub struct ChatFlowService {
     repo: AiChatFlowRepository,
     knowledge_repo: AiKnowledgeRepository,
+    capability_repo: AiCapabilityRepository,
     db: PgPool,
 }
 
@@ -68,6 +73,12 @@ pub struct ChatFlowMessageCommand {
     pub content: String,
     #[serde(default)]
     pub limit: Option<usize>,
+    #[serde(default)]
+    pub model_route_id: Option<String>,
+    #[serde(default)]
+    pub answer_model_route_id: Option<String>,
+    #[serde(default)]
+    pub skill_code: Option<String>,
     #[serde(default)]
     pub file_contexts: Vec<ModelChatFileContext>,
     #[serde(default)]
@@ -120,11 +131,35 @@ pub struct ChatFlowSendMessageResp {
     pub assistant_message: ChatFlowMessageResp,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ChatFlowSkillContext {
+    code: String,
+    name: String,
+    instruction: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SkillReferenceDocument {
+    pub relative_path: String,
+    pub content_text: String,
+}
+
+impl From<CapabilityRecord> for ChatFlowSkillContext {
+    fn from(record: CapabilityRecord) -> Self {
+        Self {
+            instruction: chat_flow_skill_instruction(&record),
+            code: record.code,
+            name: record.name,
+        }
+    }
+}
+
 impl ChatFlowService {
     pub fn new(db: PgPool) -> Self {
         Self {
             repo: AiChatFlowRepository::new(db.clone()),
             knowledge_repo: AiKnowledgeRepository::new(db.clone()),
+            capability_repo: AiCapabilityRepository::new(db.clone()),
             db,
         }
     }
@@ -253,6 +288,9 @@ impl ChatFlowService {
         let dataset_id = session
             .dataset_id
             .ok_or_else(|| AppError::bad_request("知识库会话缺少知识库"))?;
+        let skill = self
+            .resolve_chat_flow_skill(tenant_id, command.skill_code.as_deref(), &command.content)
+            .await?;
         let knowledge_service = KnowledgeService::new(self.db.clone());
         let rag = knowledge_service
             .ask_dataset_for_tenant(
@@ -262,9 +300,16 @@ impl ChatFlowService {
                 RagAskCommand {
                     question: command.content.clone(),
                     limit: command.limit.unwrap_or(DEFAULT_RAG_LIMIT),
+                    answer_model_route_id: command.answer_model_route_id.clone(),
+                    answer_instruction: skill.as_ref().map(|skill| skill.instruction.clone()),
+                    ..RagAskCommand::default()
                 },
             )
             .await?;
+        let embedding_model_route = rag.embedding_model_route.clone();
+        let rerank_model_route = rag.rerank_model_route.clone();
+        let answer_model_route = rag.answer_model_route.clone();
+        let answer_model = rag.answer_model.clone();
         let now = Utc::now().naive_utc();
         let user_message = user_chat_flow_message(
             tenant_id,
@@ -274,6 +319,7 @@ impl ChatFlowService {
             json!({
                 "source": "ai.chatFlow.knowledge",
                 "datasetId": dataset_id,
+                "skill": skill.as_ref().map(chat_flow_skill_metadata),
             }),
             now,
         );
@@ -284,8 +330,8 @@ impl ChatFlowService {
             session_id: session.id,
             role: "assistant".to_owned(),
             content: rag.answer.clone(),
-            route_id: Some(RAG_ROUTE_ID.to_owned()),
-            model: None,
+            route_id: Some(answer_model_route.clone()),
+            model: answer_model.clone(),
             rag_trace_id: Some(rag.trace_id),
             citations,
             token_count: estimate_model_text_tokens(&rag.answer),
@@ -295,6 +341,11 @@ impl ChatFlowService {
                 "ragTraceId": rag.trace_id,
                 "answerStrategy": rag.answer_strategy,
                 "retrievalHitCount": rag.retrieval_hit_count,
+                "embeddingModelRoute": embedding_model_route,
+                "rerankModelRoute": rerank_model_route,
+                "answerModelRoute": answer_model_route,
+                "answerModel": answer_model,
+                "skill": skill.as_ref().map(chat_flow_skill_metadata),
             }),
             user_id,
             now,
@@ -303,14 +354,59 @@ impl ChatFlowService {
             tenant_id,
             user_id,
             session.id,
-            Some(RAG_ROUTE_ID.to_owned()),
-            None,
+            Some(rag.answer_model_route),
+            rag.answer_model,
             &rag.answer,
             user_message,
             assistant_message,
             now,
         )
         .await
+    }
+
+    async fn resolve_chat_flow_skill(
+        &self,
+        tenant_id: i64,
+        skill_code: Option<&str>,
+        question: &str,
+    ) -> Result<Option<ChatFlowSkillContext>, AppError> {
+        let Some(skill_code) = skill_code else {
+            return Ok(None);
+        };
+        let mut records = self
+            .capability_repo
+            .list(
+                CapabilityResource::Skill,
+                &CapabilityFilter {
+                    tenant_id,
+                    status: Some(1),
+                    kind: Some(skill_code),
+                    limit: 1,
+                    offset: 0,
+                },
+            )
+            .await?;
+        let Some(record) = records.pop() else {
+            return Err(AppError::bad_request("Skill 不存在或已停用"));
+        };
+
+        let references = self
+            .capability_repo
+            .list_skill_resources(tenant_id, record.id, Some("reference"))
+            .await?;
+        let mut skill = ChatFlowSkillContext::from(record);
+        if let Some(reference_instruction) = skill_reference_instruction_for_question(
+            question,
+            &skill_reference_documents(&references),
+            3,
+        ) {
+            skill.instruction = preview_chars(
+                &format!("{}\n\n{}", skill.instruction, reference_instruction),
+                8000,
+            );
+        }
+
+        Ok(Some(skill))
     }
 
     async fn send_model_message(
@@ -324,6 +420,7 @@ impl ChatFlowService {
             .chat_completion_for_chat_flow(
                 user_id,
                 ModelChatCommand {
+                    route_id: command.model_route_id.clone(),
                     messages: vec![ModelChatMessage {
                         role: "user".to_owned(),
                         content: command.content.clone(),
@@ -453,6 +550,10 @@ fn normalize_chat_flow_message_command(
         return Err(AppError::bad_request("消息内容不能为空"));
     }
     ensure_max_chars("消息内容", &command.content, MAX_MESSAGE_CHARS)?;
+    command.model_route_id = normalize_optional_chat_flow_route_id(command.model_route_id)?;
+    command.answer_model_route_id =
+        normalize_optional_chat_flow_route_id(command.answer_model_route_id)?;
+    command.skill_code = normalize_optional_chat_flow_skill_code(command.skill_code)?;
     command.limit = Some(
         command
             .limit
@@ -460,6 +561,36 @@ fn normalize_chat_flow_message_command(
             .clamp(1, MAX_RAG_LIMIT),
     );
     Ok(command)
+}
+
+fn normalize_optional_chat_flow_route_id(
+    route_id: Option<String>,
+) -> Result<Option<String>, AppError> {
+    let route_id = route_id
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty());
+    if let Some(route_id) = &route_id {
+        ensure_max_chars("模型路由", route_id, 128)?;
+    }
+    Ok(route_id)
+}
+
+fn normalize_optional_chat_flow_skill_code(
+    skill_code: Option<String>,
+) -> Result<Option<String>, AppError> {
+    let skill_code = skill_code
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty());
+    if let Some(skill_code) = &skill_code {
+        ensure_max_chars("Skill Code", skill_code, 128)?;
+        if !skill_code
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.'))
+        {
+            return Err(AppError::bad_request("Skill Code 不合法"));
+        }
+    }
+    Ok(skill_code)
 }
 
 fn normalize_optional_mode(mode: Option<String>) -> Result<Option<String>, AppError> {
@@ -532,6 +663,170 @@ fn file_context_metadata(files: &[ModelChatFileContext]) -> Vec<Value> {
             })
         })
         .collect()
+}
+
+fn chat_flow_skill_metadata(skill: &ChatFlowSkillContext) -> Value {
+    json!({
+        "code": skill.code,
+        "name": skill.name,
+    })
+}
+
+fn chat_flow_skill_instruction(record: &CapabilityRecord) -> String {
+    let mut parts = Vec::new();
+    push_metadata_instruction(&mut parts, &record.metadata, "systemPrompt");
+    push_metadata_instruction(&mut parts, &record.metadata, "instruction");
+    push_metadata_instruction(&mut parts, &record.metadata, "instructions");
+    push_metadata_instruction(&mut parts, &record.metadata, "prompt");
+    push_metadata_instruction(&mut parts, &record.metadata, "promptRules");
+    push_metadata_instruction(&mut parts, &record.metadata, "rules");
+    if parts.is_empty() {
+        parts.push(default_chat_flow_skill_instruction(record));
+    }
+
+    preview_chars(
+        &format!(
+            "Skill: {} ({})\n{}",
+            record.name,
+            record.code,
+            parts.join("\n")
+        ),
+        4000,
+    )
+}
+
+fn push_metadata_instruction(parts: &mut Vec<String>, metadata: &Value, key: &str) {
+    match metadata.get(key) {
+        Some(Value::String(value)) => {
+            let value = value.trim();
+            if !value.is_empty() {
+                parts.push(value.to_owned());
+            }
+        }
+        Some(Value::Array(values)) => {
+            for value in values {
+                if let Some(value) = value
+                    .as_str()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                {
+                    parts.push(format!("- {value}"));
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn default_chat_flow_skill_instruction(record: &CapabilityRecord) -> String {
+    match record.code.as_str() {
+        "cited_answer" => {
+            "Answer from the selected knowledge base only. Keep claims grounded in retrieved context and cite supporting labels when available."
+                .to_owned()
+        }
+        "knowledge_base_chat" => {
+            "Answer from the selected knowledge base only. Keep claims grounded in retrieved context and cite supporting labels when available."
+                .to_owned()
+        }
+        "training_quiz" => {
+            "Generate a training quiz from retrieved content. Include questions, correct answers, concise explanations, and supporting citations."
+                .to_owned()
+        }
+        "training_assistant" => {
+            "Help with training tasks from retrieved content. Prefer quizzes, learning summaries, reminders, and cited explanations that stay grounded in the knowledge context."
+                .to_owned()
+        }
+        "task_planning" => {
+            "Turn the request into a bounded execution plan grounded in the knowledge base. Include assumptions, steps, risks, and next actions."
+                .to_owned()
+        }
+        "training_reminder" => {
+            "Draft a training reminder workflow or message from retrieved content. Do not claim a reminder was scheduled unless an approved tool result exists."
+                .to_owned()
+        }
+        "general_chat" => {
+            "Answer conversationally while still respecting the knowledge-mode grounding and citation constraints."
+                .to_owned()
+        }
+        _ => record.description.trim().to_owned(),
+    }
+}
+
+pub fn skill_reference_instruction_for_question(
+    question: &str,
+    references: &[SkillReferenceDocument],
+    limit: usize,
+) -> Option<String> {
+    if limit == 0 || references.is_empty() || question.trim().is_empty() {
+        return None;
+    }
+    let chunks = references
+        .iter()
+        .filter(|reference| !reference.content_text.trim().is_empty())
+        .enumerate()
+        .map(|(index, reference)| skill_reference_chunk(index, reference))
+        .collect::<Vec<_>>();
+    if chunks.is_empty() {
+        return None;
+    }
+    let hits = novex_rag::keyword_retrieve(question, &chunks, limit);
+    if hits.is_empty() {
+        return None;
+    }
+
+    let mut instruction =
+        "Relevant Skill References:\nUse these skill-local references only when they help answer the current user request. Do not mention unavailable scripts or execute imported scripts."
+            .to_owned();
+    for hit in hits {
+        let path = hit
+            .chunk
+            .metadata
+            .source_file_name
+            .as_deref()
+            .unwrap_or(&hit.chunk.chunk_id);
+        instruction.push_str("\n\n[");
+        instruction.push_str(path);
+        instruction.push_str("]\n");
+        instruction.push_str(&preview_chars(&hit.chunk.text, 1600));
+    }
+    Some(preview_chars(&instruction, 5000))
+}
+
+fn skill_reference_documents(records: &[SkillResourceRecord]) -> Vec<SkillReferenceDocument> {
+    records
+        .iter()
+        .filter_map(|record| {
+            record
+                .content_text
+                .as_ref()
+                .map(|content_text| SkillReferenceDocument {
+                    relative_path: record.relative_path.clone(),
+                    content_text: content_text.clone(),
+                })
+        })
+        .collect()
+}
+
+fn skill_reference_chunk(index: usize, reference: &SkillReferenceDocument) -> DocumentChunk {
+    let mut metadata = ChunkMetadata::default();
+    metadata.source_file_name = Some(reference.relative_path.clone());
+    metadata.source_title = Some(reference.relative_path.clone());
+    metadata.source_content_type = Some("text/markdown".to_owned());
+    DocumentChunk {
+        document_id: format!("skill-reference:{index}"),
+        chunk_id: reference.relative_path.clone(),
+        chunk_index: index,
+        text: reference.content_text.clone(),
+        semantic_search_text: format!("{}\n{}", reference.relative_path, reference.content_text),
+        token_count: estimate_model_text_tokens(&reference.content_text).max(1) as usize,
+        citation: CitationRef {
+            document_id: format!("skill-reference:{index}"),
+            chunk_id: reference.relative_path.clone(),
+            page_no: None,
+            section_path: vec![reference.relative_path.clone()],
+        },
+        metadata,
+    }
 }
 
 fn preview_chars(text: &str, limit: usize) -> String {
@@ -630,12 +925,21 @@ mod tests {
         let command = normalize_chat_flow_message_command(ChatFlowMessageCommand {
             content: "  哪个制度有效？  ".to_owned(),
             limit: Some(50),
+            model_route_id: Some(" runtime.llm.chat ".to_owned()),
+            answer_model_route_id: Some(" runtime.llm.rag_answer ".to_owned()),
+            skill_code: Some(" cited_answer ".to_owned()),
             ..ChatFlowMessageCommand::default()
         })
         .unwrap();
 
         assert_eq!(command.content, "哪个制度有效？");
         assert_eq!(command.limit, Some(10));
+        assert_eq!(command.model_route_id.as_deref(), Some("runtime.llm.chat"));
+        assert_eq!(
+            command.answer_model_route_id.as_deref(),
+            Some("runtime.llm.rag_answer")
+        );
+        assert_eq!(command.skill_code.as_deref(), Some("cited_answer"));
     }
 
     #[test]
@@ -671,5 +975,32 @@ mod tests {
             !source.contains(&private_estimator),
             "chat-flow must not keep a private token estimator"
         );
+    }
+
+    #[test]
+    fn skill_reference_instruction_uses_bm25_relevant_references_only() {
+        let references = vec![
+            SkillReferenceDocument {
+                relative_path: "references/style_examples.md".to_owned(),
+                content_text: "Style examples: lead with cited claims and concise conclusions."
+                    .to_owned(),
+            },
+            SkillReferenceDocument {
+                relative_path: "references/windows.md".to_owned(),
+                content_text: "Windows storage cleanup uses disk management commands.".to_owned(),
+            },
+        ];
+
+        let instruction = skill_reference_instruction_for_question(
+            "How should I write with the style examples?",
+            &references,
+            2,
+        )
+        .unwrap();
+
+        assert!(instruction.contains("Relevant Skill References"));
+        assert!(instruction.contains("references/style_examples.md"));
+        assert!(instruction.contains("lead with cited claims"));
+        assert!(!instruction.contains("references/windows.md"));
     }
 }

@@ -9,6 +9,7 @@ import {
   listDocuments,
   uploadTextDocument
 } from "@/api/ai/knowledge";
+import { getModelRuntimeConfig } from "@/api/ai/model";
 import type { DatasetResp, DocumentResp } from "@/types/ai";
 
 vi.mock("@/api/ai/knowledge", () => ({
@@ -17,6 +18,10 @@ vi.mock("@/api/ai/knowledge", () => ({
   listDatasets: vi.fn(),
   listDocuments: vi.fn(),
   uploadTextDocument: vi.fn()
+}));
+
+vi.mock("@/api/ai/model", () => ({
+  getModelRuntimeConfig: vi.fn()
 }));
 
 vi.mock("@/components/permission/permission-gate", () => ({
@@ -35,6 +40,7 @@ const listDatasetsMock = vi.mocked(listDatasets);
 const listDocumentsMock = vi.mocked(listDocuments);
 const uploadTextDocumentMock = vi.mocked(uploadTextDocument);
 const askDatasetMock = vi.mocked(askDataset);
+const getModelRuntimeConfigMock = vi.mocked(getModelRuntimeConfig);
 
 function dataset(overrides: Partial<DatasetResp>): DatasetResp {
   return {
@@ -88,6 +94,27 @@ describe("KnowledgePage", () => {
       total: 2
     });
     listDocumentsMock.mockResolvedValue({ list: [document({ id: 20 })], total: 1 });
+    getModelRuntimeConfigMock.mockResolvedValue({
+      routes: [
+        {
+          target: "llm",
+          routeId: "runtime.llm",
+          kind: "llm",
+          provider: "deep-seek",
+          model: "deepseek-v4-flash",
+          baseUrl: "https://api.deepseek.com",
+          endpoint: "https://api.deepseek.com/chat/completions",
+          maskedApiKey: "sk-****508d",
+          purposes: ["chat", "rag_answer"],
+          envKeys: ["LLM_API_KEY"],
+          purposeRouteIds: {
+            chat: "runtime.llm.chat",
+            rag_answer: "runtime.llm.rag_answer"
+          }
+        }
+      ],
+      missingEnv: []
+    });
     uploadTextDocumentMock.mockResolvedValue(88);
     askDatasetMock.mockResolvedValue({
       traceId: 42,
@@ -101,7 +128,11 @@ describe("KnowledgePage", () => {
         }
       ],
       retrievalHitCount: 1,
-      answerStrategy: "extractive"
+      answerStrategy: "llm_grounded",
+      embeddingModelRoute: "runtime.embedding",
+      rerankModelRoute: "runtime.reranker",
+      answerModelRoute: "runtime.llm.rag_answer",
+      answerModel: "deepseek-v4-flash"
     });
   });
 
@@ -178,11 +209,14 @@ describe("KnowledgePage", () => {
     await waitFor(() =>
       expect(askDatasetMock).toHaveBeenCalledWith(10, {
         question: "培训什么时候开始？",
-        limit: 5
+        limit: 5,
+        answerModelRouteId: "runtime.llm.rag_answer"
       })
     );
     expect(await screen.findByText("Training starts on Monday.")).toBeTruthy();
     expect(await screen.findByText("20:0")).toBeTruthy();
     expect(await screen.findByText("Trace #42")).toBeTruthy();
+    expect(await screen.findByText("runtime.llm.rag_answer")).toBeTruthy();
+    expect(await screen.findByText("deepseek-v4-flash")).toBeTruthy();
   });
 });

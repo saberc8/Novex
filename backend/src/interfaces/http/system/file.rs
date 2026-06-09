@@ -1,5 +1,5 @@
 use axum::{
-    extract::{Multipart, Path, Query, State},
+    extract::{DefaultBodyLimit, Multipart, Path, Query, State},
     routing::{get, post},
     Json, Router,
 };
@@ -16,16 +16,28 @@ use crate::{
 
 use super::{super::AppState, IdsReq};
 
+const FILE_UPLOAD_BODY_LIMIT_BYTES: usize = 64 * 1024 * 1024;
+
 pub fn routes() -> Router<AppState> {
     Router::new()
-        .route("/system/file/upload", post(upload))
+        .route(
+            "/system/file/upload",
+            post(upload).layer(file_upload_body_limit()),
+        )
         .route("/system/file/statistics", get(statistics))
         .route("/system/file/check", get(check))
         .route("/system/file/dir/:id/size", get(dir_size))
         .route("/system/file/dir", post(create_dir))
         .route("/system/file/:id", axum::routing::put(update))
         .route("/system/file", get(page).delete(delete_many))
-        .route("/common/file", post(common_upload))
+        .route(
+            "/common/file",
+            post(common_upload).layer(file_upload_body_limit()),
+        )
+}
+
+pub(crate) fn file_upload_body_limit() -> DefaultBodyLimit {
+    DefaultBodyLimit::max(FILE_UPLOAD_BODY_LIMIT_BYTES)
 }
 
 async fn page(
@@ -187,4 +199,61 @@ pub(crate) async fn multipart_upload_command(
         parent_path,
         bytes: bytes.ok_or_else(|| AppError::bad_request("上传文件不能为空"))?,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use axum::{
+        body::Body,
+        http::{header, Request, StatusCode},
+    };
+    use http_body_util::BodyExt;
+    use tower::ServiceExt;
+
+    use super::*;
+
+    const LARGE_PDF_BYTES: usize = 34 * 1024 * 1024;
+
+    async fn multipart_probe(multipart: Multipart) -> Result<Json<usize>, AppError> {
+        let command = multipart_upload_command(multipart).await?;
+
+        Ok(Json(command.bytes.len()))
+    }
+
+    fn multipart_body(file_size: usize) -> Vec<u8> {
+        let mut body = Vec::with_capacity(file_size + 256);
+        body.extend_from_slice(
+            b"--novex\r\nContent-Disposition: form-data; name=\"file\"; filename=\"large.pdf\"\r\nContent-Type: application/pdf\r\n\r\n",
+        );
+        body.extend(std::iter::repeat(b'x').take(file_size));
+        body.extend_from_slice(
+            b"\r\n--novex\r\nContent-Disposition: form-data; name=\"parentPath\"\r\n\r\n/knowledge\r\n--novex--\r\n",
+        );
+        body
+    }
+
+    #[tokio::test]
+    async fn multipart_upload_accepts_large_pdf_payloads() {
+        let app = Router::new().route(
+            "/upload",
+            post(multipart_probe).layer(file_upload_body_limit()),
+        );
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/upload")
+                    .header(header::CONTENT_TYPE, "multipart/form-data; boundary=novex")
+                    .body(Body::from(multipart_body(LARGE_PDF_BYTES)))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let body = serde_json::from_slice::<serde_json::Value>(&body).unwrap();
+        assert_eq!(body, serde_json::json!(LARGE_PDF_BYTES));
+    }
 }

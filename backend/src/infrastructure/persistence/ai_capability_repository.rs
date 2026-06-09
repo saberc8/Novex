@@ -41,6 +41,52 @@ pub struct CapabilityRecord {
     pub create_time: NaiveDateTime,
 }
 
+#[derive(Debug, Clone)]
+pub struct SkillSaveRecord {
+    pub id: i64,
+    pub tenant_id: i64,
+    pub code: String,
+    pub name: String,
+    pub description: String,
+    pub status: i16,
+    pub model_route_policy: Value,
+    pub capability_refs: Value,
+    pub metadata: Value,
+    pub user_id: i64,
+    pub now: NaiveDateTime,
+}
+
+#[derive(Debug, Clone)]
+pub struct SkillResourceSaveRecord {
+    pub id: i64,
+    pub tenant_id: i64,
+    pub skill_id: i64,
+    pub resource_type: String,
+    pub relative_path: String,
+    pub mime_type: String,
+    pub content_text: Option<String>,
+    pub storage_ref: Option<String>,
+    pub content_sha256: String,
+    pub size_bytes: i64,
+    pub metadata: Value,
+    pub user_id: i64,
+    pub now: NaiveDateTime,
+}
+
+#[derive(Debug, Clone, FromRow)]
+pub struct SkillResourceRecord {
+    pub id: i64,
+    pub skill_id: i64,
+    pub resource_type: String,
+    pub relative_path: String,
+    pub mime_type: String,
+    pub content_text: Option<String>,
+    pub storage_ref: Option<String>,
+    pub content_sha256: String,
+    pub size_bytes: i64,
+    pub metadata: Value,
+}
+
 #[derive(Debug, Clone, FromRow)]
 pub struct ToolLookupRecord {
     pub id: i64,
@@ -338,6 +384,145 @@ WHERE tenant_id = $1 AND code = $2 AND status = 1;
         .bind(tool_code)
         .fetch_optional(&self.db)
         .await?)
+    }
+
+    pub async fn upsert_skill(
+        &self,
+        record: &SkillSaveRecord,
+    ) -> Result<CapabilityRecord, AppError> {
+        Ok(sqlx::query_as::<_, CapabilityRecord>(
+            r#"
+INSERT INTO ai_skill (
+    id, tenant_id, code, name, description, status, model_route_policy,
+    capability_refs, metadata, create_user, create_time
+)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+ON CONFLICT (tenant_id, code)
+DO UPDATE SET
+    name = EXCLUDED.name,
+    description = EXCLUDED.description,
+    status = EXCLUDED.status,
+    model_route_policy = EXCLUDED.model_route_policy,
+    capability_refs = EXCLUDED.capability_refs,
+    metadata = EXCLUDED.metadata,
+    update_user = $10,
+    update_time = $11
+RETURNING
+    id,
+    code,
+    name,
+    COALESCE(description, '') AS description,
+    code AS kind,
+    status,
+    NULL::smallint AS risk_level,
+    metadata || jsonb_build_object(
+        'modelRoutePolicy', model_route_policy,
+        'capabilityRefs', capability_refs
+    ) AS metadata,
+    create_time;
+"#,
+        )
+        .bind(record.id)
+        .bind(record.tenant_id)
+        .bind(&record.code)
+        .bind(&record.name)
+        .bind(&record.description)
+        .bind(record.status)
+        .bind(&record.model_route_policy)
+        .bind(&record.capability_refs)
+        .bind(&record.metadata)
+        .bind(record.user_id)
+        .bind(record.now)
+        .fetch_one(&self.db)
+        .await?)
+    }
+
+    pub async fn replace_skill_resources(
+        &self,
+        tenant_id: i64,
+        skill_id: i64,
+        records: &[SkillResourceSaveRecord],
+    ) -> Result<(), AppError> {
+        let mut tx = self.db.begin().await?;
+        sqlx::query(
+            r#"
+DELETE FROM ai_skill_resource
+WHERE tenant_id = $1 AND skill_id = $2;
+"#,
+        )
+        .bind(tenant_id)
+        .bind(skill_id)
+        .execute(&mut *tx)
+        .await?;
+
+        for record in records {
+            sqlx::query(
+                r#"
+INSERT INTO ai_skill_resource (
+    id, tenant_id, skill_id, resource_type, relative_path, mime_type,
+    content_text, storage_ref, content_sha256, size_bytes, metadata,
+    create_user, create_time
+)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13);
+"#,
+            )
+            .bind(record.id)
+            .bind(record.tenant_id)
+            .bind(record.skill_id)
+            .bind(&record.resource_type)
+            .bind(&record.relative_path)
+            .bind(&record.mime_type)
+            .bind(&record.content_text)
+            .bind(&record.storage_ref)
+            .bind(&record.content_sha256)
+            .bind(record.size_bytes)
+            .bind(&record.metadata)
+            .bind(record.user_id)
+            .bind(record.now)
+            .execute(&mut *tx)
+            .await?;
+        }
+
+        tx.commit().await?;
+        Ok(())
+    }
+
+    pub async fn list_skill_resources(
+        &self,
+        tenant_id: i64,
+        skill_id: i64,
+        resource_type: Option<&str>,
+    ) -> Result<Vec<SkillResourceRecord>, AppError> {
+        let mut query = QueryBuilder::<Postgres>::new(
+            r#"
+SELECT
+    id,
+    skill_id,
+    resource_type,
+    relative_path,
+    mime_type,
+    content_text,
+    storage_ref,
+    content_sha256,
+    size_bytes,
+    metadata
+FROM ai_skill_resource
+WHERE tenant_id = "#,
+        );
+        query
+            .push_bind(tenant_id)
+            .push(" AND skill_id = ")
+            .push_bind(skill_id)
+            .push(" AND status = 1");
+        if let Some(resource_type) = resource_type {
+            query.push(" AND resource_type = ").push_bind(resource_type);
+        }
+        query.push(" ORDER BY relative_path ASC, id ASC");
+
+        Ok(query
+            .build_query_as::<SkillResourceRecord>()
+            .fetch_all(&self.db)
+            .await?)
     }
 
     pub async fn find_connector_credential(

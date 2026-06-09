@@ -4,12 +4,15 @@ from copy import deepcopy
 from io import BytesIO
 from os import environ
 from typing import Any, Mapping
+from urllib.error import URLError
 from urllib.parse import urljoin, urlparse
 from urllib.request import Request, urlopen
 from zipfile import ZipFile
 import json
+import subprocess
 import sys
 
+from parser_worker.mineru_client import default_ssl_context
 from parser_worker.parse import is_native_structured_source, parse_mineru_markdown_result, parse_request
 
 
@@ -341,8 +344,23 @@ def default_source_fetcher(backend_token: str = ""):
 
 
 def default_zip_fetcher(url: str) -> bytes:
-    with urlopen(url, timeout=120) as response:
-        return response.read()
+    try:
+        with urlopen(url, timeout=120, context=default_ssl_context()) as response:
+            return response.read()
+    except URLError as error:
+        return curl_fetch_url(url, fallback_error=error)
+
+
+def curl_fetch_url(url: str, *, fallback_error: Exception) -> bytes:
+    result = subprocess.run(
+        ["curl", "-L", "--fail", "--silent", "--show-error", "--max-time", "120", url],
+        capture_output=True,
+        check=False,
+    )
+    if result.returncode == 0:
+        return result.stdout
+    detail = result.stderr.decode("utf-8", errors="replace").strip()
+    raise RuntimeError(f"curl download failed: {detail}") from fallback_error
 
 
 def mineru_task_payload(task) -> dict[str, Any]:

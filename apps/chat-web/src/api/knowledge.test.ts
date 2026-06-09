@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { askDataset, listDatasets, submitRagFeedback } from "./knowledge";
+import { askDataset, deleteDataset, listDatasets, submitRagFeedback } from "./knowledge";
 
 function okResponse(data: unknown) {
   return Promise.resolve(
@@ -56,13 +56,18 @@ describe("chat knowledge api", () => {
         answer: "Use the current handbook.",
         citations: [],
         retrievalHitCount: 1,
-        answerStrategy: "extractive"
+        answerStrategy: "extractive",
+        embeddingModelRoute: "runtime.embedding",
+        rerankModelRoute: "runtime.reranker",
+        answerModelRoute: "runtime.llm.rag_answer",
+        answerModel: "deepseek-v4-flash"
       })
     );
 
     await askDataset(10, {
       question: "Which handbook should I use?",
-      limit: 5
+      limit: 5,
+      answerModelRouteId: "runtime.llm.rag_answer"
     });
 
     expect(fetchMock.mock.calls[0]?.[0]).toBe(
@@ -76,7 +81,25 @@ describe("chat knowledge api", () => {
       }),
       body: JSON.stringify({
         question: "Which handbook should I use?",
-        limit: 5
+        limit: 5,
+        answerModelRouteId: "runtime.llm.rag_answer"
+      })
+    });
+  });
+
+  it("deletes the selected knowledge dataset with bearer auth", async () => {
+    window.localStorage.setItem("novex_token", "token-1");
+    fetchMock.mockImplementationOnce(() => okResponse(10));
+
+    await deleteDataset(10);
+
+    expect(fetchMock.mock.calls[0]?.[0]).toBe(
+      "http://localhost:4398/ai/knowledge/datasets/10"
+    );
+    expect(fetchMock.mock.calls[0]?.[1]).toMatchObject({
+      method: "DELETE",
+      headers: expect.objectContaining({
+        Authorization: "Bearer token-1"
       })
     });
   });

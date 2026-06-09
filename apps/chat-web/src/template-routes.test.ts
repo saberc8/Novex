@@ -6,7 +6,17 @@ describe("chat-web template routes", () => {
   it("has Next page routes for the chat and knowledge template entry points", () => {
     const appDir = path.join(process.cwd(), "app");
 
-    for (const route of ["/", "/chat", "/chat/history", "/knowledge", "/knowledge/sources", "/share/[token]"]) {
+    for (const route of [
+      "/",
+      "/chat",
+      "/chat/history",
+      "/knowledge",
+      "/knowledge/[datasetId]",
+      "/knowledge/sources",
+      "/knowledge/sources/[datasetId]",
+      "/settings",
+      "/share/[token]"
+    ]) {
       const routeFile =
         route === "/"
           ? path.join(appDir, "page.tsx")

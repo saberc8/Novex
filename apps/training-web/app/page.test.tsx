@@ -119,7 +119,11 @@ describe("Training home page", () => {
         }
       ],
       retrievalHitCount: 1,
-      answerStrategy: "extractive"
+      answerStrategy: "extractive",
+      embeddingModelRoute: "runtime.embedding",
+      rerankModelRoute: "runtime.reranker",
+      answerModelRoute: "runtime.llm.rag_answer",
+      answerModel: "deepseek-v4-flash"
     });
     submitRagFeedbackMock.mockResolvedValue({
       id: 99,

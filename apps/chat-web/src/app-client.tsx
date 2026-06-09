@@ -1,24 +1,28 @@
 "use client";
 
-import { type FormEvent, useCallback, useEffect, useMemo, useState } from "react";
+import Link from "next/link";
+import { useRouter } from "next/navigation";
+import { type FormEvent, type KeyboardEvent, useCallback, useEffect, useMemo, useState } from "react";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import {
+  AlertTriangle,
   ArrowRight,
   Bot,
   Check,
   ChevronRight,
+  Copy,
   Database,
   FileText,
   LayoutGrid,
+  LogOut,
   MoreVertical,
   PanelLeft,
   Plus,
-  Quote,
-  Settings,
   Share2,
   SlidersHorizontal,
-  ThumbsDown,
-  ThumbsUp,
-  Upload
+  Upload,
+  X
 } from "lucide-react";
 import { accountLogin, getImageCaptcha } from "@/api/auth";
 import {
@@ -27,17 +31,23 @@ import {
   listChatFlowSessions,
   sendChatFlowMessage
 } from "@/api/chat-flow";
+import { listSkills } from "@/api/capability";
 import {
   createDataset,
+  deleteDataset,
   getParseJob,
+  listDocuments,
   listDatasets,
-  submitRagFeedback,
   uploadKnowledgeFile
 } from "@/api/knowledge";
-import { getAuthToken, setAuthToken as persistAuthToken } from "@/lib/auth";
+import { getModelRuntimeConfig } from "@/api/model";
+import { clearAuthToken, getAuthToken, setAuthToken as persistAuthToken } from "@/lib/auth";
+import type { AppRouteKey } from "@/page-routes";
 import type { ChatFlowMessageResp, ChatFlowMode, ChatFlowSessionResp } from "@/types/chat-flow";
 import type { ImageCaptchaResp } from "@/types/auth";
-import type { CitationResp, DatasetResp, ParserJobResp, RagFeedbackRating } from "@/types/knowledge";
+import type { CapabilityItemResp } from "@/types/capability";
+import type { CitationResp, DatasetResp, DocumentResp, ParserJobResp } from "@/types/knowledge";
+import type { ModelRoutePurpose, ModelRuntimeRouteSummary } from "@/types/model";
 
 const CHAT_CLIENT_ID = "novex-chat-web";
 const notebookColors = ["bg-emerald-50", "bg-indigo-50", "bg-stone-100", "bg-rose-50", "bg-cyan-50"];
@@ -53,9 +63,26 @@ const studioItems = [
   ["数据表格", "bg-blue-50 text-blue-800"]
 ];
 
-export function ChatAppClient({ mode = "knowledge" }: { mode?: ChatFlowMode } = {}) {
+type ToastState = {
+  kind: "error" | "success";
+  message: string;
+};
+
+export function ChatAppClient({
+  activeRoute,
+  initialDatasetId = null,
+  mode = "knowledge"
+}: {
+  activeRoute?: AppRouteKey;
+  initialDatasetId?: number | null;
+  mode?: ChatFlowMode;
+} = {}) {
+  const router = useRouter();
   const isModelMode = mode === "model";
-  const [authToken, setAuthToken] = useState<string | null>(() => getAuthToken());
+  const currentRoute = activeRoute ?? (isModelMode ? "chat" : "knowledge");
+  const routeDatasetId = normalizeDatasetId(initialDatasetId);
+  const runtimePurpose: ModelRoutePurpose = isModelMode ? "chat" : "rag_answer";
+  const [authToken, setAuthToken] = useState<string | null>(null);
   const [loginUsername, setLoginUsername] = useState("admin");
   const [loginPassword, setLoginPassword] = useState("admin123");
   const [loginCaptcha, setLoginCaptcha] = useState("");
@@ -63,21 +90,69 @@ export function ChatAppClient({ mode = "knowledge" }: { mode?: ChatFlowMode } = 
   const [loggingIn, setLoggingIn] = useState(false);
   const [loginStatus, setLoginStatus] = useState("");
   const [datasets, setDatasets] = useState<DatasetResp[]>([]);
+  const [documents, setDocuments] = useState<DocumentResp[]>([]);
   const [sessions, setSessions] = useState<ChatFlowSessionResp[]>([]);
-  const [activeDatasetId, setActiveDatasetId] = useState<number | null>(null);
+  const [activeDatasetId, setActiveDatasetId] = useState<number | null>(routeDatasetId);
   const [activeSessionId, setActiveSessionId] = useState<number | null>(null);
   const [messages, setMessages] = useState<ChatFlowMessageResp[]>([]);
-  const [notebookOpen, setNotebookOpen] = useState(false);
-  const [input, setInput] = useState(() =>
-    isModelMode ? "Draft a concise rollout note." : "Which source should I trust?"
-  );
+  const [notebookOpen, setNotebookOpen] = useState(Boolean(routeDatasetId));
+  const [input, setInput] = useState(() => (isModelMode ? "Draft a concise rollout note." : ""));
   const [parseJobs, setParseJobs] = useState<Record<number, ParserJobResp>>({});
+  const [documentLoading, setDocumentLoading] = useState(false);
   const [creating, setCreating] = useState(false);
+  const [deletingDatasetId, setDeletingDatasetId] = useState<number | null>(null);
+  const [deleteCandidate, setDeleteCandidate] = useState<DatasetResp | null>(null);
   const [uploading, setUploading] = useState(false);
   const [sending, setSending] = useState(false);
-  const [feedbackSubmitting, setFeedbackSubmitting] = useState(false);
-  const [feedbackStatus, setFeedbackStatus] = useState("");
+  const [copiedMessageId, setCopiedMessageId] = useState<number | null>(null);
   const [actionStatus, setActionStatus] = useState("");
+  const [sendStatus, setSendStatus] = useState("");
+  const [sendError, setSendError] = useState("");
+  const [toast, setToast] = useState<ToastState | null>(null);
+  const [llmRoutes, setLlmRoutes] = useState<ModelRuntimeRouteSummary[]>([]);
+  const [selectedLlmRouteId, setSelectedLlmRouteId] = useState("");
+  const [skills, setSkills] = useState<CapabilityItemResp[]>([]);
+  const [selectedSkill, setSelectedSkill] = useState<CapabilityItemResp | null>(null);
+  const [skillPickerOpen, setSkillPickerOpen] = useState(false);
+  const [skillFilter, setSkillFilter] = useState("");
+  const [activeSkillIndex, setActiveSkillIndex] = useState(0);
+
+  const resetClientSession = useCallback(() => {
+    clearAuthToken();
+    setAuthToken(null);
+    setDatasets([]);
+    setDocuments([]);
+    setSessions([]);
+    setActiveDatasetId(null);
+    setActiveSessionId(null);
+    setMessages([]);
+    setNotebookOpen(false);
+    setParseJobs({});
+    setActionStatus("");
+    setCopiedMessageId(null);
+    setSendError("");
+    setSendStatus("");
+    setSkills([]);
+    setSelectedSkill(null);
+    setSkillPickerOpen(false);
+    setSkillFilter("");
+  }, []);
+
+  const handleAuthRejected = useCallback(
+    (error: unknown) => {
+      if (!isAuthRejectedError(error)) {
+        return false;
+      }
+      resetClientSession();
+      setLoginStatus("登录已过期，请重新登录");
+      return true;
+    },
+    [resetClientSession]
+  );
+
+  useEffect(() => {
+    setAuthToken(getAuthToken());
+  }, []);
 
   const refreshDatasets = useCallback(async () => {
     const page = await listDatasets({ page: 1, size: 50 });
@@ -91,9 +166,55 @@ export function ChatAppClient({ mode = "knowledge" }: { mode?: ChatFlowMode } = 
     return nextSessions;
   }, [mode]);
 
+  const refreshDocuments = useCallback(async (datasetId: number) => {
+    setDocumentLoading(true);
+    try {
+      const page = await listDocuments(datasetId, { page: 1, size: 100 });
+      setDocuments(page.list);
+      return page.list;
+    } finally {
+      setDocumentLoading(false);
+    }
+  }, []);
+
+  const refreshModelRuntime = useCallback(async () => {
+    const summary = await getModelRuntimeConfig();
+    const routes = summary.routes.filter(
+      (route) => route.target === "llm" && route.purposes.includes(runtimePurpose)
+    );
+    setLlmRoutes(routes);
+    setSelectedLlmRouteId((current) =>
+      current && routes.some((route) => route.routeId === current)
+        ? current
+        : routes[0]?.routeId ?? ""
+    );
+    return routes;
+  }, [runtimePurpose]);
+
+  const refreshSkills = useCallback(async () => {
+    const page = await listSkills({ page: 1, size: 50, status: 1 });
+    setSkills(page.list);
+    return page.list;
+  }, []);
+
   useEffect(() => {
     if (!authToken) {
       return;
+    }
+    void refreshModelRuntime().catch((error) => {
+      if (handleAuthRejected(error)) {
+        return;
+      }
+      setLlmRoutes([]);
+      setSelectedLlmRouteId("");
+    });
+    if (!isModelMode) {
+      void refreshSkills().catch((error) => {
+        if (handleAuthRejected(error)) {
+          return;
+        }
+        setSkills([]);
+      });
     }
     if (isModelMode) {
       void refreshSessions()
@@ -106,12 +227,35 @@ export function ChatAppClient({ mode = "knowledge" }: { mode?: ChatFlowMode } = 
             setMessages([]);
           }
         })
-        .catch(() => setSessions([]));
+        .catch((error) => {
+          if (handleAuthRejected(error)) {
+            return;
+          }
+          setSessions([]);
+        });
       return;
     }
-    void refreshDatasets().catch(() => setDatasets([]));
-    void refreshSessions().catch(() => setSessions([]));
-  }, [authToken, isModelMode, refreshDatasets, refreshSessions]);
+    void refreshDatasets().catch((error) => {
+      if (handleAuthRejected(error)) {
+        return;
+      }
+      setDatasets([]);
+    });
+    void refreshSessions().catch((error) => {
+      if (handleAuthRejected(error)) {
+        return;
+      }
+      setSessions([]);
+    });
+  }, [
+    authToken,
+    handleAuthRejected,
+    isModelMode,
+    refreshDatasets,
+    refreshModelRuntime,
+    refreshSessions,
+    refreshSkills
+  ]);
 
   useEffect(() => {
     let mounted = true;
@@ -152,6 +296,104 @@ export function ChatAppClient({ mode = "knowledge" }: { mode?: ChatFlowMode } = 
     () => [...messages].reverse().find((message) => message.role === "assistant") ?? null,
     [messages]
   );
+  const selectedLlmRoute = useMemo(
+    () => llmRoutes.find((route) => route.routeId === selectedLlmRouteId) ?? llmRoutes[0] ?? null,
+    [llmRoutes, selectedLlmRouteId]
+  );
+  const selectedRuntimeRouteId = selectedLlmRoute
+    ? purposeRouteId(selectedLlmRoute, runtimePurpose)
+    : undefined;
+  const filteredSkills = useMemo(
+    () => filterSkills(skills, skillFilter),
+    [skills, skillFilter]
+  );
+
+  useEffect(() => {
+    setActiveSkillIndex(0);
+  }, [skillFilter, skills.length]);
+
+  useEffect(() => {
+    if (isModelMode) {
+      return;
+    }
+    if (routeDatasetId) {
+      setActiveDatasetId(routeDatasetId);
+      setNotebookOpen(true);
+      return;
+    }
+    setActiveDatasetId(null);
+    setNotebookOpen(false);
+    setDocuments([]);
+    setMessages([]);
+    setActiveSessionId(null);
+  }, [isModelMode, routeDatasetId]);
+
+  useEffect(() => {
+    if (!authToken || isModelMode || !activeDatasetId) {
+      return;
+    }
+    if (!activeDataset) {
+      if (datasets.length > 0) {
+        setActionStatus(`未找到知识库 #${activeDatasetId}`);
+      }
+      return;
+    }
+
+    let cancelled = false;
+    setNotebookOpen(true);
+    setActionStatus("");
+    setCopiedMessageId(null);
+    setSendError("");
+    setSendStatus("");
+    setDocuments([]);
+    void refreshDocuments(activeDataset.id).catch((error) => {
+      if (handleAuthRejected(error)) {
+        return;
+      }
+      if (!cancelled) {
+        setDocuments([]);
+      }
+    });
+    void refreshSessions()
+      .then(async (nextSessions) => {
+        const matchingSession = nextSessions.find(
+          (session) => session.mode === "knowledge" && session.datasetId === activeDataset.id
+        );
+        const history = matchingSession
+          ? await listChatFlowMessages(matchingSession.id).catch((error) => {
+              handleAuthRejected(error);
+              return [];
+            })
+          : [];
+        if (cancelled) {
+          return;
+        }
+        setActiveSessionId(matchingSession?.id ?? null);
+        setMessages(history);
+      })
+      .catch((error) => {
+        if (handleAuthRejected(error)) {
+          return;
+        }
+        if (!cancelled) {
+          setActiveSessionId(null);
+          setMessages([]);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    activeDataset?.id,
+    activeDatasetId,
+    authToken,
+    datasets.length,
+    handleAuthRejected,
+    isModelMode,
+    refreshDocuments,
+    refreshSessions
+  ]);
 
   async function handleCreateNotebook() {
     if (creating) {
@@ -169,7 +411,7 @@ export function ChatAppClient({ mode = "knowledge" }: { mode?: ChatFlowMode } = 
       const nextDatasets = await refreshDatasets();
       const created = nextDatasets.find((dataset) => dataset.id === datasetId);
       if (created) {
-        openNotebook(created, sessions);
+        openNotebook(created);
       }
     } catch (error) {
       setActionStatus(error instanceof Error ? error.message : "创建笔记本失败");
@@ -212,25 +454,66 @@ export function ChatAppClient({ mode = "knowledge" }: { mode?: ChatFlowMode } = 
     }
   }
 
-  async function openNotebook(dataset: DatasetResp, sessionSource = sessions) {
+  function handleLogout() {
+    resetClientSession();
+  }
+
+  function openNotebook(dataset: DatasetResp) {
     setActiveDatasetId(dataset.id);
     setNotebookOpen(true);
-    setFeedbackStatus("");
-    let matchingSession = sessionSource.find(
-      (session) => session.mode === "knowledge" && session.datasetId === dataset.id
-    );
-    if (!matchingSession) {
-      const latestSessions = await refreshSessions().catch(() => []);
-      matchingSession = latestSessions.find(
-        (session) => session.mode === "knowledge" && session.datasetId === dataset.id
-      );
+    router.push(datasetDetailHref(dataset.id, currentRoute));
+  }
+
+  function showToast(message: string, kind: ToastState["kind"] = "error") {
+    setToast({ kind, message });
+  }
+
+  function handleDeleteNotebook(dataset: DatasetResp) {
+    if (deletingDatasetId !== null) {
+      return;
     }
-    setActiveSessionId(matchingSession?.id ?? null);
-    if (matchingSession) {
-      const history = await listChatFlowMessages(matchingSession.id).catch(() => []);
-      setMessages(history);
-    } else {
-      setMessages([]);
+    setActionStatus("");
+    setDeleteCandidate(dataset);
+  }
+
+  function handleCancelDeleteNotebook() {
+    if (deletingDatasetId !== null) {
+      return;
+    }
+    setDeleteCandidate(null);
+  }
+
+  async function handleConfirmDeleteNotebook() {
+    const dataset = deleteCandidate;
+    if (!dataset || deletingDatasetId !== null) {
+      return;
+    }
+
+    setDeletingDatasetId(dataset.id);
+    try {
+      await deleteDataset(dataset.id);
+      setDatasets((current) => current.filter((item) => item.id !== dataset.id));
+      setSessions((current) => current.filter((session) => session.datasetId !== dataset.id));
+      setParseJobs((current) =>
+        Object.fromEntries(
+          Object.entries(current).filter(([, job]) => job.datasetId !== dataset.id)
+        )
+      );
+      if (activeDatasetId === dataset.id) {
+        setActiveDatasetId(null);
+        setActiveSessionId(null);
+        setDocuments([]);
+        setMessages([]);
+        setNotebookOpen(false);
+        router.push("/knowledge");
+      }
+      setDeleteCandidate(null);
+      showToast(`已删除知识库「${dataset.name}」`, "success");
+    } catch (error) {
+      setDeleteCandidate(null);
+      showToast(error instanceof Error ? error.message : "删除知识库失败");
+    } finally {
+      setDeletingDatasetId(null);
     }
   }
 
@@ -287,9 +570,66 @@ export function ChatAppClient({ mode = "knowledge" }: { mode?: ChatFlowMode } = 
       const latest = await getParseJob(activeDataset.id, response.parseJob.id);
       setParseJobs((current) => ({ ...current, [latest.id]: latest }));
       await refreshDatasets().catch(() => undefined);
+      await refreshDocuments(activeDataset.id).catch(() => undefined);
     } finally {
       setUploading(false);
     }
+  }
+
+  function handleComposerChange(value: string) {
+    setInput(value);
+    if (isModelMode) {
+      return;
+    }
+    const nextFilter = skillQueryFromInput(value);
+    if (nextFilter === null) {
+      setSkillPickerOpen(false);
+      setSkillFilter("");
+      return;
+    }
+    setSkillFilter(nextFilter);
+    setSkillPickerOpen(true);
+  }
+
+  function handleComposerKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
+    if (isModelMode) {
+      return;
+    }
+    if (event.key === "/" && input.trim().length === 0) {
+      setSkillPickerOpen(true);
+      setSkillFilter("");
+      return;
+    }
+    if (!skillPickerOpen) {
+      return;
+    }
+    if (event.key === "Escape") {
+      event.preventDefault();
+      setSkillPickerOpen(false);
+      setSkillFilter("");
+      return;
+    }
+    if (event.key === "ArrowDown") {
+      event.preventDefault();
+      setActiveSkillIndex((current) => Math.min(current + 1, Math.max(filteredSkills.length - 1, 0)));
+      return;
+    }
+    if (event.key === "ArrowUp") {
+      event.preventDefault();
+      setActiveSkillIndex((current) => Math.max(current - 1, 0));
+      return;
+    }
+    if ((event.key === "Enter" || event.key === "Tab") && filteredSkills[activeSkillIndex]) {
+      event.preventDefault();
+      selectSkill(filteredSkills[activeSkillIndex]);
+    }
+  }
+
+  function selectSkill(skill: CapabilityItemResp) {
+    setSelectedSkill(skill);
+    setInput((current) => removeSkillSlashTrigger(current));
+    setSkillPickerOpen(false);
+    setSkillFilter("");
   }
 
   async function handleSend() {
@@ -298,50 +638,78 @@ export function ChatAppClient({ mode = "knowledge" }: { mode?: ChatFlowMode } = 
       return;
     }
     setSending(true);
-    setFeedbackStatus("");
+    setCopiedMessageId(null);
+    setSendError("");
+    setSendStatus(isModelMode ? "正在调用模型..." : "正在检索知识库并生成回答...");
     try {
       if (isModelMode) {
         const sessionId = await ensureModelSession();
-        const response = await sendChatFlowMessage(sessionId, { content });
+        const response = await sendChatFlowMessage(sessionId, {
+          content,
+          modelRouteId: selectedRuntimeRouteId
+        });
         setSessions((current) => [response.session, ...current.filter((item) => item.id !== response.session.id)]);
         setActiveSessionId(response.session.id);
         setMessages((current) => [...current, response.userMessage, response.assistantMessage]);
+        setInput("");
+        setSendStatus("");
         return;
       }
       if (!activeDataset) {
+        setSendError("请先选择知识库");
         return;
       }
       const sessionId = await ensureKnowledgeSession(activeDataset);
-      const response = await sendChatFlowMessage(sessionId, { content, limit: 5 });
+      const response = await sendChatFlowMessage(sessionId, {
+        content,
+        limit: 5,
+        answerModelRouteId: selectedRuntimeRouteId,
+        ...(selectedSkill ? { skillCode: selectedSkill.code } : {})
+      });
       setSessions((current) => [response.session, ...current.filter((item) => item.id !== response.session.id)]);
       setActiveSessionId(response.session.id);
       setMessages((current) => [...current, response.userMessage, response.assistantMessage]);
+      setInput("");
+      setSelectedSkill(null);
+      setSkillPickerOpen(false);
+      setSkillFilter("");
+      setSendStatus("");
+    } catch (error) {
+      setSendStatus("");
+      setSendError(error instanceof Error ? error.message : "发送失败");
     } finally {
       setSending(false);
     }
   }
 
-  async function handleFeedback(rating: RagFeedbackRating) {
-    if (!latestAssistant?.ragTraceId || feedbackSubmitting) {
-      return;
-    }
-    setFeedbackSubmitting(true);
-    setFeedbackStatus("");
+  async function handleCopyMessage(message: ChatFlowMessageResp) {
     try {
-      await submitRagFeedback({
-        traceId: latestAssistant.ragTraceId,
-        rating,
-        reason: "chat-answer-feedback"
-      });
-      setFeedbackStatus("反馈已保存");
-    } finally {
-      setFeedbackSubmitting(false);
+      if (!window.navigator.clipboard?.writeText) {
+        throw new Error("clipboard unavailable");
+      }
+      await window.navigator.clipboard.writeText(message.content);
+      setCopiedMessageId(message.id);
+    } catch {
+      setToast({ kind: "error", message: "复制失败，请手动选择文本" });
     }
   }
+
+  const overlays = (
+    <>
+      <AppToast toast={toast} onClose={() => setToast(null)} />
+      <DeleteDatasetDialog
+        busy={deleteCandidate ? deletingDatasetId === deleteCandidate.id : false}
+        dataset={deleteCandidate}
+        onCancel={handleCancelDeleteNotebook}
+        onConfirm={() => void handleConfirmDeleteNotebook()}
+      />
+    </>
+  );
 
   if (!authToken) {
     return (
       <LoginPanel
+        activeRoute={currentRoute}
         captcha={captcha}
         loginCaptcha={loginCaptcha}
         loginPassword={loginPassword}
@@ -359,10 +727,13 @@ export function ChatAppClient({ mode = "knowledge" }: { mode?: ChatFlowMode } = 
   if (isModelMode) {
     return (
       <main className="min-h-screen bg-[#eef0fb] text-neutral-950">
+        {overlays}
         <TopBar
-          showCreateNotebook={false}
-          title="Novex Chat"
-          onCreateNotebook={handleCreateNotebook}
+          activeRoute={currentRoute}
+      showCreateNotebook={false}
+      title="Novex Chat"
+      onCreateNotebook={handleCreateNotebook}
+      onLogout={handleLogout}
         />
         <div className="grid min-h-[calc(100vh-88px)] grid-cols-1 gap-4 px-5 pb-4 xl:grid-cols-[minmax(0,1fr)_360px]">
           <section className="flex min-h-[520px] min-w-0 flex-col overflow-hidden rounded-lg bg-white">
@@ -374,16 +745,25 @@ export function ChatAppClient({ mode = "knowledge" }: { mode?: ChatFlowMode } = 
               <Conversation emptyText="开始新的模型会话。" messages={messages} />
             </div>
             <div className="px-6 pb-5">
-              <div className="mx-auto max-w-5xl rounded-2xl border border-neutral-400 bg-white px-5 py-4">
-                <div className="flex items-center gap-3">
-                  <input
-                    aria-label="提问或创作内容"
-                    className="min-w-0 flex-1 bg-transparent text-base outline-none"
-                    onChange={(event) => setInput(event.target.value)}
-                    placeholder="提问或创作内容"
-                    value={input}
+              <div className="mx-auto max-w-5xl rounded-2xl border border-neutral-300 bg-white px-4 py-3 shadow-sm">
+                <textarea
+                  aria-label="提问或创作内容"
+                  className="min-h-20 w-full resize-none bg-transparent text-base leading-6 outline-none"
+                  onChange={(event) => setInput(event.target.value)}
+                  placeholder="提问或创作内容"
+                  rows={3}
+                  value={input}
+                />
+                <div className="mt-3 flex flex-col gap-3 sm:flex-row sm:items-center">
+                  <div className="min-w-0 flex-1">
+                  <ModelRouteSelect
+                    routes={llmRoutes}
+                    selectedRouteId={selectedLlmRoute?.routeId ?? ""}
+                    purpose="chat"
+                    onRouteChange={setSelectedLlmRouteId}
+                    wide
                   />
-                  <span className="hidden text-sm text-neutral-500 sm:inline">Model Chat</span>
+                  </div>
                   <button
                     aria-label="发送消息"
                     className="flex h-12 w-12 shrink-0 items-center justify-center rounded-full bg-neutral-100 text-neutral-800 hover:bg-neutral-200 disabled:opacity-50"
@@ -395,6 +775,7 @@ export function ChatAppClient({ mode = "knowledge" }: { mode?: ChatFlowMode } = 
                   </button>
                 </div>
               </div>
+              <ComposerStatus error={sendError} status={sendStatus} />
               <div className="mt-3 text-center text-xs text-neutral-500">
                 模型输出需要结合业务上下文复核。
               </div>
@@ -404,7 +785,13 @@ export function ChatAppClient({ mode = "knowledge" }: { mode?: ChatFlowMode } = 
           <aside className="flex min-h-[520px] flex-col overflow-hidden rounded-lg bg-white">
             <PanelHeader title="Runtime" />
             <div className="min-h-0 flex-1 overflow-auto p-5">
-              <ModelSessionPanel activeSession={activeSession} latestAssistant={latestAssistant} />
+              <ModelSessionPanel
+                activeSession={activeSession}
+                latestAssistant={latestAssistant}
+                llmRoutes={llmRoutes}
+                selectedRouteId={selectedLlmRoute?.routeId ?? ""}
+                onRouteChange={setSelectedLlmRouteId}
+              />
             </div>
           </aside>
         </div>
@@ -415,7 +802,13 @@ export function ChatAppClient({ mode = "knowledge" }: { mode?: ChatFlowMode } = 
   if (!notebookOpen || !activeDataset) {
     return (
       <main className="min-h-screen bg-white text-neutral-950">
-        <TopBar title="NotebookLM" onCreateNotebook={handleCreateNotebook} />
+        {overlays}
+        <TopBar
+          activeRoute={currentRoute}
+          title="NotebookLM"
+          onCreateNotebook={handleCreateNotebook}
+          onLogout={handleLogout}
+        />
         <section className="mx-auto max-w-[1640px] px-8 pb-12 pt-5">
           <div className="grid gap-5 sm:grid-cols-2 lg:grid-cols-4">
             <button
@@ -436,27 +829,38 @@ export function ChatAppClient({ mode = "knowledge" }: { mode?: ChatFlowMode } = 
             ) : null}
 
             {datasets.map((dataset, index) => (
-              <button
-                aria-label={`打开 ${dataset.name}`}
+              <article
                 className={[
-                  "min-h-[230px] rounded-lg p-7 text-left hover:brightness-[0.98]",
+                  "relative min-h-[230px] rounded-lg hover:brightness-[0.98]",
                   notebookColors[index % notebookColors.length]
                 ].join(" ")}
                 key={dataset.id}
-                onClick={() => void openNotebook(dataset)}
-                type="button"
               >
-                <div className="flex items-start justify-between">
+                <button
+                  aria-label={`打开 ${dataset.name}`}
+                  className="flex min-h-[230px] w-full flex-col rounded-lg p-7 pr-14 text-left"
+                  onClick={() => openNotebook(dataset)}
+                  type="button"
+                >
                   <span className="text-5xl">{notebookIcons[index % notebookIcons.length]}</span>
-                  <MoreVertical aria-hidden="true" className="h-5 w-5 text-neutral-600" />
-                </div>
-                <div className="mt-10 line-clamp-3 text-3xl font-medium leading-tight tracking-normal">
-                  {dataset.name}
-                </div>
-                <div className="mt-5 text-base text-neutral-600">
-                  {formatChineseDate(dataset.createTime)} · {dataset.documentCount} 个来源
-                </div>
-              </button>
+                  <span className="mt-10 line-clamp-3 text-3xl font-medium leading-tight tracking-normal">
+                    {dataset.name}
+                  </span>
+                  <span className="mt-5 text-base text-neutral-600">
+                    {formatChineseDate(dataset.createTime)} · {dataset.documentCount} 个来源
+                  </span>
+                </button>
+                <button
+                  aria-label={`删除 ${dataset.name}`}
+                  className="absolute right-5 top-5 flex h-9 w-9 items-center justify-center rounded-full text-neutral-600 hover:bg-black/5 disabled:cursor-not-allowed disabled:opacity-50"
+                  disabled={deletingDatasetId === dataset.id}
+                  onClick={() => handleDeleteNotebook(dataset)}
+                  title="删除知识库"
+                  type="button"
+                >
+                  <MoreVertical aria-hidden="true" className="h-5 w-5" />
+                </button>
+              </article>
             ))}
           </div>
         </section>
@@ -465,12 +869,25 @@ export function ChatAppClient({ mode = "knowledge" }: { mode?: ChatFlowMode } = 
   }
 
   return (
-    <main className="min-h-screen bg-[#eef0fb] text-neutral-950">
-      <TopBar title={activeDataset.name} onCreateNotebook={handleCreateNotebook} />
-      <div className="grid min-h-[calc(100vh-88px)] grid-cols-1 gap-4 px-5 pb-4 lg:grid-cols-[500px_minmax(0,1fr)_500px]">
-        <aside className="flex min-h-[520px] flex-col overflow-hidden rounded-lg bg-white">
+    <main className="min-h-screen bg-[#eef0fb] text-[12px] text-neutral-950">
+      {overlays}
+      <TopBar
+        activeRoute={currentRoute}
+        compact
+        title={activeDataset.name}
+        onCreateNotebook={handleCreateNotebook}
+        onLogout={handleLogout}
+      />
+      <div
+        className="grid min-h-[calc(100vh-88px)] grid-cols-1 gap-4 px-4 pb-4 xl:h-[calc(100vh-88px)] xl:min-h-0 xl:overflow-hidden xl:grid-cols-[360px_minmax(0,1fr)_360px] xl:items-stretch 2xl:grid-cols-[420px_minmax(0,1fr)_420px]"
+        data-testid="knowledge-detail-layout"
+      >
+        <aside
+          className="flex min-h-[520px] flex-col overflow-hidden rounded-lg bg-white xl:h-full xl:min-h-0"
+          data-testid="knowledge-sources-panel"
+        >
           <PanelHeader title="来源" />
-          <div className="space-y-4 overflow-auto p-5">
+          <div className="min-h-0 flex-1 space-y-4 overflow-y-auto p-5" data-testid="knowledge-sources-scroll">
             <label className="flex h-11 cursor-pointer items-center justify-center gap-2 rounded-full border border-slate-300 bg-white text-sm font-medium hover:bg-slate-50">
               <Plus aria-hidden="true" className="h-4 w-4" />
               添加来源
@@ -484,49 +901,94 @@ export function ChatAppClient({ mode = "knowledge" }: { mode?: ChatFlowMode } = 
               />
             </label>
             <SourceSearch />
-            <SourceList dataset={activeDataset} parseJobs={Object.values(parseJobs)} />
+            <SourceList
+              dataset={activeDataset}
+              documentLoading={documentLoading}
+              documents={documents}
+              parseJobs={Object.values(parseJobs)}
+            />
           </div>
         </aside>
 
-        <section className="flex min-h-[520px] min-w-0 flex-col overflow-hidden rounded-lg bg-white">
+        <section
+          className="flex min-h-[520px] min-w-0 flex-col overflow-hidden rounded-lg bg-white xl:h-full xl:min-h-0"
+          data-testid="knowledge-chat-panel"
+        >
           <PanelHeader title="对话">
             <SlidersHorizontal aria-hidden="true" className="h-5 w-5 text-neutral-600" />
             <MoreVertical aria-hidden="true" className="h-5 w-5 text-neutral-600" />
           </PanelHeader>
-          <div className="min-h-0 flex-1 overflow-auto px-6 py-5">
+          <div className="min-h-0 flex-1 overflow-y-auto px-5 py-4" data-testid="knowledge-chat-scroll">
             <Conversation messages={messages} />
           </div>
-          <div className="px-6 pb-5">
-            <div className="mx-auto max-w-5xl rounded-2xl border border-neutral-400 bg-white px-5 py-4">
-              <div className="flex items-center gap-3">
-                <input
-                  aria-label="提问或创作内容"
-                  className="min-w-0 flex-1 bg-transparent text-base outline-none"
-                  onChange={(event) => setInput(event.target.value)}
-                  placeholder="提问或创作内容"
-                  value={input}
-                />
-                <span className="hidden text-sm text-neutral-500 sm:inline">{activeDataset.documentCount} 个来源</span>
+          <div className="px-5 pb-4">
+            <div className="relative mx-auto max-w-5xl rounded-2xl border border-neutral-300 bg-white px-3.5 py-2.5 shadow-sm">
+              <SkillPicker
+                activeIndex={activeSkillIndex}
+                open={skillPickerOpen}
+                skills={filteredSkills}
+                onSelect={selectSkill}
+              />
+              {selectedSkill ? (
+                <div className="mb-2 flex flex-wrap items-center gap-2">
+                  <span className="inline-flex max-w-full items-center gap-1.5 rounded-full border border-slate-200 bg-slate-50 px-2.5 py-1 text-xs font-medium text-neutral-700">
+                    <Bot aria-hidden="true" className="h-3.5 w-3.5 shrink-0" />
+                    <span className="truncate">{selectedSkill.name}</span>
+                    <button
+                      aria-label={`移除 skill ${selectedSkill.name}`}
+                      className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full hover:bg-slate-200"
+                      onClick={() => setSelectedSkill(null)}
+                      type="button"
+                    >
+                      <X aria-hidden="true" className="h-3 w-3" />
+                    </button>
+                  </span>
+                </div>
+              ) : null}
+              <textarea
+                aria-label="提问或创作内容"
+                className="min-h-12 w-full resize-none bg-transparent text-[13px] leading-5 outline-none"
+                onChange={(event) => handleComposerChange(event.target.value)}
+                onKeyDown={handleComposerKeyDown}
+                placeholder="输入 / 选择 Skills，或直接提问当前知识库"
+                rows={2}
+                value={input}
+              />
+              <div className="mt-2 flex flex-col gap-2 sm:flex-row sm:items-center">
+                <div className="min-w-0 flex-1">
+                  <ModelRouteSelect
+                    routes={llmRoutes}
+                    selectedRouteId={selectedLlmRoute?.routeId ?? ""}
+                    purpose="rag_answer"
+                    onRouteChange={setSelectedLlmRouteId}
+                    wide
+                  />
+                </div>
+                <span className="text-xs text-neutral-500">{activeDataset.documentCount} 个来源</span>
                 <button
                   aria-label="发送消息"
-                  className="flex h-12 w-12 shrink-0 items-center justify-center rounded-full bg-neutral-100 text-neutral-800 hover:bg-neutral-200 disabled:opacity-50"
+                  className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-neutral-100 text-neutral-800 hover:bg-neutral-200 disabled:opacity-50"
                   disabled={sending}
                   onClick={() => void handleSend()}
                   type="button"
                 >
-                  <ArrowRight aria-hidden="true" className="h-6 w-6" />
+                  <ArrowRight aria-hidden="true" className="h-5 w-5" />
                 </button>
               </div>
             </div>
+            <ComposerStatus error={sendError} status={sendStatus} />
             <div className="mt-3 text-center text-xs text-neutral-500">
               NotebookLM 提供的内容未必准确，因此请仔细核查回答内容。
             </div>
           </div>
         </section>
 
-        <aside className="flex min-h-[520px] flex-col overflow-hidden rounded-lg bg-white">
+        <aside
+          className="flex min-h-[520px] flex-col overflow-hidden rounded-lg bg-white xl:h-full xl:min-h-0"
+          data-testid="knowledge-studio-panel"
+        >
           <PanelHeader title="Studio" />
-          <div className="min-h-0 flex-1 overflow-auto p-5">
+          <div className="min-h-0 flex-1 overflow-y-auto p-5" data-testid="knowledge-studio-scroll">
             <div className="grid grid-cols-2 gap-3">
               {studioItems.map(([label, className]) => (
                 <button
@@ -574,16 +1036,21 @@ export function ChatAppClient({ mode = "knowledge" }: { mode?: ChatFlowMode } = 
         {messages.map((message) =>
           message.role === "assistant" ? (
             <AssistantAnswer
-              feedbackStatus={feedbackStatus}
-              feedbackSubmitting={feedbackSubmitting}
+              copied={copiedMessageId === message.id}
               key={message.id}
               message={message}
-              onFeedback={handleFeedback}
+              onCopy={() => void handleCopyMessage(message)}
             />
           ) : (
             <div className="flex justify-end" key={message.id}>
-              <div className="max-w-[78%] rounded-2xl bg-neutral-900 px-4 py-3 text-sm leading-6 text-white">
-                {message.content}
+              <div className="flex max-w-[78%] flex-col items-end gap-2">
+                <div className="rounded-2xl bg-neutral-900 px-4 py-3 text-sm leading-6 text-white">
+                  {message.content}
+                </div>
+                <MessageCopyButton
+                  copied={copiedMessageId === message.id}
+                  onCopy={() => void handleCopyMessage(message)}
+                />
               </div>
             </div>
           )
@@ -596,20 +1063,31 @@ export function ChatAppClient({ mode = "knowledge" }: { mode?: ChatFlowMode } = 
 function TopBar({
   title,
   onCreateNotebook,
+  onLogout,
+  compact = false,
   showCreateNotebook = true
 }: {
+  activeRoute?: AppRouteKey;
   title: string;
   onCreateNotebook: () => void;
+  onLogout?: () => void;
+  compact?: boolean;
   showCreateNotebook?: boolean;
 }) {
   return (
-    <header className="flex h-[88px] items-center justify-between px-6">
-      <div className="flex min-w-0 items-center gap-4">
+    <header className="flex h-[88px] items-center justify-between gap-5 px-6">
+      <Link
+        aria-label="回到首页"
+        className="flex min-w-0 items-center gap-4 rounded-full pr-3 outline-none hover:opacity-80 focus-visible:ring-2 focus-visible:ring-neutral-400"
+        href="/knowledge"
+      >
         <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-full bg-black text-white">
           <LayoutGrid aria-hidden="true" className="h-6 w-6" />
         </div>
-        <h1 className="truncate text-3xl font-medium tracking-normal">{title}</h1>
-      </div>
+        <h1 className={["truncate font-medium tracking-normal", compact ? "text-2xl" : "text-3xl"].join(" ")}>
+          {title}
+        </h1>
+      </Link>
       <div className="flex shrink-0 items-center gap-3">
         {showCreateNotebook ? (
           <button
@@ -625,16 +1103,23 @@ function TopBar({
           <Share2 aria-hidden="true" className="h-4 w-4" />
           分享
         </button>
-        <button className="flex h-11 items-center gap-2 rounded-full border border-slate-200 px-4 text-sm font-medium" type="button">
-          <Settings aria-hidden="true" className="h-4 w-4" />
-          设置
-        </button>
+        {onLogout ? (
+          <button
+            className="flex h-11 items-center gap-2 rounded-full border border-slate-200 px-4 text-sm font-medium hover:bg-slate-50"
+            onClick={onLogout}
+            type="button"
+          >
+            <LogOut aria-hidden="true" className="h-4 w-4" />
+            退出登录
+          </button>
+        ) : null}
       </div>
     </header>
   );
 }
 
 function LoginPanel({
+  activeRoute,
   captcha,
   loginCaptcha,
   loginPassword,
@@ -646,6 +1131,7 @@ function LoginPanel({
   onPasswordChange,
   onUsernameChange
 }: {
+  activeRoute?: AppRouteKey;
   captcha: ImageCaptchaResp | null;
   loginCaptcha: string;
   loginPassword: string;
@@ -659,7 +1145,7 @@ function LoginPanel({
 }) {
   return (
     <main className="min-h-screen bg-white text-neutral-950">
-      <TopBar title="NotebookLM" onCreateNotebook={() => undefined} />
+      <TopBar activeRoute={activeRoute} title="NotebookLM" onCreateNotebook={() => undefined} />
       <div className="mx-auto flex min-h-[calc(100vh-88px)] max-w-[1440px] items-center justify-center px-6 pb-12">
         <form
           className="w-full max-w-sm rounded-lg border border-slate-200 bg-white p-6 shadow-sm"
@@ -725,10 +1211,115 @@ function LoginPanel({
   );
 }
 
+function AppToast({
+  onClose,
+  toast
+}: {
+  onClose: () => void;
+  toast: ToastState | null;
+}) {
+  if (!toast) {
+    return null;
+  }
+
+  const isError = toast.kind === "error";
+  return (
+    <div className="fixed right-5 top-5 z-50 w-[min(360px,calc(100vw-40px))]" role="status">
+      <div
+        className={[
+          "flex items-start gap-3 rounded-lg border bg-white p-4 text-sm shadow-lg",
+          isError ? "border-rose-200 text-rose-900" : "border-emerald-200 text-emerald-900"
+        ].join(" ")}
+      >
+        <span
+          className={[
+            "mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-full",
+            isError ? "bg-rose-50 text-rose-600" : "bg-emerald-50 text-emerald-600"
+          ].join(" ")}
+        >
+          {isError ? (
+            <AlertTriangle aria-hidden="true" className="h-4 w-4" />
+          ) : (
+            <Check aria-hidden="true" className="h-4 w-4" />
+          )}
+        </span>
+        <div className="min-w-0 flex-1 leading-6">{toast.message}</div>
+        <button
+          aria-label="关闭提示"
+          className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-neutral-500 hover:bg-neutral-100"
+          onClick={onClose}
+          type="button"
+        >
+          <X aria-hidden="true" className="h-4 w-4" />
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function DeleteDatasetDialog({
+  busy,
+  dataset,
+  onCancel,
+  onConfirm
+}: {
+  busy: boolean;
+  dataset: DatasetResp | null;
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  if (!dataset) {
+    return null;
+  }
+
+  return (
+    <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/35 px-4 py-6">
+      <div
+        aria-labelledby="delete-dataset-title"
+        aria-modal="true"
+        className="w-full max-w-md rounded-lg bg-white p-5 shadow-2xl"
+        role="dialog"
+      >
+        <div className="flex items-start gap-3">
+          <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-rose-50 text-rose-600">
+            <AlertTriangle aria-hidden="true" className="h-5 w-5" />
+          </span>
+          <div className="min-w-0 flex-1">
+            <h2 className="text-lg font-semibold" id="delete-dataset-title">
+              确认删除知识库
+            </h2>
+            <p className="mt-2 text-sm leading-6 text-neutral-600">
+              删除「{dataset.name}」会同时删除相关来源、chunks、解析任务、进行中的任务和问答记录。
+            </p>
+          </div>
+        </div>
+        <div className="mt-6 flex justify-end gap-3">
+          <button
+            className="h-10 rounded-full border border-slate-200 px-4 text-sm font-medium hover:bg-slate-50 disabled:opacity-50"
+            disabled={busy}
+            onClick={onCancel}
+            type="button"
+          >
+            取消
+          </button>
+          <button
+            className="h-10 rounded-full bg-rose-600 px-4 text-sm font-semibold text-white hover:bg-rose-700 disabled:opacity-50"
+            disabled={busy}
+            onClick={onConfirm}
+            type="button"
+          >
+            {busy ? "删除中..." : "确认删除"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function PanelHeader({ title, children }: { title: string; children?: React.ReactNode }) {
   return (
-    <div className="flex h-16 items-center justify-between border-b border-slate-200 px-5">
-      <h2 className="text-xl font-medium">{title}</h2>
+    <div className="flex h-12 items-center justify-between border-b border-slate-200 px-4">
+      <h2 className="text-sm font-semibold">{title}</h2>
       <div className="flex items-center gap-4">{children ?? <PanelLeft aria-hidden="true" className="h-5 w-5 text-neutral-600" />}</div>
     </div>
   );
@@ -737,11 +1328,11 @@ function PanelHeader({ title, children }: { title: string; children?: React.Reac
 function SourceSearch() {
   return (
     <div className="rounded-2xl border border-slate-200 p-3">
-      <div className="text-base text-neutral-500">在网络中搜索新来源</div>
-      <div className="mt-3 flex items-center gap-2">
-        <span className="rounded-full border border-slate-200 px-3 py-2 text-sm font-semibold">Web</span>
-        <span className="rounded-full border border-slate-200 px-3 py-2 text-sm font-semibold">Fast Research</span>
-        <button className="ml-auto flex h-10 w-10 items-center justify-center rounded-full bg-neutral-100" type="button">
+      <div className="text-sm text-neutral-500">在网络中搜索新来源</div>
+      <div className="mt-2 flex items-center gap-2">
+        <span className="rounded-full border border-slate-200 px-2.5 py-1.5 text-xs font-semibold">Web</span>
+        <span className="rounded-full border border-slate-200 px-2.5 py-1.5 text-xs font-semibold">Fast Research</span>
+        <button className="ml-auto flex h-8 w-8 items-center justify-center rounded-full bg-neutral-100" type="button">
           <Upload aria-hidden="true" className="h-4 w-4 text-neutral-600" />
         </button>
       </div>
@@ -749,24 +1340,56 @@ function SourceSearch() {
   );
 }
 
-function SourceList({ dataset, parseJobs }: { dataset: DatasetResp; parseJobs: ParserJobResp[] }) {
+function SourceList({
+  dataset,
+  documents,
+  documentLoading,
+  parseJobs
+}: {
+  dataset: DatasetResp;
+  documents: DocumentResp[];
+  documentLoading: boolean;
+  parseJobs: ParserJobResp[];
+}) {
+  const documentIds = new Set(documents.map((document) => document.id));
+  const pendingJobs = parseJobs.filter((job) => !documentIds.has(job.documentId));
+
   return (
     <div className="space-y-3">
       <div className="flex items-center justify-between text-sm text-neutral-700">
         <span className="font-medium">已选择 {dataset.documentCount} 个来源</span>
         <span>全选</span>
       </div>
-      {parseJobs.map((job) => (
+      {documentLoading ? (
+        <div className="rounded-lg border border-slate-200 bg-slate-50 p-4 text-sm text-neutral-500">
+          正在加载来源...
+        </div>
+      ) : null}
+      {documents.map((document) => (
+        <div className="flex items-center gap-3 rounded-lg px-2 py-2 hover:bg-slate-50" key={document.id}>
+          <FileText aria-hidden="true" className="h-5 w-5 shrink-0 text-blue-700" />
+          <div className="min-w-0 flex-1">
+            <div className="truncate text-sm font-medium">{document.name}</div>
+            <div className="mt-1 flex flex-wrap gap-x-2 gap-y-1 text-xs text-neutral-500">
+              <span>{document.contentType || "document"}</span>
+              <span>{documentStatus(document)}</span>
+            </div>
+          </div>
+          {document.ingestionStatus === 4 ? (
+            <Check aria-hidden="true" className="h-5 w-5 text-neutral-500" />
+          ) : null}
+        </div>
+      ))}
+      {pendingJobs.map((job) => (
         <div className="flex items-center gap-3 rounded-lg px-2 py-2" key={job.id}>
-          <FileText aria-hidden="true" className="h-5 w-5 shrink-0 text-red-500" />
+          <FileText aria-hidden="true" className="h-5 w-5 shrink-0 text-amber-600" />
           <div className="min-w-0 flex-1">
             <div className="truncate text-sm font-medium">{job.documentName}</div>
             <div className="mt-1 text-xs text-neutral-500">{parseJobStatus(job)}</div>
           </div>
-          <Check aria-hidden="true" className="h-5 w-5 text-neutral-500" />
         </div>
       ))}
-      {parseJobs.length === 0 ? (
+      {!documentLoading && documents.length === 0 && pendingJobs.length === 0 ? (
         <div className="rounded-lg border border-dashed border-slate-200 p-4 text-sm leading-6 text-neutral-500">
           还没有上传来源。添加文件后会进入 RAG 解析和索引。
         </div>
@@ -775,27 +1398,142 @@ function SourceList({ dataset, parseJobs }: { dataset: DatasetResp; parseJobs: P
   );
 }
 
-function AssistantAnswer({
-  message,
-  feedbackStatus,
-  feedbackSubmitting,
-  onFeedback
+function ComposerStatus({ error, status }: { error: string; status: string }) {
+  if (!error && !status) {
+    return null;
+  }
+  return (
+    <div
+      className={[
+        "mx-auto mt-3 max-w-5xl rounded-lg px-3 py-2 text-sm",
+        error ? "bg-rose-50 text-rose-700" : "bg-slate-50 text-neutral-600"
+      ].join(" ")}
+    >
+      {error || status}
+    </div>
+  );
+}
+
+function SkillPicker({
+  activeIndex,
+  open,
+  skills,
+  onSelect
 }: {
+  activeIndex: number;
+  open: boolean;
+  skills: CapabilityItemResp[];
+  onSelect: (skill: CapabilityItemResp) => void;
+}) {
+  if (!open) {
+    return null;
+  }
+
+  return (
+    <div
+      aria-label="Skills"
+      className="absolute bottom-full left-0 z-20 mb-2 max-h-64 w-full overflow-y-auto rounded-lg border border-slate-200 bg-white p-2 text-left shadow-xl"
+      role="listbox"
+    >
+      {skills.length === 0 ? (
+        <div className="px-3 py-2 text-xs text-neutral-500">没有匹配的 skill</div>
+      ) : (
+        skills.map((skill, index) => (
+          <button
+            aria-selected={index === activeIndex}
+            className={[
+              "flex w-full items-start gap-2 rounded-md px-3 py-2 text-left",
+              index === activeIndex ? "bg-neutral-100" : "hover:bg-slate-50"
+            ].join(" ")}
+            key={skill.code}
+            onClick={() => onSelect(skill)}
+            role="option"
+            type="button"
+          >
+            <Bot aria-hidden="true" className="mt-0.5 h-4 w-4 shrink-0 text-neutral-600" />
+            <span className="min-w-0 flex-1">
+              <span className="block truncate text-xs font-semibold text-neutral-950">{skill.name}</span>
+              <span className="mt-0.5 line-clamp-2 block text-xs leading-5 text-neutral-500">
+                {skill.description || skill.code}
+              </span>
+            </span>
+            <span className="shrink-0 rounded-full bg-slate-100 px-2 py-0.5 text-[11px] text-neutral-500">
+              {skill.code}
+            </span>
+          </button>
+        ))
+      )}
+    </div>
+  );
+}
+
+function MarkdownContent({ content }: { content: string }) {
+  return (
+    <ReactMarkdown
+      components={{
+        a: ({ children, href }) => (
+          <a className="font-medium text-blue-700 underline underline-offset-2" href={href} rel="noreferrer" target="_blank">
+            {children}
+          </a>
+        ),
+        blockquote: ({ children }) => (
+          <blockquote className="my-3 border-l-4 border-slate-200 pl-3 text-neutral-600">{children}</blockquote>
+        ),
+        code: ({ children, className }) => (
+          <code className={[className, "rounded bg-slate-100 px-1 py-0.5 font-mono text-[0.92em]"].filter(Boolean).join(" ")}>
+            {children}
+          </code>
+        ),
+        h1: ({ children }) => <h1 className="mb-2 mt-1 text-lg font-semibold leading-7 text-neutral-950">{children}</h1>,
+        h2: ({ children }) => <h2 className="mb-2 mt-1 text-base font-semibold leading-6 text-neutral-950">{children}</h2>,
+        h3: ({ children }) => <h3 className="mb-2 mt-3 text-sm font-semibold leading-6 text-neutral-950">{children}</h3>,
+        li: ({ children }) => <li className="pl-1">{children}</li>,
+        ol: ({ children }) => <ol className="my-3 list-decimal space-y-1 pl-5">{children}</ol>,
+        p: ({ children }) => <p className="my-2">{children}</p>,
+        pre: ({ children }) => (
+          <pre className="my-3 max-w-full overflow-x-auto rounded-lg border border-slate-200 bg-slate-50 p-3 text-xs leading-5">
+            {children}
+          </pre>
+        ),
+        table: ({ children }) => (
+          <div className="my-3 max-w-full overflow-x-auto rounded-lg border border-slate-200">
+            <table className="w-full min-w-max border-collapse text-left text-xs">{children}</table>
+          </div>
+        ),
+        tbody: ({ children }) => <tbody className="divide-y divide-slate-100">{children}</tbody>,
+        td: ({ children }) => <td className="border-r border-slate-100 px-3 py-2 align-top last:border-r-0">{children}</td>,
+        th: ({ children }) => <th className="border-r border-slate-200 bg-slate-50 px-3 py-2 font-semibold last:border-r-0">{children}</th>,
+        thead: ({ children }) => <thead className="border-b border-slate-200">{children}</thead>,
+        ul: ({ children }) => <ul className="my-3 list-disc space-y-1 pl-5">{children}</ul>
+      }}
+      remarkPlugins={[remarkGfm]}
+    >
+      {content}
+    </ReactMarkdown>
+  );
+}
+
+function AssistantAnswer({
+  copied,
+  message,
+  onCopy
+}: {
+  copied: boolean;
   message: ChatFlowMessageResp;
-  feedbackStatus: string;
-  feedbackSubmitting: boolean;
-  onFeedback: (rating: RagFeedbackRating) => void;
+  onCopy: () => void;
 }) {
   const retrievalHitCount = Number(message.metadata.retrievalHitCount ?? 0);
   const answerStrategy = String(message.metadata.answerStrategy ?? "rag");
   const isModelAnswer = !message.ragTraceId;
+  const answerModelRoute = message.routeId ?? metadataString(message.metadata.answerModelRoute);
+  const answerModel = message.model ?? metadataString(message.metadata.answerModel);
 
   return (
-    <article className="text-base leading-8 text-neutral-800">
+    <article className="text-[13px] leading-6 text-neutral-800">
       <div className="flex items-start gap-3">
         <Bot aria-hidden="true" className="mt-1 h-5 w-5 shrink-0 text-neutral-600" />
         <div className="min-w-0 flex-1">
-          <div>{message.content}</div>
+          <MarkdownContent content={message.content} />
           {isModelAnswer ? (
             <div className="mt-3 flex flex-wrap gap-2 text-sm text-neutral-500">
               {message.routeId ? <span>{message.routeId}</span> : null}
@@ -815,51 +1553,44 @@ function AssistantAnswer({
               <span>{retrievalHitCount} hits</span>
               <span>·</span>
               <span>{answerStrategy}</span>
+              {answerModelRoute ? (
+                <>
+                  <span>·</span>
+                  <span>{answerModelRoute}</span>
+                </>
+              ) : null}
+              {answerModel ? (
+                <>
+                  <span>·</span>
+                  <span>{answerModel}</span>
+                </>
+              ) : null}
             </div>
           )}
           <CitationList citations={message.citations} />
-          {!isModelAnswer ? (
-            <div className="mt-4 flex flex-wrap items-center gap-3">
-              <button
-                className="rounded-full border border-slate-200 px-3 py-1.5 text-sm"
-                disabled={!message.ragTraceId || feedbackSubmitting}
-                type="button"
-              >
-                保存到笔记
-              </button>
-              <button
-                aria-label="有帮助"
-                className="text-neutral-600 disabled:opacity-40"
-                disabled={!message.ragTraceId || feedbackSubmitting}
-                onClick={() => onFeedback("helpful")}
-                type="button"
-              >
-                <ThumbsUp aria-hidden="true" className="h-5 w-5" />
-              </button>
-              <button
-                aria-label="答案不准确"
-                className="text-neutral-600 disabled:opacity-40"
-                disabled={!message.ragTraceId || feedbackSubmitting}
-                onClick={() => onFeedback("not_helpful")}
-                type="button"
-              >
-                <ThumbsDown aria-hidden="true" className="h-5 w-5" />
-              </button>
-              <button
-                aria-label="引用问题"
-                className="text-neutral-600 disabled:opacity-40"
-                disabled={!message.ragTraceId || feedbackSubmitting}
-                onClick={() => onFeedback("citation_issue")}
-                type="button"
-              >
-                <Quote aria-hidden="true" className="h-5 w-5" />
-              </button>
-              {feedbackStatus ? <span className="text-sm text-neutral-500">{feedbackStatus}</span> : null}
-            </div>
-          ) : null}
+          <div className="mt-4">
+            <MessageCopyButton copied={copied} onCopy={onCopy} />
+          </div>
         </div>
       </div>
     </article>
+  );
+}
+
+function MessageCopyButton({ copied, onCopy }: { copied: boolean; onCopy: () => void }) {
+  return (
+    <div className="flex items-center gap-2 text-xs text-neutral-500">
+      <button
+        aria-label="复制文本"
+        className="flex h-8 items-center gap-1.5 rounded-full border border-slate-200 bg-white px-3 text-xs font-medium text-neutral-600 hover:bg-slate-50"
+        onClick={onCopy}
+        type="button"
+      >
+        <Copy aria-hidden="true" className="h-3.5 w-3.5" />
+        <span>复制文本</span>
+      </button>
+      {copied ? <span>已复制</span> : null}
+    </div>
   );
 }
 
@@ -879,26 +1610,142 @@ function CitationList({ citations }: { citations: CitationResp[] }) {
   );
 }
 
+function normalizeDatasetId(value: number | null | undefined) {
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0 ? value : null;
+}
+
+function datasetDetailHref(datasetId: number, route: AppRouteKey) {
+  return route === "knowledge-sources" ? `/knowledge/sources/${datasetId}` : `/knowledge/${datasetId}`;
+}
+
+function purposeRouteId(route: ModelRuntimeRouteSummary, purpose: ModelRoutePurpose) {
+  return route.purposeRouteIds?.[purpose] ?? route.routeId;
+}
+
+function modelRouteLabel(route: ModelRuntimeRouteSummary, purpose: ModelRoutePurpose) {
+  const model = route.model ?? "LLM";
+  return `${model} · ${purposeRouteId(route, purpose)}`;
+}
+
+function skillQueryFromInput(value: string) {
+  const match = value.match(/^\/([^\s]*)$/);
+  return match ? match[1].trim().toLowerCase() : null;
+}
+
+function removeSkillSlashTrigger(value: string) {
+  return value.replace(/^\/[^\s]*\s*/, "");
+}
+
+function filterSkills(skills: CapabilityItemResp[], query: string) {
+  const normalized = query.trim().toLowerCase();
+  if (!normalized) {
+    return skills;
+  }
+  return skills.filter((skill) =>
+    [skill.name, skill.code, skill.description].some((value) => value.toLowerCase().includes(normalized))
+  );
+}
+
+function metadataString(value: unknown) {
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+function isAuthRejectedError(error: unknown) {
+  const message = error instanceof Error ? error.message : String(error ?? "");
+  return message.includes("401") || message.includes("未授权") || message.includes("重新登录");
+}
+
 function ModelSessionPanel({
   activeSession,
-  latestAssistant
+  latestAssistant,
+  llmRoutes,
+  selectedRouteId,
+  onRouteChange
 }: {
   activeSession: ChatFlowSessionResp | null;
   latestAssistant: ChatFlowMessageResp | null;
+  llmRoutes: ModelRuntimeRouteSummary[];
+  selectedRouteId: string;
+  onRouteChange: (routeId: string) => void;
 }) {
   return (
     <div className="space-y-4 text-sm text-neutral-700">
+      <div className="rounded-lg border border-slate-200 p-4">
+        <div className="font-semibold text-neutral-950">LLM</div>
+        <div className="mt-3">
+          <ModelRouteSelect
+            routes={llmRoutes}
+            selectedRouteId={selectedRouteId}
+            purpose="chat"
+            onRouteChange={onRouteChange}
+            wide
+          />
+        </div>
+      </div>
       <div className="rounded-lg border border-slate-200 p-4">
         <div className="font-semibold text-neutral-950">{activeSession?.title ?? "Model Chat"}</div>
         <div className="mt-2 text-neutral-500">{activeSession?.messageCount ?? 0} 条消息</div>
       </div>
       <div className="rounded-lg border border-slate-200 p-4">
         <div className="font-semibold text-neutral-950">Latest Output</div>
-        <div className="mt-2 leading-6 text-neutral-500">
-          {latestAssistant ? `${latestAssistant.tokenCount} tokens` : "No model output yet."}
+        <div className="mt-2 break-words leading-6 text-neutral-500">
+          {latestAssistant ? (
+            <>
+              <div>{latestAssistant.routeId ?? "No route"}</div>
+              {latestAssistant.model ? <div>{latestAssistant.model}</div> : null}
+              <div>{latestAssistant.tokenCount} tokens</div>
+            </>
+          ) : (
+            "No model output yet."
+          )}
         </div>
       </div>
     </div>
+  );
+}
+
+function ModelRouteSelect({
+  routes,
+  selectedRouteId,
+  purpose,
+  onRouteChange,
+  wide = false
+}: {
+  routes: ModelRuntimeRouteSummary[];
+  selectedRouteId: string;
+  purpose: ModelRoutePurpose;
+  onRouteChange: (routeId: string) => void;
+  wide?: boolean;
+}) {
+  if (!routes.length) {
+    return (
+      <span
+        className={[
+          "rounded-full border border-slate-200 px-3 py-1.5 text-sm text-neutral-500",
+          wide ? "inline-flex w-full justify-center" : "hidden sm:inline"
+        ].join(" ")}
+      >
+        No LLM
+      </span>
+    );
+  }
+
+  return (
+    <select
+      aria-label="LLM 模型"
+      className={[
+        "h-9 rounded-full border border-slate-200 bg-white px-3 text-sm text-neutral-700 outline-none focus:border-neutral-500",
+        wide ? "w-full" : "hidden max-w-64 sm:inline"
+      ].join(" ")}
+      onChange={(event) => onRouteChange(event.target.value)}
+      value={selectedRouteId}
+    >
+      {routes.map((route) => (
+        <option key={route.routeId} value={route.routeId}>
+          {modelRouteLabel(route, purpose)}
+        </option>
+      ))}
+    </select>
   );
 }
 
@@ -939,6 +1786,22 @@ function parseJobStatus(job: ParserJobResp) {
     return "解析失败";
   }
   return "解析中";
+}
+
+function documentStatus(document: DocumentResp) {
+  if (document.parseStatus === 4 || document.ingestionStatus === 5) {
+    return "处理失败";
+  }
+  if (document.ingestionStatus === 4) {
+    return `已索引 · ${document.chunkCount} chunks`;
+  }
+  if (document.parseStatus === 3) {
+    return `已解析 · ${document.chunkCount} chunks`;
+  }
+  if (document.parseStatus === 2) {
+    return "解析中";
+  }
+  return "待解析";
 }
 
 function formatChineseDate(value: string) {

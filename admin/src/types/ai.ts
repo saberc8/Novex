@@ -60,6 +60,7 @@ export interface DocumentUploadCommand {
 export interface RagAskCommand {
   question: string;
   limit?: number;
+  answerModelRouteId?: string;
 }
 
 export interface CitationResp {
@@ -75,4 +76,8 @@ export interface RagAskResp {
   citations: CitationResp[];
   retrievalHitCount: number;
   answerStrategy: string;
+  embeddingModelRoute: string;
+  rerankModelRoute: string;
+  answerModelRoute: string;
+  answerModel?: string | null;
 }

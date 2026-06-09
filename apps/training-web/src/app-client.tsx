@@ -83,7 +83,11 @@ const fallbackAnswer: RagAskResp = {
     }
   ],
   retrievalHitCount: 2,
-  answerStrategy: "fixture"
+  answerStrategy: "fixture",
+  embeddingModelRoute: "local-keyword",
+  rerankModelRoute: "none",
+  answerModelRoute: "local-extractive",
+  answerModel: null
 };
 
 const fallbackCitations: CitationItem[] = [

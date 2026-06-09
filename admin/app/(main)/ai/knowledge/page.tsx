@@ -11,6 +11,7 @@ import {
   listDocuments,
   uploadTextDocument
 } from "@/api/ai/knowledge";
+import { getModelRuntimeConfig } from "@/api/ai/model";
 import { PermissionGate } from "@/components/permission/permission-gate";
 import { DataTable } from "@/components/table/data-table";
 import { Badge } from "@/components/ui/badge";
@@ -33,6 +34,7 @@ import {
 } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import type { DatasetCommand, DatasetResp, DocumentResp, RagAskResp } from "@/types/ai";
+import type { ModelRuntimeRouteSummary, ModelRoutePurpose } from "@/types/ai-model";
 
 const DEFAULT_DATASET_COMMAND: DatasetCommand = {
   name: "",
@@ -58,6 +60,8 @@ export default function AiKnowledgePage() {
   const [askQuestion, setAskQuestion] = useState("");
   const [askResult, setAskResult] = useState<RagAskResp | null>(null);
   const [askSubmitting, setAskSubmitting] = useState(false);
+  const [llmRoutes, setLlmRoutes] = useState<ModelRuntimeRouteSummary[]>([]);
+  const [selectedLlmRouteId, setSelectedLlmRouteId] = useState("");
 
   const loadDatasets = useCallback(async () => {
     setDatasetLoading(true);
@@ -103,9 +107,30 @@ export default function AiKnowledgePage() {
     }
   }, [selectedDataset]);
 
+  const loadModelRuntime = useCallback(async () => {
+    try {
+      const result = await getModelRuntimeConfig();
+      const routes = result.routes.filter(
+        (route) => route.target === "llm" && route.purposes.includes("rag_answer")
+      );
+      setLlmRoutes(routes);
+      setSelectedLlmRouteId((current) =>
+        current && routes.some((route) => route.routeId === current)
+          ? current
+          : routes[0]?.routeId ?? ""
+      );
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "模型运行时加载失败");
+    }
+  }, []);
+
   useEffect(() => {
     void loadDatasets();
   }, [loadDatasets]);
+
+  useEffect(() => {
+    void loadModelRuntime();
+  }, [loadModelRuntime]);
 
   useEffect(() => {
     void loadDocuments();
@@ -147,6 +172,14 @@ export default function AiKnowledgePage() {
     ],
     []
   );
+
+  const selectedLlmRoute = useMemo(
+    () => llmRoutes.find((route) => route.routeId === selectedLlmRouteId) ?? llmRoutes[0] ?? null,
+    [llmRoutes, selectedLlmRouteId]
+  );
+  const selectedAnswerModelRouteId = selectedLlmRoute
+    ? purposeRouteId(selectedLlmRoute, "rag_answer")
+    : undefined;
 
   async function saveDataset(command: DatasetCommand) {
     setCreateSubmitting(true);
@@ -209,7 +242,13 @@ export default function AiKnowledgePage() {
     }
     setAskSubmitting(true);
     try {
-      setAskResult(await askDataset(selectedDataset.id, { question, limit: 5 }));
+      setAskResult(
+        await askDataset(selectedDataset.id, {
+          question,
+          limit: 5,
+          answerModelRouteId: selectedAnswerModelRouteId
+        })
+      );
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "问答失败");
     } finally {
@@ -345,12 +384,39 @@ export default function AiKnowledgePage() {
                   onChange={(event) => setAskQuestion(event.target.value)}
                 />
               </Field>
+              <Field label="回答模型">
+                <Select
+                  value={selectedLlmRoute?.routeId ?? ""}
+                  onValueChange={setSelectedLlmRouteId}
+                  disabled={!llmRoutes.length}
+                >
+                  <SelectTrigger>
+                    <SelectValue placeholder="选择 LLM" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {llmRoutes.map((route) => (
+                      <SelectItem key={route.routeId} value={route.routeId}>
+                        {modelRouteLabel(route, "rag_answer")}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </Field>
               <Button type="submit" className="w-fit" disabled={!selectedDataset || askSubmitting}>
                 <Send />
                 提问
               </Button>
               {askResult ? (
                 <div className="grid gap-3 rounded-md border bg-muted/20 p-3 text-sm">
+                  <div className="flex flex-wrap gap-2 text-xs text-muted-foreground">
+                    <Badge variant="outline">{askResult.answerStrategy}</Badge>
+                    <Badge variant="outline" className="font-mono">
+                      {askResult.answerModelRoute}
+                    </Badge>
+                    {askResult.answerModel ? (
+                      <Badge variant="secondary">{askResult.answerModel}</Badge>
+                    ) : null}
+                  </div>
                   <div className="whitespace-pre-wrap leading-6">{askResult.answer}</div>
                   {askResult.citations.length ? (
                     <div className="flex flex-wrap gap-2">
@@ -482,6 +548,15 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
       {children}
     </div>
   );
+}
+
+function purposeRouteId(route: ModelRuntimeRouteSummary, purpose: ModelRoutePurpose) {
+  return route.purposeRouteIds?.[purpose] ?? route.routeId;
+}
+
+function modelRouteLabel(route: ModelRuntimeRouteSummary, purpose: ModelRoutePurpose) {
+  const model = route.model ?? "LLM";
+  return `${model} · ${purposeRouteId(route, purpose)}`;
 }
 
 function datasetStatusLabel(status: number) {

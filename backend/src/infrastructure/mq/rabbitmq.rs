@@ -104,6 +104,14 @@ impl RabbitMqClient {
         let channel = connection.create_channel().await.map_err(|error| {
             AppError::Anyhow(anyhow::anyhow!("create RabbitMQ channel: {error}"))
         })?;
+        channel
+            .confirm_select(ConfirmSelectOptions::default())
+            .await
+            .map_err(|error| {
+                AppError::Anyhow(anyhow::anyhow!(
+                    "enable RabbitMQ publisher confirms: {error}"
+                ))
+            })?;
         let client = Self { channel, config };
         client.declare_topology().await?;
         Ok(client)
@@ -255,6 +263,14 @@ impl ParserRabbitMqClient {
         let channel = connection.create_channel().await.map_err(|error| {
             AppError::Anyhow(anyhow::anyhow!("create parser RabbitMQ channel: {error}"))
         })?;
+        channel
+            .confirm_select(ConfirmSelectOptions::default())
+            .await
+            .map_err(|error| {
+                AppError::Anyhow(anyhow::anyhow!(
+                    "enable parser RabbitMQ publisher confirms: {error}"
+                ))
+            })?;
         let client = Self { channel, config };
         client.declare_parser_topology().await?;
         Ok(client)
@@ -468,5 +484,20 @@ mod tests {
                 "{needle} missing from RabbitMQ module"
             );
         }
+    }
+
+    #[test]
+    fn rabbitmq_clients_enable_publisher_confirms_before_publishing() {
+        let source = include_str!("rabbitmq.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+
+        let confirm_select_calls = source.matches(".confirm_select(").count();
+
+        assert!(
+            confirm_select_calls >= 2,
+            "scheduler and parser RabbitMQ clients must enable publisher confirms"
+        );
     }
 }

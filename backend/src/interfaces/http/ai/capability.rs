@@ -1,6 +1,6 @@
 use axum::{
-    extract::{Query, State},
-    routing::get,
+    extract::{Multipart, Query, State},
+    routing::{get, post},
     Json, Router,
 };
 
@@ -9,8 +9,9 @@ use crate::{
         CapabilityItemResp, CapabilityQuery, CapabilityService, CapabilitySummaryResp,
         ConnectorCredentialCommand, ConnectorCredentialQuery, ConnectorCredentialResp,
         McpServerCommand, McpServerResp, PluginInstallCommand, PluginInstallationQuery,
-        PluginInstallationResp, ToolCallAuditQuery, ToolCallAuditResp, ToolDryRunCommand,
-        ToolDryRunResp,
+        PluginInstallationResp, SkillImportFromSourceCommand, SkillImportPreviewCommand,
+        SkillImportPreviewResp, SkillImportResultResp, ToolCallAuditQuery, ToolCallAuditResp,
+        ToolDryRunCommand, ToolDryRunResp,
     },
     domain::auth::model::CurrentUser,
     interfaces::http::{middleware::permission::require_permission, AppState},
@@ -19,6 +20,7 @@ use crate::{
 
 const CAPABILITY_SUMMARY_PERMISSION: &str = "ai:foundation:read";
 const SKILL_LIST_PERMISSION: &str = "ai:skill:list";
+const SKILL_IMPORT_PERMISSION: &str = "ai:skill:import";
 const TOOL_LIST_PERMISSION: &str = "ai:tool:list";
 const CONNECTOR_LIST_PERMISSION: &str = "ai:connector:list";
 const CONNECTOR_CREDENTIAL_UPDATE_PERMISSION: &str = "ai:connector:credential:update";
@@ -34,6 +36,19 @@ pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/ai/capabilities/summary", get(summary))
         .route("/ai/capabilities/skills", get(list_skills))
+        .route("/ai/capabilities/skills/import", post(import_skill))
+        .route(
+            "/ai/capabilities/skills/import/preview",
+            post(preview_skill_import),
+        )
+        .route(
+            "/ai/capabilities/skills/import/source",
+            post(import_skill_from_source),
+        )
+        .route(
+            "/ai/capabilities/skills/import/package",
+            post(import_skill_package),
+        )
         .route(
             "/ai/capabilities/tools/dry-run",
             axum::routing::post(dry_run_tool),
@@ -115,6 +130,66 @@ async fn list_skills(
     let service = CapabilityService::for_tenant(state.db, current_user.tenant_id);
 
     Ok(Json(ApiResponse::ok(service.list_skills(query).await?)))
+}
+
+async fn import_skill(
+    State(state): State<AppState>,
+    current_user: CurrentUser,
+    mut multipart: Multipart,
+) -> Result<Json<ApiResponse<CapabilityItemResp>>, AppError> {
+    require_permission(&current_user, SKILL_IMPORT_PERMISSION)?;
+    let file = multipart_skill_file(&mut multipart).await?;
+    let service = CapabilityService::for_tenant(state.db, current_user.tenant_id);
+
+    Ok(Json(ApiResponse::ok(
+        service
+            .import_skill(current_user.id, file.filename.as_deref(), &file.bytes)
+            .await?,
+    )))
+}
+
+async fn preview_skill_import(
+    State(state): State<AppState>,
+    current_user: CurrentUser,
+    Json(command): Json<SkillImportPreviewCommand>,
+) -> Result<Json<ApiResponse<SkillImportPreviewResp>>, AppError> {
+    require_permission(&current_user, SKILL_IMPORT_PERMISSION)?;
+    let service = CapabilityService::for_tenant(state.db, current_user.tenant_id);
+
+    Ok(Json(ApiResponse::ok(
+        service.preview_skill_import(command).await?,
+    )))
+}
+
+async fn import_skill_from_source(
+    State(state): State<AppState>,
+    current_user: CurrentUser,
+    Json(command): Json<SkillImportFromSourceCommand>,
+) -> Result<Json<ApiResponse<SkillImportResultResp>>, AppError> {
+    require_permission(&current_user, SKILL_IMPORT_PERMISSION)?;
+    let service = CapabilityService::for_tenant(state.db, current_user.tenant_id);
+
+    Ok(Json(ApiResponse::ok(
+        service
+            .import_skill_from_source(current_user.id, command)
+            .await?,
+    )))
+}
+
+async fn import_skill_package(
+    State(state): State<AppState>,
+    current_user: CurrentUser,
+    mut multipart: Multipart,
+) -> Result<Json<ApiResponse<SkillImportResultResp>>, AppError> {
+    require_permission(&current_user, SKILL_IMPORT_PERMISSION)?;
+    let file = multipart_skill_file(&mut multipart).await?;
+    let service = CapabilityService::for_tenant(state.db, current_user.tenant_id);
+
+    Ok(Json(ApiResponse::ok(
+        service
+            .import_skill_package(current_user.id, file.filename.as_deref(), &file.bytes)
+            .await?,
+    )))
 }
 
 async fn list_connectors(
@@ -228,11 +303,38 @@ async fn list_tool_audits(
     )))
 }
 
+struct SkillUploadFile {
+    filename: Option<String>,
+    bytes: Vec<u8>,
+}
+
+async fn multipart_skill_file(multipart: &mut Multipart) -> Result<SkillUploadFile, AppError> {
+    while let Some(field) = multipart
+        .next_field()
+        .await
+        .map_err(|_| AppError::bad_request("Skill 导入文件解析失败"))?
+    {
+        let is_file_field = field.name() == Some("file") || field.file_name().is_some();
+        if !is_file_field {
+            continue;
+        }
+        let filename = field.file_name().map(ToOwned::to_owned);
+        let bytes = field
+            .bytes()
+            .await
+            .map_err(|_| AppError::bad_request("Skill 导入文件读取失败"))?
+            .to_vec();
+        return Ok(SkillUploadFile { filename, bytes });
+    }
+
+    Err(AppError::bad_request("Skill 导入文件不能为空"))
+}
+
 #[cfg(test)]
 mod tests {
     use axum::{
         body::Body,
-        extract::{Query, State},
+        extract::{FromRequest, Query, State},
         http::{header, Request, StatusCode},
     };
     use http_body_util::BodyExt;
@@ -281,6 +383,7 @@ mod tests {
     fn capability_permissions_match_seeded_menu_permissions() {
         assert_eq!(TOOL_LIST_PERMISSION, "ai:tool:list");
         assert_eq!(SKILL_LIST_PERMISSION, "ai:skill:list");
+        assert_eq!(SKILL_IMPORT_PERMISSION, "ai:skill:import");
         assert_eq!(CONNECTOR_LIST_PERMISSION, "ai:connector:list");
         assert_eq!(
             CONNECTOR_CREDENTIAL_UPDATE_PERMISSION,
@@ -311,7 +414,7 @@ mod tests {
             source
                 .matches("CapabilityService::for_tenant(state.db, current_user.tenant_id)")
                 .count()
-                >= 14
+                >= 15
         );
     }
 
@@ -341,11 +444,103 @@ mod tests {
         assert!(matches!(err, AppError::Forbidden));
     }
 
+    #[tokio::test]
+    async fn skill_import_handler_rejects_missing_permission() {
+        let boundary = "novex-test-boundary";
+        let body = format!(
+            "--{boundary}\r\n\
+Content-Disposition: form-data; name=\"file\"; filename=\"SKILL.md\"\r\n\
+Content-Type: text/markdown\r\n\r\n\
+---\nname: demo-skill\ndescription: Demo skill.\n---\n# Demo\n\r\n\
+--{boundary}--\r\n"
+        );
+        let multipart = axum::extract::Multipart::from_request(
+            Request::builder()
+                .header(
+                    header::CONTENT_TYPE,
+                    format!("multipart/form-data; boundary={boundary}"),
+                )
+                .body(Body::from(body))
+                .unwrap(),
+            &(),
+        )
+        .await
+        .unwrap();
+
+        let err = import_skill(
+            State(test_state()),
+            user_with_permissions(vec![]),
+            multipart,
+        )
+        .await
+        .unwrap_err();
+
+        assert!(matches!(err, AppError::Forbidden));
+    }
+
+    #[tokio::test]
+    async fn skill_ai_import_handlers_reject_missing_permission() {
+        let boundary = "novex-test-boundary";
+        let body = format!(
+            "--{boundary}\r\n\
+Content-Disposition: form-data; name=\"file\"; filename=\"skills.zip\"\r\n\
+Content-Type: application/zip\r\n\r\n\
+zip-bytes\r\n\
+--{boundary}--\r\n"
+        );
+        let multipart = axum::extract::Multipart::from_request(
+            Request::builder()
+                .header(
+                    header::CONTENT_TYPE,
+                    format!("multipart/form-data; boundary={boundary}"),
+                )
+                .body(Body::from(body))
+                .unwrap(),
+            &(),
+        )
+        .await
+        .unwrap();
+        let preview_err = preview_skill_import(
+            State(test_state()),
+            user_with_permissions(vec![]),
+            Json(SkillImportPreviewCommand {
+                source: "https://github.com/KKKKhazix/khazix-skills".to_owned(),
+            }),
+        )
+        .await
+        .unwrap_err();
+        let source_err = import_skill_from_source(
+            State(test_state()),
+            user_with_permissions(vec![]),
+            Json(SkillImportFromSourceCommand {
+                source: "https://github.com/KKKKhazix/khazix-skills".to_owned(),
+                skill_path: Some("khazix-writer".to_owned()),
+            }),
+        )
+        .await
+        .unwrap_err();
+        let package_err = import_skill_package(
+            State(test_state()),
+            user_with_permissions(vec![]),
+            multipart,
+        )
+        .await
+        .unwrap_err();
+
+        assert!(matches!(preview_err, AppError::Forbidden));
+        assert!(matches!(source_err, AppError::Forbidden));
+        assert!(matches!(package_err, AppError::Forbidden));
+    }
+
     #[test]
     fn skill_list_permission_seed_contains_skill_menu() {
         let seed = include_str!("../../../../migrations/202606050001_seed_ai_foundation_menus.sql");
+        let import_seed =
+            include_str!("../../../../migrations/202606090002_seed_skill_import_permission.sql");
         assert!(seed.contains("/ai/skills"));
         assert!(seed.contains("ai:skill:list"));
+        assert!(import_seed.contains("/ai/skills"));
+        assert!(import_seed.contains("ai:skill:import"));
     }
 
     #[tokio::test]

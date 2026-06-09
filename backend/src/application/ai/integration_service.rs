@@ -728,7 +728,11 @@ fn normalize_training_ask_input(input: &serde_json::Value) -> Result<TrainingAsk
         .unwrap_or_default()
         .to_owned();
     let limit = object.get("limit").and_then(json_usize).unwrap_or_default();
-    let command = normalize_rag_ask_command(RagAskCommand { question, limit })?;
+    let command = normalize_rag_ask_command(RagAskCommand {
+        question,
+        limit,
+        ..RagAskCommand::default()
+    })?;
 
     Ok(TrainingAskInput {
         dataset_id,
@@ -931,8 +935,8 @@ fn openapi_training_ask_response(
         trace_id: Some(answer.trace_id),
         retrieval_hit_count: Some(answer.retrieval_hit_count),
         answer_strategy: Some(answer.answer_strategy),
-        route_id: None,
-        model: None,
+        route_id: Some(answer.answer_model_route),
+        model: answer.answer_model,
         usage: None,
         latency_ms: None,
         run_id: None,
@@ -1603,7 +1607,7 @@ mod tests {
 
         assert_eq!(ask.dataset_id, 42);
         assert_eq!(ask.command.question, "Novex training policy?");
-        assert_eq!(ask.command.limit, 10);
+        assert_eq!(ask.command.limit, 24);
 
         let ask = normalize_training_ask_input(&json!({
             "dataset_id": 43,
@@ -1732,6 +1736,10 @@ mod tests {
                 }],
                 retrieval_hit_count: 1,
                 answer_strategy: "extractive".to_owned(),
+                embedding_model_route: "runtime.embedding".to_owned(),
+                rerank_model_route: "runtime.reranker".to_owned(),
+                answer_model_route: "runtime.llm".to_owned(),
+                answer_model: Some("deepseek-v4-flash".to_owned()),
             },
         );
 

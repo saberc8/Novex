@@ -1,6 +1,7 @@
 use novex_ai_core::FoundationModule;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::BTreeMap;
 use std::{env, fmt};
 
 pub const CRATE_ID: &str = "novex-model";
@@ -268,6 +269,12 @@ impl ModelRuntimeRoute {
     }
 
     pub fn summary(&self) -> ModelRuntimeRouteSummary {
+        let purpose_route_ids = self
+            .purposes
+            .iter()
+            .map(|purpose| (purpose.as_str().to_owned(), self.route_id.clone()))
+            .collect();
+
         ModelRuntimeRouteSummary {
             target: self.target,
             route_id: self.route_id.clone(),
@@ -279,6 +286,7 @@ impl ModelRuntimeRoute {
             masked_api_key: mask_api_key(&self.api_key),
             purposes: self.purposes.clone(),
             env_keys: self.env_keys.clone(),
+            purpose_route_ids,
         }
     }
 }
@@ -419,6 +427,7 @@ pub struct ModelRuntimeRouteSummary {
     pub masked_api_key: String,
     pub purposes: Vec<ModelRoutePurpose>,
     pub env_keys: Vec<String>,
+    pub purpose_route_ids: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]

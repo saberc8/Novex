@@ -26,6 +26,40 @@ export interface CapabilityItemResp {
   createTime: string;
 }
 
+export interface SkillImportPreviewCommand {
+  source: string;
+}
+
+export interface SkillImportFromSourceCommand {
+  source: string;
+  skillPath?: string | null;
+}
+
+export interface SkillImportPreviewItemResp {
+  code: string;
+  name: string;
+  description: string;
+  path: string;
+  referenceCount: number;
+  scriptCount: number;
+  assetCount: number;
+}
+
+export interface SkillImportPreviewResp {
+  sourceUrl: string;
+  skills: SkillImportPreviewItemResp[];
+  warnings: string[];
+}
+
+export interface SkillImportResultResp {
+  skill: CapabilityItemResp;
+  resourceCount: number;
+  referenceCount: number;
+  scriptCount: number;
+  assetCount: number;
+  warnings: string[];
+}
+
 export interface ToolDryRunCommand {
   toolCode: string;
   input: Record<string, unknown>;

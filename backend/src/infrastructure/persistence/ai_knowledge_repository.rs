@@ -459,6 +459,196 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10);
         .await?)
     }
 
+    pub async fn delete_dataset_cascade(
+        &self,
+        tenant_id: i64,
+        dataset_id: i64,
+    ) -> Result<(), AppError> {
+        let mut tx = self.db.begin().await?;
+
+        sqlx::query(
+            r#"
+DELETE FROM ai_feedback AS f
+USING ai_rag_trace AS t
+WHERE f.tenant_id = $1
+  AND t.tenant_id = $1
+  AND t.dataset_id = $2
+  AND (f.trace_id = t.id::TEXT OR (f.resource_type = 'rag_trace' AND f.resource_id = t.id::TEXT));
+"#,
+        )
+        .bind(tenant_id)
+        .bind(dataset_id)
+        .execute(&mut *tx)
+        .await?;
+
+        sqlx::query(
+            r#"
+DELETE FROM ai_chat_flow_message AS m
+WHERE m.tenant_id = $1
+  AND (
+      EXISTS (
+          SELECT 1
+          FROM ai_chat_flow_session AS s
+          WHERE s.tenant_id = m.tenant_id
+            AND s.id = m.session_id
+            AND s.dataset_id = $2
+      )
+      OR EXISTS (
+          SELECT 1
+          FROM ai_rag_trace AS t
+          WHERE t.tenant_id = m.tenant_id
+            AND t.id = m.rag_trace_id
+            AND t.dataset_id = $2
+      )
+  );
+"#,
+        )
+        .bind(tenant_id)
+        .bind(dataset_id)
+        .execute(&mut *tx)
+        .await?;
+
+        sqlx::query(
+            r#"
+DELETE FROM ai_chat_flow_session
+WHERE tenant_id = $1 AND dataset_id = $2;
+"#,
+        )
+        .bind(tenant_id)
+        .bind(dataset_id)
+        .execute(&mut *tx)
+        .await?;
+
+        sqlx::query(
+            r#"
+DELETE FROM ai_rag_trace_hit
+WHERE tenant_id = $1 AND dataset_id = $2;
+"#,
+        )
+        .bind(tenant_id)
+        .bind(dataset_id)
+        .execute(&mut *tx)
+        .await?;
+
+        sqlx::query(
+            r#"
+DELETE FROM ai_rag_trace
+WHERE tenant_id = $1 AND dataset_id = $2;
+"#,
+        )
+        .bind(tenant_id)
+        .bind(dataset_id)
+        .execute(&mut *tx)
+        .await?;
+
+        if parser_outbox_table_exists(&mut tx).await? {
+            sqlx::query(
+                r#"
+DELETE FROM ai_parser_outbox
+WHERE tenant_id = $1 AND dataset_id = $2;
+"#,
+            )
+            .bind(tenant_id)
+            .bind(dataset_id)
+            .execute(&mut *tx)
+            .await?;
+        }
+
+        sqlx::query(
+            r#"
+DELETE FROM ai_parser_job
+WHERE tenant_id = $1 AND dataset_id = $2;
+"#,
+        )
+        .bind(tenant_id)
+        .bind(dataset_id)
+        .execute(&mut *tx)
+        .await?;
+
+        sqlx::query(
+            r#"
+DELETE FROM ai_embedding
+WHERE tenant_id = $1 AND dataset_id = $2;
+"#,
+        )
+        .bind(tenant_id)
+        .bind(dataset_id)
+        .execute(&mut *tx)
+        .await?;
+
+        sqlx::query(
+            r#"
+DELETE FROM ai_vector_collection
+WHERE tenant_id = $1 AND dataset_id = $2;
+"#,
+        )
+        .bind(tenant_id)
+        .bind(dataset_id)
+        .execute(&mut *tx)
+        .await?;
+
+        sqlx::query(
+            r#"
+DELETE FROM ai_document_block
+WHERE tenant_id = $1 AND dataset_id = $2;
+"#,
+        )
+        .bind(tenant_id)
+        .bind(dataset_id)
+        .execute(&mut *tx)
+        .await?;
+
+        sqlx::query(
+            r#"
+DELETE FROM ai_document_chunk
+WHERE tenant_id = $1 AND dataset_id = $2;
+"#,
+        )
+        .bind(tenant_id)
+        .bind(dataset_id)
+        .execute(&mut *tx)
+        .await?;
+
+        sqlx::query(
+            r#"
+DELETE FROM ai_document
+WHERE tenant_id = $1 AND dataset_id = $2;
+"#,
+        )
+        .bind(tenant_id)
+        .bind(dataset_id)
+        .execute(&mut *tx)
+        .await?;
+
+        sqlx::query(
+            r#"
+DELETE FROM sys_resource_permission
+WHERE tenant_id = $1
+  AND resource_type = 'ai_dataset'
+  AND resource_id = $2::TEXT;
+"#,
+        )
+        .bind(tenant_id)
+        .bind(dataset_id)
+        .execute(&mut *tx)
+        .await?;
+
+        let result = sqlx::query(
+            r#"
+DELETE FROM ai_dataset
+WHERE tenant_id = $1 AND id = $2;
+"#,
+        )
+        .bind(tenant_id)
+        .bind(dataset_id)
+        .execute(&mut *tx)
+        .await?;
+        ensure_affected(result.rows_affected())?;
+
+        tx.commit().await?;
+        Ok(())
+    }
+
     pub async fn count_documents(&self, filter: &DocumentFilter) -> Result<i64, AppError> {
         let mut query = QueryBuilder::<Postgres>::new("SELECT COUNT(*) FROM ai_document AS d");
         query.push(" WHERE 1 = 1");
@@ -1627,6 +1817,15 @@ fn ensure_affected(rows_affected: u64) -> Result<(), AppError> {
     }
 }
 
+async fn parser_outbox_table_exists(tx: &mut Transaction<'_, Postgres>) -> Result<bool, AppError> {
+    Ok(sqlx::query_scalar::<_, Option<String>>(
+        "SELECT to_regclass('public.ai_parser_outbox')::TEXT;",
+    )
+    .fetch_one(&mut **tx)
+    .await?
+    .is_some())
+}
+
 async fn insert_dataset_vector_collection(
     tx: &mut Transaction<'_, Postgres>,
     record: &DatasetSaveRecord<'_>,
@@ -2016,6 +2215,40 @@ mod tests {
             "attempt_count",
         ] {
             assert!(source.contains(needle), "{needle} missing from repository");
+        }
+    }
+
+    #[test]
+    fn repository_deletes_dataset_cascade_records_in_one_transaction() {
+        let source = include_str!("ai_knowledge_repository.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+
+        for needle in [
+            "delete_dataset_cascade",
+            "DELETE FROM ai_feedback AS f",
+            "DELETE FROM ai_chat_flow_message AS m",
+            "DELETE FROM ai_chat_flow_session",
+            "DELETE FROM ai_rag_trace_hit",
+            "DELETE FROM ai_rag_trace",
+            "parser_outbox_table_exists(&mut tx).await?",
+            "DELETE FROM ai_parser_outbox",
+            "DELETE FROM ai_parser_job",
+            "DELETE FROM ai_embedding",
+            "DELETE FROM ai_vector_collection",
+            "DELETE FROM ai_document_block",
+            "DELETE FROM ai_document_chunk",
+            "DELETE FROM ai_document",
+            "DELETE FROM sys_resource_permission",
+            "DELETE FROM ai_dataset",
+            "tx.commit().await?",
+            "ensure_affected(result.rows_affected())?",
+        ] {
+            assert!(
+                source.contains(needle),
+                "{needle} missing from repository cascade delete"
+            );
         }
     }
 
