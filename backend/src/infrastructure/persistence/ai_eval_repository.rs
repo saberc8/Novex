@@ -636,6 +636,7 @@ WHERE tenant_id = $1
   AND id = $2
   AND (
       status IN ('queued', 'retry')
+      OR (status = 'running' AND lease_owner = $3)
       OR (status = 'running' AND lease_until IS NOT NULL AND lease_until < $5)
   )
 RETURNING {}
@@ -1052,6 +1053,19 @@ mod tests {
         assert!(
             source.contains("WHERE status IN (1, 3)"),
             "eval outbox scanner must retry records that failed to publish"
+        );
+    }
+
+    #[test]
+    fn eval_task_lease_allows_same_worker_reentry() {
+        let source = include_str!("ai_eval_repository.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+
+        assert!(
+            source.contains("OR (status = 'running' AND lease_owner = $3)"),
+            "same worker must be able to resume its own running lease after message redelivery"
         );
     }
 }

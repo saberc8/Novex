@@ -126,7 +126,7 @@ pub async fn run_eval_worker_runtime(
             Ok(EvalTaskHandleOutcome::Completed | EvalTaskHandleOutcome::Ignored) => {}
             Err(error) => {
                 tracing::error!(error = ?error, task_id = message.task_id, "execute eval task failed");
-                mq.publish_eval_dead(&message).await?;
+                return Err(error);
             }
         }
         delivery
@@ -160,9 +160,20 @@ where
         )
         .await?
     else {
+        if let Some(task) = repo.find_task(message.tenant_id, message.task_id).await? {
+            if is_terminal_task_status(&task.status) {
+                aggregate_run_if_finished(
+                    repo,
+                    task.tenant_id,
+                    task.run_id,
+                    user_id_from_task(&task),
+                )
+                .await?;
+            }
+        }
         return Ok(EvalTaskHandleOutcome::Ignored);
     };
-    let user_id = task.create_user.unwrap_or_default();
+    let user_id = user_id_from_task(&task);
     repo.update_run_status(
         task.tenant_id,
         task.run_id,
@@ -527,6 +538,10 @@ fn metric_code(metric: EvalMetricKind) -> String {
     .to_owned()
 }
 
+fn user_id_from_task(task: &EvalTaskRecord) -> i64 {
+    task.create_user.unwrap_or_default()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -588,6 +603,20 @@ mod tests {
         assert_eq!(
             aggregate_status_from_tasks(&terminal),
             Some("failed".to_owned())
+        );
+    }
+
+    #[test]
+    fn worker_does_not_dead_letter_infrastructure_errors() {
+        let source = include_str!("eval_worker_runtime.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+
+        assert!(source.contains("return Err(error);"));
+        assert!(
+            !source.contains("mq.publish_eval_dead(&message).await?;\n            }\n        }\n        delivery"),
+            "infrastructure errors must not be dead-lettered and acked as business failures"
         );
     }
 

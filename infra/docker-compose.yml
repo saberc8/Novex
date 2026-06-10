@@ -171,6 +171,7 @@ services:
     image: ${RUST_IMAGE:-rust:1.85-bookworm}
     working_dir: /workspace
     command: bash -lc "cargo run -p backend-rust --bin eval_worker"
+    restart: unless-stopped
     environment:
       DATABASE_URL: postgres://postgres:postgres@postgres:5432/avalon_admin
       DATABASE_MAX_CONNECTIONS: ${DATABASE_MAX_CONNECTIONS:-5}
