@@ -16,6 +16,7 @@ POC_SERVICES=(
   rabbitmq
   redis
   backend
+  eval-worker
   parser-worker
   admin
   training-web

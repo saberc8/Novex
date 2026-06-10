@@ -1,22 +1,20 @@
-use std::time::Instant;
-
 use chrono::Utc;
+#[cfg(test)]
 use novex_eval::{
-    build_regression_report, score_case, score_cost_case, score_latency_case,
-    score_retrieval_recall_case, EvalCaseActual, EvalCaseExpected, EvalCaseScore, EvalMetricKind,
-    EvalTargetKind,
+    score_case, score_cost_case, score_latency_case, score_retrieval_recall_case, EvalCaseScore,
+    EvalMetricKind, EvalTargetKind,
 };
+use novex_eval::{EvalCaseActual, EvalCaseExpected};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sqlx::PgPool;
 
 use crate::{
-    application::ai::knowledge_service::{KnowledgeService, RagAskCommand},
     application::system::{ensure_max_chars, format_datetime},
     infrastructure::persistence::ai_eval_repository::{
         AiEvalRepository, EvalCaseFilter, EvalCaseRecord, EvalDatasetFilter, EvalDatasetRecord,
-        EvalOutboxSaveRecord, EvalResultFilter, EvalResultRecord, EvalResultSaveRecord,
-        EvalRunFilter, EvalRunRecord, EvalRunSaveRecord, EvalTaskSaveRecord,
+        EvalOutboxSaveRecord, EvalResultFilter, EvalResultRecord, EvalRunFilter, EvalRunRecord,
+        EvalRunSaveRecord, EvalTaskSaveRecord,
     },
     shared::{
         error::AppError,
@@ -243,7 +241,6 @@ pub struct EvalResultResp {
 #[derive(Debug, Clone)]
 pub struct EvalService {
     tenant_id: i64,
-    db: PgPool,
     repo: AiEvalRepository,
 }
 
@@ -255,7 +252,6 @@ impl EvalService {
     pub fn for_tenant(db: PgPool, tenant_id: i64) -> Self {
         Self {
             tenant_id,
-            db: db.clone(),
             repo: AiEvalRepository::new(db),
         }
     }
@@ -341,121 +337,72 @@ impl EvalService {
         let run_id = next_id();
         let now = Utc::now().naive_utc();
         let metric_breakdown = json!({});
-        let report_payload = eval_report_payload(
-            cases.len() as i32,
-            0,
-            0,
-            0.0,
-            metric_breakdown.clone(),
-        );
-        self.repo
-            .create_run(&EvalRunSaveRecord {
-                id: run_id,
-                tenant_id: self.tenant_id,
-                dataset_id: dataset.id,
-                dataset_code: dataset.code.clone(),
-                status: EVAL_RUN_STATUS_QUEUED.to_owned(),
-                total_cases: cases.len() as i32,
-                passed_cases: 0,
-                failed_cases: 0,
-                average_score: 0.0,
-                metric_breakdown,
-                report_payload,
-                triggered_by: user_id,
-                user_id,
-                now,
-            })
-            .await?;
-
+        let report_payload =
+            eval_report_payload(cases.len() as i32, 0, 0, 0.0, metric_breakdown.clone());
+        let run = EvalRunSaveRecord {
+            id: run_id,
+            tenant_id: self.tenant_id,
+            dataset_id: dataset.id,
+            dataset_code: dataset.code.clone(),
+            status: EVAL_RUN_STATUS_QUEUED.to_owned(),
+            total_cases: cases.len() as i32,
+            passed_cases: 0,
+            failed_cases: 0,
+            average_score: 0.0,
+            metric_breakdown,
+            report_payload,
+            triggered_by: user_id,
+            user_id,
+            now,
+        };
+        let runtime_config = eval_task_runtime_config(&dataset, &command);
+        let mut tasks = Vec::with_capacity(cases.len());
+        let mut outbox_records = Vec::with_capacity(cases.len());
         for case in &cases {
             let task_id = next_id();
-            self.repo
-                .create_task(&EvalTaskSaveRecord {
-                    id: task_id,
-                    tenant_id: self.tenant_id,
-                    run_id,
-                    dataset_id: dataset.id,
-                    case_id: case.id,
-                    case_code: case.case_code.clone(),
-                    target_kind: case.target_kind.clone(),
-                    metric_kind: case.metric_kind.clone(),
-                    run_mode: command.run_mode.clone(),
-                    status: EVAL_TASK_STATUS_QUEUED.to_owned(),
-                    attempt: 0,
-                    max_attempts: DEFAULT_TASK_MAX_ATTEMPTS,
-                    input_snapshot: eval_case_input_snapshot(case),
-                    expected_snapshot: case.expected_payload.clone(),
-                    tags_snapshot: case.tags.clone(),
-                    runtime_config: eval_task_runtime_config(&dataset, &command),
-                    user_id,
-                    now,
-                })
-                .await?;
-            self.repo
-                .create_outbox(&EvalOutboxSaveRecord {
-                    id: next_id(),
-                    tenant_id: self.tenant_id,
-                    run_id,
+            tasks.push(EvalTaskSaveRecord {
+                id: task_id,
+                tenant_id: self.tenant_id,
+                run_id,
+                dataset_id: dataset.id,
+                case_id: case.id,
+                case_code: case.case_code.clone(),
+                target_kind: case.target_kind.clone(),
+                metric_kind: case.metric_kind.clone(),
+                run_mode: command.run_mode.clone(),
+                status: EVAL_TASK_STATUS_QUEUED.to_owned(),
+                attempt: 0,
+                max_attempts: DEFAULT_TASK_MAX_ATTEMPTS,
+                input_snapshot: eval_case_input_snapshot(case),
+                expected_snapshot: case.expected_payload.clone(),
+                tags_snapshot: case.tags.clone(),
+                runtime_config: runtime_config.clone(),
+                user_id,
+                now,
+            });
+            outbox_records.push(EvalOutboxSaveRecord {
+                id: next_id(),
+                tenant_id: self.tenant_id,
+                run_id,
+                task_id,
+                event_type: EVAL_TASK_REQUESTED_EVENT.to_owned(),
+                payload: eval_task_payload(
                     task_id,
-                    event_type: EVAL_TASK_REQUESTED_EVENT.to_owned(),
-                    payload: eval_task_payload(
-                        task_id,
-                        run_id,
-                        self.tenant_id,
-                        case,
-                        &command.run_mode,
-                        DEFAULT_TASK_MAX_ATTEMPTS,
-                    ),
-                    user_id,
-                    now,
-                })
-                .await?;
-        }
-
-        self.get_run(run_id).await
-    }
-
-    async fn build_eval_actual_for_run(
-        &self,
-        user_id: i64,
-        dataset: &EvalDatasetRecord,
-        case: &EvalCaseRecord,
-        expected: &EvalCaseExpected,
-        command: &EvalRunCommand,
-    ) -> Result<EvalCaseActual, AppError> {
-        if eval_run_uses_live_rag(command) && case.target_kind == "rag" {
-            let knowledge_dataset_id = live_rag_knowledge_dataset_id(
-                &dataset.metadata,
-                &case.tags,
-                &case.expected_payload,
-            )
-            .ok_or_else(|| AppError::bad_request("live_rag 评测缺少 knowledgeDatasetId"))?;
-            let started = Instant::now();
-            let response = KnowledgeService::new(self.db.clone())
-                .ask_dataset_for_tenant(
+                    run_id,
                     self.tenant_id,
-                    user_id,
-                    knowledge_dataset_id,
-                    RagAskCommand {
-                        question: case.prompt.clone(),
-                        limit: 5,
-                        ..RagAskCommand::default()
-                    },
-                )
-                .await?;
-            return Ok(EvalCaseActual {
-                answer: Some(response.answer),
-                citations: response
-                    .citations
-                    .into_iter()
-                    .map(|citation| citation.chunk_id)
-                    .collect(),
-                latency_ms: started.elapsed().as_millis().min(u128::from(u32::MAX)) as u32,
-                ..Default::default()
+                    case,
+                    &command.run_mode,
+                    DEFAULT_TASK_MAX_ATTEMPTS,
+                ),
+                user_id,
+                now,
             });
         }
+        self.repo
+            .create_run_with_tasks_and_outbox(&run, &tasks, &outbox_records)
+            .await?;
 
-        Ok(build_eval_actual(&case.target_kind, expected, &case.prompt))
+        self.get_run(run_id).await
     }
 
     pub async fn list_runs(
@@ -532,6 +479,7 @@ pub fn normalize_eval_run_command(mut command: EvalRunCommand) -> Result<EvalRun
     Ok(command)
 }
 
+#[cfg(test)]
 fn eval_run_uses_live_rag(command: &EvalRunCommand) -> bool {
     command.run_mode == EVAL_RUN_MODE_LIVE_RAG
 }
@@ -568,10 +516,12 @@ fn eval_task_runtime_config(dataset: &EvalDatasetRecord, command: &EvalRunComman
     json!({
         "datasetId": dataset.id,
         "datasetCode": dataset.code,
+        "datasetMetadata": dataset.metadata,
         "runMode": command.run_mode
     })
 }
 
+#[cfg(test)]
 fn live_rag_knowledge_dataset_id(
     dataset_metadata: &Value,
     case_tags: &Value,
@@ -585,6 +535,7 @@ fn live_rag_knowledge_dataset_id(
         .or_else(|| json_positive_i64(expected_payload, "knowledge_dataset_id"))
 }
 
+#[cfg(test)]
 fn json_positive_i64(value: &Value, key: &str) -> Option<i64> {
     value
         .get(key)
@@ -770,6 +721,7 @@ fn score_eval_case(case: &EvalCaseRecord) -> Result<EvalCaseScore, AppError> {
     Ok(score_eval_case_with_actual(case, &expected, &actual))
 }
 
+#[cfg(test)]
 fn score_eval_case_with_actual(
     case: &EvalCaseRecord,
     expected: &EvalCaseExpected,
@@ -800,17 +752,10 @@ fn score_eval_case_with_actual(
     }
 }
 
+#[cfg(test)]
 fn expected_from_case(case: &EvalCaseRecord) -> Result<EvalCaseExpected, AppError> {
     serde_json::from_value::<EvalCaseExpected>(case.expected_payload.clone())
         .map_err(|err| AppError::bad_request(format!("评测期望格式错误: {err}")))
-}
-
-fn metric_breakdown_payload(report: &novex_eval::RegressionReport) -> Value {
-    let mut map = serde_json::Map::new();
-    for (metric, score) in &report.metric_breakdown {
-        map.insert(metric_code(*metric), json!(score));
-    }
-    Value::Object(map)
 }
 
 impl From<EvalDatasetRecord> for EvalDatasetResp {
@@ -887,6 +832,7 @@ impl From<EvalResultRecord> for EvalResultResp {
     }
 }
 
+#[cfg(test)]
 fn target_kind_from_code(code: &str) -> EvalTargetKind {
     match code {
         "rag" => EvalTargetKind::Rag,
@@ -898,6 +844,7 @@ fn target_kind_from_code(code: &str) -> EvalTargetKind {
     }
 }
 
+#[cfg(test)]
 fn metric_kind_from_code(code: &str) -> EvalMetricKind {
     match code {
         "retrieval_recall" => EvalMetricKind::RetrievalRecall,
@@ -911,6 +858,7 @@ fn metric_kind_from_code(code: &str) -> EvalMetricKind {
     }
 }
 
+#[cfg(test)]
 fn expected_u32(payload: &Value, key: &str, fallback: u32) -> u32 {
     payload
         .get(key)
@@ -919,6 +867,7 @@ fn expected_u32(payload: &Value, key: &str, fallback: u32) -> u32 {
         .unwrap_or(fallback)
 }
 
+#[cfg(test)]
 fn metric_code(metric: EvalMetricKind) -> String {
     match metric {
         EvalMetricKind::RetrievalRecall => "retrieval_recall",
@@ -1134,7 +1083,10 @@ mod tests {
             "idx_ai_eval_outbox_status",
             "uq_ai_eval_outbox_task_event",
         ] {
-            assert!(migration.contains(needle), "{needle} missing from eval queue migration");
+            assert!(
+                migration.contains(needle),
+                "{needle} missing from eval queue migration"
+            );
         }
     }
 

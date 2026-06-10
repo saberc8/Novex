@@ -6,6 +6,7 @@ use serde_json::{json, Value};
 use sqlx::PgPool;
 
 use crate::{
+    application::ai::eval_service::{EvalRunCommand, EvalService},
     application::scheduler::{
         http_safety::{validate_http_target, HttpSafetyConfig},
         service::{JOB_TYPE_BUILTIN, JOB_TYPE_HTTP},
@@ -33,7 +34,7 @@ pub async fn execute_scheduler_message(
     worker_id: &str,
     message: &SchedulerMessage,
 ) -> Result<ExecutionOutcome, AppError> {
-    let repo = SchedulerRepository::new(db);
+    let repo = SchedulerRepository::new(db.clone());
     let job = repo
         .get_job(message.job_id)
         .await?
@@ -48,7 +49,7 @@ pub async fn execute_scheduler_message(
 
     let result = match job.task_type {
         JOB_TYPE_HTTP => execute_http_job(&job, http_safety).await,
-        JOB_TYPE_BUILTIN => execute_builtin_job(&job.builtin_key).await,
+        JOB_TYPE_BUILTIN => execute_builtin_job(db.clone(), &job).await,
         _ => Err(AppError::bad_request("任务类型不正确")),
     };
 
@@ -165,14 +166,41 @@ async fn execute_http_job(
     })
 }
 
-async fn execute_builtin_job(key: &str) -> Result<HttpOutput, AppError> {
-    match key {
+async fn execute_builtin_job(
+    db: PgPool,
+    job: &crate::infrastructure::persistence::scheduler_repository::JobRecord,
+) -> Result<HttpOutput, AppError> {
+    match job.builtin_key.as_str() {
         "system.noop" => Ok(HttpOutput {
             status: Some(200),
             body: "ok".to_owned(),
         }),
-        _ => Err(AppError::bad_request(format!("未知内置任务: {key}"))),
+        "eval.run_dataset" => {
+            let command = eval_run_command_from_builtin_payload(&job.http_body)?;
+            let run = EvalService::new(db).run_eval(1, command).await?;
+            Ok(HttpOutput {
+                status: Some(200),
+                body: json!({
+                    "runId": run.run_id,
+                    "datasetCode": run.dataset_code,
+                    "status": run.status
+                })
+                .to_string(),
+            })
+        }
+        _ => Err(AppError::bad_request(format!(
+            "未知内置任务: {}",
+            job.builtin_key
+        ))),
     }
+}
+
+fn eval_run_command_from_builtin_payload(payload: &str) -> Result<EvalRunCommand, AppError> {
+    if payload.trim().is_empty() {
+        return Err(AppError::bad_request("eval.run_dataset 缺少任务参数"));
+    }
+    serde_json::from_str::<EvalRunCommand>(payload)
+        .map_err(|error| AppError::bad_request(format!("eval.run_dataset 参数格式错误: {error}")))
 }
 
 fn truncate_body(mut body: String) -> String {
@@ -203,5 +231,16 @@ mod tests {
         };
 
         assert!(outcome.retryable);
+    }
+
+    #[test]
+    fn eval_builtin_payload_parses_dataset_and_run_mode() {
+        let command = eval_run_command_from_builtin_payload(
+            r#"{"datasetCode":"rag_regression_live","runMode":"live_rag"}"#,
+        )
+        .unwrap();
+
+        assert_eq!(command.dataset_code, "rag_regression_live");
+        assert_eq!(command.run_mode, "live_rag");
     }
 }

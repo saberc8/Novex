@@ -1,8 +1,13 @@
 use std::net::SocketAddr;
 
 use backend_rust::{
-    application::ai::parser_queue_runtime::{
-        parser_queue_from_config, parser_rabbitmq_from_config, spawn_parser_queue_publisher,
+    application::ai::{
+        eval_queue_runtime::{
+            eval_queue_from_config, eval_rabbitmq_from_config, spawn_eval_queue_publisher,
+        },
+        parser_queue_runtime::{
+            parser_queue_from_config, parser_rabbitmq_from_config, spawn_parser_queue_publisher,
+        },
     },
     application::scheduler::runtime::{
         http_safety_from_config, rabbitmq_from_config, spawn_scheduler_runtime,
@@ -42,6 +47,11 @@ async fn main() -> anyhow::Result<()> {
         db.clone(),
         parser_queue_from_config(&config),
         parser_rabbitmq_from_config(&config),
+    );
+    spawn_eval_queue_publisher(
+        db.clone(),
+        eval_queue_from_config(&config),
+        eval_rabbitmq_from_config(&config),
     );
     let app = build_router_with_scheduler_http_safety(
         db,

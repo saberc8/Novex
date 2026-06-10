@@ -6,9 +6,10 @@ Local POC topology for Novex. The default compose path starts PostgreSQL, Milvus
 
 - `postgres`: PostgreSQL control-plane database on `localhost:5432`.
 - `etcd`, `minio`, `milvus`: Milvus Standalone backing services on `localhost:19530`.
-- `rabbitmq`: Durable parser queue broker on `localhost:5672`, management UI on `localhost:15672`.
+- `rabbitmq`: Durable parser and eval queue broker on `localhost:5672`, management UI on `localhost:15672`.
 - `redis`: Parser worker lease/idempotency cache on `localhost:6379`.
-- `backend`: Rust API on `localhost:4398`, with `DB_AUTO_MIGRATE=true`.
+- `backend`: Rust API on `localhost:4398`, with `DB_AUTO_MIGRATE=true`; publishes parser and eval outbox jobs.
+- `eval-worker`: Rust eval queue consumer for real asynchronous eval tasks on `novex.eval.execute`.
 - `parser-worker`: Python document parser queue consumer when the `parser` profile is enabled.
 - `admin`: Admin control plane on `localhost:4399` when the `apps` profile is enabled.
 - `training-web`: POC customer app on `localhost:4401` when the `apps` profile is enabled.
@@ -23,7 +24,7 @@ Start the full local POC stack with environment checks:
 ./scripts/run-poc.sh
 ```
 
-The single local env entry for the POC stack is `infra/.env.poc`. The script creates it from `infra/.env.poc.example` when it is missing, loads only that file, checks live AI variables without printing raw secrets, verifies required Docker images already exist locally, then starts PostgreSQL, Milvus, RabbitMQ, Redis, the Rust backend, parser-worker, and all POC frontends. `up` runs with `--pull never`; use `./scripts/run-poc.sh pull` explicitly when you want to fetch only missing images.
+The single local env entry for the POC stack is `infra/.env.poc`. The script creates it from `infra/.env.poc.example` when it is missing, loads only that file, checks live AI variables without printing raw secrets, verifies required Docker images already exist locally, then starts PostgreSQL, Milvus, RabbitMQ, Redis, the Rust backend, eval-worker, parser-worker, and all POC frontends. `up` runs with `--pull never`; use `./scripts/run-poc.sh pull` explicitly when you want to fetch only missing images.
 
 Useful commands:
 
@@ -35,10 +36,10 @@ Useful commands:
 ./scripts/run-poc.sh pull
 ```
 
-Equivalent minimal backend stack:
+Equivalent minimal backend and eval stack:
 
 ```bash
-docker compose --env-file infra/.env.poc -f infra/docker-compose.yml up postgres etcd minio milvus backend
+docker compose --env-file infra/.env.poc -f infra/docker-compose.yml up postgres etcd minio milvus rabbitmq backend eval-worker
 ```
 
 Run the durable parser pipeline:
@@ -48,6 +49,8 @@ docker compose --env-file infra/.env.poc -f infra/docker-compose.yml --profile p
 ```
 
 The backend writes parser jobs to PostgreSQL outbox and publishes them to RabbitMQ. `parser-worker` consumes `novex.parser.execute`, coordinates in Redis, and callbacks the backend with `PARSER_CALLBACK_TOKEN`. Use a non-default token outside local POC.
+
+Eval runs are outbox-backed. `POST /ai/evals/runs` creates `ai_eval_run`, `ai_eval_task`, and `ai_eval_outbox` rows. The backend publisher sends pending eval outbox rows to RabbitMQ, and `eval-worker` consumes `novex.eval.execute` to execute real `live_rag` tasks through the Novex knowledge path.
 
 Run Admin and the customer-facing app templates:
 
@@ -95,4 +98,4 @@ curl http://localhost:4398/health
 curl http://localhost:4398/ready
 ```
 
-The backend container sets `MILVUS_ENDPOINT=http://milvus:19530`; if Milvus is unavailable or no usable collection exists yet, the RAG path keeps the local hybrid fallback. Parser queue publishing is enabled in compose through `PARSER_QUEUE_ENABLED=true` and `PARSER_QUEUE_PUBLISHER_ENABLED=true`. External GitHub, Feishu, draw, and MinerU credentials are optional. Without MinerU, text-like uploads still parse through the native parser path; PDF/Office/Image jobs stay retry/dead-letter governed by RabbitMQ.
+The backend container sets `MILVUS_ENDPOINT=http://milvus:19530`; if Milvus is unavailable or no usable collection exists yet, the RAG path keeps the local hybrid fallback. Parser queue publishing is enabled in compose through `PARSER_QUEUE_ENABLED=true` and `PARSER_QUEUE_PUBLISHER_ENABLED=true`. Eval queue publishing is enabled through `EVAL_QUEUE_ENABLED=true` and `EVAL_QUEUE_PUBLISHER_ENABLED=true`, with execution handled by `eval-worker`. External GitHub, Feishu, draw, and MinerU credentials are optional. Without MinerU, text-like uploads still parse through the native parser path; PDF/Office/Image jobs stay retry/dead-letter governed by RabbitMQ.

@@ -352,6 +352,107 @@ VALUES (
         Ok(())
     }
 
+    pub async fn create_run_with_tasks_and_outbox(
+        &self,
+        run: &EvalRunSaveRecord,
+        tasks: &[EvalTaskSaveRecord],
+        outbox_records: &[EvalOutboxSaveRecord],
+    ) -> Result<(), AppError> {
+        let mut tx = self.db.begin().await?;
+
+        sqlx::query(
+            r#"
+INSERT INTO ai_eval_run (
+    id, tenant_id, dataset_id, dataset_code, status, total_cases, passed_cases,
+    failed_cases, average_score, metric_breakdown, report_payload, triggered_by,
+    started_at, finished_at, create_user, create_time, update_user, update_time
+)
+VALUES (
+    $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
+    CASE WHEN $5 = 'queued' THEN NULL ELSE $14 END,
+    CASE WHEN $5 IN ('succeeded', 'failed', 'cancelled') THEN $14 ELSE NULL END,
+    $13, $14, $13, $14
+);
+"#,
+        )
+        .bind(run.id)
+        .bind(run.tenant_id)
+        .bind(run.dataset_id)
+        .bind(&run.dataset_code)
+        .bind(&run.status)
+        .bind(run.total_cases)
+        .bind(run.passed_cases)
+        .bind(run.failed_cases)
+        .bind(run.average_score)
+        .bind(&run.metric_breakdown)
+        .bind(&run.report_payload)
+        .bind(run.triggered_by)
+        .bind(run.user_id)
+        .bind(run.now)
+        .execute(&mut *tx)
+        .await?;
+
+        for task in tasks {
+            sqlx::query(
+                r#"
+INSERT INTO ai_eval_task (
+    id, tenant_id, run_id, dataset_id, case_id, case_code, target_kind, metric_kind,
+    run_mode, status, attempt, max_attempts, scheduled_at, input_snapshot,
+    expected_snapshot, tags_snapshot, runtime_config, create_user, create_time,
+    update_user, update_time
+)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $16, $13, $14, $15, $17, $18, $16, $18, $16);
+"#,
+            )
+            .bind(task.id)
+            .bind(task.tenant_id)
+            .bind(task.run_id)
+            .bind(task.dataset_id)
+            .bind(task.case_id)
+            .bind(&task.case_code)
+            .bind(&task.target_kind)
+            .bind(&task.metric_kind)
+            .bind(&task.run_mode)
+            .bind(&task.status)
+            .bind(task.attempt)
+            .bind(task.max_attempts)
+            .bind(&task.input_snapshot)
+            .bind(&task.expected_snapshot)
+            .bind(&task.tags_snapshot)
+            .bind(task.now)
+            .bind(&task.runtime_config)
+            .bind(task.user_id)
+            .execute(&mut *tx)
+            .await?;
+        }
+
+        for record in outbox_records {
+            sqlx::query(
+                r#"
+INSERT INTO ai_eval_outbox (
+    id, tenant_id, run_id, task_id, event_type, payload, status, attempt_count,
+    create_user, create_time, update_user, update_time
+)
+VALUES ($1, $2, $3, $4, $5, $6, 1, 0, $7, $8, $7, $8)
+ON CONFLICT (tenant_id, task_id, event_type) DO NOTHING;
+"#,
+            )
+            .bind(record.id)
+            .bind(record.tenant_id)
+            .bind(record.run_id)
+            .bind(record.task_id)
+            .bind(&record.event_type)
+            .bind(&record.payload)
+            .bind(record.user_id)
+            .bind(record.now)
+            .execute(&mut *tx)
+            .await?;
+        }
+
+        tx.commit().await?;
+        Ok(())
+    }
+
     pub async fn create_result(&self, record: &EvalResultSaveRecord) -> Result<(), AppError> {
         sqlx::query(
             r#"
@@ -452,7 +553,7 @@ ON CONFLICT (tenant_id, task_id, event_type) DO NOTHING;
             r#"
 SELECT id, tenant_id, run_id, task_id, event_type, payload, status, attempt_count
 FROM ai_eval_outbox
-WHERE status = 1
+WHERE status IN (1, 3)
 ORDER BY create_time ASC, id ASC
 LIMIT $1;
 "#,
@@ -703,6 +804,80 @@ ORDER BY id ASC;
         .await?)
     }
 
+    pub async fn update_run_status(
+        &self,
+        tenant_id: i64,
+        run_id: i64,
+        status: &str,
+        user_id: i64,
+        now: NaiveDateTime,
+    ) -> Result<(), AppError> {
+        sqlx::query(
+            r#"
+UPDATE ai_eval_run
+SET status = $3,
+    started_at = COALESCE(started_at, $5),
+    update_user = $4,
+    update_time = $5
+WHERE tenant_id = $1 AND id = $2 AND status IN ('queued', 'running');
+"#,
+        )
+        .bind(tenant_id)
+        .bind(run_id)
+        .bind(status)
+        .bind(user_id)
+        .bind(now)
+        .execute(&self.db)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn update_run_summary(
+        &self,
+        tenant_id: i64,
+        run_id: i64,
+        status: &str,
+        total_cases: i32,
+        passed_cases: i32,
+        failed_cases: i32,
+        average_score: f64,
+        metric_breakdown: &Value,
+        report_payload: &Value,
+        user_id: i64,
+        now: NaiveDateTime,
+    ) -> Result<(), AppError> {
+        sqlx::query(
+            r#"
+UPDATE ai_eval_run
+SET status = $3,
+    total_cases = $4,
+    passed_cases = $5,
+    failed_cases = $6,
+    average_score = $7,
+    metric_breakdown = $8,
+    report_payload = $9,
+    finished_at = $11,
+    update_user = $10,
+    update_time = $11
+WHERE tenant_id = $1 AND id = $2;
+"#,
+        )
+        .bind(tenant_id)
+        .bind(run_id)
+        .bind(status)
+        .bind(total_cases)
+        .bind(passed_cases)
+        .bind(failed_cases)
+        .bind(average_score)
+        .bind(metric_breakdown)
+        .bind(report_payload)
+        .bind(user_id)
+        .bind(now)
+        .execute(&self.db)
+        .await?;
+        Ok(())
+    }
+
     pub async fn count_results(&self, filter: &EvalResultFilter) -> Result<i64, AppError> {
         Ok(sqlx::query_scalar::<_, i64>(
             "SELECT COUNT(*) FROM ai_eval_result WHERE tenant_id = $1 AND run_id = $2",
@@ -852,6 +1027,7 @@ mod tests {
         for needle in [
             "create_task",
             "create_outbox",
+            "create_run_with_tasks_and_outbox",
             "list_pending_eval_outbox",
             "mark_eval_outbox_published",
             "try_start_task",
@@ -859,7 +1035,23 @@ mod tests {
             "fail_task",
             "list_run_tasks",
         ] {
-            assert!(source.contains(needle), "{needle} missing from eval repository");
+            assert!(
+                source.contains(needle),
+                "{needle} missing from eval repository"
+            );
         }
+    }
+
+    #[test]
+    fn eval_outbox_scan_retries_publish_failures() {
+        let source = include_str!("ai_eval_repository.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+
+        assert!(
+            source.contains("WHERE status IN (1, 3)"),
+            "eval outbox scanner must retry records that failed to publish"
+        );
     }
 }
