@@ -60,6 +60,21 @@ FROM studio_menu AS s
 WHERE NOT EXISTS (SELECT 1 FROM sys_menu WHERE permission = 'ai:studio:artifact:create')
 ON CONFLICT DO NOTHING;
 
+WITH studio_menu AS (
+    SELECT id
+    FROM sys_menu
+    WHERE path = '/ai/studio'
+    ORDER BY id
+    LIMIT 1
+)
+INSERT INTO sys_menu
+    (id, title, parent_id, type, path, name, component, redirect, icon, is_external, is_cache, is_hidden, permission, sort, status, create_user, create_time)
+SELECT
+    3314, '删除 Artifact', s.id, 3, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, 'ai:studio:artifact:delete', 4, 1, 1, NOW()
+FROM studio_menu AS s
+WHERE NOT EXISTS (SELECT 1 FROM sys_menu WHERE permission = 'ai:studio:artifact:delete')
+ON CONFLICT DO NOTHING;
+
 INSERT INTO sys_role_menu (role_id, menu_id)
 SELECT 1, id
 FROM sys_menu
@@ -67,6 +82,7 @@ WHERE path = '/ai/studio'
    OR permission IN (
       'ai:studio:action:list',
       'ai:studio:artifact:list',
-      'ai:studio:artifact:create'
+      'ai:studio:artifact:create',
+      'ai:studio:artifact:delete'
    )
 ON CONFLICT DO NOTHING;

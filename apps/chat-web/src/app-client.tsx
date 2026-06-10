@@ -12,9 +12,10 @@ import {
   ArrowRight,
   Bot,
   Check,
+  ChevronDown,
   ChevronRight,
   Copy,
-  Database,
+  Eye,
   FileText,
   GitBranch,
   LayoutGrid,
@@ -25,6 +26,7 @@ import {
   Plus,
   Share2,
   SlidersHorizontal,
+  Trash2,
   Upload,
   X
 } from "lucide-react";
@@ -46,6 +48,7 @@ import {
 } from "@/api/knowledge";
 import { getModelRuntimeConfig } from "@/api/model";
 import {
+  deleteStudioArtifact,
   generateStudioArtifact,
   listDatasetStudioArtifacts,
   listStudioActions
@@ -60,6 +63,7 @@ import type { ModelRoutePurpose, ModelRuntimeRouteSummary } from "@/types/model"
 import type { MindMapContent, StudioActionResp, StudioArtifactResp } from "@/types/studio";
 
 const CHAT_CLIENT_ID = "novex-chat-web";
+const DEFAULT_NOTEBOOK_NAME = "未命名的笔记本";
 const DEFAULT_MIND_MAP_MAX_NODES = 72;
 const MIN_MIND_MAP_MAX_NODES = 12;
 const MAX_MIND_MAP_MAX_NODES = 96;
@@ -135,6 +139,7 @@ export function ChatAppClient({
   const [generatingActionCode, setGeneratingActionCode] = useState<string | null>(null);
   const [studioError, setStudioError] = useState("");
   const [openStudioArtifactId, setOpenStudioArtifactId] = useState<number | null>(null);
+  const [deletingStudioArtifactId, setDeletingStudioArtifactId] = useState<number | null>(null);
   const [mindMapPromptOpen, setMindMapPromptOpen] = useState(false);
   const [mindMapPrompt, setMindMapPrompt] = useState("");
   const [mindMapMaxNodes, setMindMapMaxNodes] = useState(DEFAULT_MIND_MAP_MAX_NODES);
@@ -366,10 +371,6 @@ export function ChatAppClient({
     () => studioActions.find((action) => action.code === "mind_map.generate") ?? null,
     [studioActions]
   );
-  const latestMindMapArtifact = useMemo(
-    () => studioArtifacts.find((artifact) => artifact.artifactType === "mind_map") ?? null,
-    [studioArtifacts]
-  );
   const openStudioArtifact = useMemo(
     () => studioArtifacts.find((artifact) => artifact.id === openStudioArtifactId) ?? null,
     [openStudioArtifactId, studioArtifacts]
@@ -481,7 +482,7 @@ export function ChatAppClient({
     setActionStatus("");
     try {
       const datasetId = await createDataset({
-        name: "未命名的笔记本",
+        name: nextNotebookName(datasets),
         description: "Created from chat workspace",
         visibility: 1,
         retrievalMode: 3
@@ -778,10 +779,7 @@ export function ChatAppClient({
         maxNodes,
         answerModelRouteId: selectedRuntimeRouteId
       });
-      setStudioArtifacts((current) => [
-        artifact,
-        ...current.filter((item) => item.id !== artifact.id)
-      ]);
+      setStudioArtifacts((current) => [artifact, ...current]);
       return true;
     } catch (error) {
       if (handleAuthRejected(error)) {
@@ -807,6 +805,28 @@ export function ChatAppClient({
       setMindMapPromptOpen(false);
       setMindMapPrompt("");
       setMindMapMaxNodes(DEFAULT_MIND_MAP_MAX_NODES);
+    }
+  }
+
+  async function handleDeleteStudioArtifact(artifact: StudioArtifactResp) {
+    if (deletingStudioArtifactId) {
+      return;
+    }
+    setDeletingStudioArtifactId(artifact.id);
+    setStudioError("");
+    try {
+      await deleteStudioArtifact(artifact.id);
+      setStudioArtifacts((current) => current.filter((item) => item.id !== artifact.id));
+      if (openStudioArtifactId === artifact.id) {
+        setOpenStudioArtifactId(null);
+      }
+    } catch (error) {
+      if (handleAuthRejected(error)) {
+        return;
+      }
+      setStudioError(error instanceof Error ? error.message : "删除失败");
+    } finally {
+      setDeletingStudioArtifactId(null);
     }
   }
 
@@ -997,7 +1017,7 @@ export function ChatAppClient({
   }
 
   return (
-    <main className="min-h-screen bg-[#eef0fb] text-[12px] text-neutral-950">
+    <main className="min-h-screen bg-[#eef0fb] text-[11px] text-neutral-950">
       {overlays}
       <TopBar
         activeRoute={currentRoute}
@@ -1007,17 +1027,17 @@ export function ChatAppClient({
         onLogout={handleLogout}
       />
       <div
-        className="grid min-h-[calc(100vh-88px)] grid-cols-1 gap-4 px-4 pb-4 xl:h-[calc(100vh-88px)] xl:min-h-0 xl:overflow-hidden xl:grid-cols-[360px_minmax(0,1fr)_360px] xl:items-stretch 2xl:grid-cols-[420px_minmax(0,1fr)_420px]"
+        className="grid min-h-[calc(100vh-64px)] grid-cols-1 gap-3 px-3 pb-3 xl:h-[calc(100vh-64px)] xl:min-h-0 xl:overflow-hidden xl:grid-cols-[340px_minmax(0,1fr)_340px] xl:items-stretch 2xl:grid-cols-[380px_minmax(0,1fr)_380px]"
         data-testid="knowledge-detail-layout"
       >
         <aside
-          className="flex min-h-[520px] flex-col overflow-hidden rounded-lg bg-white xl:h-full xl:min-h-0"
+          className="flex min-h-[480px] flex-col overflow-hidden rounded-md bg-white xl:h-full xl:min-h-0"
           data-testid="knowledge-sources-panel"
         >
-          <PanelHeader title="来源" />
-          <div className="min-h-0 flex-1 space-y-4 overflow-y-auto p-5" data-testid="knowledge-sources-scroll">
-            <label className="flex h-11 cursor-pointer items-center justify-center gap-2 rounded-full border border-slate-300 bg-white text-sm font-medium hover:bg-slate-50">
-              <Plus aria-hidden="true" className="h-4 w-4" />
+          <PanelHeader compact title="来源" />
+          <div className="min-h-0 flex-1 space-y-3 overflow-y-auto p-4" data-testid="knowledge-sources-scroll">
+            <label className="flex h-9 cursor-pointer items-center justify-center gap-1.5 rounded-full border border-slate-300 bg-white text-xs font-medium hover:bg-slate-50">
+              <Plus aria-hidden="true" className="h-3.5 w-3.5" />
               添加来源
               <input
                 accept=".txt,.md,.pdf,.csv,.json,.log,text/*,application/pdf,application/json"
@@ -1039,18 +1059,21 @@ export function ChatAppClient({
         </aside>
 
         <section
-          className="flex min-h-[520px] min-w-0 flex-col overflow-hidden rounded-lg bg-white xl:h-full xl:min-h-0"
+          className="flex min-h-[480px] min-w-0 flex-col overflow-hidden rounded-md bg-white xl:h-full xl:min-h-0"
           data-testid="knowledge-chat-panel"
         >
-          <PanelHeader title="对话">
-            <SlidersHorizontal aria-hidden="true" className="h-5 w-5 text-neutral-600" />
-            <MoreVertical aria-hidden="true" className="h-5 w-5 text-neutral-600" />
+          <PanelHeader compact title="对话">
+            <SlidersHorizontal aria-hidden="true" className="h-4 w-4 text-neutral-600" />
+            <MoreVertical aria-hidden="true" className="h-4 w-4 text-neutral-600" />
           </PanelHeader>
-          <div className="min-h-0 flex-1 overflow-y-auto px-5 py-4" data-testid="knowledge-chat-scroll">
+          <div className="min-h-0 flex-1 overflow-y-auto px-4 py-3" data-testid="knowledge-chat-scroll">
             <Conversation messages={messages} />
           </div>
-          <div className="px-5 pb-4">
-            <div className="relative mx-auto max-w-5xl rounded-2xl border border-neutral-300 bg-white px-3.5 py-2.5 shadow-sm">
+          <div className="px-4 pb-2">
+            <div
+              className="relative mx-auto max-w-2xl rounded-lg border border-neutral-300 bg-white px-2.5 py-1.5 shadow-sm"
+              data-testid="knowledge-composer-shell"
+            >
               <SkillPicker
                 activeIndex={activeSkillIndex}
                 open={skillPickerOpen}
@@ -1075,52 +1098,51 @@ export function ChatAppClient({
               ) : null}
               <textarea
                 aria-label="提问或创作内容"
-                className="min-h-12 w-full resize-none bg-transparent text-[13px] leading-5 outline-none"
+                className="min-h-8 w-full resize-none bg-transparent text-[11px] leading-5 outline-none"
                 onChange={(event) => handleComposerChange(event.target.value)}
                 onKeyDown={handleComposerKeyDown}
                 placeholder="输入 / 选择 Skills，或直接提问当前知识库"
-                rows={2}
+                rows={1}
                 value={input}
               />
-              <div className="mt-2 flex flex-col gap-2 sm:flex-row sm:items-center">
-                <div className="min-w-0 flex-1">
+              <div className="mt-1.5 flex items-center justify-between gap-2">
+                <span className="min-w-0 truncate text-xs text-neutral-500">{activeDataset.documentCount} 个来源</span>
+                <div className="flex min-w-0 shrink-0 items-center justify-end gap-2">
                   <ModelRouteSelect
                     routes={llmRoutes}
                     selectedRouteId={selectedLlmRoute?.routeId ?? ""}
                     purpose="rag_answer"
                     onRouteChange={setSelectedLlmRouteId}
-                    wide
                   />
+                  <button
+                    aria-label="发送消息"
+                    className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-neutral-100 text-neutral-800 hover:bg-neutral-200 disabled:opacity-50"
+                    disabled={sending}
+                    onClick={() => void handleSend()}
+                    type="button"
+                  >
+                    <ArrowRight aria-hidden="true" className="h-4 w-4" />
+                  </button>
                 </div>
-                <span className="text-xs text-neutral-500">{activeDataset.documentCount} 个来源</span>
-                <button
-                  aria-label="发送消息"
-                  className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-neutral-100 text-neutral-800 hover:bg-neutral-200 disabled:opacity-50"
-                  disabled={sending}
-                  onClick={() => void handleSend()}
-                  type="button"
-                >
-                  <ArrowRight aria-hidden="true" className="h-5 w-5" />
-                </button>
               </div>
             </div>
             <ComposerStatus error={sendError} status={sendStatus} />
-            <div className="mt-3 text-center text-xs text-neutral-500">
+            <div className="mt-2 text-center text-[11px] text-neutral-500">
               NotebookLM 提供的内容未必准确，因此请仔细核查回答内容。
             </div>
           </div>
         </section>
 
         <aside
-          className="flex min-h-[520px] flex-col overflow-hidden rounded-lg bg-white xl:h-full xl:min-h-0"
+          className="flex min-h-[480px] flex-col overflow-hidden rounded-md bg-white xl:h-full xl:min-h-0"
           data-testid="knowledge-studio-panel"
         >
-          <PanelHeader title="Studio" />
-          <div className="min-h-0 flex-1 overflow-y-auto p-5" data-testid="knowledge-studio-scroll">
-            <div className="grid grid-cols-2 gap-3">
+          <PanelHeader compact title="Studio" />
+          <div className="min-h-0 flex-1 overflow-y-auto p-4" data-testid="knowledge-studio-scroll">
+            <div className="grid grid-cols-2 gap-2">
               {studioItems.map(([label, className]) => (
                 <button
-                  className={`flex min-h-20 items-center justify-between rounded-lg p-4 text-left text-sm font-semibold disabled:cursor-not-allowed disabled:opacity-50 ${className}`}
+                  className={`flex min-h-14 items-center justify-between rounded-md p-2.5 text-left text-[11px] font-semibold disabled:cursor-not-allowed disabled:opacity-50 ${className}`}
                   aria-label={label}
                   disabled={label === "思维导图" ? !mindMapAction || generatingActionCode !== null : true}
                   key={label}
@@ -1133,9 +1155,9 @@ export function ChatAppClient({
                 >
                   <span>{label}</span>
                   {generatingActionCode && label === "思维导图" ? (
-                    <Loader2 aria-hidden="true" className="h-5 w-5 animate-spin" />
+                    <Loader2 aria-hidden="true" className="h-3.5 w-3.5 animate-spin" />
                   ) : (
-                    <ChevronRight aria-hidden="true" className="h-5 w-5" />
+                    <ChevronRight aria-hidden="true" className="h-3.5 w-3.5" />
                   )}
                 </button>
               ))}
@@ -1145,20 +1167,13 @@ export function ChatAppClient({
                 {studioError}
               </div>
             ) : null}
-            <MindMapArtifactLauncher
-              artifact={latestMindMapArtifact}
+            <StudioArtifactList
+              artifacts={studioArtifacts}
+              deletingArtifactId={deletingStudioArtifactId}
               loading={studioLoading}
+              onDelete={(artifact) => void handleDeleteStudioArtifact(artifact)}
               onOpen={(artifact) => setOpenStudioArtifactId(artifact.id)}
             />
-            <div className="mt-6 border-t border-slate-200 pt-5">
-              <StudioNotes dataset={activeDataset} activeSession={activeSession} />
-            </div>
-          </div>
-          <div className="p-5">
-            <button className="ml-auto flex h-11 items-center gap-2 rounded-full bg-black px-5 text-sm font-semibold text-white" type="button">
-              <FileText aria-hidden="true" className="h-4 w-4" />
-              添加笔记
-            </button>
           </div>
         </aside>
       </div>
@@ -1302,7 +1317,7 @@ export function ChatAppClient({
           ) : (
             <div className="flex justify-end" key={message.id}>
               <div className="flex max-w-[78%] flex-col items-end gap-2">
-                <div className="rounded-2xl bg-neutral-900 px-4 py-3 text-sm leading-6 text-white">
+                <div className="rounded-xl bg-neutral-900 px-3 py-2 text-xs leading-5 text-white">
                   {message.content}
                 </div>
                 <MessageCopyButton
@@ -1333,41 +1348,66 @@ function TopBar({
   showCreateNotebook?: boolean;
 }) {
   return (
-    <header className="flex h-[88px] items-center justify-between gap-5 px-6">
+    <header
+      className={[
+        "flex items-center justify-between",
+        compact ? "h-16 gap-3 px-4" : "h-[88px] gap-5 px-6"
+      ].join(" ")}
+    >
       <Link
         aria-label="回到首页"
-        className="flex min-w-0 items-center gap-4 rounded-full pr-3 outline-none hover:opacity-80 focus-visible:ring-2 focus-visible:ring-neutral-400"
+        className={[
+          "flex min-w-0 items-center rounded-full outline-none hover:opacity-80 focus-visible:ring-2 focus-visible:ring-neutral-400",
+          compact ? "gap-3 pr-2" : "gap-4 pr-3"
+        ].join(" ")}
         href="/knowledge"
       >
-        <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-full bg-black text-white">
-          <LayoutGrid aria-hidden="true" className="h-6 w-6" />
+        <div
+          className={[
+            "flex shrink-0 items-center justify-center rounded-full bg-black text-white",
+            compact ? "h-10 w-10" : "h-12 w-12"
+          ].join(" ")}
+        >
+          <LayoutGrid aria-hidden="true" className={compact ? "h-5 w-5" : "h-6 w-6"} />
         </div>
-        <h1 className={["truncate font-medium tracking-normal", compact ? "text-2xl" : "text-3xl"].join(" ")}>
+        <h1 className={["truncate font-medium tracking-normal", compact ? "text-xl" : "text-3xl"].join(" ")}>
           {title}
         </h1>
       </Link>
-      <div className="flex shrink-0 items-center gap-3">
+      <div className={["flex shrink-0 items-center", compact ? "gap-2" : "gap-3"].join(" ")}>
         {showCreateNotebook ? (
           <button
-            className="hidden h-11 items-center gap-2 rounded-full bg-black px-5 text-sm font-semibold text-white md:flex"
+            className={[
+              "hidden items-center gap-2 rounded-full bg-black font-semibold text-white md:flex",
+              compact ? "h-9 px-4 text-xs" : "h-11 px-5 text-sm"
+            ].join(" ")}
             onClick={onCreateNotebook}
             type="button"
           >
-            <Plus aria-hidden="true" className="h-4 w-4" />
+            <Plus aria-hidden="true" className={compact ? "h-3.5 w-3.5" : "h-4 w-4"} />
             创建笔记本
           </button>
         ) : null}
-        <button className="hidden h-11 items-center gap-2 rounded-full border border-slate-200 px-4 text-sm font-medium md:flex" type="button">
-          <Share2 aria-hidden="true" className="h-4 w-4" />
+        <button
+          className={[
+            "hidden items-center gap-2 rounded-full border border-slate-200 font-medium md:flex",
+            compact ? "h-9 px-3 text-xs" : "h-11 px-4 text-sm"
+          ].join(" ")}
+          type="button"
+        >
+          <Share2 aria-hidden="true" className={compact ? "h-3.5 w-3.5" : "h-4 w-4"} />
           分享
         </button>
         {onLogout ? (
           <button
-            className="flex h-11 items-center gap-2 rounded-full border border-slate-200 px-4 text-sm font-medium hover:bg-slate-50"
+            className={[
+              "flex items-center gap-2 rounded-full border border-slate-200 font-medium hover:bg-slate-50",
+              compact ? "h-9 px-3 text-xs" : "h-11 px-4 text-sm"
+            ].join(" ")}
             onClick={onLogout}
             type="button"
           >
-            <LogOut aria-hidden="true" className="h-4 w-4" />
+            <LogOut aria-hidden="true" className={compact ? "h-3.5 w-3.5" : "h-4 w-4"} />
             退出登录
           </button>
         ) : null}
@@ -1403,7 +1443,12 @@ function LoginPanel({
 }) {
   return (
     <main className="min-h-screen bg-white text-neutral-950">
-      <TopBar activeRoute={activeRoute} title="NotebookLM" onCreateNotebook={() => undefined} />
+      <TopBar
+        activeRoute={activeRoute}
+        title="NotebookLM"
+        showCreateNotebook={false}
+        onCreateNotebook={() => undefined}
+      />
       <div className="mx-auto flex min-h-[calc(100vh-88px)] max-w-[1440px] items-center justify-center px-6 pb-12">
         <form
           className="w-full max-w-sm rounded-lg border border-slate-200 bg-white p-6 shadow-sm"
@@ -1574,24 +1619,44 @@ function DeleteDatasetDialog({
   );
 }
 
-function PanelHeader({ title, children }: { title: string; children?: React.ReactNode }) {
+function PanelHeader({
+  title,
+  children,
+  compact = false
+}: {
+  title: string;
+  children?: React.ReactNode;
+  compact?: boolean;
+}) {
   return (
-    <div className="flex h-12 items-center justify-between border-b border-slate-200 px-4">
-      <h2 className="text-sm font-semibold">{title}</h2>
-      <div className="flex items-center gap-4">{children ?? <PanelLeft aria-hidden="true" className="h-5 w-5 text-neutral-600" />}</div>
+    <div
+      className={[
+        "flex items-center justify-between border-b border-slate-200",
+        compact ? "h-10 px-3" : "h-12 px-4"
+      ].join(" ")}
+    >
+      <h2 className={[compact ? "text-xs" : "text-sm", "font-semibold"].join(" ")}>{title}</h2>
+      <div className={["flex items-center", compact ? "gap-3" : "gap-4"].join(" ")}>
+        {children ?? (
+          <PanelLeft
+            aria-hidden="true"
+            className={[compact ? "h-4 w-4" : "h-5 w-5", "text-neutral-600"].join(" ")}
+          />
+        )}
+      </div>
     </div>
   );
 }
 
 function SourceSearch() {
   return (
-    <div className="rounded-2xl border border-slate-200 p-3">
-      <div className="text-sm text-neutral-500">在网络中搜索新来源</div>
-      <div className="mt-2 flex items-center gap-2">
-        <span className="rounded-full border border-slate-200 px-2.5 py-1.5 text-xs font-semibold">Web</span>
-        <span className="rounded-full border border-slate-200 px-2.5 py-1.5 text-xs font-semibold">Fast Research</span>
-        <button className="ml-auto flex h-8 w-8 items-center justify-center rounded-full bg-neutral-100" type="button">
-          <Upload aria-hidden="true" className="h-4 w-4 text-neutral-600" />
+    <div className="rounded-xl border border-slate-200 p-2.5">
+      <div className="text-xs text-neutral-500">在网络中搜索新来源</div>
+      <div className="mt-1.5 flex items-center gap-1.5">
+        <span className="rounded-full border border-slate-200 px-2 py-1 text-[11px] font-semibold">Web</span>
+        <span className="rounded-full border border-slate-200 px-2 py-1 text-[11px] font-semibold">Fast Research</span>
+        <button className="ml-auto flex h-7 w-7 items-center justify-center rounded-full bg-neutral-100" type="button">
+          <Upload aria-hidden="true" className="h-3.5 w-3.5 text-neutral-600" />
         </button>
       </div>
     </div>
@@ -1613,42 +1678,42 @@ function SourceList({
   const pendingJobs = parseJobs.filter((job) => !documentIds.has(job.documentId));
 
   return (
-    <div className="space-y-3">
-      <div className="flex items-center justify-between text-sm text-neutral-700">
+    <div className="space-y-2">
+      <div className="flex items-center justify-between text-xs text-neutral-700">
         <span className="font-medium">已选择 {dataset.documentCount} 个来源</span>
         <span>全选</span>
       </div>
       {documentLoading ? (
-        <div className="rounded-lg border border-slate-200 bg-slate-50 p-4 text-sm text-neutral-500">
+        <div className="rounded-md border border-slate-200 bg-slate-50 p-3 text-xs text-neutral-500">
           正在加载来源...
         </div>
       ) : null}
       {documents.map((document) => (
-        <div className="flex items-center gap-3 rounded-lg px-2 py-2 hover:bg-slate-50" key={document.id}>
-          <FileText aria-hidden="true" className="h-5 w-5 shrink-0 text-blue-700" />
+        <div className="flex items-center gap-2 rounded-md px-1.5 py-1.5 hover:bg-slate-50" key={document.id}>
+          <FileText aria-hidden="true" className="h-4 w-4 shrink-0 text-blue-700" />
           <div className="min-w-0 flex-1">
-            <div className="truncate text-sm font-medium">{document.name}</div>
-            <div className="mt-1 flex flex-wrap gap-x-2 gap-y-1 text-xs text-neutral-500">
+            <div className="truncate text-xs font-medium">{document.name}</div>
+            <div className="mt-0.5 flex flex-wrap gap-x-2 gap-y-1 text-[11px] text-neutral-500">
               <span>{document.contentType || "document"}</span>
               <span>{documentStatus(document)}</span>
             </div>
           </div>
           {document.ingestionStatus === 4 ? (
-            <Check aria-hidden="true" className="h-5 w-5 text-neutral-500" />
+            <Check aria-hidden="true" className="h-4 w-4 text-neutral-500" />
           ) : null}
         </div>
       ))}
       {pendingJobs.map((job) => (
-        <div className="flex items-center gap-3 rounded-lg px-2 py-2" key={job.id}>
-          <FileText aria-hidden="true" className="h-5 w-5 shrink-0 text-amber-600" />
+        <div className="flex items-center gap-2 rounded-md px-1.5 py-1.5" key={job.id}>
+          <FileText aria-hidden="true" className="h-4 w-4 shrink-0 text-amber-600" />
           <div className="min-w-0 flex-1">
-            <div className="truncate text-sm font-medium">{job.documentName}</div>
-            <div className="mt-1 text-xs text-neutral-500">{parseJobStatus(job)}</div>
+            <div className="truncate text-xs font-medium">{job.documentName}</div>
+            <div className="mt-0.5 text-[11px] text-neutral-500">{parseJobStatus(job)}</div>
           </div>
         </div>
       ))}
       {!documentLoading && documents.length === 0 && pendingJobs.length === 0 ? (
-        <div className="rounded-lg border border-dashed border-slate-200 p-4 text-sm leading-6 text-neutral-500">
+        <div className="rounded-md border border-dashed border-slate-200 p-3 text-xs leading-5 text-neutral-500">
           还没有上传来源。添加文件后会进入 RAG 解析和索引。
         </div>
       ) : null}
@@ -1663,7 +1728,7 @@ function ComposerStatus({ error, status }: { error: string; status: string }) {
   return (
     <div
       className={[
-        "mx-auto mt-3 max-w-5xl rounded-lg px-3 py-2 text-sm",
+        "mx-auto mt-2 max-w-2xl rounded-md px-2.5 py-1.5 text-xs",
         error ? "bg-rose-50 text-rose-700" : "bg-slate-50 text-neutral-600"
       ].join(" ")}
     >
@@ -1787,13 +1852,13 @@ function AssistantAnswer({
   const answerModel = message.model ?? metadataString(message.metadata.answerModel);
 
   return (
-    <article className="text-[13px] leading-6 text-neutral-800">
-      <div className="flex items-start gap-3">
-        <Bot aria-hidden="true" className="mt-1 h-5 w-5 shrink-0 text-neutral-600" />
+    <article className="text-xs leading-5 text-neutral-800">
+      <div className="flex items-start gap-2.5">
+        <Bot aria-hidden="true" className="mt-0.5 h-4 w-4 shrink-0 text-neutral-600" />
         <div className="min-w-0 flex-1">
           <MarkdownContent content={message.content} />
           {isModelAnswer ? (
-            <div className="mt-3 flex flex-wrap gap-2 text-sm text-neutral-500">
+            <div className="mt-2 flex flex-wrap gap-1.5 text-xs text-neutral-500">
               {message.routeId ? <span>{message.routeId}</span> : null}
               {message.routeId && message.model ? <span>·</span> : null}
               {message.model ? <span>{message.model}</span> : null}
@@ -1805,7 +1870,7 @@ function AssistantAnswer({
               ) : null}
             </div>
           ) : (
-            <div className="mt-3 flex flex-wrap gap-2 text-sm text-neutral-500">
+            <div className="mt-2 flex flex-wrap gap-1.5 text-xs text-neutral-500">
               <span>Trace #{message.ragTraceId ?? 0}</span>
               <span>·</span>
               <span>{retrievalHitCount} hits</span>
@@ -1826,7 +1891,7 @@ function AssistantAnswer({
             </div>
           )}
           <CitationList citations={message.citations} />
-          <div className="mt-4">
+          <div className="mt-3">
             <MessageCopyButton copied={copied} onCopy={onCopy} />
           </div>
         </div>
@@ -1837,14 +1902,14 @@ function AssistantAnswer({
 
 function MessageCopyButton({ copied, onCopy }: { copied: boolean; onCopy: () => void }) {
   return (
-    <div className="flex items-center gap-2 text-xs text-neutral-500">
+    <div className="flex items-center gap-1.5 text-[11px] text-neutral-500">
       <button
         aria-label="复制文本"
-        className="flex h-8 items-center gap-1.5 rounded-full border border-slate-200 bg-white px-3 text-xs font-medium text-neutral-600 hover:bg-slate-50"
+        className="flex h-7 items-center gap-1 rounded-full border border-slate-200 bg-white px-2.5 text-[11px] font-medium text-neutral-600 hover:bg-slate-50"
         onClick={onCopy}
         type="button"
       >
-        <Copy aria-hidden="true" className="h-3.5 w-3.5" />
+        <Copy aria-hidden="true" className="h-3 w-3" />
         <span>复制文本</span>
       </button>
       {copied ? <span>已复制</span> : null}
@@ -1857,9 +1922,9 @@ function CitationList({ citations }: { citations: CitationResp[] }) {
     return null;
   }
   return (
-    <div className="mt-3 flex flex-wrap gap-2">
+    <div className="mt-2 flex flex-wrap gap-1.5">
       {citations.map((citation) => (
-        <span className="rounded-full bg-neutral-100 px-3 py-1 text-sm text-neutral-600" key={citation.chunkId}>
+        <span className="rounded-full bg-neutral-100 px-2 py-0.5 text-xs text-neutral-600" key={citation.chunkId}>
           {citation.chunkId}
           {citation.pageNo ? ` · page ${citation.pageNo}` : ""}
         </span>
@@ -1886,13 +1951,32 @@ function purposeRouteId(route: ModelRuntimeRouteSummary, purpose: ModelRoutePurp
 }
 
 function modelRouteLabel(route: ModelRuntimeRouteSummary, purpose: ModelRoutePurpose) {
-  const model = route.model ?? "LLM";
-  return `${model} · ${purposeRouteId(route, purpose)}`;
+  return route.model?.trim() || route.provider?.trim() || purposeRouteId(route, purpose);
+}
+
+function modelRouteMetaLabel(route: ModelRuntimeRouteSummary) {
+  return route.provider?.trim() || route.target || "LLM";
 }
 
 function skillQueryFromInput(value: string) {
   const match = value.match(/^\/([^\s]*)$/);
   return match ? match[1].trim().toLowerCase() : null;
+}
+
+function nextNotebookName(datasets: DatasetResp[]) {
+  const names = new Set(datasets.map((dataset) => dataset.name.trim()).filter(Boolean));
+  if (!names.has(DEFAULT_NOTEBOOK_NAME)) {
+    return DEFAULT_NOTEBOOK_NAME;
+  }
+
+  for (let index = 2; index < 1000; index += 1) {
+    const candidate = `${DEFAULT_NOTEBOOK_NAME} ${index}`;
+    if (!names.has(candidate)) {
+      return candidate;
+    }
+  }
+
+  return `${DEFAULT_NOTEBOOK_NAME} ${Date.now()}`;
 }
 
 function removeSkillSlashTrigger(value: string) {
@@ -1980,6 +2064,8 @@ function ModelRouteSelect({
   onRouteChange: (routeId: string) => void;
   wide?: boolean;
 }) {
+  const [open, setOpen] = useState(false);
+
   if (!routes.length) {
     return (
       <span
@@ -1993,59 +2079,168 @@ function ModelRouteSelect({
     );
   }
 
+  const selectedRoute = routes.find((route) => route.routeId === selectedRouteId) ?? routes[0];
+  const selectedLabel = modelRouteLabel(selectedRoute, purpose);
+
   return (
-    <select
-      aria-label="LLM 模型"
-      className={[
-        "h-9 rounded-full border border-slate-200 bg-white px-3 text-sm text-neutral-700 outline-none focus:border-neutral-500",
-        wide ? "w-full" : "hidden max-w-64 sm:inline"
-      ].join(" ")}
-      onChange={(event) => onRouteChange(event.target.value)}
-      value={selectedRouteId}
+    <div
+      className={["relative", wide ? "w-full" : "w-[9.5rem] max-w-[40vw]"].join(" ")}
+      onKeyDown={(event) => {
+        if (event.key === "Escape") {
+          setOpen(false);
+        }
+      }}
     >
-      {routes.map((route) => (
-        <option key={route.routeId} value={route.routeId}>
-          {modelRouteLabel(route, purpose)}
-        </option>
-      ))}
-    </select>
+      <button
+        aria-expanded={open}
+        aria-haspopup="listbox"
+        aria-label={`LLM 模型 ${selectedLabel}`}
+        className={[
+          "flex min-w-0 items-center justify-between gap-2 rounded-full border border-slate-200 bg-white text-left font-medium text-neutral-700 outline-none hover:bg-slate-50 focus-visible:ring-2 focus-visible:ring-neutral-300",
+          wide ? "h-9 w-full px-3 text-xs" : "h-8 w-full px-2.5 text-[11px]"
+        ].join(" ")}
+        onClick={() => setOpen((value) => !value)}
+        title={selectedLabel}
+        type="button"
+      >
+        <span className="truncate">{selectedLabel}</span>
+        <ChevronDown
+          aria-hidden="true"
+          className={[
+            wide ? "h-3.5 w-3.5" : "h-3 w-3",
+            `shrink-0 text-neutral-500 transition-transform ${open ? "rotate-180" : ""}`
+          ].join(" ")}
+        />
+      </button>
+      {open ? (
+        <div
+          aria-label="选择 LLM 模型"
+          className={[
+            "absolute bottom-full z-30 mb-2 max-h-64 overflow-y-auto rounded-lg border border-slate-200 bg-white p-1 shadow-lg",
+            wide ? "left-0 w-full min-w-56" : "right-0 w-56"
+          ].join(" ")}
+          role="listbox"
+        >
+          {routes.map((route) => {
+            const label = modelRouteLabel(route, purpose);
+            const selected = route.routeId === selectedRoute.routeId;
+            return (
+              <button
+                aria-label={label}
+                aria-selected={selected}
+                className={[
+                  "flex w-full items-center justify-between gap-3 rounded-md px-3 py-2 text-left text-sm text-neutral-800 hover:bg-slate-50",
+                  selected ? "bg-slate-100 font-semibold" : ""
+                ].join(" ")}
+                key={route.routeId}
+                onClick={() => {
+                  onRouteChange(route.routeId);
+                  setOpen(false);
+                }}
+                role="option"
+                type="button"
+              >
+                <span className="min-w-0">
+                  <span className="block truncate">{label}</span>
+                  <span className="block truncate text-[11px] font-normal text-neutral-500">
+                    {modelRouteMetaLabel(route)}
+                  </span>
+                </span>
+                {selected ? <Check aria-hidden="true" className="h-4 w-4 shrink-0 text-neutral-700" /> : null}
+              </button>
+            );
+          })}
+        </div>
+      ) : null}
+    </div>
   );
 }
 
-function MindMapArtifactLauncher({
-  artifact,
+function StudioArtifactList({
+  artifacts,
+  deletingArtifactId,
   loading,
+  onDelete,
   onOpen
 }: {
-  artifact: StudioArtifactResp | null;
+  artifacts: StudioArtifactResp[];
+  deletingArtifactId: number | null;
   loading: boolean;
+  onDelete: (artifact: StudioArtifactResp) => void;
   onOpen: (artifact: StudioArtifactResp) => void;
 }) {
-  if (!artifact) {
-    return loading ? (
-      <div className="mt-5 rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-neutral-500">
-        正在加载 Studio 产物...
-      </div>
-    ) : null;
-  }
-
   return (
-    <button
-      aria-label={`打开 ${artifact.title}`}
-      className="mt-5 flex w-full items-start gap-3 rounded-lg border border-slate-200 bg-white p-3 text-left shadow-sm outline-none hover:border-fuchsia-200 hover:bg-fuchsia-50/40 focus-visible:ring-2 focus-visible:ring-fuchsia-300"
-      onClick={() => onOpen(artifact)}
-      type="button"
-    >
-      <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-md bg-fuchsia-50 text-fuchsia-700">
-        <GitBranch aria-hidden="true" className="h-5 w-5" />
+    <section className="mt-4 border-t border-slate-200 pt-4" data-testid="studio-artifact-list">
+      <div className="flex items-center justify-between gap-2">
+        <div>
+          <h3 className="text-xs font-semibold text-neutral-950">生成内容</h3>
+          <div className="mt-0.5 text-[11px] text-neutral-500">
+            {artifacts.length ? `${artifacts.length} 个产物` : "从上方模块生成后会出现在这里"}
+          </div>
+        </div>
+        {loading ? <Loader2 aria-hidden="true" className="h-3.5 w-3.5 animate-spin text-neutral-500" /> : null}
       </div>
-      <div className="min-w-0 flex-1">
-        <div className="truncate text-sm font-semibold text-neutral-950">{artifact.title}</div>
-        <div className="mt-1 text-xs text-neutral-500">{artifact.createTime}</div>
-      </div>
-      <ChevronRight aria-hidden="true" className="mt-2 h-4 w-4 shrink-0 text-neutral-500" />
-    </button>
+
+      {artifacts.length ? (
+        <div className="mt-2.5 space-y-2">
+          {artifacts.map((artifact) => (
+            <div
+              className="flex items-center gap-2 rounded-md border border-slate-200 bg-white p-2.5 shadow-sm"
+              key={artifact.id}
+            >
+              <button
+                aria-label={`预览 ${artifact.title}`}
+                className="flex min-w-0 flex-1 items-center gap-2 text-left outline-none hover:text-fuchsia-800 focus-visible:ring-2 focus-visible:ring-fuchsia-300"
+                onClick={() => onOpen(artifact)}
+                type="button"
+              >
+                <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-fuchsia-50 text-fuchsia-700">
+                  {artifact.artifactType === "mind_map" ? (
+                    <GitBranch aria-hidden="true" className="h-4 w-4" />
+                  ) : (
+                    <FileText aria-hidden="true" className="h-4 w-4" />
+                  )}
+                </div>
+                <div className="min-w-0 flex-1">
+                  <div className="truncate text-xs font-semibold text-neutral-950">{artifact.title}</div>
+                  <div className="mt-0.5 flex flex-wrap items-center gap-1.5 text-[11px] text-neutral-500">
+                    <span>{studioArtifactTypeLabel(artifact)}</span>
+                    <span>{artifact.createTime}</span>
+                  </div>
+                </div>
+                <Eye aria-hidden="true" className="h-3.5 w-3.5 shrink-0 text-neutral-500" />
+              </button>
+              <button
+                aria-label={`删除 ${artifact.title}`}
+                className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-neutral-500 hover:bg-rose-50 hover:text-rose-600 focus-visible:ring-2 focus-visible:ring-rose-300 disabled:cursor-not-allowed disabled:opacity-50"
+                disabled={deletingArtifactId === artifact.id}
+                onClick={() => onDelete(artifact)}
+                type="button"
+              >
+                {deletingArtifactId === artifact.id ? (
+                  <Loader2 aria-hidden="true" className="h-3.5 w-3.5 animate-spin" />
+                ) : (
+                  <Trash2 aria-hidden="true" className="h-3.5 w-3.5" />
+                )}
+              </button>
+            </div>
+          ))}
+        </div>
+      ) : (
+        <div className="mt-2.5 rounded-md border border-dashed border-slate-200 bg-slate-50 px-3 py-3 text-xs text-neutral-500">
+          暂无生成内容
+        </div>
+      )}
+    </section>
   );
+}
+
+function studioArtifactTypeLabel(artifact: StudioArtifactResp) {
+  if (artifact.artifactType === "mind_map") {
+    return "思维导图";
+  }
+  const action = studioItems.find(([label]) => artifact.title.includes(label));
+  return action?.[0] ?? artifact.artifactType;
 }
 
 function MindMapArtifactPanel({
@@ -2157,7 +2352,7 @@ function MindMapMarkmapCanvas({ content }: { content: MindMapContent }) {
   );
 }
 
-function mindMapContentToMarkdown(content: MindMapContent) {
+export function mindMapContentToMarkdown(content: MindMapContent) {
   const root = content.nodes.find((node) => node.id === "root") ?? content.nodes[0] ?? null;
   if (!root) {
     return `# ${escapeMarkmapLine(content.title || "思维导图")}`;
@@ -2210,12 +2405,6 @@ function appendMindMapMarkdownChildren(
 function appendMindMapMarkdownNode(lines: string[], node: MindMapContent["nodes"][number], depth: number) {
   const indent = "  ".repeat(depth);
   lines.push(`${indent}- ${escapeMarkmapLine(markmapNodeLabel(node))}`);
-  if (node.summary) {
-    lines.push(`${indent}  - ${escapeMarkmapLine(node.summary)}`);
-  }
-  if (node.citationRefs?.length) {
-    lines.push(`${indent}  - 引用: ${node.citationRefs.slice(0, 4).map(escapeMarkmapLine).join(", ")}`);
-  }
 }
 
 function markmapNodeLabel(node: MindMapContent["nodes"][number]) {
@@ -2224,35 +2413,6 @@ function markmapNodeLabel(node: MindMapContent["nodes"][number]) {
 
 function escapeMarkmapLine(value: string) {
   return value.replace(/\s+/g, " ").replace(/[#`*_{}[\]()<>]/g, "").trim();
-}
-
-function StudioNotes({
-  dataset,
-  activeSession
-}: {
-  dataset: DatasetResp;
-  activeSession: ChatFlowSessionResp | null;
-}) {
-  return (
-    <div className="space-y-4">
-      <div className="flex items-start gap-3">
-        <Database aria-hidden="true" className="mt-1 h-6 w-6 text-blue-700" />
-        <div className="min-w-0 flex-1">
-          <div className="truncate text-sm font-semibold">{dataset.name}</div>
-          <div className="mt-1 text-sm text-neutral-500">{dataset.documentCount} 个来源 · 当前笔记本</div>
-        </div>
-        <MoreVertical aria-hidden="true" className="h-5 w-5 text-neutral-500" />
-      </div>
-      <div className="flex items-start gap-3">
-        <FileText aria-hidden="true" className="mt-1 h-6 w-6 text-blue-700" />
-        <div className="min-w-0 flex-1">
-          <div className="truncate text-sm font-semibold">{activeSession?.title ?? "未命名的笔记"}</div>
-          <div className="mt-1 text-sm text-neutral-500">{activeSession?.messageCount ?? 0} 条消息</div>
-        </div>
-        <MoreVertical aria-hidden="true" className="h-5 w-5 text-neutral-500" />
-      </div>
-    </div>
-  );
 }
 
 function parseMindMapContent(value: Record<string, unknown>): MindMapContent | null {

@@ -17,11 +17,15 @@ use crate::{
 pub const STUDIO_ACTION_LIST_PERMISSION: &str = "ai:studio:action:list";
 pub const STUDIO_ARTIFACT_LIST_PERMISSION: &str = "ai:studio:artifact:list";
 pub const STUDIO_ARTIFACT_CREATE_PERMISSION: &str = "ai:studio:artifact:create";
+pub const STUDIO_ARTIFACT_DELETE_PERMISSION: &str = "ai:studio:artifact:delete";
 
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/ai/studio/actions", get(list_actions))
-        .route("/ai/studio/artifacts/:artifact_id", get(get_artifact))
+        .route(
+            "/ai/studio/artifacts/:artifact_id",
+            get(get_artifact).delete(delete_artifact),
+        )
         .route(
             "/ai/knowledge/datasets/:dataset_id/artifacts",
             get(list_dataset_artifacts).post(generate_dataset_artifact),
@@ -87,6 +91,21 @@ async fn generate_dataset_artifact(
     )))
 }
 
+async fn delete_artifact(
+    State(state): State<AppState>,
+    current_user: CurrentUser,
+    Path(artifact_id): Path<i64>,
+) -> Result<Json<ApiResponse<i64>>, AppError> {
+    require_permission(&current_user, STUDIO_ARTIFACT_DELETE_PERMISSION)?;
+    let service = StudioService::new(state.db);
+
+    Ok(Json(ApiResponse::ok(
+        service
+            .delete_artifact(current_user.tenant_id, current_user.id, artifact_id)
+            .await?,
+    )))
+}
+
 #[cfg(test)]
 mod tests {
     use axum::extract::{Path, State};
@@ -127,6 +146,7 @@ mod tests {
             "ai:studio:action:list",
             "ai:studio:artifact:list",
             "ai:studio:artifact:create",
+            "ai:studio:artifact:delete",
         ] {
             assert!(
                 permissions.contains(permission),
@@ -177,6 +197,19 @@ mod tests {
                 max_nodes: Some(8),
                 answer_model_route_id: None,
             }),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(matches!(err, AppError::Forbidden));
+    }
+
+    #[tokio::test]
+    async fn delete_studio_artifact_rejects_missing_permission() {
+        let err = delete_artifact(
+            State(test_state()),
+            user_with_permissions(vec![]),
+            Path(8801),
         )
         .await
         .unwrap_err();

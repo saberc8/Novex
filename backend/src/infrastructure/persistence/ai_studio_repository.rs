@@ -203,6 +203,7 @@ FROM ai_studio_artifact
 WHERE tenant_id = $1
   AND create_user = $2
   AND dataset_id = $3
+  AND status = 1
 ORDER BY create_time DESC, id DESC
 LIMIT $4;
 "#,
@@ -230,7 +231,8 @@ SELECT
 FROM ai_studio_artifact
 WHERE tenant_id = $1
   AND create_user = $2
-  AND id = $3;
+  AND id = $3
+  AND status = 1;
 "#,
         )
         .bind(tenant_id)
@@ -238,5 +240,32 @@ WHERE tenant_id = $1
         .bind(artifact_id)
         .fetch_optional(&self.db)
         .await?)
+    }
+
+    pub async fn soft_delete_artifact(
+        &self,
+        tenant_id: i64,
+        user_id: i64,
+        artifact_id: i64,
+    ) -> Result<bool, AppError> {
+        let result = sqlx::query(
+            r#"
+UPDATE ai_studio_artifact
+SET status = 0,
+    update_user = $2,
+    update_time = NOW()
+WHERE tenant_id = $1
+  AND create_user = $2
+  AND id = $3
+  AND status = 1;
+"#,
+        )
+        .bind(tenant_id)
+        .bind(user_id)
+        .bind(artifact_id)
+        .execute(&self.db)
+        .await?;
+
+        Ok(result.rows_affected() > 0)
     }
 }

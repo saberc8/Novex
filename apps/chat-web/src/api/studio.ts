@@ -29,3 +29,9 @@ export function generateStudioArtifact(datasetId: number, data: StudioArtifactGe
 export function getStudioArtifact(artifactId: number) {
   return apiRequest<StudioArtifactResp>(`/ai/studio/artifacts/${artifactId}`);
 }
+
+export function deleteStudioArtifact(artifactId: number) {
+  return apiRequest<number>(`/ai/studio/artifacts/${artifactId}`, {
+    method: "DELETE"
+  });
+}

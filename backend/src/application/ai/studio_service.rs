@@ -215,6 +215,23 @@ impl StudioService {
         Ok(StudioArtifactResp::from(row))
     }
 
+    pub async fn delete_artifact(
+        &self,
+        tenant_id: i64,
+        user_id: i64,
+        artifact_id: i64,
+    ) -> Result<i64, AppError> {
+        ensure_artifact_id(artifact_id)?;
+        let deleted = self
+            .repo
+            .soft_delete_artifact(tenant_id, user_id, artifact_id)
+            .await?;
+        if !deleted {
+            return Err(AppError::NotFound);
+        }
+        Ok(artifact_id)
+    }
+
     pub async fn generate_artifact(
         &self,
         tenant_id: i64,
@@ -809,11 +826,12 @@ fn append_model_mind_map_branch(
         return;
     }
     let node_id = model_mind_map_node_id(level, path);
-    let summary = if branch.summary.trim().is_empty() {
-        label.clone()
+    let raw_summary = if branch.summary.trim().is_empty() {
+        String::new()
     } else {
         preview_chars(branch.summary.trim(), 120)
     };
+    let summary = mind_map_node_summary(&label, &raw_summary);
     let citation_refs =
         model_mind_map_citation_refs(branch.citation_index, sections, citations, citation_cache);
 
@@ -832,16 +850,20 @@ fn append_model_mind_map_branch(
     if level >= 3 {
         return;
     }
-    if level == 2 && branch.children.is_empty() && nodes.len() < node_limit {
-        let detail_label = compact_mind_map_label(&summary, 28);
+    if level == 2 && branch.children.is_empty() && !raw_summary.is_empty() && nodes.len() < node_limit {
+        let detail_label = compact_mind_map_label(&raw_summary, 28);
         if detail_label != label && detail_label.chars().count() >= 2 {
+            if let Some(parent_node) = nodes.last_mut() {
+                parent_node["summary"] = Value::String(String::new());
+            }
             let mut detail_path = path.to_vec();
             detail_path.push(1);
             let detail_id = model_mind_map_node_id(3, &detail_path);
+            let detail_summary = mind_map_node_summary(&detail_label, &raw_summary);
             nodes.push(json!({
                 "id": detail_id,
                 "label": detail_label,
-                "summary": summary,
+                "summary": detail_summary,
                 "level": 3,
                 "citationRefs": citation_refs
             }));
@@ -1067,6 +1089,26 @@ fn compact_mind_map_label(text: &str, limit: usize) -> String {
         .find(|clause| is_compact_label_clause(clause))
         .unwrap_or(normalized.as_str());
     preview_chars(candidate, limit)
+}
+
+fn mind_map_node_summary(label: &str, summary: &str) -> String {
+    let summary = summary.trim();
+    if summary.is_empty() {
+        return String::new();
+    }
+    let summary = preview_chars(summary, 120);
+    if mind_map_text_key(&summary) == mind_map_text_key(label) {
+        String::new()
+    } else {
+        summary
+    }
+}
+
+fn mind_map_text_key(text: &str) -> String {
+    text.chars()
+        .filter(|ch| ch.is_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect()
 }
 
 fn trim_mind_map_discourse_prefix(text: &str) -> &str {
@@ -1737,7 +1779,7 @@ mod tests {
     }
 
     #[test]
-    fn studio_service_expands_shallow_model_points_to_third_level() {
+    fn studio_service_expands_shallow_model_points_without_repeating_summaries() {
         let sections = vec![StudioMindMapSection {
             title: "AI战略".to_owned(),
             first_index: 0,
@@ -1778,6 +1820,16 @@ mod tests {
         assert!(
             nodes.iter().any(|node| node["level"] == 3),
             "backend should add a detail node when model returns only two levels"
+        );
+        let repeated_fact_count = nodes
+            .iter()
+            .flat_map(|node| [node["label"].as_str(), node["summary"].as_str()])
+            .flatten()
+            .filter(|value| value.contains("ONE、AI搜问、AI表格"))
+            .count();
+        assert_eq!(
+            repeated_fact_count, 1,
+            "auto-expanded detail text should not be repeated in parent or child summaries"
         );
     }
 

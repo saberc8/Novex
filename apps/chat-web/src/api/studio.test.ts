@@ -1,5 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { generateStudioArtifact, listDatasetStudioArtifacts, listStudioActions } from "./studio";
+import {
+  deleteStudioArtifact,
+  generateStudioArtifact,
+  listDatasetStudioArtifacts,
+  listStudioActions
+} from "./studio";
 
 function okResponse(data: unknown) {
   return Promise.resolve(
@@ -83,6 +88,22 @@ describe("chat studio api", () => {
         topic: "Training handbook",
         maxNodes: 10,
         answerModelRouteId: "runtime.llm.rag_answer"
+      })
+    });
+  });
+
+  it("deletes a generated studio artifact", async () => {
+    window.localStorage.setItem("novex_token", "token-1");
+
+    await deleteStudioArtifact(8801);
+
+    expect(fetchMock.mock.calls[0]?.[0]).toBe(
+      "http://localhost:4398/ai/studio/artifacts/8801"
+    );
+    expect(fetchMock.mock.calls[0]?.[1]).toMatchObject({
+      method: "DELETE",
+      headers: expect.objectContaining({
+        Authorization: "Bearer token-1"
       })
     });
   });

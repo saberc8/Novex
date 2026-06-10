@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import ChatPage from "./chat/page";
 import KnowledgePage from "./knowledge/page";
 import { metadata } from "./layout";
+import { mindMapContentToMarkdown } from "@/app-client";
 import {
   createChatFlowSession,
   listChatFlowMessages,
@@ -21,6 +22,7 @@ import {
 } from "@/api/knowledge";
 import { getModelRuntimeConfig } from "@/api/model";
 import {
+  deleteStudioArtifact,
   generateStudioArtifact,
   listDatasetStudioArtifacts,
   listStudioActions
@@ -69,6 +71,7 @@ vi.mock("@/api/model", () => ({
 
 vi.mock("@/api/studio", () => ({
   generateStudioArtifact: vi.fn(),
+  deleteStudioArtifact: vi.fn(),
   listDatasetStudioArtifacts: vi.fn(),
   listStudioActions: vi.fn()
 }));
@@ -88,6 +91,7 @@ const listDatasetsMock = vi.mocked(listDatasets);
 const uploadKnowledgeFileMock = vi.mocked(uploadKnowledgeFile);
 const getModelRuntimeConfigMock = vi.mocked(getModelRuntimeConfig);
 const generateStudioArtifactMock = vi.mocked(generateStudioArtifact);
+const deleteStudioArtifactMock = vi.mocked(deleteStudioArtifact);
 const listDatasetStudioArtifactsMock = vi.mocked(listDatasetStudioArtifacts);
 const listStudioActionsMock = vi.mocked(listStudioActions);
 const writeTextMock = vi.fn();
@@ -365,6 +369,7 @@ describe("Chat web page", () => {
     listStudioActionsMock.mockResolvedValue([studioAction()]);
     listDatasetStudioArtifactsMock.mockResolvedValue([]);
     generateStudioArtifactMock.mockResolvedValue(mindMapArtifact());
+    deleteStudioArtifactMock.mockResolvedValue(8801);
     listChatFlowSessionsMock.mockResolvedValue([session()]);
     listChatFlowMessagesMock.mockResolvedValue([]);
     listSkillsMock.mockResolvedValue({
@@ -487,6 +492,8 @@ describe("Chat web page", () => {
     render(<KnowledgePage />);
 
     expect(screen.getByRole("heading", { name: "NotebookLM 登录", level: 1 })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "创建笔记本" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "新建笔记本" })).toBeNull();
     expect(await screen.findByRole("button", { name: "登录" })).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "登录" }));
 
@@ -554,6 +561,36 @@ describe("Chat web page", () => {
     );
   });
 
+  it("creates the next unnamed notebook when the default name already exists", async () => {
+    listDatasetsMock.mockResolvedValue({
+      list: [
+        dataset({
+          id: 10,
+          name: "未命名的笔记本"
+        }),
+        dataset({
+          id: 11,
+          name: "未命名的笔记本 3"
+        })
+      ],
+      total: 2
+    });
+
+    render(<KnowledgePage />);
+
+    expect(await screen.findByRole("button", { name: "打开 未命名的笔记本" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "新建笔记本" }));
+
+    await waitFor(() =>
+      expect(createDatasetMock).toHaveBeenCalledWith({
+        name: "未命名的笔记本 2",
+        description: "Created from chat workspace",
+        visibility: 1,
+        retrievalMode: 3
+      })
+    );
+  });
+
   it("uploads a source file and polls parser status inside a notebook", async () => {
     render(<KnowledgePage />);
 
@@ -589,25 +626,62 @@ describe("Chat web page", () => {
     expect(routerPushMock).toHaveBeenCalledWith("/knowledge/10");
   });
 
-  it("keeps notebook detail columns independently scrollable on desktop", async () => {
+  it("keeps notebook detail columns independently scrollable with compact spacing", async () => {
     render(<KnowledgePage />);
 
     fireEvent.click(await screen.findByRole("button", { name: /打开 Machine Learning Tools/ }));
 
+    const topBar = screen.getByRole("banner");
+    expect(topBar.className).toContain("h-16");
+    expect(topBar.className).toContain("px-4");
+    expect(screen.getByRole("heading", { name: /Machine Learning Tools/ }).className).toContain("text-xl");
+
     const layout = await screen.findByTestId("knowledge-detail-layout");
-    expect(layout.className).toContain("xl:h-[calc(100vh-88px)]");
+    expect(layout.className).toContain("gap-3");
+    expect(layout.className).toContain("px-3");
+    expect(layout.className).toContain("pb-3");
+    expect(layout.className).toContain("xl:h-[calc(100vh-64px)]");
     expect(layout.className).toContain("xl:overflow-hidden");
 
-    for (const testId of [
-      "knowledge-sources-scroll",
-      "knowledge-chat-scroll",
-      "knowledge-studio-scroll"
-    ]) {
+    for (const testId of ["knowledge-sources-panel", "knowledge-chat-panel", "knowledge-studio-panel"]) {
+      const panel = screen.getByTestId(testId);
+      expect(panel.className).toContain("min-h-[480px]");
+      expect(panel.className).toContain("rounded-md");
+    }
+
+    const sourcesHeader = screen.getByRole("heading", { name: "来源" }).parentElement as HTMLElement;
+    expect(sourcesHeader.className).toContain("h-10");
+    expect(sourcesHeader.className).toContain("px-3");
+
+    for (const testId of ["knowledge-sources-scroll", "knowledge-chat-scroll", "knowledge-studio-scroll"]) {
       const region = screen.getByTestId(testId);
       expect(region.className).toContain("min-h-0");
       expect(region.className).toContain("flex-1");
       expect(region.className).toContain("overflow-y-auto");
     }
+
+    expect(screen.getByTestId("knowledge-sources-scroll").className).toContain("p-4");
+    expect(screen.getByTestId("knowledge-chat-scroll").className).toContain("px-4");
+    expect(screen.getByTestId("knowledge-chat-scroll").className).toContain("py-3");
+    expect(screen.getByTestId("knowledge-studio-scroll").className).toContain("p-4");
+    expect((screen.getByText("添加来源").closest("label") as HTMLElement).className).toContain("h-9");
+    expect(screen.queryByRole("button", { name: "添加笔记" })).toBeNull();
+  });
+
+  it("renders compact Studio action items in the upper grid", async () => {
+    render(<KnowledgePage />);
+
+    fireEvent.click(await screen.findByRole("button", { name: /打开 Machine Learning Tools/ }));
+
+    const studioScroll = await screen.findByTestId("knowledge-studio-scroll");
+    const actionGrid = studioScroll.firstElementChild as HTMLElement;
+    expect(actionGrid.className).toContain("gap-2");
+
+    const mindMapAction = screen.getByRole("button", { name: "思维导图" });
+    expect(mindMapAction.className).toContain("min-h-14");
+    expect(mindMapAction.className).toContain("p-2.5");
+    expect(mindMapAction.className).toContain("text-[11px]");
+    expect(mindMapAction.querySelector("svg")?.className.baseVal).toContain("h-3.5");
   });
 
   it("generates a cited mind map artifact from the Studio panel", async () => {
@@ -634,11 +708,11 @@ describe("Chat web page", () => {
         answerModelRouteId: "runtime.llm.rag_answer"
       })
     );
-    expect(await screen.findByRole("button", { name: "打开 Training Handbook - 思维导图" })).toBeTruthy();
+    expect(await screen.findByRole("button", { name: "预览 Training Handbook - 思维导图" })).toBeTruthy();
     expect(await screen.findByText("2026-01-30 10:02:00")).toBeTruthy();
     expect(screen.queryByText("Security training")).toBeNull();
 
-    fireEvent.click(screen.getByRole("button", { name: "打开 Training Handbook - 思维导图" }));
+    fireEvent.click(screen.getByRole("button", { name: "预览 Training Handbook - 思维导图" }));
 
     const artifactDialog = await screen.findByRole("dialog", { name: "Training Handbook - 思维导图" });
     expect(artifactDialog).toBeTruthy();
@@ -652,6 +726,107 @@ describe("Chat web page", () => {
     expect(canvas.getAttribute("data-renderer")).toBe("markmap");
     expect(canvas.className).toContain("overflow-hidden");
     expect(canvas.querySelector("svg")).toBeTruthy();
+  });
+
+  it("renders mind map markdown without duplicating summaries or citation refs as nodes", () => {
+    const markdown = mindMapContentToMarkdown({
+      title: "未命名的笔记本",
+      nodes: [
+        { id: "root", label: "未命名的笔记本", level: 0, citationRefs: [] },
+        {
+          id: "topic-1",
+          label: "钉钉的象征",
+          summary: "钉三多源于雨燕，象征持续飞行与不落地。",
+          level: 1,
+          citationRefs: ["c1"]
+        },
+        {
+          id: "topic-1-point-1",
+          label: "特性",
+          summary: "雨燕可连续飞行300多天。",
+          level: 2,
+          citationRefs: ["c1"]
+        },
+        {
+          id: "topic-1-point-1-detail-1",
+          label: "雨燕可连续飞行300多天",
+          summary: "雨燕可连续飞行300多天。",
+          level: 3,
+          citationRefs: ["c1"]
+        }
+      ],
+      edges: [
+        { source: "root", target: "topic-1" },
+        { source: "topic-1", target: "topic-1-point-1" },
+        { source: "topic-1-point-1", target: "topic-1-point-1-detail-1" }
+      ],
+      citations: [
+        {
+          id: "c1",
+          documentId: "20",
+          chunkId: "20:0",
+          pageNo: 3,
+          sectionPath: ["Policy"]
+        }
+      ]
+    });
+
+    expect(markdown.match(/雨燕可连续飞行300多天/g) ?? []).toHaveLength(1);
+    expect(markdown).not.toContain("引用:");
+    expect(markdown).not.toContain("钉三多源于雨燕");
+  });
+
+  it("keeps generated Studio artifacts in a lower preview/delete list", async () => {
+    const existingArtifact = mindMapArtifact({
+      id: 8701,
+      title: "已有分析 - 思维导图",
+      createTime: "2026-01-30 09:40:00"
+    });
+    const firstGenerated = mindMapArtifact({
+      id: 8801,
+      title: "第一次生成 - 思维导图",
+      createTime: "2026-01-30 10:02:00"
+    });
+    const secondGenerated = mindMapArtifact({
+      id: 8802,
+      title: "第二次生成 - 思维导图",
+      createTime: "2026-01-30 10:05:00"
+    });
+    listDatasetStudioArtifactsMock.mockResolvedValueOnce([existingArtifact]);
+    generateStudioArtifactMock
+      .mockResolvedValueOnce(firstGenerated)
+      .mockResolvedValueOnce(secondGenerated);
+    deleteStudioArtifactMock.mockResolvedValueOnce(firstGenerated.id);
+
+    render(<KnowledgePage />);
+
+    fireEvent.click(await screen.findByRole("button", { name: /打开 Machine Learning Tools/ }));
+    expect(await screen.findByText("生成内容")).toBeTruthy();
+    expect(await screen.findByRole("button", { name: "预览 已有分析 - 思维导图" })).toBeTruthy();
+    expect(screen.queryByText("当前笔记本")).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "思维导图" }));
+    fireEvent.change(await screen.findByLabelText("总结方向"), {
+      target: { value: "第一次总结方向" }
+    });
+    fireEvent.click(screen.getByRole("button", { name: "生成思维导图" }));
+    expect(await screen.findByRole("button", { name: "预览 第一次生成 - 思维导图" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "预览 已有分析 - 思维导图" })).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "思维导图" }));
+    fireEvent.change(await screen.findByLabelText("总结方向"), {
+      target: { value: "第二次总结方向" }
+    });
+    fireEvent.click(screen.getByRole("button", { name: "生成思维导图" }));
+    expect(await screen.findByRole("button", { name: "预览 第二次生成 - 思维导图" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "预览 第一次生成 - 思维导图" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "预览 已有分析 - 思维导图" })).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "删除 第一次生成 - 思维导图" }));
+    await waitFor(() => expect(deleteStudioArtifactMock).toHaveBeenCalledWith(firstGenerated.id));
+    expect(screen.queryByRole("button", { name: "预览 第一次生成 - 思维导图" })).toBeNull();
+    expect(screen.getByRole("button", { name: "预览 第二次生成 - 思维导图" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "预览 已有分析 - 思维导图" })).toBeTruthy();
   });
 
   it("shows a Studio loading failure instead of a silent disabled action", async () => {
@@ -677,12 +852,85 @@ describe("Chat web page", () => {
     fireEvent.click(await screen.findByRole("button", { name: /打开 Machine Learning Tools/ }));
 
     const layout = await screen.findByTestId("knowledge-detail-layout");
-    expect(layout.closest("main")?.className).toContain("text-[12px]");
+    expect(layout.closest("main")?.className).toContain("text-[11px]");
+
+    const shell = screen.getByTestId("knowledge-composer-shell");
+    expect(shell.className).toContain("max-w-2xl");
 
     const composer = screen.getByLabelText("提问或创作内容") as HTMLTextAreaElement;
-    expect(composer.className).toContain("min-h-12");
-    expect(composer.className).toContain("text-[13px]");
-    expect(composer.getAttribute("rows")).toBe("2");
+    expect(composer.className).toContain("min-h-8");
+    expect(composer.className).toContain("text-[11px]");
+    expect(composer.getAttribute("rows")).toBe("1");
+  });
+
+  it("uses a short custom model selector beside the send button in notebook detail", async () => {
+    getModelRuntimeConfigMock.mockResolvedValueOnce({
+      routes: [
+        {
+          target: "llm",
+          routeId: "runtime.llm",
+          kind: "llm",
+          provider: "deep-seek",
+          model: "deepseek-v4-flash",
+          baseUrl: "https://api.deepseek.com",
+          endpoint: "https://api.deepseek.com/chat/completions",
+          maskedApiKey: "sk-****508d",
+          purposes: ["chat", "rag_answer"],
+          envKeys: ["LLM_API_KEY"],
+          purposeRouteIds: {
+            chat: "runtime.llm.chat",
+            rag_answer: "runtime.llm.rag_answer"
+          }
+        },
+        {
+          target: "llm",
+          routeId: "runtime.llm.qwen",
+          kind: "llm",
+          provider: "dash-scope",
+          model: "qwen-max",
+          baseUrl: "https://dashscope.aliyuncs.com",
+          endpoint: "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions",
+          maskedApiKey: "sk-****qwen",
+          purposes: ["chat", "rag_answer"],
+          envKeys: ["QWEN_API_KEY"],
+          purposeRouteIds: {
+            chat: "runtime.llm.qwen_chat",
+            rag_answer: "runtime.llm.qwen_rag"
+          }
+        }
+      ],
+      missingEnv: []
+    });
+
+    render(<KnowledgePage />);
+
+    fireEvent.click(await screen.findByRole("button", { name: /打开 Machine Learning Tools/ }));
+
+    expect(screen.queryByRole("combobox", { name: "LLM 模型" })).toBeNull();
+    const modelButton = await screen.findByRole("button", { name: "LLM 模型 deepseek-v4-flash" });
+    expect(screen.getByRole("button", { name: "发送消息" }).parentElement?.textContent).toContain("deepseek-v4-flash");
+
+    fireEvent.click(modelButton);
+    const listbox = await screen.findByRole("listbox", { name: "选择 LLM 模型" });
+    expect(listbox.textContent).toContain("deepseek-v4-flash");
+    expect(listbox.textContent).toContain("qwen-max");
+    expect(listbox.textContent).not.toContain("runtime.llm");
+
+    fireEvent.click(screen.getByRole("option", { name: "qwen-max" }));
+    expect(screen.getByRole("button", { name: "LLM 模型 qwen-max" })).toBeTruthy();
+
+    fireEvent.change(screen.getByLabelText("提问或创作内容"), {
+      target: { value: "应该信任哪个来源？" }
+    });
+    fireEvent.click(screen.getByRole("button", { name: "发送消息" }));
+
+    await waitFor(() =>
+      expect(sendChatFlowMessageMock).toHaveBeenCalledWith(501, {
+        content: "应该信任哪个来源？",
+        limit: 5,
+        answerModelRouteId: "runtime.llm.qwen_rag"
+      })
+    );
   });
 
   it("deletes a notebook from the card menu after confirming in the app dialog", async () => {
@@ -733,7 +981,7 @@ describe("Chat web page", () => {
     expect(await screen.findByText("Use the cited source list before drawing conclusions.")).toBeTruthy();
     expect(await screen.findByText("Trace #42")).toBeTruthy();
     expect(await screen.findByText("runtime.llm.rag_answer")).toBeTruthy();
-    expect(await screen.findByText("deepseek-v4-flash")).toBeTruthy();
+    expect((await screen.findAllByText("deepseek-v4-flash")).length).toBeGreaterThan(0);
     expect(await screen.findByText("20:0 · page 3")).toBeTruthy();
   });
 
