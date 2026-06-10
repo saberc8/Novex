@@ -26,6 +26,7 @@ novex-memory.workspace = true
 novex-model.workspace = true
 novex-plugin.workspace = true
 novex-rag.workspace = true
+novex-skill.workspace = true
 novex-tools.workspace = true
 novex-trigger.workspace = true
 rand = "0.8"

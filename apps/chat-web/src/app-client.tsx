@@ -2,9 +2,11 @@
 
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { type FormEvent, type KeyboardEvent, useCallback, useEffect, useMemo, useState } from "react";
+import { type FormEvent, type KeyboardEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import { Transformer } from "markmap-lib";
+import { Markmap } from "markmap-view";
 import {
   AlertTriangle,
   ArrowRight,
@@ -14,7 +16,9 @@ import {
   Copy,
   Database,
   FileText,
+  GitBranch,
   LayoutGrid,
+  Loader2,
   LogOut,
   MoreVertical,
   PanelLeft,
@@ -41,6 +45,11 @@ import {
   uploadKnowledgeFile
 } from "@/api/knowledge";
 import { getModelRuntimeConfig } from "@/api/model";
+import {
+  generateStudioArtifact,
+  listDatasetStudioArtifacts,
+  listStudioActions
+} from "@/api/studio";
 import { clearAuthToken, getAuthToken, setAuthToken as persistAuthToken } from "@/lib/auth";
 import type { AppRouteKey } from "@/page-routes";
 import type { ChatFlowMessageResp, ChatFlowMode, ChatFlowSessionResp } from "@/types/chat-flow";
@@ -48,8 +57,12 @@ import type { ImageCaptchaResp } from "@/types/auth";
 import type { CapabilityItemResp } from "@/types/capability";
 import type { CitationResp, DatasetResp, DocumentResp, ParserJobResp } from "@/types/knowledge";
 import type { ModelRoutePurpose, ModelRuntimeRouteSummary } from "@/types/model";
+import type { MindMapContent, StudioActionResp, StudioArtifactResp } from "@/types/studio";
 
 const CHAT_CLIENT_ID = "novex-chat-web";
+const DEFAULT_MIND_MAP_MAX_NODES = 72;
+const MIN_MIND_MAP_MAX_NODES = 12;
+const MAX_MIND_MAP_MAX_NODES = 96;
 const notebookColors = ["bg-emerald-50", "bg-indigo-50", "bg-stone-100", "bg-rose-50", "bg-cyan-50"];
 const notebookIcons = ["🔬", "🍂", "🐫", "⚙️", "🌊", "📁", "⚠️"];
 const studioItems = [
@@ -116,6 +129,15 @@ export function ChatAppClient({
   const [skillPickerOpen, setSkillPickerOpen] = useState(false);
   const [skillFilter, setSkillFilter] = useState("");
   const [activeSkillIndex, setActiveSkillIndex] = useState(0);
+  const [studioActions, setStudioActions] = useState<StudioActionResp[]>([]);
+  const [studioArtifacts, setStudioArtifacts] = useState<StudioArtifactResp[]>([]);
+  const [studioLoading, setStudioLoading] = useState(false);
+  const [generatingActionCode, setGeneratingActionCode] = useState<string | null>(null);
+  const [studioError, setStudioError] = useState("");
+  const [openStudioArtifactId, setOpenStudioArtifactId] = useState<number | null>(null);
+  const [mindMapPromptOpen, setMindMapPromptOpen] = useState(false);
+  const [mindMapPrompt, setMindMapPrompt] = useState("");
+  const [mindMapMaxNodes, setMindMapMaxNodes] = useState(DEFAULT_MIND_MAP_MAX_NODES);
 
   const resetClientSession = useCallback(() => {
     clearAuthToken();
@@ -136,6 +158,11 @@ export function ChatAppClient({
     setSelectedSkill(null);
     setSkillPickerOpen(false);
     setSkillFilter("");
+    setStudioActions([]);
+    setStudioArtifacts([]);
+    setStudioLoading(false);
+    setGeneratingActionCode(null);
+    setStudioError("");
   }, []);
 
   const handleAuthRejected = useCallback(
@@ -197,6 +224,24 @@ export function ChatAppClient({
     return page.list;
   }, []);
 
+  const refreshStudioActions = useCallback(async () => {
+    const actions = await listStudioActions({ surface: "knowledge" });
+    setStudioActions(actions);
+    setStudioError("");
+    return actions;
+  }, []);
+
+  const refreshStudioArtifacts = useCallback(async (datasetId: number) => {
+    setStudioLoading(true);
+    try {
+      const artifacts = await listDatasetStudioArtifacts(datasetId);
+      setStudioArtifacts(artifacts);
+      return artifacts;
+    } finally {
+      setStudioLoading(false);
+    }
+  }, []);
+
   useEffect(() => {
     if (!authToken) {
       return;
@@ -214,6 +259,15 @@ export function ChatAppClient({
           return;
         }
         setSkills([]);
+      });
+      void refreshStudioActions().catch((error) => {
+        if (handleAuthRejected(error)) {
+          return;
+        }
+        setStudioActions([]);
+        setStudioError(
+          `Studio 功能加载失败：${error instanceof Error ? error.message : "请稍后重试"}`
+        );
       });
     }
     if (isModelMode) {
@@ -254,6 +308,7 @@ export function ChatAppClient({
     refreshDatasets,
     refreshModelRuntime,
     refreshSessions,
+    refreshStudioActions,
     refreshSkills
   ]);
 
@@ -307,6 +362,18 @@ export function ChatAppClient({
     () => filterSkills(skills, skillFilter),
     [skills, skillFilter]
   );
+  const mindMapAction = useMemo(
+    () => studioActions.find((action) => action.code === "mind_map.generate") ?? null,
+    [studioActions]
+  );
+  const latestMindMapArtifact = useMemo(
+    () => studioArtifacts.find((artifact) => artifact.artifactType === "mind_map") ?? null,
+    [studioArtifacts]
+  );
+  const openStudioArtifact = useMemo(
+    () => studioArtifacts.find((artifact) => artifact.id === openStudioArtifactId) ?? null,
+    [openStudioArtifactId, studioArtifacts]
+  );
 
   useEffect(() => {
     setActiveSkillIndex(0);
@@ -324,6 +391,7 @@ export function ChatAppClient({
     setActiveDatasetId(null);
     setNotebookOpen(false);
     setDocuments([]);
+    setStudioArtifacts([]);
     setMessages([]);
     setActiveSessionId(null);
   }, [isModelMode, routeDatasetId]);
@@ -346,12 +414,21 @@ export function ChatAppClient({
     setSendError("");
     setSendStatus("");
     setDocuments([]);
+    setStudioArtifacts([]);
     void refreshDocuments(activeDataset.id).catch((error) => {
       if (handleAuthRejected(error)) {
         return;
       }
       if (!cancelled) {
         setDocuments([]);
+      }
+    });
+    void refreshStudioArtifacts(activeDataset.id).catch((error) => {
+      if (handleAuthRejected(error)) {
+        return;
+      }
+      if (!cancelled) {
+        setStudioArtifacts([]);
       }
     });
     void refreshSessions()
@@ -392,7 +469,8 @@ export function ChatAppClient({
     handleAuthRejected,
     isModelMode,
     refreshDocuments,
-    refreshSessions
+    refreshSessions,
+    refreshStudioArtifacts
   ]);
 
   async function handleCreateNotebook() {
@@ -679,6 +757,56 @@ export function ChatAppClient({
       setSendError(error instanceof Error ? error.message : "发送失败");
     } finally {
       setSending(false);
+    }
+  }
+
+  async function handleGenerateStudioArtifact(
+    action: StudioActionResp,
+    options: { topic?: string; maxNodes?: number } = {}
+  ) {
+    if (!activeDataset || generatingActionCode) {
+      return false;
+    }
+    const topic = options.topic?.trim() || activeDataset.name;
+    const maxNodes = normalizeMindMapMaxNodes(options.maxNodes);
+    setGeneratingActionCode(action.code);
+    setStudioError("");
+    try {
+      const artifact = await generateStudioArtifact(activeDataset.id, {
+        actionCode: action.code,
+        topic,
+        maxNodes,
+        answerModelRouteId: selectedRuntimeRouteId
+      });
+      setStudioArtifacts((current) => [
+        artifact,
+        ...current.filter((item) => item.id !== artifact.id)
+      ]);
+      return true;
+    } catch (error) {
+      if (handleAuthRejected(error)) {
+        return false;
+      }
+      setStudioError(error instanceof Error ? error.message : "生成失败");
+      return false;
+    } finally {
+      setGeneratingActionCode(null);
+    }
+  }
+
+  async function handleSubmitMindMapPrompt(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!mindMapAction) {
+      return;
+    }
+    const generated = await handleGenerateStudioArtifact(mindMapAction, {
+      topic: mindMapPrompt,
+      maxNodes: mindMapMaxNodes
+    });
+    if (generated) {
+      setMindMapPromptOpen(false);
+      setMindMapPrompt("");
+      setMindMapMaxNodes(DEFAULT_MIND_MAP_MAX_NODES);
     }
   }
 
@@ -992,15 +1120,36 @@ export function ChatAppClient({
             <div className="grid grid-cols-2 gap-3">
               {studioItems.map(([label, className]) => (
                 <button
-                  className={`flex min-h-20 items-center justify-between rounded-lg p-4 text-left text-sm font-semibold ${className}`}
+                  className={`flex min-h-20 items-center justify-between rounded-lg p-4 text-left text-sm font-semibold disabled:cursor-not-allowed disabled:opacity-50 ${className}`}
+                  aria-label={label}
+                  disabled={label === "思维导图" ? !mindMapAction || generatingActionCode !== null : true}
                   key={label}
+                  onClick={
+                    label === "思维导图" && mindMapAction
+                      ? () => setMindMapPromptOpen(true)
+                      : undefined
+                  }
                   type="button"
                 >
                   <span>{label}</span>
-                  <ChevronRight aria-hidden="true" className="h-5 w-5" />
+                  {generatingActionCode && label === "思维导图" ? (
+                    <Loader2 aria-hidden="true" className="h-5 w-5 animate-spin" />
+                  ) : (
+                    <ChevronRight aria-hidden="true" className="h-5 w-5" />
+                  )}
                 </button>
               ))}
             </div>
+            {studioError ? (
+              <div className="mt-4 rounded-md border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-700">
+                {studioError}
+              </div>
+            ) : null}
+            <MindMapArtifactLauncher
+              artifact={latestMindMapArtifact}
+              loading={studioLoading}
+              onOpen={(artifact) => setOpenStudioArtifactId(artifact.id)}
+            />
             <div className="mt-6 border-t border-slate-200 pt-5">
               <StudioNotes dataset={activeDataset} activeSession={activeSession} />
             </div>
@@ -1013,6 +1162,115 @@ export function ChatAppClient({
           </div>
         </aside>
       </div>
+      {openStudioArtifact ? (
+        <div
+          className="fixed inset-0 z-40 flex items-center justify-center bg-black/30 p-4"
+          onClick={() => setOpenStudioArtifactId(null)}
+        >
+          <div
+            aria-labelledby="studio-artifact-dialog-title"
+            aria-modal="true"
+            className="flex max-h-[90vh] w-full max-w-6xl flex-col rounded-lg bg-white shadow-2xl"
+            onClick={(event) => event.stopPropagation()}
+            role="dialog"
+          >
+            <div className="flex items-start gap-3 border-b border-slate-200 px-5 py-4">
+              <div className="min-w-0 flex-1">
+                <h2 className="truncate text-base font-semibold text-neutral-950" id="studio-artifact-dialog-title">
+                  {openStudioArtifact.title}
+                </h2>
+                <div className="mt-1 text-xs text-neutral-500">{openStudioArtifact.createTime}</div>
+              </div>
+              <button
+                aria-label="关闭 Studio 产物"
+                className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full hover:bg-slate-100"
+                onClick={() => setOpenStudioArtifactId(null)}
+                type="button"
+              >
+                <X aria-hidden="true" className="h-4 w-4" />
+              </button>
+            </div>
+            <div className="min-h-0 flex-1 overflow-auto p-5">
+              <MindMapArtifactPanel artifact={openStudioArtifact} loading={false} />
+            </div>
+          </div>
+        </div>
+      ) : null}
+      {mindMapPromptOpen ? (
+        <div
+          className="fixed inset-0 z-40 flex items-center justify-center bg-black/30 p-4"
+          onClick={() => setMindMapPromptOpen(false)}
+        >
+          <form
+            aria-labelledby="mind-map-prompt-dialog-title"
+            aria-modal="true"
+            className="w-full max-w-xl rounded-lg bg-white p-5 shadow-2xl"
+            onClick={(event) => event.stopPropagation()}
+            onSubmit={handleSubmitMindMapPrompt}
+            role="dialog"
+          >
+            <div className="flex items-start justify-between gap-4">
+              <div>
+                <h2 className="text-base font-semibold text-neutral-950" id="mind-map-prompt-dialog-title">
+                  生成思维导图
+                </h2>
+                <p className="mt-1 text-sm text-neutral-500">
+                  输入你希望总结的方向，系统会结合知识库内容生成完整结构。
+                </p>
+              </div>
+              <button
+                aria-label="关闭"
+                className="rounded-full p-1 text-neutral-500 hover:bg-neutral-100 hover:text-neutral-900"
+                onClick={() => setMindMapPromptOpen(false)}
+                type="button"
+              >
+                <X aria-hidden="true" className="h-5 w-5" />
+              </button>
+            </div>
+            <div className="mt-5 grid gap-4">
+              <label className="grid gap-2 text-sm font-medium text-neutral-800" htmlFor="mind-map-prompt">
+                总结方向
+                <textarea
+                  className="min-h-28 rounded-lg border border-slate-200 px-3 py-2 text-sm font-normal text-neutral-900 outline-none focus:border-fuchsia-300 focus:ring-2 focus:ring-fuchsia-100"
+                  id="mind-map-prompt"
+                  onChange={(event) => setMindMapPrompt(event.target.value)}
+                  placeholder="例如：按研究方法、实验流程、适用边界和关键结论完整总结"
+                  value={mindMapPrompt}
+                />
+              </label>
+              <label className="grid gap-2 text-sm font-medium text-neutral-800" htmlFor="mind-map-max-nodes">
+                节点上限
+                <input
+                  className="h-10 rounded-lg border border-slate-200 px-3 text-sm font-normal text-neutral-900 outline-none focus:border-fuchsia-300 focus:ring-2 focus:ring-fuchsia-100"
+                  id="mind-map-max-nodes"
+                  max={MAX_MIND_MAP_MAX_NODES}
+                  min={MIN_MIND_MAP_MAX_NODES}
+                  onChange={(event) => setMindMapMaxNodes(Number(event.target.value))}
+                  type="number"
+                  value={mindMapMaxNodes}
+                />
+              </label>
+            </div>
+            <div className="mt-6 flex justify-end gap-3">
+              <button
+                className="rounded-full border border-slate-200 px-4 py-2 text-sm font-semibold text-neutral-700 hover:bg-slate-50"
+                onClick={() => setMindMapPromptOpen(false)}
+                type="button"
+              >
+                取消
+              </button>
+              <button
+                className="inline-flex items-center gap-2 rounded-full bg-black px-4 py-2 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:opacity-60"
+                disabled={generatingActionCode !== null}
+                type="submit"
+              >
+                {generatingActionCode ? <Loader2 aria-hidden="true" className="h-4 w-4 animate-spin" /> : null}
+                生成思维导图
+              </button>
+            </div>
+          </form>
+        </div>
+      ) : null}
     </main>
   );
 
@@ -1614,6 +1872,11 @@ function normalizeDatasetId(value: number | null | undefined) {
   return typeof value === "number" && Number.isSafeInteger(value) && value > 0 ? value : null;
 }
 
+function normalizeMindMapMaxNodes(value: number | null | undefined) {
+  const numeric = typeof value === "number" && Number.isFinite(value) ? Math.trunc(value) : DEFAULT_MIND_MAP_MAX_NODES;
+  return Math.min(MAX_MIND_MAP_MAX_NODES, Math.max(MIN_MIND_MAP_MAX_NODES, numeric));
+}
+
 function datasetDetailHref(datasetId: number, route: AppRouteKey) {
   return route === "knowledge-sources" ? `/knowledge/sources/${datasetId}` : `/knowledge/${datasetId}`;
 }
@@ -1749,6 +2012,220 @@ function ModelRouteSelect({
   );
 }
 
+function MindMapArtifactLauncher({
+  artifact,
+  loading,
+  onOpen
+}: {
+  artifact: StudioArtifactResp | null;
+  loading: boolean;
+  onOpen: (artifact: StudioArtifactResp) => void;
+}) {
+  if (!artifact) {
+    return loading ? (
+      <div className="mt-5 rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-neutral-500">
+        正在加载 Studio 产物...
+      </div>
+    ) : null;
+  }
+
+  return (
+    <button
+      aria-label={`打开 ${artifact.title}`}
+      className="mt-5 flex w-full items-start gap-3 rounded-lg border border-slate-200 bg-white p-3 text-left shadow-sm outline-none hover:border-fuchsia-200 hover:bg-fuchsia-50/40 focus-visible:ring-2 focus-visible:ring-fuchsia-300"
+      onClick={() => onOpen(artifact)}
+      type="button"
+    >
+      <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-md bg-fuchsia-50 text-fuchsia-700">
+        <GitBranch aria-hidden="true" className="h-5 w-5" />
+      </div>
+      <div className="min-w-0 flex-1">
+        <div className="truncate text-sm font-semibold text-neutral-950">{artifact.title}</div>
+        <div className="mt-1 text-xs text-neutral-500">{artifact.createTime}</div>
+      </div>
+      <ChevronRight aria-hidden="true" className="mt-2 h-4 w-4 shrink-0 text-neutral-500" />
+    </button>
+  );
+}
+
+function MindMapArtifactPanel({
+  artifact,
+  loading
+}: {
+  artifact: StudioArtifactResp | null;
+  loading: boolean;
+}) {
+  if (!artifact) {
+    return loading ? (
+      <div className="mt-5 rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-neutral-500">
+        正在加载 Studio 产物...
+      </div>
+    ) : null;
+  }
+
+  const content = parseMindMapContent(artifact.contentJson);
+  if (!content) {
+    return (
+      <div className="mt-5 rounded-md border border-slate-200 bg-white p-4 text-sm text-neutral-700">
+        {artifact.contentText || artifact.title}
+      </div>
+    );
+  }
+
+  const displayCitations = content.citations.slice(0, 12);
+
+  return (
+    <section className="mt-5 rounded-lg border border-slate-200 bg-white p-4">
+      <div className="flex items-start gap-3">
+        <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-md bg-fuchsia-50 text-fuchsia-700">
+          <GitBranch aria-hidden="true" className="h-5 w-5" />
+        </div>
+        <div className="min-w-0 flex-1">
+          <h3 className="truncate text-sm font-semibold text-neutral-900">{content.title}</h3>
+          <div className="mt-1 text-xs text-neutral-500">
+            {artifact.ragTraceId ? `Trace #${artifact.ragTraceId}` : artifact.createTime}
+          </div>
+        </div>
+      </div>
+
+      <MindMapMarkmapCanvas content={content} />
+
+      <div className="mt-4 grid gap-3 text-sm text-neutral-700 md:grid-cols-3">
+        <div className="rounded-md bg-slate-50 px-3 py-2">
+          <div className="text-xs text-neutral-500">节点</div>
+          <div className="mt-1 font-semibold text-neutral-950">{content.nodes.length}</div>
+        </div>
+        <div className="rounded-md bg-slate-50 px-3 py-2">
+          <div className="text-xs text-neutral-500">关系</div>
+          <div className="mt-1 font-semibold text-neutral-950">{content.edges.length}</div>
+        </div>
+        <div className="rounded-md bg-slate-50 px-3 py-2">
+          <div className="text-xs text-neutral-500">引用</div>
+          <div className="mt-1 font-semibold text-neutral-950">{content.citations.length}</div>
+        </div>
+      </div>
+
+      {displayCitations.length ? (
+        <div className="mt-4 flex flex-wrap gap-2">
+          {displayCitations.map((citation) => (
+            <span className="rounded-full bg-slate-100 px-2.5 py-1 text-xs text-slate-600" key={citation.id}>
+              {mindMapCitationLabel(citation)}
+            </span>
+          ))}
+        </div>
+      ) : null}
+    </section>
+  );
+}
+
+function MindMapMarkmapCanvas({ content }: { content: MindMapContent }) {
+  const svgRef = useRef<SVGSVGElement | null>(null);
+  const markmapRef = useRef<Markmap | null>(null);
+  const markdown = useMemo(() => mindMapContentToMarkdown(content), [content]);
+
+  useEffect(() => {
+    const svg = svgRef.current;
+    if (!svg) {
+      return;
+    }
+    const transformer = new Transformer();
+    const { root } = transformer.transform(markdown);
+    try {
+      if (!markmapRef.current) {
+        markmapRef.current = Markmap.create(svg, {
+          autoFit: true,
+          duration: 0
+        });
+      }
+      markmapRef.current.setData(root);
+      void markmapRef.current.fit();
+    } catch {
+      markmapRef.current = null;
+    }
+  }, [markdown]);
+
+  return (
+    <div
+      aria-label={`${content.title} 思维导图`}
+      className="mt-4 h-[560px] overflow-hidden rounded-lg border border-slate-200 bg-white"
+      data-renderer="markmap"
+      data-testid="studio-mind-map-canvas"
+      role="group"
+    >
+      <svg aria-label={`${content.title} 思维导图`} className="h-full w-full" ref={svgRef} role="img" />
+    </div>
+  );
+}
+
+function mindMapContentToMarkdown(content: MindMapContent) {
+  const root = content.nodes.find((node) => node.id === "root") ?? content.nodes[0] ?? null;
+  if (!root) {
+    return `# ${escapeMarkmapLine(content.title || "思维导图")}`;
+  }
+
+  const nodeById = new Map(content.nodes.map((node) => [node.id, node]));
+  const childrenByParent = new Map<string, MindMapContent["nodes"]>();
+  for (const edge of content.edges) {
+    const source = nodeById.get(edge.source);
+    const target = nodeById.get(edge.target);
+    if (!source || !target) {
+      continue;
+    }
+    childrenByParent.set(edge.source, [...(childrenByParent.get(edge.source) ?? []), target]);
+  }
+
+  const visited = new Set<string>([root.id]);
+  const lines = [`# ${escapeMarkmapLine(markmapNodeLabel(root))}`];
+  appendMindMapMarkdownChildren(lines, root.id, childrenByParent, visited, 1);
+
+  for (const node of content.nodes) {
+    if (visited.has(node.id)) {
+      continue;
+    }
+    visited.add(node.id);
+    appendMindMapMarkdownNode(lines, node, 1);
+    appendMindMapMarkdownChildren(lines, node.id, childrenByParent, visited, 2);
+  }
+
+  return lines.join("\n");
+}
+
+function appendMindMapMarkdownChildren(
+  lines: string[],
+  nodeId: string,
+  childrenByParent: Map<string, MindMapContent["nodes"]>,
+  visited: Set<string>,
+  depth: number
+) {
+  for (const child of childrenByParent.get(nodeId) ?? []) {
+    if (visited.has(child.id)) {
+      continue;
+    }
+    visited.add(child.id);
+    appendMindMapMarkdownNode(lines, child, depth);
+    appendMindMapMarkdownChildren(lines, child.id, childrenByParent, visited, depth + 1);
+  }
+}
+
+function appendMindMapMarkdownNode(lines: string[], node: MindMapContent["nodes"][number], depth: number) {
+  const indent = "  ".repeat(depth);
+  lines.push(`${indent}- ${escapeMarkmapLine(markmapNodeLabel(node))}`);
+  if (node.summary) {
+    lines.push(`${indent}  - ${escapeMarkmapLine(node.summary)}`);
+  }
+  if (node.citationRefs?.length) {
+    lines.push(`${indent}  - 引用: ${node.citationRefs.slice(0, 4).map(escapeMarkmapLine).join(", ")}`);
+  }
+}
+
+function markmapNodeLabel(node: MindMapContent["nodes"][number]) {
+  return node.label || node.summary || node.id;
+}
+
+function escapeMarkmapLine(value: string) {
+  return value.replace(/\s+/g, " ").replace(/[#`*_{}[\]()<>]/g, "").trim();
+}
+
 function StudioNotes({
   dataset,
   activeSession
@@ -1776,6 +2253,98 @@ function StudioNotes({
       </div>
     </div>
   );
+}
+
+function parseMindMapContent(value: Record<string, unknown>): MindMapContent | null {
+  const title = stringValue(value.title);
+  const nodes = Array.isArray(value.nodes)
+    ? value.nodes.map(parseMindMapNode).filter((node): node is MindMapContent["nodes"][number] => Boolean(node))
+    : [];
+  const edges = Array.isArray(value.edges)
+    ? value.edges.map(parseMindMapEdge).filter((edge): edge is MindMapContent["edges"][number] => Boolean(edge))
+    : [];
+  const citations = Array.isArray(value.citations)
+    ? value.citations
+        .map(parseMindMapCitation)
+        .filter((citation): citation is MindMapContent["citations"][number] => Boolean(citation))
+    : [];
+
+  if (!title || nodes.length === 0) {
+    return null;
+  }
+
+  return {
+    title,
+    nodes,
+    edges,
+    citations
+  };
+}
+
+function parseMindMapNode(value: unknown): MindMapContent["nodes"][number] | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+  const id = stringValue(value.id);
+  const label = stringValue(value.label);
+  if (!id || !label) {
+    return null;
+  }
+  return {
+    id,
+    label,
+    summary: stringValue(value.summary),
+    level: numberValue(value.level),
+    citationRefs: stringArrayValue(value.citationRefs)
+  };
+}
+
+function parseMindMapEdge(value: unknown): MindMapContent["edges"][number] | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+  const source = stringValue(value.source);
+  const target = stringValue(value.target);
+  return source && target ? { source, target } : null;
+}
+
+function parseMindMapCitation(value: unknown): MindMapContent["citations"][number] | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+  const id = stringValue(value.id);
+  const documentId = stringValue(value.documentId);
+  const chunkId = stringValue(value.chunkId);
+  if (!id || !documentId || !chunkId) {
+    return null;
+  }
+  return {
+    id,
+    documentId,
+    chunkId,
+    pageNo: numberValue(value.pageNo) ?? null,
+    sectionPath: stringArrayValue(value.sectionPath)
+  };
+}
+
+function mindMapCitationLabel(citation: MindMapContent["citations"][number]) {
+  return citation.pageNo ? `${citation.chunkId} · page ${citation.pageNo}` : citation.chunkId;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function stringValue(value: unknown) {
+  return typeof value === "string" ? value : "";
+}
+
+function numberValue(value: unknown) {
+  return typeof value === "number" ? value : undefined;
+}
+
+function stringArrayValue(value: unknown) {
+  return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
 }
 
 function parseJobStatus(job: ParserJobResp) {

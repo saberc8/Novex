@@ -20,8 +20,14 @@ import {
   uploadKnowledgeFile
 } from "@/api/knowledge";
 import { getModelRuntimeConfig } from "@/api/model";
+import {
+  generateStudioArtifact,
+  listDatasetStudioArtifacts,
+  listStudioActions
+} from "@/api/studio";
 import type { ChatFlowMessageResp, ChatFlowSessionResp } from "@/types/chat-flow";
 import type { DatasetResp, DocumentResp, ParserJobResp } from "@/types/knowledge";
+import type { StudioActionResp, StudioArtifactResp } from "@/types/studio";
 
 const routerPushMock = vi.hoisted(() => vi.fn());
 
@@ -61,6 +67,12 @@ vi.mock("@/api/model", () => ({
   getModelRuntimeConfig: vi.fn()
 }));
 
+vi.mock("@/api/studio", () => ({
+  generateStudioArtifact: vi.fn(),
+  listDatasetStudioArtifacts: vi.fn(),
+  listStudioActions: vi.fn()
+}));
+
 const accountLoginMock = vi.mocked(accountLogin);
 const getImageCaptchaMock = vi.mocked(getImageCaptcha);
 const createChatFlowSessionMock = vi.mocked(createChatFlowSession);
@@ -75,6 +87,9 @@ const listDocumentsMock = vi.mocked(listDocuments);
 const listDatasetsMock = vi.mocked(listDatasets);
 const uploadKnowledgeFileMock = vi.mocked(uploadKnowledgeFile);
 const getModelRuntimeConfigMock = vi.mocked(getModelRuntimeConfig);
+const generateStudioArtifactMock = vi.mocked(generateStudioArtifact);
+const listDatasetStudioArtifactsMock = vi.mocked(listDatasetStudioArtifacts);
+const listStudioActionsMock = vi.mocked(listStudioActions);
 const writeTextMock = vi.fn();
 
 function dataset(overrides: Partial<DatasetResp> = {}): DatasetResp {
@@ -195,6 +210,128 @@ function documentResp(overrides: Partial<DocumentResp> = {}): DocumentResp {
   };
 }
 
+function studioAction(overrides: Partial<StudioActionResp> = {}): StudioActionResp {
+  return {
+    id: 3500001,
+    tenantId: 1,
+    code: "mind_map.generate",
+    name: "思维导图",
+    description: "Generate a cited mind map from the selected knowledge notebook.",
+    surface: "knowledge",
+    artifactType: "mind_map",
+    pluginCode: "builtin.notebook-studio",
+    skillCode: "mind_map",
+    permissionCode: "ai:studio:artifact:create",
+    modelRoutePolicy: {},
+    inputSchema: {},
+    outputSchema: {},
+    renderer: "mind_map",
+    sort: 40,
+    status: 1,
+    metadata: {},
+    createTime: "2026-01-30 10:00:00",
+    ...overrides
+  };
+}
+
+function mindMapArtifact(overrides: Partial<StudioArtifactResp> = {}): StudioArtifactResp {
+  return {
+    id: 8801,
+    tenantId: 1,
+    datasetId: 10,
+    sessionId: null,
+    runId: null,
+    ragTraceId: 42,
+    actionCode: "mind_map.generate",
+    artifactType: "mind_map",
+    title: "Training Handbook - 思维导图",
+    contentJson: {
+      title: "Training Handbook",
+      nodes: [
+        { id: "root", label: "Training Handbook", level: 0, citationRefs: [] },
+        {
+          id: "topic-1",
+          label: "Security training",
+          summary: "Incident response and reporting",
+          level: 1,
+          citationRefs: ["c1"]
+        },
+        {
+          id: "topic-1-1",
+          label: "Response steps",
+          summary: "Triage and response workflow",
+          level: 2,
+          citationRefs: ["c1"]
+        },
+        {
+          id: "topic-1-1-1",
+          label: "Escalation path",
+          summary: "When incidents should be escalated",
+          level: 3,
+          citationRefs: ["c3"]
+        },
+        {
+          id: "topic-2",
+          label: "Policy basics",
+          summary: "Onboarding policy basics",
+          level: 1,
+          citationRefs: ["c2"]
+        }
+      ],
+      edges: [
+        { source: "root", target: "topic-1" },
+        { source: "topic-1", target: "topic-1-1" },
+        { source: "topic-1-1", target: "topic-1-1-1" },
+        { source: "root", target: "topic-2" }
+      ],
+      citations: [
+        {
+          id: "c1",
+          documentId: "20",
+          chunkId: "20:0",
+          pageNo: 3,
+          sectionPath: ["Policy"]
+        },
+        {
+          id: "c2",
+          documentId: "21",
+          chunkId: "21:2",
+          pageNo: null,
+          sectionPath: ["Onboarding"]
+        },
+        {
+          id: "c3",
+          documentId: "22",
+          chunkId: "22:4",
+          pageNo: 8,
+          sectionPath: ["Security", "Escalation"]
+        }
+      ]
+    },
+    contentText: "Training Handbook\nSecurity training",
+    sourceSnapshot: {
+      answerModelRoute: "runtime.llm.rag_answer"
+    },
+    citations: [
+      {
+        documentId: "20",
+        chunkId: "20:0",
+        pageNo: 3,
+        sectionPath: ["Policy"]
+      }
+    ],
+    version: 1,
+    status: 1,
+    metadata: {
+      renderer: "mind_map"
+    },
+    createUser: 1,
+    createTime: "2026-01-30 10:02:00",
+    updateTime: "2026-01-30 10:02:00",
+    ...overrides
+  };
+}
+
 describe("Chat web page", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -225,6 +362,9 @@ describe("Chat web page", () => {
       list: [documentResp()],
       total: 1
     });
+    listStudioActionsMock.mockResolvedValue([studioAction()]);
+    listDatasetStudioArtifactsMock.mockResolvedValue([]);
+    generateStudioArtifactMock.mockResolvedValue(mindMapArtifact());
     listChatFlowSessionsMock.mockResolvedValue([session()]);
     listChatFlowMessagesMock.mockResolvedValue([]);
     listSkillsMock.mockResolvedValue({
@@ -468,6 +608,59 @@ describe("Chat web page", () => {
       expect(region.className).toContain("flex-1");
       expect(region.className).toContain("overflow-y-auto");
     }
+  });
+
+  it("generates a cited mind map artifact from the Studio panel", async () => {
+    render(<KnowledgePage />);
+
+    fireEvent.click(await screen.findByRole("button", { name: /打开 Machine Learning Tools/ }));
+    fireEvent.click(await screen.findByRole("button", { name: "思维导图" }));
+    expect(generateStudioArtifactMock).not.toHaveBeenCalled();
+
+    expect(await screen.findByRole("heading", { name: "生成思维导图" })).toBeTruthy();
+    fireEvent.change(screen.getByLabelText("总结方向"), {
+      target: { value: "按研究方法、实验流程、适用边界完整总结" }
+    });
+    fireEvent.change(screen.getByLabelText("节点上限"), {
+      target: { value: "72" }
+    });
+    fireEvent.click(screen.getByRole("button", { name: "生成思维导图" }));
+
+    await waitFor(() =>
+      expect(generateStudioArtifactMock).toHaveBeenCalledWith(10, {
+        actionCode: "mind_map.generate",
+        topic: "按研究方法、实验流程、适用边界完整总结",
+        maxNodes: 72,
+        answerModelRouteId: "runtime.llm.rag_answer"
+      })
+    );
+    expect(await screen.findByRole("button", { name: "打开 Training Handbook - 思维导图" })).toBeTruthy();
+    expect(await screen.findByText("2026-01-30 10:02:00")).toBeTruthy();
+    expect(screen.queryByText("Security training")).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "打开 Training Handbook - 思维导图" }));
+
+    const artifactDialog = await screen.findByRole("dialog", { name: "Training Handbook - 思维导图" });
+    expect(artifactDialog).toBeTruthy();
+    expect(artifactDialog.textContent).toContain("2026-01-30 10:02:00");
+    expect(artifactDialog.textContent).toContain("节点");
+    expect(artifactDialog.textContent).toContain("关系");
+    expect(artifactDialog.textContent).toContain("引用");
+    expect(artifactDialog.textContent).toContain("20:0 · page 3");
+
+    const canvas = await screen.findByTestId("studio-mind-map-canvas");
+    expect(canvas.getAttribute("data-renderer")).toBe("markmap");
+    expect(canvas.className).toContain("overflow-hidden");
+    expect(canvas.querySelector("svg")).toBeTruthy();
+  });
+
+  it("shows a Studio loading failure instead of a silent disabled action", async () => {
+    listStudioActionsMock.mockRejectedValueOnce(new Error("请求的资源不存在"));
+    render(<KnowledgePage />);
+
+    fireEvent.click(await screen.findByRole("button", { name: /打开 Machine Learning Tools/ }));
+
+    expect(await screen.findByText("Studio 功能加载失败：请求的资源不存在")).toBeTruthy();
   });
 
   it("does not prefill the knowledge chat input with an example question", async () => {

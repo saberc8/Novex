@@ -398,6 +398,7 @@ dependencies = [
  "novex-model",
  "novex-plugin",
  "novex-rag",
+ "novex-skill",
  "novex-tools",
  "novex-trigger",
  "rand 0.8.6",
@@ -1853,6 +1854,13 @@ dependencies = [
  "serde",
  "serde_json",
  "unicode-normalization",
+]
+
+[[package]]
+name = "novex-skill"
+version = "0.1.0"
+dependencies = [
+ "serde",
 ]
 
 [[package]]

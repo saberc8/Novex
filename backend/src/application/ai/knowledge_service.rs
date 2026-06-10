@@ -3537,6 +3537,7 @@ fn retrieval_plan_chat_command(
             },
         ],
         file_contexts: vec![],
+        response_format: None,
         temperature: Some(0.0),
         max_tokens: Some(1200),
     }
@@ -4503,6 +4504,7 @@ fn large_document_notes_chat_command(
             },
         ],
         file_contexts: vec![],
+        response_format: None,
         temperature: Some(0.1),
         max_tokens: Some(1200),
     }
@@ -4539,6 +4541,7 @@ fn large_document_final_answer_chat_command(
             },
         ],
         file_contexts: vec![],
+        response_format: None,
         temperature: Some(0.2),
         max_tokens: Some(DEFAULT_RAG_ANSWER_MAX_TOKENS),
     }
@@ -4588,6 +4591,7 @@ fn rag_answer_chat_command(
             },
         ],
         file_contexts: vec![],
+        response_format: None,
         temperature: Some(0.2),
         max_tokens: Some(max_tokens),
     }

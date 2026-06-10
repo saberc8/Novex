@@ -4,6 +4,13 @@ use novex_mcp::{
     validate_mcp_registration_policy, McpAuthScope, McpAuthType, McpRegistrationPolicy,
     McpTransportKind,
 };
+use novex_skill::{
+    normalize_skill_package_path as normalize_skill_package_path_core,
+    normalize_skill_package_path_or_empty as normalize_skill_package_path_or_empty_core,
+    selected_skill_md_index as selected_skill_md_index_core, skill_resource_kind,
+    skill_root_from_skill_md_path, strip_skill_root, SkillPackageError, SkillPackagePath,
+    SkillResourceKind,
+};
 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, USER_AGENT};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
@@ -110,6 +117,12 @@ pub struct SkillImportCommand {
 pub struct SkillImportFile {
     pub relative_path: String,
     pub bytes: Vec<u8>,
+}
+
+impl SkillPackagePath for SkillImportFile {
+    fn relative_path(&self) -> &str {
+        &self.relative_path
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1004,11 +1017,11 @@ pub fn parse_skill_directory_import(
         let Some(relative_path) = strip_skill_root(&skill_root, &file.relative_path) else {
             continue;
         };
-        let resource_type = skill_resource_type(&relative_path);
-        if resource_type == "ignored" {
+        let resource_kind = skill_resource_kind(&relative_path);
+        if resource_kind == SkillResourceKind::Ignored {
             continue;
         }
-        let resource = skill_import_resource(resource_type, &relative_path, &file.bytes)?;
+        let resource = skill_import_resource(resource_kind, &relative_path, &file.bytes)?;
         if resource.resource_type == "script" {
             warnings.push(format!(
                 "{} 已保存为脚本资源，但 Novex 不会执行导入脚本",
@@ -1239,65 +1252,8 @@ fn parse_json_skill_import(
     })
 }
 
-fn selected_skill_md_index(files: &[SkillImportFile]) -> Result<usize, AppError> {
-    if let Some(index) = files
-        .iter()
-        .position(|file| file.relative_path.eq_ignore_ascii_case("SKILL.md"))
-    {
-        return Ok(index);
-    }
-
-    let matches = files
-        .iter()
-        .enumerate()
-        .filter(|(_, file)| file.relative_path.ends_with("/SKILL.md"))
-        .map(|(index, _)| index)
-        .collect::<Vec<_>>();
-    match matches.as_slice() {
-        [index] => Ok(*index),
-        [] => Err(AppError::bad_request("Skill 目录缺少 SKILL.md")),
-        _ => Err(AppError::bad_request(
-            "压缩包包含多个 Skill，请上传单个 Skill 目录或使用 GitHub 预览选择",
-        )),
-    }
-}
-
-fn skill_root_from_skill_md_path(skill_md_path: &str) -> String {
-    skill_md_path
-        .strip_suffix("/SKILL.md")
-        .unwrap_or("")
-        .trim_matches('/')
-        .to_owned()
-}
-
-fn strip_skill_root(skill_root: &str, path: &str) -> Option<String> {
-    if skill_root.is_empty() {
-        return Some(path.to_owned());
-    }
-    path.strip_prefix(skill_root)
-        .and_then(|value| value.strip_prefix('/'))
-        .map(ToOwned::to_owned)
-}
-
-fn skill_resource_type(path: &str) -> &'static str {
-    let lower = path.to_ascii_lowercase();
-    if lower == "skill.md" {
-        "skill_md"
-    } else if lower.starts_with("references/") {
-        "reference"
-    } else if lower.starts_with("scripts/") {
-        "script"
-    } else if lower.starts_with("assets/") {
-        "asset"
-    } else if lower == "agents/openai.yaml" || lower == "agents/openai.yml" {
-        "metadata"
-    } else {
-        "ignored"
-    }
-}
-
 fn skill_import_resource(
-    resource_type: &str,
+    resource_kind: SkillResourceKind,
     relative_path: &str,
     bytes: &[u8],
 ) -> Result<SkillImportResourceCommand, AppError> {
@@ -1312,23 +1268,23 @@ fn skill_import_resource(
         .essence_str()
         .to_owned();
     let content_text = match std::str::from_utf8(bytes) {
-        Ok(text) if is_text_skill_resource(resource_type, &mime_type) => Some(text.to_owned()),
-        Ok(_) if resource_type == "asset" => None,
+        Ok(text) if resource_kind.is_text_resource(&mime_type) => Some(text.to_owned()),
+        Ok(_) if resource_kind == SkillResourceKind::Asset => None,
         Ok(text) => Some(text.to_owned()),
-        Err(_) if resource_type == "asset" => None,
+        Err(_) if resource_kind == SkillResourceKind::Asset => None,
         Err(_) => {
             return Err(AppError::bad_request(format!(
                 "{relative_path} 必须使用 UTF-8 编码"
             )))
         }
     };
-    let metadata = match resource_type {
-        "script" => json!({ "execution": "disabled" }),
-        "asset" => json!({ "embedded": false }),
+    let metadata = match resource_kind {
+        SkillResourceKind::Script => json!({ "execution": "disabled" }),
+        SkillResourceKind::Asset => json!({ "embedded": false }),
         _ => json!({}),
     };
     Ok(SkillImportResourceCommand {
-        resource_type: resource_type.to_owned(),
+        resource_type: resource_kind.as_str().to_owned(),
         relative_path: relative_path.to_owned(),
         mime_type,
         content_text,
@@ -1339,54 +1295,32 @@ fn skill_import_resource(
     })
 }
 
-fn is_text_skill_resource(resource_type: &str, mime_type: &str) -> bool {
-    matches!(
-        resource_type,
-        "skill_md" | "reference" | "script" | "metadata"
-    ) || mime_type.starts_with("text/")
-        || matches!(
-            mime_type,
-            "application/json" | "application/yaml" | "application/x-yaml"
-        )
-}
-
 fn sha256_hex(bytes: &[u8]) -> String {
     let digest = Sha256::digest(bytes);
     digest.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 fn normalize_skill_package_path(path: &str) -> Result<String, AppError> {
-    let path = path.replace('\\', "/");
-    let path = path.trim().trim_start_matches("./").trim_matches('/');
-    if path.is_empty() {
-        return Err(AppError::bad_request("Skill 文件路径不能为空"));
-    }
-    if path.starts_with('/') || path.contains('\0') {
-        return Err(AppError::bad_request("Skill 文件路径无效"));
-    }
-    let mut parts = Vec::new();
-    for part in path.split('/') {
-        let part = part.trim();
-        if part.is_empty() || part == "." {
-            continue;
-        }
-        if part == ".." {
-            return Err(AppError::bad_request("Skill 文件路径不能包含 .."));
-        }
-        parts.push(part);
-    }
-    if parts.is_empty() {
-        return Err(AppError::bad_request("Skill 文件路径不能为空"));
-    }
-    Ok(parts.join("/"))
+    normalize_skill_package_path_core(path).map_err(skill_package_error)
 }
 
 fn normalize_skill_package_path_or_empty(path: &str) -> Result<String, AppError> {
-    let path = path.trim().trim_matches('/');
-    if path.is_empty() {
-        Ok(String::new())
-    } else {
-        normalize_skill_package_path(path)
+    normalize_skill_package_path_or_empty_core(path).map_err(skill_package_error)
+}
+
+fn selected_skill_md_index(files: &[SkillImportFile]) -> Result<usize, AppError> {
+    selected_skill_md_index_core(files).map_err(skill_package_error)
+}
+
+fn skill_package_error(error: SkillPackageError) -> AppError {
+    match error {
+        SkillPackageError::EmptyPath => AppError::bad_request("Skill 文件路径不能为空"),
+        SkillPackageError::InvalidPath => AppError::bad_request("Skill 文件路径无效"),
+        SkillPackageError::PathTraversal => AppError::bad_request("Skill 文件路径不能包含 .."),
+        SkillPackageError::MissingSkillManifest => AppError::bad_request("Skill 目录缺少 SKILL.md"),
+        SkillPackageError::MultipleSkillManifests => AppError::bad_request(
+            "压缩包包含多个 Skill，请上传单个 Skill 目录或使用 GitHub 预览选择",
+        ),
     }
 }
 
@@ -1609,8 +1543,8 @@ async fn fetch_github_skill_files(
         let Some(relative_path) = strip_skill_root(&skill_path, &item.path) else {
             continue;
         };
-        let resource_type = skill_resource_type(&relative_path);
-        if resource_type == "ignored" {
+        let resource_kind = skill_resource_kind(&relative_path);
+        if resource_kind == SkillResourceKind::Ignored {
             continue;
         }
         if let Some(size) = item.size {
@@ -1692,10 +1626,10 @@ fn skill_resource_counts(tree: &[GitHubTreeItem], skill_path: &str) -> (usize, u
         let Some(relative_path) = strip_skill_root(skill_path, &item.path) else {
             continue;
         };
-        match skill_resource_type(&relative_path) {
-            "reference" => reference_count += 1,
-            "script" => script_count += 1,
-            "asset" => asset_count += 1,
+        match skill_resource_kind(&relative_path) {
+            SkillResourceKind::Reference => reference_count += 1,
+            SkillResourceKind::Script => script_count += 1,
+            SkillResourceKind::Asset => asset_count += 1,
             _ => {}
         }
     }

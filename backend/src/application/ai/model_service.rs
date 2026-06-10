@@ -70,6 +70,8 @@ pub struct ModelChatCommand {
     #[serde(default)]
     pub file_contexts: Vec<ModelChatFileContext>,
     #[serde(default)]
+    pub response_format: Option<Value>,
+    #[serde(default)]
     pub temperature: Option<f64>,
     #[serde(default, rename = "maxTokens")]
     pub max_tokens: Option<u32>,
@@ -1192,13 +1194,17 @@ fn model_chat_request_payload(route: &ModelRuntimeRoute, command: &ModelChatComm
             .collect::<Vec<_>>(),
     );
 
-    json!({
+    let mut payload = json!({
         "model": route.model().unwrap_or_default(),
         "messages": messages,
         "temperature": command.temperature.unwrap_or(DEFAULT_MODEL_CHAT_TEMPERATURE),
         "max_tokens": command.max_tokens.unwrap_or(DEFAULT_MODEL_CHAT_MAX_TOKENS),
         "stream": false,
-    })
+    });
+    if let Some(response_format) = &command.response_format {
+        payload["response_format"] = response_format.clone();
+    }
+    payload
 }
 
 fn model_chat_file_context_prompt(files: &[ModelChatFileContext]) -> String {
@@ -1220,12 +1226,7 @@ fn model_chat_response_from_provider(
     latency_ms: u128,
     conversation_id: Option<i64>,
 ) -> Result<ModelChatResp, AppError> {
-    let answer = body
-        .pointer("/choices/0/message/content")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_owned)
+    let answer = model_chat_answer_from_provider_body(&body)
         .ok_or_else(|| AppError::bad_request("LLM 响应为空"))?;
     Ok(ModelChatResp {
         conversation_id,
@@ -1235,6 +1236,51 @@ fn model_chat_response_from_provider(
         latency_ms,
         usage: normalize_model_provider_usage(&body),
     })
+}
+
+fn model_chat_answer_from_provider_body(body: &Value) -> Option<String> {
+    for pointer in [
+        "/choices/0/message/content",
+        "/choices/0/text",
+        "/output_text",
+    ] {
+        if let Some(value) = body.pointer(pointer) {
+            if let Some(answer) = model_chat_text_from_value(value) {
+                return Some(answer);
+            }
+        }
+    }
+    None
+}
+
+fn model_chat_text_from_value(value: &Value) -> Option<String> {
+    match value {
+        Value::String(text) => non_empty_model_chat_text(text),
+        Value::Array(items) => {
+            let text = items
+                .iter()
+                .filter_map(|item| {
+                    item.get("text")
+                        .or_else(|| item.get("content"))
+                        .and_then(Value::as_str)
+                        .map(str::trim)
+                        .filter(|part| !part.is_empty())
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            non_empty_model_chat_text(&text)
+        }
+        _ => None,
+    }
+}
+
+fn non_empty_model_chat_text(text: &str) -> Option<String> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_owned())
+    }
 }
 
 impl From<ModelChatConversationRow> for ModelChatConversationResp {
@@ -2468,6 +2514,27 @@ mod tests {
     }
 
     #[test]
+    fn model_chat_payload_includes_optional_response_format() {
+        let route = llm_test_config()
+            .route(ModelRuntimeTarget::Llm)
+            .unwrap()
+            .clone();
+        let command = normalize_model_chat_command(ModelChatCommand {
+            messages: vec![ModelChatMessage {
+                role: "user".to_owned(),
+                content: "返回 JSON".to_owned(),
+            }],
+            response_format: Some(json!({ "type": "json_object" })),
+            ..ModelChatCommand::default()
+        })
+        .unwrap();
+
+        let payload = model_chat_request_payload(&route, &command);
+
+        assert_eq!(payload["response_format"]["type"], "json_object");
+    }
+
+    #[test]
     fn model_chat_response_extracts_answer_usage_and_route_summary() {
         let route = llm_test_config()
             .route(ModelRuntimeTarget::Llm)
@@ -2518,6 +2585,26 @@ mod tests {
         assert_eq!(response.usage.prompt_tokens, Some(11));
         assert_eq!(response.usage.completion_tokens, Some(7));
         assert_eq!(response.usage.total_tokens, Some(18));
+    }
+
+    #[test]
+    fn model_chat_response_accepts_provider_text_fallback() {
+        let route = llm_test_config()
+            .route(ModelRuntimeTarget::Llm)
+            .unwrap()
+            .clone();
+        let body = json!({
+            "choices": [
+                {
+                    "message": { "content": "" },
+                    "text": "Novex accepted a provider text fallback."
+                }
+            ]
+        });
+
+        let response = model_chat_response_from_provider(&route, body, 42, None).unwrap();
+
+        assert_eq!(response.answer, "Novex accepted a provider text fallback.");
     }
 
     #[test]

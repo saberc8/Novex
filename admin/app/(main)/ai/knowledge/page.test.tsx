@@ -10,6 +10,7 @@ import {
   uploadTextDocument
 } from "@/api/ai/knowledge";
 import { getModelRuntimeConfig } from "@/api/ai/model";
+import { generateDatasetArtifact } from "@/api/ai/studio";
 import type { DatasetResp, DocumentResp } from "@/types/ai";
 
 vi.mock("@/api/ai/knowledge", () => ({
@@ -22,6 +23,16 @@ vi.mock("@/api/ai/knowledge", () => ({
 
 vi.mock("@/api/ai/model", () => ({
   getModelRuntimeConfig: vi.fn()
+}));
+
+vi.mock("@/api/ai/studio", () => ({
+  generateDatasetArtifact: vi.fn()
+}));
+
+vi.mock("@/components/ai/mind-map-artifact", () => ({
+  MindMapArtifact: ({ artifact }: { artifact: { title: string } }) => (
+    <div data-testid="mind-map-artifact">{artifact.title}</div>
+  )
 }));
 
 vi.mock("@/components/permission/permission-gate", () => ({
@@ -41,6 +52,7 @@ const listDocumentsMock = vi.mocked(listDocuments);
 const uploadTextDocumentMock = vi.mocked(uploadTextDocument);
 const askDatasetMock = vi.mocked(askDataset);
 const getModelRuntimeConfigMock = vi.mocked(getModelRuntimeConfig);
+const generateDatasetArtifactMock = vi.mocked(generateDatasetArtifact);
 
 function dataset(overrides: Partial<DatasetResp>): DatasetResp {
   return {
@@ -134,6 +146,35 @@ describe("KnowledgePage", () => {
       answerModelRoute: "runtime.llm.rag_answer",
       answerModel: "deepseek-v4-flash"
     });
+    generateDatasetArtifactMock.mockResolvedValue({
+      id: 3501,
+      tenantId: 1,
+      datasetId: 10,
+      sessionId: null,
+      runId: null,
+      ragTraceId: null,
+      actionCode: "mind_map.generate",
+      artifactType: "mind_map",
+      title: "产品定位 - 思维导图",
+      contentJson: {
+        title: "产品定位",
+        nodes: [
+          { id: "root", label: "产品定位", summary: "根节点", level: 0, citationRefs: [] },
+          { id: "topic-1", label: "市场机会", summary: "机会摘要", level: 1, citationRefs: ["c1"] }
+        ],
+        edges: [{ source: "root", target: "topic-1" }],
+        citations: [{ id: "c1", documentId: "20", chunkId: "20:0", pageNo: null, sectionPath: ["战略"] }]
+      },
+      contentText: "产品定位\n市场机会",
+      sourceSnapshot: {},
+      citations: [{ documentId: "20", chunkId: "20:0", pageNo: null, sectionPath: ["战略"] }],
+      version: 1,
+      status: 1,
+      metadata: { renderer: "mind_map" },
+      createUser: 1,
+      createTime: "2026-06-10 10:00:00",
+      updateTime: "2026-06-10 10:00:00"
+    });
   });
 
   it("keeps dataset and document panels aligned and loads documents for the selected dataset", async () => {
@@ -218,5 +259,31 @@ describe("KnowledgePage", () => {
     expect(await screen.findByText("Trace #42")).toBeTruthy();
     expect(await screen.findByText("runtime.llm.rag_answer")).toBeTruthy();
     expect(await screen.findByText("deepseek-v4-flash")).toBeTruthy();
+  });
+
+  it("opens a mind map prompt dialog and generates a rendered artifact", async () => {
+    render(<KnowledgePage />);
+
+    await screen.findByTestId("dataset-card-10");
+    fireEvent.click(screen.getByRole("button", { name: "思维导图" }));
+
+    expect(await screen.findByRole("heading", { name: "生成思维导图" })).toBeTruthy();
+    fireEvent.change(screen.getByPlaceholderText("例如：围绕产品定位、关键矛盾、技术路线、风险和落地路径总结"), {
+      target: { value: "围绕产品定位、关键矛盾和落地路径总结" }
+    });
+    fireEvent.change(screen.getByLabelText("节点上限"), {
+      target: { value: "72" }
+    });
+    fireEvent.click(screen.getByRole("button", { name: "生成" }));
+
+    await waitFor(() =>
+      expect(generateDatasetArtifactMock).toHaveBeenCalledWith(10, {
+        actionCode: "mind_map.generate",
+        topic: "围绕产品定位、关键矛盾和落地路径总结",
+        maxNodes: 72,
+        answerModelRouteId: "runtime.llm.rag_answer"
+      })
+    );
+    expect((await screen.findByTestId("mind-map-artifact")).textContent).toContain("产品定位 - 思维导图");
   });
 });

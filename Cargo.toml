@@ -9,6 +9,7 @@ members = [
     "crates/novex-connectors",
     "crates/novex-mcp",
     "crates/novex-plugin",
+    "crates/novex-skill",
     "crates/novex-trigger",
     "crates/novex-memory",
     "crates/novex-eval",
@@ -29,6 +30,7 @@ novex-memory = { path = "crates/novex-memory" }
 novex-model = { path = "crates/novex-model" }
 novex-plugin = { path = "crates/novex-plugin" }
 novex-rag = { path = "crates/novex-rag" }
+novex-skill = { path = "crates/novex-skill" }
 novex-tools = { path = "crates/novex-tools" }
 novex-trigger = { path = "crates/novex-trigger" }
 serde = { version = "1", features = ["derive"] }

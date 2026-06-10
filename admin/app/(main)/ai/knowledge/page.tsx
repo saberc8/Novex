@@ -1,7 +1,19 @@
 "use client";
 
 import type { ColumnDef } from "@tanstack/react-table";
-import { Database, FilePlus2, FileText, RefreshCw, Save, Search, Send, Upload, X } from "lucide-react";
+import {
+  Database,
+  FilePlus2,
+  FileText,
+  GitBranch,
+  Loader2,
+  RefreshCw,
+  Save,
+  Search,
+  Send,
+  Upload,
+  X
+} from "lucide-react";
 import { useCallback, useEffect, useMemo, useState, type FormEvent } from "react";
 import { toast } from "sonner";
 import {
@@ -12,6 +24,8 @@ import {
   uploadTextDocument
 } from "@/api/ai/knowledge";
 import { getModelRuntimeConfig } from "@/api/ai/model";
+import { generateDatasetArtifact } from "@/api/ai/studio";
+import { MindMapArtifact } from "@/components/ai/mind-map-artifact";
 import { PermissionGate } from "@/components/permission/permission-gate";
 import { DataTable } from "@/components/table/data-table";
 import { Badge } from "@/components/ui/badge";
@@ -33,7 +47,7 @@ import {
   SelectValue
 } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
-import type { DatasetCommand, DatasetResp, DocumentResp, RagAskResp } from "@/types/ai";
+import type { DatasetCommand, DatasetResp, DocumentResp, RagAskResp, StudioArtifactResp } from "@/types/ai";
 import type { ModelRuntimeRouteSummary, ModelRoutePurpose } from "@/types/ai-model";
 
 const DEFAULT_DATASET_COMMAND: DatasetCommand = {
@@ -62,6 +76,11 @@ export default function AiKnowledgePage() {
   const [askSubmitting, setAskSubmitting] = useState(false);
   const [llmRoutes, setLlmRoutes] = useState<ModelRuntimeRouteSummary[]>([]);
   const [selectedLlmRouteId, setSelectedLlmRouteId] = useState("");
+  const [mindMapOpen, setMindMapOpen] = useState(false);
+  const [mindMapPrompt, setMindMapPrompt] = useState("");
+  const [mindMapMaxNodes, setMindMapMaxNodes] = useState(72);
+  const [mindMapSubmitting, setMindMapSubmitting] = useState(false);
+  const [mindMapArtifact, setMindMapArtifact] = useState<StudioArtifactResp | null>(null);
 
   const loadDatasets = useCallback(async () => {
     setDatasetLoading(true);
@@ -138,6 +157,7 @@ export default function AiKnowledgePage() {
 
   useEffect(() => {
     setAskResult(null);
+    setMindMapArtifact(null);
   }, [selectedDataset?.id]);
 
   const documentColumns = useMemo<ColumnDef<DocumentResp>[]>(
@@ -256,6 +276,36 @@ export default function AiKnowledgePage() {
     }
   }
 
+  async function submitMindMap(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!selectedDataset) {
+      toast.error("请选择知识库");
+      return;
+    }
+    const topic = mindMapPrompt.trim();
+    if (!topic) {
+      toast.error("请输入总结方向");
+      return;
+    }
+    const maxNodes = Math.min(96, Math.max(12, Number(mindMapMaxNodes) || 72));
+    setMindMapSubmitting(true);
+    try {
+      const artifact = await generateDatasetArtifact(selectedDataset.id, {
+        actionCode: "mind_map.generate",
+        topic,
+        maxNodes,
+        answerModelRouteId: selectedAnswerModelRouteId
+      });
+      setMindMapArtifact(artifact);
+      setMindMapOpen(false);
+      toast.success("思维导图已生成");
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "思维导图生成失败");
+    } finally {
+      setMindMapSubmitting(false);
+    }
+  }
+
   return (
     <div
       className="mx-auto grid w-full max-w-7xl items-start gap-4 xl:grid-cols-[360px_1fr]"
@@ -341,6 +391,16 @@ export default function AiKnowledgePage() {
             <RefreshCw />
             刷新
           </Button>
+          <PermissionGate permissions={["ai:studio:artifact:create"]}>
+            <Button
+              variant="default"
+              onClick={() => setMindMapOpen(true)}
+              disabled={!selectedDataset || mindMapSubmitting}
+            >
+              <GitBranch />
+              思维导图
+            </Button>
+          </PermissionGate>
         </div>
         <div className="grid gap-4 lg:grid-cols-2">
           <PermissionGate permissions={["ai:knowledge:document:create"]}>
@@ -432,6 +492,7 @@ export default function AiKnowledgePage() {
             </form>
           </PermissionGate>
         </div>
+        {mindMapArtifact ? <MindMapArtifact artifact={mindMapArtifact} /> : null}
         <DataTable
           columns={documentColumns}
           data={documents}
@@ -451,6 +512,69 @@ export default function AiKnowledgePage() {
             onSubmit={saveDataset}
             onCancel={() => setCreateOpen(false)}
           />
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={mindMapOpen} onOpenChange={setMindMapOpen}>
+        <DialogContent className="max-w-2xl">
+          <DialogHeader>
+            <DialogTitle>生成思维导图</DialogTitle>
+            <DialogDescription>{selectedDataset?.name ?? "知识库"}</DialogDescription>
+          </DialogHeader>
+          <form className="grid gap-4" onSubmit={submitMindMap}>
+            <div className="grid gap-2">
+              <Label htmlFor="mind-map-prompt">总结方向</Label>
+              <Textarea
+                id="mind-map-prompt"
+                value={mindMapPrompt}
+                className="min-h-28"
+                placeholder="例如：围绕产品定位、关键矛盾、技术路线、风险和落地路径总结"
+                onChange={(event) => setMindMapPrompt(event.target.value)}
+              />
+            </div>
+            <div className="grid gap-2 md:grid-cols-[180px_1fr] md:items-end">
+              <div className="grid gap-2">
+                <Label htmlFor="mind-map-max-nodes">节点上限</Label>
+                <Input
+                  id="mind-map-max-nodes"
+                  type="number"
+                  min={12}
+                  max={96}
+                  step={6}
+                  value={mindMapMaxNodes}
+                  onChange={(event) => setMindMapMaxNodes(Number(event.target.value))}
+                />
+              </div>
+              <Field label="回答模型">
+                <Select
+                  value={selectedLlmRoute?.routeId ?? ""}
+                  onValueChange={setSelectedLlmRouteId}
+                  disabled={!llmRoutes.length}
+                >
+                  <SelectTrigger>
+                    <SelectValue placeholder="选择 LLM" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {llmRoutes.map((route) => (
+                      <SelectItem key={route.routeId} value={route.routeId}>
+                        {modelRouteLabel(route, "rag_answer")}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </Field>
+            </div>
+            <div className="flex justify-end gap-2">
+              <Button type="button" variant="outline" onClick={() => setMindMapOpen(false)}>
+                <X />
+                取消
+              </Button>
+              <Button type="submit" disabled={!selectedDataset || mindMapSubmitting}>
+                {mindMapSubmitting ? <Loader2 className="animate-spin" /> : <GitBranch />}
+                生成
+              </Button>
+            </div>
+          </form>
         </DialogContent>
       </Dialog>
     </div>
