@@ -6,8 +6,8 @@ import json
 from os import environ
 
 
-DEFAULT_RABBITMQ_URL = "amqp://guest:guest@127.0.0.1:5672/%2f"
-DEFAULT_REDIS_URL = "redis://127.0.0.1:6379/0"
+DEFAULT_RABBITMQ_URL = "amqp://guest:guest@127.0.0.1:5673/%2f"
+DEFAULT_REDIS_URL = "redis://127.0.0.1:16379/0"
 DEFAULT_EXCHANGE = "novex.parser"
 DEFAULT_EXECUTE_QUEUE = "novex.parser.execute"
 DEFAULT_RETRY_QUEUE = "novex.parser.retry"

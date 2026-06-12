@@ -9,7 +9,7 @@ The seed migrations create `admin/admin123` for local development. Change this p
 Run migrations against a local PostgreSQL database:
 
 ```bash
-DATABASE_URL=postgres://postgres:123456@127.0.0.1:5432/nv_admin sqlx migrate run
+DATABASE_URL=postgres://postgres:postgres@127.0.0.1:15432/novex sqlx migrate run
 ```
 
 Check core tables:
@@ -27,7 +27,7 @@ Expected result: each query returns its table name.
 Knowledge-base ingestion keeps PostgreSQL as the source of truth for chunk text, citations, permissions, and trace metadata. When Milvus is configured, indexed chunks are also upserted to the collection stored in `ai_vector_collection.provider_collection`. Knowledge-base ask then sends vector recall to the same collection, and returned `chunk_uid` values are mapped back to PostgreSQL chunks before answer construction.
 
 ```bash
-MILVUS_ENDPOINT=http://127.0.0.1:19530
+MILVUS_ENDPOINT=http://127.0.0.1:19540
 MILVUS_TOKEN=root:Milvus # optional; NOVEX_MILVUS_TOKEN is also accepted
 ```
 

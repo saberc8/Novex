@@ -389,7 +389,7 @@ fn default_local_milvus_env_if_missing() {
     {
         return;
     }
-    env::set_var("MILVUS_ENDPOINT", "http://localhost:19530");
+    env::set_var("MILVUS_ENDPOINT", "http://localhost:19540");
     env::set_var("MILVUS_TOKEN", "root:Milvus");
 }
 

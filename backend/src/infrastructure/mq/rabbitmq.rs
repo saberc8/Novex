@@ -25,7 +25,7 @@ pub struct RabbitMqConfig {
 impl Default for RabbitMqConfig {
     fn default() -> Self {
         Self {
-            url: "amqp://guest:guest@127.0.0.1:5672/%2f".to_owned(),
+            url: "amqp://guest:guest@127.0.0.1:5673/%2f".to_owned(),
             exchange: "avalon.scheduler".to_owned(),
             execute_queue: "avalon.scheduler.execute".to_owned(),
             retry_queue: "avalon.scheduler.retry".to_owned(),
@@ -54,7 +54,7 @@ pub struct ParserRabbitMqConfig {
 impl Default for ParserRabbitMqConfig {
     fn default() -> Self {
         Self {
-            url: "amqp://guest:guest@127.0.0.1:5672/%2f".to_owned(),
+            url: "amqp://guest:guest@127.0.0.1:5673/%2f".to_owned(),
             exchange: "novex.parser".to_owned(),
             execute_queue: "novex.parser.execute".to_owned(),
             retry_queue: "novex.parser.retry".to_owned(),

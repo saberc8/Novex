@@ -207,7 +207,7 @@ mod tests {
         assert!(!config.publisher_enabled);
         assert_eq!(config.tick_seconds, 5);
         assert_eq!(config.batch_size, 50);
-        assert_eq!(config.redis_url, "redis://127.0.0.1:6379/0");
+        assert_eq!(config.redis_url, "redis://127.0.0.1:16379/0");
         assert_eq!(rabbitmq.exchange, "novex.parser");
         assert_eq!(rabbitmq.execute_queue, "novex.parser.execute");
         assert_eq!(rabbitmq.retry_queue, "novex.parser.retry");
@@ -337,7 +337,7 @@ mod tests {
     fn test_app_config() -> AppConfig {
         AppConfig {
             http_port: 4398,
-            database_url: "postgres://postgres:postgres@localhost:5432/avalon_admin".to_owned(),
+            database_url: "postgres://postgres:postgres@127.0.0.1:15432/novex".to_owned(),
             database_max_connections: 5,
             db_auto_migrate: false,
             cors_allowed_origins: vec!["http://localhost:4399".to_owned()],
@@ -350,7 +350,7 @@ mod tests {
             scheduler_worker_id: "worker-1".to_owned(),
             scheduler_http_allowlist_mode: "default".to_owned(),
             scheduler_http_allowlist: vec![],
-            rabbitmq_url: "amqp://guest:guest@127.0.0.1:5672/%2f".to_owned(),
+            rabbitmq_url: "amqp://guest:guest@127.0.0.1:5673/%2f".to_owned(),
             rabbitmq_exchange: "avalon.scheduler".to_owned(),
             rabbitmq_execute_queue: "avalon.scheduler.execute".to_owned(),
             rabbitmq_retry_queue: "avalon.scheduler.retry".to_owned(),
@@ -363,7 +363,7 @@ mod tests {
             parser_queue_publisher_enabled: false,
             parser_queue_tick_seconds: 5,
             parser_queue_batch_size: 50,
-            redis_url: "redis://127.0.0.1:6379/0".to_owned(),
+            redis_url: "redis://127.0.0.1:16379/0".to_owned(),
             rabbitmq_parser_exchange: "novex.parser".to_owned(),
             rabbitmq_parser_execute_queue: "novex.parser.execute".to_owned(),
             rabbitmq_parser_retry_queue: "novex.parser.retry".to_owned(),

@@ -54,9 +54,8 @@ impl AppConfig {
             .parse::<u16>()
             .context("HTTP_PORT must be a valid TCP port")?;
 
-        let database_url = env::var("DATABASE_URL").unwrap_or_else(|_| {
-            "postgres://postgres:postgres@localhost:5432/avalon_admin".to_owned()
-        });
+        let database_url = env::var("DATABASE_URL")
+            .unwrap_or_else(|_| "postgres://postgres:postgres@127.0.0.1:15432/novex".to_owned());
 
         let database_max_connections = parse_database_max_connections(
             &env::var("DATABASE_MAX_CONNECTIONS").unwrap_or_else(|_| "5".to_owned()),
@@ -92,7 +91,7 @@ impl AppConfig {
         let scheduler_http_allowlist =
             parse_cors_allowed_origins(&env::var("SCHEDULER_HTTP_ALLOWLIST").unwrap_or_default());
         let rabbitmq_url = env::var("RABBITMQ_URL")
-            .unwrap_or_else(|_| "amqp://guest:guest@127.0.0.1:5672/%2f".to_owned());
+            .unwrap_or_else(|_| "amqp://guest:guest@127.0.0.1:5673/%2f".to_owned());
         let rabbitmq_exchange =
             env::var("RABBITMQ_EXCHANGE").unwrap_or_else(|_| "avalon.scheduler".to_owned());
         let rabbitmq_execute_queue = env::var("RABBITMQ_SCHEDULER_EXECUTE_QUEUE")
@@ -126,7 +125,7 @@ impl AppConfig {
             &env::var("PARSER_QUEUE_BATCH_SIZE").unwrap_or_else(|_| "50".to_owned()),
         )?;
         let redis_url =
-            env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379/0".to_owned());
+            env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:16379/0".to_owned());
         let rabbitmq_parser_exchange =
             env::var("RABBITMQ_PARSER_EXCHANGE").unwrap_or_else(|_| "novex.parser".to_owned());
         let rabbitmq_parser_execute_queue = env::var("RABBITMQ_PARSER_EXECUTE_QUEUE")

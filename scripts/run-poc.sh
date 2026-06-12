@@ -9,18 +9,21 @@ COMMAND="${1:-up}"
 
 COMPOSE=()
 POC_SERVICES=(
-  postgres
-  etcd
-  minio
-  milvus
-  rabbitmq
-  redis
   backend
   parser-worker
   admin
   training-web
   chat-web
   agent-workspace
+)
+COMMON_REQUIRED_CONTAINERS=(
+  docker-postgres
+  docker-redis
+  docker-rabbitmq
+  docker-minio
+  docker-milvus
+  docker-etcd
+  docker-neo4j
 )
 
 main() {
@@ -36,6 +39,8 @@ main() {
       require_docker
       ensure_parser_callback_token
       check_live_ai_env
+      require_common_docker_services
+      ensure_common_postgres_database
       require_local_images
       print_urls
       exec "${COMPOSE[@]}" up --pull never "${POC_SERVICES[@]}"
@@ -137,10 +142,83 @@ require_local_images() {
 
 Options:
   1. Run './scripts/run-poc.sh pull' when Docker Hub access is available.
-  2. Edit infra/.env.poc to point RUST_IMAGE, NODE_IMAGE, PYTHON_IMAGE, or RABBITMQ_IMAGE at tags you already have locally.
+  2. Edit infra/.env.poc to point RUST_IMAGE, NODE_IMAGE, or PYTHON_IMAGE at tags you already have locally.
 
 EOF
   exit 1
+}
+
+require_common_docker_services() {
+  local network="${COMMON_DOCKER_NETWORK:-docker-common_default}"
+  local bad=()
+  local container
+  local status
+  local health
+
+  if ! docker network inspect "${network}" >/dev/null 2>&1; then
+    echo "Missing shared Docker network: ${network}" >&2
+    print_common_stack_hint >&2
+    exit 1
+  fi
+
+  for container in "${COMMON_REQUIRED_CONTAINERS[@]}"; do
+    if ! docker inspect "${container}" >/dev/null 2>&1; then
+      bad+=("${container}: missing")
+      continue
+    fi
+
+    status="$(docker inspect --format '{{.State.Status}}' "${container}")"
+    health="$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "${container}")"
+    if [[ "${status}" != "running" ]]; then
+      bad+=("${container}: ${status}")
+      continue
+    fi
+    if [[ "${health}" != "none" && "${health}" != "healthy" ]]; then
+      bad+=("${container}: ${health}")
+    fi
+  done
+
+  if [[ "${#bad[@]}" -eq 0 ]]; then
+    return
+  fi
+
+  echo "Shared docker-common services are not ready:" >&2
+  printf '  %s\n' "${bad[@]}" >&2
+  print_common_stack_hint >&2
+  exit 1
+}
+
+ensure_common_postgres_database() {
+  local container="${COMMON_POSTGRES_CONTAINER:-docker-postgres}"
+  local user="${COMMON_POSTGRES_USER:-postgres}"
+  local password="${COMMON_POSTGRES_PASSWORD:-postgres}"
+  local database="${COMMON_POSTGRES_DATABASE:-novex}"
+  local exists
+
+  if [[ ! "${database}" =~ ^[A-Za-z0-9_]+$ ]]; then
+    echo "COMMON_POSTGRES_DATABASE must contain only letters, numbers, and underscores: ${database}" >&2
+    exit 1
+  fi
+
+  exists="$(
+    docker exec -e PGPASSWORD="${password}" "${container}" \
+      psql -U "${user}" -d postgres -tAc "SELECT 1 FROM pg_database WHERE datname = '${database}'" \
+      | tr -d '[:space:]'
+  )"
+  if [[ "${exists}" == "1" ]]; then
+    return
+  fi
+
+  echo "Creating shared Postgres database: ${database}"
+  docker exec -e PGPASSWORD="${password}" "${container}" createdb -U "${user}" "${database}"
+}
+
+print_common_stack_hint() {
+  cat <<'EOF'
+Start or repair the shared stack first:
+  cd /Users/yusenlin/Avalon/freedom/2026/aimanju/aether-loom
+  docker compose up -d postgres redis rabbitmq etcd minio milvus attu neo4j
+EOF
 }
 
 pull_missing_images() {
@@ -281,8 +359,10 @@ Admin:            http://localhost:${ADMIN_PORT:-4399}
 Training Web:     http://localhost:${TRAINING_WEB_PORT:-4401}
 Chat Web:         http://localhost:${CHAT_WEB_PORT:-4402}
 Agent Workspace:  http://localhost:${AGENT_WORKSPACE_PORT:-4403}
-RabbitMQ UI:      http://localhost:${RABBITMQ_MANAGEMENT_PORT:-15672}
-MinIO Console:    http://localhost:${MINIO_CONSOLE_PORT:-9001}
+RabbitMQ UI:      ${RABBITMQ_MANAGEMENT_URL:-http://localhost:15673}
+MinIO Console:    ${MINIO_CONSOLE_URL:-http://localhost:19011}
+Attu:             ${ATTU_URL:-http://localhost:18000}
+Neo4j Browser:    ${NEO4J_BROWSER_URL:-http://localhost:17474}
 
 RabbitMQ default login: ${RABBITMQ_DEFAULT_USER:-guest} / ${RABBITMQ_DEFAULT_PASS:-guest}
 EOF
@@ -293,7 +373,7 @@ usage() {
 Usage: scripts/run-poc.sh [command]
 
 Commands:
-  up         Start services, backend, parser-worker, and POC frontends
+  up         Check docker-common, then start backend, parser-worker, and POC frontends
   down       Stop and remove compose services
   logs       Follow logs for the POC stack
   status     Show compose service status
@@ -310,7 +390,9 @@ Default URLs:
   Training Web     http://localhost:4401
   Chat Web         http://localhost:4402
   Agent Workspace  http://localhost:4403
-  RabbitMQ UI      http://localhost:15672
+  RabbitMQ UI      http://localhost:15673
+  MinIO Console    http://localhost:19011
+  Attu             http://localhost:18000
 EOF
 }
 

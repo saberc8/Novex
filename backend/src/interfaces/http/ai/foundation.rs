@@ -180,37 +180,27 @@ mod tests {
         let compose = include_str!("../../../../../infra/docker-compose.yml");
 
         for service in [
-            "postgres:",
-            "etcd:",
-            "minio:",
-            "milvus:",
-            "rabbitmq:",
-            "redis:",
             "backend:",
             "parser-worker:",
             "admin:",
             "training-web:",
+            "chat-web:",
+            "agent-workspace:",
         ] {
             assert!(compose.contains(service), "{service} missing from compose");
         }
 
         for contract in [
-            "${POSTGRES_IMAGE:-postgres:16-alpine}",
-            "${ETCD_IMAGE:-quay.io/coreos/etcd:v3.5.18}",
-            "${MINIO_IMAGE:-minio/minio:RELEASE.2025-01-20T14-49-07Z}",
-            "${MILVUS_IMAGE:-milvusdb/milvus:v2.5.4}",
-            "${RABBITMQ_IMAGE:-rabbitmq:4.0-management-alpine}",
-            "${REDIS_IMAGE:-redis:7-alpine}",
-            "${RUST_IMAGE:-rust:1.85-bookworm}",
+            "${RUST_IMAGE:-rust:bookworm}",
+            "${PYTHON_IMAGE:-python:3.12-slim}",
             "${NODE_IMAGE:-node:24-bookworm-slim}",
-            "${POSTGRES_PORT:-5432}:5432",
-            "${MINIO_API_PORT:-9000}:9000",
-            "${MINIO_CONSOLE_PORT:-9001}:9001",
-            "${MILVUS_PORT:-19530}:19530",
-            "${MILVUS_METRICS_PORT:-9091}:9091",
-            "${RABBITMQ_AMQP_PORT:-5672}:5672",
-            "${RABBITMQ_MANAGEMENT_PORT:-15672}:15672",
-            "${REDIS_PORT:-6379}:6379",
+            "COMMON_DOCKER_NETWORK",
+            "external: true",
+            "docker-common_default",
+            "postgres://${COMMON_POSTGRES_USER:-postgres}:${COMMON_POSTGRES_PASSWORD:-postgres}@postgres:5432/${COMMON_POSTGRES_DATABASE:-novex}",
+            "http://milvus:19530",
+            "amqp://${RABBITMQ_DEFAULT_USER:-guest}:${RABBITMQ_DEFAULT_PASS:-guest}@rabbitmq:5672/%2f",
+            "redis://redis:6379/0",
             "${BACKEND_PORT:-4398}:${HTTP_PORT:-4398}",
             "${ADMIN_PORT:-4399}:4399",
             "${TRAINING_WEB_PORT:-4401}:4401",
@@ -235,10 +225,26 @@ mod tests {
                 "{contract} missing from compose"
             );
         }
+
+        for removed_contract in [
+            "${POSTGRES_IMAGE:-postgres:16-alpine}",
+            "${ETCD_IMAGE:-quay.io/coreos/etcd:v3.5.18}",
+            "${MINIO_IMAGE:-minio/minio:RELEASE.2025-01-20T14-49-07Z}",
+            "${MILVUS_IMAGE:-milvusdb/milvus:v2.5.4}",
+            "${RABBITMQ_IMAGE:-rabbitmq:4.0-management-alpine}",
+            "${REDIS_IMAGE:-redis:7-alpine}",
+            "${POSTGRES_PORT:-5432}:5432",
+            "${REDIS_PORT:-6379}:6379",
+        ] {
+            assert!(
+                !compose.contains(removed_contract),
+                "{removed_contract} should not be declared by Novex compose"
+            );
+        }
     }
 
     #[test]
-    fn run_poc_script_starts_full_stack_and_checks_live_ai_env() {
+    fn run_poc_script_starts_runtime_and_checks_common_stack() {
         let script = include_str!("../../../../../scripts/run-poc.sh");
 
         assert!(
@@ -260,6 +266,13 @@ mod tests {
             "docker image inspect",
             "docker pull",
             "Run './scripts/run-poc.sh pull'",
+            "require_common_docker_services",
+            "ensure_common_postgres_database",
+            "docker network inspect",
+            "docker exec",
+            "docker-rabbitmq",
+            "docker-common_default",
+            "COMMON_POSTGRES_DATABASE",
             "PARSER_CALLBACK_TOKEN",
             "LLM_API_KEY",
             "LLM_BASE_URL",
@@ -275,7 +288,8 @@ mod tests {
             "MINERU_TOKEN",
             "PARSER_WORKER_MODE",
             "http://localhost:4401",
-            "http://localhost:15672",
+            "http://localhost:15673",
+            "http://localhost:19011",
         ] {
             assert!(script.contains(needle), "{needle} missing from run script");
         }
