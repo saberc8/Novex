@@ -705,7 +705,8 @@ fn studio_mind_map_chat_command(
                     3) 深度最多 3 层，每个一级主题至少包含 2 个二级节点，重要二级节点继续展开三级细节；\
                     4) label 使用短主题词，中文不超过 14 个字，英文不超过 5 个词；\
                     5) summary 用一句话解释该节点价值，不超过 100 个字；6) 排除 OCR、图表代码、图片说明、乱码和无关广告文本；\
-                    7) citationIndex 必须引用输入中的 S 编号；8) 如果资料覆盖多个阶段或对象，要按专业阅读顺序组织，而不是按原文顺序机械罗列。\
+                    7) citationIndex 必须引用输入中的 S 编号；8) 如果资料覆盖多个阶段或对象，要按专业阅读顺序组织，而不是按原文顺序机械罗列；\
+                    9) 人物成长史、履历、传记类内容必须按年份/阶段 + 关键事件组织，禁止把序位、序号、时间、日期、事件、备注等表头作为 label。\
                     JSON 形状：{{\"summary\":\"整体摘要\",\"branches\":[{{\"label\":\"主题\",\"summary\":\"说明\",\"citationIndex\":1,\"children\":[{{\"label\":\"子主题\",\"summary\":\"说明\",\"citationIndex\":1,\"children\":[]}}]}}]}}"
                 ),
             },
@@ -821,7 +822,7 @@ fn append_model_mind_map_branch(
     if nodes.len() >= node_limit || level > 3 {
         return;
     }
-    let label = compact_mind_map_label(&branch.label, 28);
+    let label = meaningful_mind_map_label(&branch.label, &branch.summary, 28);
     if label.chars().count() < 2 {
         return;
     }
@@ -850,7 +851,11 @@ fn append_model_mind_map_branch(
     if level >= 3 {
         return;
     }
-    if level == 2 && branch.children.is_empty() && !raw_summary.is_empty() && nodes.len() < node_limit {
+    if level == 2
+        && branch.children.is_empty()
+        && !raw_summary.is_empty()
+        && nodes.len() < node_limit
+    {
         let detail_label = compact_mind_map_label(&raw_summary, 28);
         if detail_label != label && detail_label.chars().count() >= 2 {
             if let Some(parent_node) = nodes.last_mut() {
@@ -961,14 +966,19 @@ fn studio_chunk_score(topic: &str, record: &ChunkRecord) -> i32 {
 }
 
 fn mind_map_context_label(context: &StudioMindMapContext) -> String {
-    context
+    let section_label = context
         .citation
         .section_path
         .last()
         .map(|section| section.trim())
         .filter(|section| !section.is_empty())
-        .map(|section| preview_chars(section, 48))
-        .unwrap_or_else(|| first_sentence_label(&context.text, 48))
+        .map(|section| preview_chars(section, 48));
+    if let Some(label) = section_label {
+        if !is_mind_map_dimension_heading(&label) {
+            return label;
+        }
+    }
+    mind_map_text_label(&context.text, 48)
 }
 
 fn mind_map_sections_from_contexts(contexts: &[StudioMindMapContext]) -> Vec<StudioMindMapSection> {
@@ -1077,6 +1087,9 @@ fn compact_mind_map_label(text: &str, limit: usize) -> String {
     if normalized.is_empty() {
         return "要点".to_owned();
     }
+    if let Some(table_label) = mind_map_table_row_label(&normalized, limit) {
+        return table_label;
+    }
 
     let clauses = normalized
         .split(|ch| matches!(ch, '。' | '，' | ',' | '.' | '；' | ';' | '：' | ':'))
@@ -1088,7 +1101,164 @@ fn compact_mind_map_label(text: &str, limit: usize) -> String {
         .map(|clause| trim_mind_map_discourse_prefix(clause))
         .find(|clause| is_compact_label_clause(clause))
         .unwrap_or(normalized.as_str());
-    preview_chars(candidate, limit)
+    let label = preview_chars(candidate, limit);
+    if is_mind_map_dimension_heading(&label) || is_mind_map_table_scaffold_label(&label) {
+        "要点".to_owned()
+    } else {
+        label
+    }
+}
+
+fn meaningful_mind_map_label(label: &str, summary: &str, limit: usize) -> String {
+    let compact_label = compact_mind_map_label(label, limit);
+    if compact_label != "要点" && !is_mind_map_dimension_heading(&compact_label) {
+        return compact_label;
+    }
+
+    let compact_summary = compact_mind_map_label(summary, limit);
+    if compact_summary != "要点" && !is_mind_map_dimension_heading(&compact_summary) {
+        return compact_summary;
+    }
+
+    "关键阶段".to_owned()
+}
+
+fn mind_map_text_label(text: &str, limit: usize) -> String {
+    if let Some(table_label) = mind_map_table_row_label(text, limit) {
+        return table_label;
+    }
+    for sentence in mind_map_sentences_with_language(text, 8, true) {
+        let label = compact_mind_map_label(&sentence, limit);
+        if label != "要点" && !is_mind_map_dimension_heading(&label) {
+            return label;
+        }
+    }
+
+    let label = first_sentence_label(text, limit);
+    if is_mind_map_dimension_heading(&label) || is_mind_map_table_scaffold_label(&label) {
+        "关键阶段".to_owned()
+    } else {
+        label
+    }
+}
+
+fn mind_map_table_row_label(text: &str, limit: usize) -> Option<String> {
+    for line in text.lines() {
+        let Some(cells) = markdown_table_cells(line) else {
+            continue;
+        };
+        if cells.len() < 2 || is_markdown_table_alignment_row(&cells) {
+            continue;
+        }
+        let meaningful = cells
+            .into_iter()
+            .map(|cell| normalize_mind_map_table_cell(&cell))
+            .filter(|cell| {
+                !cell.is_empty()
+                    && !is_mind_map_dimension_heading(cell)
+                    && !is_mind_map_sequence_cell(cell)
+                    && !is_markdown_table_alignment_cell(cell)
+            })
+            .collect::<Vec<_>>();
+        if meaningful.is_empty() {
+            continue;
+        }
+        let label = preview_chars(&meaningful.join(" "), limit);
+        if !is_mind_map_table_scaffold_label(&label) && !is_mind_map_dimension_heading(&label) {
+            return Some(label);
+        }
+    }
+    None
+}
+
+fn markdown_table_cells(line: &str) -> Option<Vec<String>> {
+    let trimmed = line.trim();
+    if !trimmed.contains('|') {
+        return None;
+    }
+    let cells = trimmed
+        .trim_matches('|')
+        .split('|')
+        .map(normalize_mind_map_table_cell)
+        .filter(|cell| !cell.is_empty())
+        .collect::<Vec<_>>();
+    (cells.len() >= 2).then_some(cells)
+}
+
+fn normalize_mind_map_table_cell(cell: &str) -> String {
+    cell.trim()
+        .trim_matches(|ch: char| {
+            ch.is_whitespace()
+                || matches!(
+                    ch,
+                    '*' | '#' | '`' | '|' | '。' | '，' | ',' | '.' | '；' | ';' | '：' | ':'
+                )
+        })
+        .trim()
+        .to_owned()
+}
+
+fn is_markdown_table_alignment_row(cells: &[String]) -> bool {
+    cells
+        .iter()
+        .all(|cell| is_markdown_table_alignment_cell(cell))
+}
+
+fn is_markdown_table_alignment_cell(cell: &str) -> bool {
+    let trimmed = cell.trim();
+    !trimmed.is_empty()
+        && trimmed
+            .chars()
+            .all(|ch| matches!(ch, '-' | ':' | ' ' | '\t'))
+}
+
+fn is_mind_map_sequence_cell(text: &str) -> bool {
+    let normalized = mind_map_text_key(text);
+    if normalized.is_empty() {
+        return false;
+    }
+    normalized.chars().all(|ch| ch.is_ascii_digit())
+        || (normalized.starts_with('第')
+            && normalized.chars().skip(1).all(|ch| {
+                ch.is_ascii_digit()
+                    || matches!(
+                        ch,
+                        '一' | '二' | '三' | '四' | '五' | '六' | '七' | '八' | '九' | '十'
+                    )
+            }))
+}
+
+fn is_mind_map_dimension_heading(text: &str) -> bool {
+    let key = mind_map_text_key(text);
+    matches!(
+        key.as_str(),
+        "序位"
+            | "序号"
+            | "编号"
+            | "排名"
+            | "时间"
+            | "日期"
+            | "年份"
+            | "事件"
+            | "事项"
+            | "备注"
+            | "说明"
+            | "描述"
+            | "内容"
+            | "阶段"
+            | "时期"
+            | "维度"
+            | "字段"
+    )
+}
+
+fn is_mind_map_table_scaffold_label(text: &str) -> bool {
+    markdown_table_cells(text).is_some_and(|cells| {
+        is_markdown_table_alignment_row(&cells)
+            || cells
+                .iter()
+                .all(|cell| is_mind_map_dimension_heading(cell) || is_mind_map_sequence_cell(cell))
+    })
 }
 
 fn mind_map_node_summary(label: &str, summary: &str) -> String {
@@ -1142,6 +1312,9 @@ fn trim_mind_map_discourse_prefix(text: &str) -> &str {
 fn is_compact_label_clause(text: &str) -> bool {
     let char_count = text.chars().count();
     if char_count < 4 {
+        return false;
+    }
+    if is_mind_map_dimension_heading(text) || is_mind_map_table_scaffold_label(text) {
         return false;
     }
     if text.ends_with("而言") || text.ends_with("来说") {
@@ -1208,6 +1381,9 @@ fn is_mind_map_sentence_candidate(text: &str, prefer_cjk: bool) -> bool {
         .chars()
         .filter(|ch| ch.is_ascii_alphanumeric())
         .count();
+    if is_mind_map_dimension_heading(trimmed) || is_mind_map_table_scaffold_label(trimmed) {
+        return false;
+    }
     is_mind_map_content_candidate(trimmed)
         && !trimmed.contains("images/")
         && !trimmed.contains("text_image")
@@ -1647,6 +1823,41 @@ mod tests {
     }
 
     #[test]
+    fn studio_mind_map_fallback_uses_event_labels_instead_of_table_headers() {
+        let content = build_mind_map_from_contexts(
+            "人物成长史",
+            &[StudioMindMapContext {
+                text: "| 序位* | 时间 | 事件 |\n| --- | --- | --- |\n| 1 | 1982年 | 出生于杭州，后来进入产品领域。 |\n| 2 | 2015年 | 带领团队完成关键产品发布。 |"
+                    .to_owned(),
+                citation: section_citation("序位*", "20:70"),
+            }],
+            8,
+        );
+
+        let nodes = content["nodes"]
+            .as_array()
+            .expect("nodes should be an array");
+        let level_one_labels = nodes
+            .iter()
+            .filter(|node| node["level"] == 1)
+            .filter_map(|node| node["label"].as_str())
+            .collect::<Vec<_>>();
+
+        assert!(
+            level_one_labels
+                .iter()
+                .all(|label| *label != "序位*" && *label != "时间"),
+            "table headers should not become visible mind-map dimensions"
+        );
+        assert!(
+            level_one_labels
+                .iter()
+                .any(|label| label.contains("1982年") && label.contains("出生")),
+            "person timeline nodes should expose the actual time and event"
+        );
+    }
+
+    #[test]
     fn studio_mind_map_labels_are_compact_for_visual_nodes() {
         assert_eq!(
             compact_mind_map_label(
@@ -1751,6 +1962,51 @@ mod tests {
     }
 
     #[test]
+    fn studio_service_replaces_model_table_header_labels_with_stage_events() {
+        let sections = vec![StudioMindMapSection {
+            title: "序位*".to_owned(),
+            first_index: 0,
+            items: vec![StudioMindMapSectionItem {
+                text: "1982年出生于杭州，随后进入产品领域。".to_owned(),
+                citation: section_citation("序位*", "20:80"),
+            }],
+        }];
+        let section_refs = sections.iter().collect::<Vec<_>>();
+        let content = build_model_mind_map_content(
+            "人物成长史",
+            r#"{
+              "summary": "按人物成长阶段整理关键事件",
+              "branches": [
+                {
+                  "label": "时间",
+                  "summary": "1982年出生于杭州，随后进入产品领域",
+                  "citationIndex": 1,
+                  "children": []
+                }
+              ]
+            }"#,
+            &section_refs,
+            6,
+        )
+        .expect("model JSON should build mind map content");
+
+        let nodes = content["nodes"]
+            .as_array()
+            .expect("nodes should be an array");
+        let level_one_label = nodes
+            .iter()
+            .find(|node| node["level"] == 1)
+            .and_then(|node| node["label"].as_str())
+            .expect("level one node should exist");
+
+        assert_ne!(level_one_label, "时间");
+        assert!(
+            level_one_label.contains("1982年") && level_one_label.contains("出生"),
+            "model table-header labels should be replaced with meaningful stage events"
+        );
+    }
+
+    #[test]
     fn studio_mind_map_prompt_includes_user_direction_and_completeness_rules() {
         let sections = vec![StudioMindMapSection {
             title: "产品定位".to_owned(),
@@ -1773,6 +2029,7 @@ mod tests {
         assert!(system_prompt.contains("尽可能完整"));
         assert!(system_prompt.contains("专业思维导图"));
         assert!(system_prompt.contains("严格 JSON"));
+        assert!(system_prompt.contains("禁止把序位、序号、时间、日期、事件、备注等表头作为 label"));
         assert!(user_prompt.contains("用户总结方向：围绕产品定位、关键矛盾和落地路径总结"));
         assert!(user_prompt.contains("[S1] 产品定位"));
         assert_eq!(command.max_tokens, Some(3200));
