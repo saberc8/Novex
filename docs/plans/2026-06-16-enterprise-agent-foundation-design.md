@@ -111,6 +111,8 @@ POC 阶段指定模型使用现有配置路由：
 
 Direct ports must preserve license attribution. Codex is Apache-2.0; Novex should add a NOTICE entry when code is copied or substantially derived.
 
+The living implementation tracker is `docs/plans/2026-06-16-codex-migration-matrix.md`.
+
 ## Core Runtime Model
 
 Novex should introduce a Codex-like runtime vocabulary:
