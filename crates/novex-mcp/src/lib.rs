@@ -113,6 +113,23 @@ fn normalize_mcp_code_segment(value: &str) -> String {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpToolInvocationRequest {
+    pub server_code: String,
+    pub tool_name: String,
+    pub arguments: Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpToolInvocationResult {
+    pub tool_code: String,
+    pub status: String,
+    pub output: Value,
+    pub dry_run: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct McpRegistrationPolicy {

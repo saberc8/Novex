@@ -91,6 +91,8 @@ pub struct SkillResourceRecord {
 pub struct ToolLookupRecord {
     pub id: i64,
     pub code: String,
+    pub tool_kind: String,
+    pub executor_kind: String,
     pub risk_level: i16,
     pub approval_policy: i16,
     pub permission_code: Option<String>,
@@ -279,6 +281,26 @@ pub struct McpToolRecord {
 }
 
 #[derive(Debug, Clone, FromRow)]
+pub struct McpToolExecutionRecord {
+    pub id: i64,
+    pub server_id: i64,
+    pub server_code: String,
+    pub server_name: String,
+    pub endpoint_url: Option<String>,
+    pub transport_kind: String,
+    pub auth_type: String,
+    pub secret_ref: Option<String>,
+    pub tool_name: String,
+    pub tool_code: String,
+    pub description: String,
+    pub input_schema: Value,
+    pub output_schema: Value,
+    pub risk_level: i16,
+    pub permission_code: Option<String>,
+    pub metadata: Value,
+}
+
+#[derive(Debug, Clone, FromRow)]
 pub struct TriggerLookupRecord {
     pub id: i64,
     pub tenant_id: i64,
@@ -431,7 +453,7 @@ impl AiCapabilityRepository {
     ) -> Result<Option<ToolLookupRecord>, AppError> {
         Ok(sqlx::query_as::<_, ToolLookupRecord>(
             r#"
-SELECT id, code, risk_level, approval_policy, permission_code
+SELECT id, code, tool_kind, executor_kind, risk_level, approval_policy, permission_code
 FROM ai_tool
 WHERE tenant_id = $1 AND code = $2 AND status = 1;
 "#,
@@ -1204,6 +1226,45 @@ SELECT
     t.metadata,
     t.create_time,
     t.update_time
+FROM ai_mcp_tool AS t
+JOIN ai_mcp_server AS s ON s.id = t.server_id AND s.tenant_id = t.tenant_id
+WHERE t.tenant_id = $1
+  AND t.tool_code = $2
+  AND t.status = 1
+  AND s.status = 1
+LIMIT 1;
+"#,
+        )
+        .bind(tenant_id)
+        .bind(tool_code)
+        .fetch_optional(&self.db)
+        .await?)
+    }
+
+    pub async fn find_mcp_tool_for_execution(
+        &self,
+        tenant_id: i64,
+        tool_code: &str,
+    ) -> Result<Option<McpToolExecutionRecord>, AppError> {
+        Ok(sqlx::query_as::<_, McpToolExecutionRecord>(
+            r#"
+SELECT
+    t.id,
+    t.server_id,
+    s.code AS server_code,
+    s.name AS server_name,
+    s.endpoint_url,
+    s.transport_kind,
+    s.auth_type,
+    s.secret_ref,
+    t.tool_name,
+    t.tool_code,
+    COALESCE(t.description, '') AS description,
+    t.input_schema,
+    t.output_schema,
+    t.risk_level,
+    t.permission_code,
+    t.metadata
 FROM ai_mcp_tool AS t
 JOIN ai_mcp_server AS s ON s.id = t.server_id AND s.tenant_id = t.tenant_id
 WHERE t.tenant_id = $1

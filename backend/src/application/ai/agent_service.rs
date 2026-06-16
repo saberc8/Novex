@@ -6,10 +6,11 @@ use novex_agent_protocol::{AgentTurnItem, ToolObservationStatus};
 use novex_agent_runtime::parse_model_turn_output;
 use novex_ai_core::{validate_run_transition, RunEventKind, RunStatus, RunStepType, TaskBudget};
 use novex_connectors::{
-    parse_credential_scope, parse_github_code_search_response, select_connector_credential,
-    ConnectorCredentialBinding, FeishuTextMessage, GitHubCodeSearchRequest, GitHubFileReadRequest,
-    ResolvedConnectorCredential,
+    parse_credential_scope, parse_github_code_search_response, resolve_env_secret_ref,
+    select_connector_credential, ConnectorCredentialBinding, FeishuTextMessage,
+    GitHubCodeSearchRequest, GitHubFileReadRequest, ResolvedConnectorCredential,
 };
+use novex_mcp::{McpToolInvocationRequest, McpToolInvocationResult};
 use novex_memory::{
     build_memory_context, MemoryAccessContext, MemoryContext, MemoryScope, MemoryScopeRef,
     MemorySnippet, MemoryWritePolicy,
@@ -17,7 +18,7 @@ use novex_memory::{
 use novex_model::ModelRoutePurpose;
 use novex_tools::{
     evaluate_tool_execution_policy, parse_media_image_generation_response, ApprovalPolicy,
-    MediaImageGenerationRequest, ToolExecutionPolicyDecision, ToolExecutionPolicyInput,
+    MediaImageGenerationRequest, ToolExecutionPolicyDecision, ToolExecutionPolicyInput, ToolKind,
     ToolRiskLevel,
 };
 use serde::{Deserialize, Serialize};
@@ -34,8 +35,8 @@ use crate::{
             RunEventSaveRecord, RunPauseSaveRecord, RunSaveRecord, RunStatusUpdate,
             RunStepSaveRecord,
         },
-        ai_capability_repository::ConnectorCredentialLookupRecord,
         ai_capability_repository::{AiCapabilityRepository, ToolAuditSaveRecord, ToolLookupRecord},
+        ai_capability_repository::{ConnectorCredentialLookupRecord, McpToolExecutionRecord},
         ai_media_repository::{AiMediaRepository, MediaAssetSaveRecord, MediaJobSaveRecord},
         ai_memory_repository::{AiMemoryRepository, MemoryFilter, MemoryRecord},
     },
@@ -1100,10 +1101,18 @@ impl AgentService {
         } else {
             None
         };
+        let mcp_tool = if matches!(agent_tool_kind(tool), ToolKind::Mcp) {
+            self.capability_repo
+                .find_mcp_tool_for_execution(self.tenant_id, &tool.code)
+                .await?
+        } else {
+            None
+        };
         let execution = execute_agent_tool(
-            &tool.code,
+            tool,
             &input,
             connector_credential.as_ref(),
+            mcp_tool.as_ref(),
             Some(&self.model_runtime),
         )
         .await;
@@ -1385,11 +1394,16 @@ impl AgentService {
 }
 
 async fn execute_agent_tool(
-    tool_code: &str,
+    tool: &ToolLookupRecord,
     input: &Value,
     connector_credential: Option<&ConnectorCredentialLookupRecord>,
+    mcp_tool: Option<&McpToolExecutionRecord>,
     model_runtime: Option<&ModelRuntimeService>,
 ) -> AgentToolExecution {
+    if matches!(agent_tool_kind(tool), ToolKind::Mcp) {
+        return execute_mcp_tool(&tool.code, input, mcp_tool).await;
+    }
+    let tool_code = tool.code.as_str();
     if tool_code == FEISHU_TOOL_CODE {
         return execute_feishu_message_tool(input).await;
     }
@@ -1414,6 +1428,120 @@ async fn execute_agent_tool(
         true,
         format!("Agent dry-run executed {tool_code}."),
     )
+}
+
+async fn execute_mcp_tool(
+    tool_code: &str,
+    input: &Value,
+    mcp_tool: Option<&McpToolExecutionRecord>,
+) -> AgentToolExecution {
+    let Some(tool) = mcp_tool else {
+        return AgentToolExecution::failed(
+            json!({
+                "dryRun": false,
+                "toolCode": tool_code,
+                "status": "failed",
+                "provider": "mcp",
+                "error": "MCP tool registration not found",
+            }),
+            "MCP tool registration not found".to_owned(),
+            "Agent failed to execute MCP tool.".to_owned(),
+        );
+    };
+
+    let request = McpToolInvocationRequest {
+        server_code: tool.server_code.clone(),
+        tool_name: tool.tool_name.clone(),
+        arguments: input.clone(),
+    };
+    let auth = mcp_auth_payload(tool.secret_ref.as_deref(), &tool.auth_type);
+    if let Some(mock_response) = tool.metadata.get("mockResponse").cloned() {
+        let result = McpToolInvocationResult {
+            tool_code: tool.tool_code.clone(),
+            status: "succeeded".to_owned(),
+            output: mock_response,
+            dry_run: false,
+        };
+        return AgentToolExecution::succeeded(
+            json!({
+                "dryRun": result.dry_run,
+                "toolCode": result.tool_code,
+                "status": result.status,
+                "provider": "mcp",
+                "server": mcp_server_payload(tool),
+                "request": request,
+                "response": result.output,
+                "auth": auth,
+                "mocked": true,
+            }),
+            result.dry_run,
+            format!(
+                "Agent executed MCP tool {} via configured mock response.",
+                tool.tool_code
+            ),
+        );
+    }
+
+    let result = McpToolInvocationResult {
+        tool_code: tool.tool_code.clone(),
+        status: "succeeded".to_owned(),
+        output: json!({
+            "message": "MCP live client is not configured; dry-run only",
+            "endpointUrl": tool.endpoint_url,
+            "serverCode": tool.server_code,
+            "toolName": tool.tool_name,
+            "arguments": input,
+        }),
+        dry_run: true,
+    };
+    AgentToolExecution::succeeded(
+        json!({
+            "dryRun": result.dry_run,
+            "toolCode": result.tool_code,
+            "status": result.status,
+            "provider": "mcp",
+            "server": mcp_server_payload(tool),
+            "request": request,
+            "response": result.output,
+            "auth": auth,
+            "mocked": false,
+        }),
+        result.dry_run,
+        format!("Agent dry-run prepared MCP tool {}.", tool.tool_code),
+    )
+}
+
+fn mcp_server_payload(tool: &McpToolExecutionRecord) -> Value {
+    json!({
+        "serverId": tool.server_id,
+        "serverCode": tool.server_code,
+        "serverName": tool.server_name,
+        "endpointUrl": tool.endpoint_url,
+        "transportKind": tool.transport_kind,
+        "authType": tool.auth_type,
+    })
+}
+
+fn mcp_auth_payload(secret_ref: Option<&str>, auth_type: &str) -> Value {
+    mcp_auth_payload_from_sources(secret_ref, auth_type, |key| env::var(key).ok())
+}
+
+fn mcp_auth_payload_from_sources<F>(
+    secret_ref: Option<&str>,
+    auth_type: &str,
+    mut env_get: F,
+) -> Value
+where
+    F: FnMut(&str) -> Option<String>,
+{
+    let resolved = secret_ref
+        .and_then(|secret_ref| resolve_env_secret_ref(secret_ref, &mut env_get))
+        .is_some();
+    json!({
+        "type": auth_type,
+        "secretRef": secret_ref,
+        "resolved": resolved,
+    })
 }
 
 async fn execute_github_repo_search_tool(
@@ -2331,6 +2459,27 @@ fn agent_tool_policy_decision(
     })
 }
 
+fn agent_tool_kind(tool: &ToolLookupRecord) -> ToolKind {
+    let executor = tool.executor_kind.trim().to_ascii_lowercase();
+    let kind = tool.tool_kind.trim().to_ascii_lowercase();
+    match executor.as_str() {
+        "mcp" => ToolKind::Mcp,
+        "connector" => ToolKind::Connector,
+        "model" => ToolKind::Model,
+        "media" => ToolKind::Media,
+        "sandbox" => ToolKind::Sandbox,
+        "http" => ToolKind::Http,
+        _ => match kind.as_str() {
+            "mcp" => ToolKind::Mcp,
+            "connector" => ToolKind::Connector,
+            "media" => ToolKind::Media,
+            "model" => ToolKind::Model,
+            "http" => ToolKind::Http,
+            _ => ToolKind::Function,
+        },
+    }
+}
+
 fn tool_risk_level(value: i16) -> ToolRiskLevel {
     match value {
         value if value <= 1 => ToolRiskLevel::Low,
@@ -2890,6 +3039,8 @@ mod tests {
             &ToolLookupRecord {
                 id: 1,
                 code: "github.issue.write".to_owned(),
+                tool_kind: "connector".to_owned(),
+                executor_kind: "connector".to_owned(),
                 risk_level: 3,
                 approval_policy: 1,
                 permission_code: Some("ai:agent:run".to_owned()),
@@ -2900,6 +3051,73 @@ mod tests {
         assert!(decision.requires_approval);
         assert_eq!(decision.pause_reason.as_deref(), Some("approval"));
         assert_eq!(decision.policy_reason, "high_risk_requires_manual_approval");
+    }
+
+    #[test]
+    fn agent_runtime_routes_mcp_tools_through_audited_observation_path() {
+        let source = include_str!("agent_service.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+
+        assert!(source.contains("execute_mcp_tool"));
+        assert!(source.contains("ToolKind::Mcp"));
+        assert!(source.contains("RunEventKind::Observation"));
+    }
+
+    #[tokio::test]
+    async fn mcp_tool_execution_uses_mock_response_without_exposing_secret() {
+        let tool = McpToolExecutionRecord {
+            id: 11,
+            server_id: 42,
+            server_code: "docs".to_owned(),
+            server_name: "Docs".to_owned(),
+            endpoint_url: Some("https://mcp.example.com/mcp".to_owned()),
+            transport_kind: "streamable_http".to_owned(),
+            auth_type: "bearer_env".to_owned(),
+            secret_ref: Some("env:DOCS_MCP_TOKEN".to_owned()),
+            tool_name: "search".to_owned(),
+            tool_code: "mcp.docs.search".to_owned(),
+            description: "Search docs".to_owned(),
+            input_schema: json!({"type":"object"}),
+            output_schema: json!({"type":"object"}),
+            risk_level: 1,
+            permission_code: Some("ai:mcp:docs:search".to_owned()),
+            metadata: json!({
+                "mockResponse": {
+                    "hits": [
+                        {
+                            "title": "Codex migration",
+                            "score": 0.98
+                        }
+                    ]
+                }
+            }),
+        };
+
+        let execution =
+            execute_mcp_tool("mcp.docs.search", &json!({"query": "codex"}), Some(&tool)).await;
+
+        assert!(execution.succeeded_status());
+        assert!(!execution.dry_run);
+        assert_eq!(execution.response_payload["provider"], "mcp");
+        assert_eq!(
+            execution.response_payload["response"]["hits"][0]["title"],
+            "Codex migration"
+        );
+        assert_eq!(
+            execution.response_payload["auth"]["secretRef"],
+            "env:DOCS_MCP_TOKEN"
+        );
+        assert!(execution
+            .response_payload
+            .to_string()
+            .contains("DOCS_MCP_TOKEN"));
+        let auth = mcp_auth_payload_from_sources(Some("env:DOCS_MCP_TOKEN"), "bearer_env", |key| {
+            (key == "DOCS_MCP_TOKEN").then(|| "test-token".to_owned())
+        });
+        assert_eq!(auth["resolved"], true);
+        assert!(!auth.to_string().contains("test-token"));
     }
 
     #[test]
