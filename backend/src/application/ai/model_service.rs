@@ -4194,6 +4194,20 @@ mod tests {
     }
 
     #[test]
+    fn model_ops_alert_delivery_migration_defines_table_and_seed_job() {
+        let migration = include_str!(
+            "../../../migrations/202606170005_create_ai_model_ops_alert_delivery.sql"
+        );
+
+        assert!(migration.contains("CREATE TABLE IF NOT EXISTS ai_model_ops_alert_delivery"));
+        assert!(migration.contains("idx_ai_model_ops_alert_delivery_alert_id"));
+        assert!(migration.contains("idx_ai_model_ops_alert_delivery_channel_status"));
+        assert!(migration.contains("INSERT INTO sys_job"));
+        assert!(migration.contains("'ai.model.alert_delivery'"));
+        assert!(migration.contains("'AI Model Alert Delivery'"));
+    }
+
+    #[test]
     fn multi_hop_fallback_allows_bounded_new_routes() {
         let mut visited = std::collections::HashSet::from(["runtime.llm".to_owned()]);
 
