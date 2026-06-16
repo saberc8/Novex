@@ -19,8 +19,8 @@ use novex_model::ModelRoutePurpose;
 use novex_tools::{
     agent_model_loop_tool_definitions, evaluate_tool_execution_policy,
     parse_media_image_generation_response, ApprovalPolicy, MediaImageGenerationRequest,
-    ToolExecutionPolicyDecision, ToolExecutionPolicyInput, ToolKind, ToolRiskLevel, ToolRouteError,
-    ToolRouteErrorKind, ToolRouter,
+    ToolBatchPlan, ToolExecutionPolicyDecision, ToolExecutionPolicyInput, ToolKind, ToolRiskLevel,
+    ToolRouteError, ToolRouteErrorKind, ToolRouter,
 };
 use novex_trace::{TraceBundle, TraceEvent, TraceReplaySummary};
 use serde::{Deserialize, Serialize};
@@ -495,6 +495,7 @@ impl AgentService {
             let parsed = parse_model_turn_output(&model_response.answer).map_err(|err| {
                 AppError::bad_request(format!("Agent 模型输出解析失败: {}", err.message))
             })?;
+            let parsed_items = parsed.items.clone();
             let parsed_payload = agent_turn_item_event_payload(&parsed.item);
 
             match parsed.item {
@@ -521,13 +522,40 @@ impl AgentService {
                     return self.get_run(run_id).await;
                 }
                 AgentTurnItem::ToolCall {
-                    call_id,
-                    tool_code,
-                    arguments,
+                    call_id: _,
+                    tool_code: _,
+                    arguments: _,
                 } => {
-                    if !runtime_state.can_execute_tool_call() {
+                    let tool_call_items = parsed_items
+                        .into_iter()
+                        .filter_map(|item| match item {
+                            AgentTurnItem::ToolCall {
+                                call_id,
+                                tool_code,
+                                arguments,
+                            } => Some((call_id, tool_code, arguments)),
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>();
+                    let tool_call_count = tool_call_items.len();
+                    let requested_batch_payload = tool_call_items
+                        .iter()
+                        .map(|(call_id, tool_code, arguments)| {
+                            json!({
+                                "callId": call_id,
+                                "toolCode": tool_code,
+                                "arguments": arguments,
+                            })
+                        })
+                        .collect::<Vec<_>>();
+                    let can_execute_requested_tool_calls = if tool_call_count == 1 {
+                        runtime_state.can_execute_tool_call()
+                    } else {
+                        runtime_state.can_execute_tool_calls(tool_call_count)
+                    };
+                    if !can_execute_requested_tool_calls {
                         let final_output = format!(
-                            "Tool call budget exhausted before executing requested tool `{tool_code}`."
+                            "Tool call budget exhausted before executing requested batch of {tool_call_count} tool calls."
                         );
                         let final_payload =
                             agent_turn_item_event_payload(&AgentTurnItem::FinalAnswer {
@@ -536,17 +564,18 @@ impl AgentService {
                         self.append_event(
                             user_id,
                             run_id,
-                            None,
-                            RunEventKind::ActionSelected,
-                            run_status_code(RunStatus::Failed),
-                            json!({
-                                "toolCode": tool_code,
-                                "arguments": arguments,
-                                "runtimeMode": "model_loop",
-                                "stopReason": "tool_call_budget_exhausted"
-                            }),
-                        )
-                        .await?;
+                                None,
+                                RunEventKind::ActionSelected,
+                                run_status_code(RunStatus::Failed),
+                                json!({
+                                    "requestedToolCallCount": tool_call_count,
+                                    "remainingToolCallBudget": runtime_state.remaining_tool_call_budget(),
+                                    "toolCallBatch": requested_batch_payload,
+                                    "runtimeMode": "model_loop",
+                                    "stopReason": "tool_call_budget_exhausted"
+                                }),
+                            )
+                            .await?;
                         self.finish_model_loop_run(
                             user_id,
                             run_id,
@@ -573,125 +602,163 @@ impl AgentService {
                         return self.get_run(run_id).await;
                     }
 
-                    let routed_call = match tool_router.route_tool_call(
-                        &call_id,
-                        &tool_code,
-                        arguments.clone(),
-                    ) {
-                        Ok(routed_call) => routed_call,
-                        Err(err) => {
-                            let stop_reason = tool_route_stop_reason(err.kind);
-                            let final_output = tool_route_failure_message(&err);
-                            let final_payload =
-                                agent_turn_item_event_payload(&AgentTurnItem::FinalAnswer {
-                                    content: final_output.clone(),
-                                });
-                            self.append_event(
-                                user_id,
-                                run_id,
-                                None,
-                                RunEventKind::ActionSelected,
-                                run_status_code(RunStatus::Failed),
-                                json!({
-                                    "toolCode": tool_code,
-                                    "arguments": arguments,
-                                    "runtimeMode": "model_loop",
-                                    "stopReason": stop_reason,
-                                    "toolRouteError": err
-                                }),
-                            )
-                            .await?;
-                            self.finish_model_loop_run(
-                                user_id,
-                                run_id,
-                                None,
-                                RunStatus::Failed,
-                                &final_output,
-                                json!({
-                                    "answer": final_output.clone(),
-                                    "runtimeMode": "model_loop",
-                                    "stopReason": stop_reason
-                                }),
-                                final_payload,
-                            )
-                            .await?;
-                            self.refresh_trace_snapshot(
-                                user_id,
-                                run_id,
-                                json!({
-                                    "runtimeMode": "model_loop",
-                                    "stopReason": stop_reason
-                                }),
-                            )
-                            .await?;
-                            return self.get_run(run_id).await;
+                    let mut routed_calls = Vec::with_capacity(tool_call_count);
+                    for (call_id, tool_code, arguments) in tool_call_items {
+                        match tool_router.route_tool_call(&call_id, &tool_code, arguments.clone()) {
+                            Ok(routed_call) => routed_calls.push(routed_call),
+                            Err(err) => {
+                                let stop_reason = tool_route_stop_reason(err.kind);
+                                let final_output = tool_route_failure_message(&err);
+                                let final_payload =
+                                    agent_turn_item_event_payload(&AgentTurnItem::FinalAnswer {
+                                        content: final_output.clone(),
+                                    });
+                                self.append_event(
+                                    user_id,
+                                    run_id,
+                                    None,
+                                    RunEventKind::ActionSelected,
+                                    run_status_code(RunStatus::Failed),
+                                    json!({
+                                        "toolCode": tool_code,
+                                        "arguments": arguments,
+                                        "toolCallBatch": requested_batch_payload,
+                                        "runtimeMode": "model_loop",
+                                        "stopReason": stop_reason,
+                                        "toolRouteError": err
+                                    }),
+                                )
+                                .await?;
+                                self.finish_model_loop_run(
+                                    user_id,
+                                    run_id,
+                                    None,
+                                    RunStatus::Failed,
+                                    &final_output,
+                                    json!({
+                                        "answer": final_output.clone(),
+                                        "runtimeMode": "model_loop",
+                                        "stopReason": stop_reason
+                                    }),
+                                    final_payload,
+                                )
+                                .await?;
+                                self.refresh_trace_snapshot(
+                                    user_id,
+                                    run_id,
+                                    json!({
+                                        "runtimeMode": "model_loop",
+                                        "stopReason": stop_reason
+                                    }),
+                                )
+                                .await?;
+                                return self.get_run(run_id).await;
+                            }
                         }
-                    };
-                    let concurrency_policy_payload =
-                        serde_json::to_value(&routed_call.tool.concurrency).unwrap_or(Value::Null);
-                    let tool_code = routed_call.tool.code;
-                    let arguments = routed_call.arguments;
-                    runtime_state.push_item(AgentTurnItem::tool_call(
-                        call_id.clone(),
-                        tool_code.clone(),
-                        arguments.clone(),
-                    ));
-                    let mut action_payload =
-                        agent_turn_item_event_payload(&AgentTurnItem::tool_call(
+                    }
+
+                    let batch_plan = ToolBatchPlan::from_routed_calls(routed_calls);
+                    let batch_execution_mode_payload =
+                        serde_json::to_value(batch_plan.mode).unwrap_or(Value::Null);
+                    let serial_reason = batch_plan.serial_reason.clone();
+                    let tool_call_batch_payload = batch_plan
+                        .calls
+                        .iter()
+                        .map(|call| {
+                            json!({
+                                "callId": call.call_id,
+                                "toolCode": call.tool.code,
+                                "arguments": call.arguments,
+                                "concurrencyPolicy": call.tool.concurrency,
+                            })
+                        })
+                        .collect::<Vec<_>>();
+                    let batch_size = batch_plan.calls.len();
+                    let mut batch_observations = Vec::new();
+                    let mut last_recorded_step_id = None;
+
+                    for (batch_index, routed_call) in batch_plan.calls.into_iter().enumerate() {
+                        let call_id = routed_call.call_id;
+                        let concurrency_policy_payload =
+                            serde_json::to_value(&routed_call.tool.concurrency)
+                                .unwrap_or(Value::Null);
+                        let tool_code = routed_call.tool.code;
+                        let arguments = routed_call.arguments;
+                        runtime_state.push_item(AgentTurnItem::tool_call(
                             call_id.clone(),
                             tool_code.clone(),
                             arguments.clone(),
                         ));
-                    if let Some(object) = action_payload.as_object_mut() {
-                        object.insert("runtimeMode".to_owned(), json!("model_loop"));
-                        object.insert("concurrencyPolicy".to_owned(), concurrency_policy_payload);
-                    }
-                    self.append_event(
-                        user_id,
-                        run_id,
-                        None,
-                        RunEventKind::ActionSelected,
-                        run_status_code(RunStatus::Running),
-                        action_payload,
-                    )
-                    .await?;
-                    let Some(tool) = self
-                        .capability_repo
-                        .find_tool_by_code(self.tenant_id, &tool_code)
-                        .await?
-                    else {
-                        return Err(AppError::NotFound);
-                    };
-                    let policy = agent_tool_policy_decision(&tool, command.auto_approve);
-                    if policy.requires_approval {
-                        ensure_agent_run_transition(
-                            &run_status_code(RunStatus::Running),
-                            RunStatus::WaitingApproval,
-                        )?;
-                        self.update_status(AgentStatusUpdate {
+                        let mut action_payload =
+                            agent_turn_item_event_payload(&AgentTurnItem::tool_call(
+                                call_id.clone(),
+                                tool_code.clone(),
+                                arguments.clone(),
+                            ));
+                        if let Some(object) = action_payload.as_object_mut() {
+                            object.insert("runtimeMode".to_owned(), json!("model_loop"));
+                            object
+                                .insert("concurrencyPolicy".to_owned(), concurrency_policy_payload);
+                            object.insert(
+                                "batchExecutionMode".to_owned(),
+                                batch_execution_mode_payload.clone(),
+                            );
+                            object.insert("serialReason".to_owned(), json!(serial_reason));
+                            object.insert(
+                                "toolCallBatch".to_owned(),
+                                Value::Array(tool_call_batch_payload.clone()),
+                            );
+                            object.insert("toolCallBatchIndex".to_owned(), json!(batch_index));
+                            object.insert("toolCallBatchSize".to_owned(), json!(batch_size));
+                        }
+                        self.append_event(
                             user_id,
                             run_id,
-                            status: run_status_code(RunStatus::WaitingApproval),
-                            output_payload: json!({ "toolCode": tool.code }),
-                            final_output: None,
-                            pause_reason: policy.pause_reason.as_deref(),
-                            finished: false,
-                        })
-                        .await?;
-                        self.pause_for_approval(user_id, run_id, &tool, &command.input, now)
-                            .await?;
-                        self.refresh_trace_snapshot(
-                            user_id,
-                            run_id,
-                            json!({ "runtimeMode": "model_loop", "pauseReason": "approval" }),
+                            None,
+                            RunEventKind::ActionSelected,
+                            run_status_code(RunStatus::Running),
+                            action_payload,
                         )
                         .await?;
-                        return self.get_run(run_id).await;
-                    } else {
+                        let Some(tool) = self
+                            .capability_repo
+                            .find_tool_by_code(self.tenant_id, &tool_code)
+                            .await?
+                        else {
+                            return Err(AppError::NotFound);
+                        };
+                        let policy = agent_tool_policy_decision(&tool, command.auto_approve);
+                        if policy.requires_approval {
+                            ensure_agent_run_transition(
+                                &run_status_code(RunStatus::Running),
+                                RunStatus::WaitingApproval,
+                            )?;
+                            self.update_status(AgentStatusUpdate {
+                                user_id,
+                                run_id,
+                                status: run_status_code(RunStatus::WaitingApproval),
+                                output_payload: json!({ "toolCode": tool.code }),
+                                final_output: None,
+                                pause_reason: policy.pause_reason.as_deref(),
+                                finished: false,
+                            })
+                            .await?;
+                            self.pause_for_approval(user_id, run_id, &tool, &command.input, now)
+                                .await?;
+                            self.refresh_trace_snapshot(
+                                user_id,
+                                run_id,
+                                json!({ "runtimeMode": "model_loop", "pauseReason": "approval" }),
+                            )
+                            .await?;
+                            return self.get_run(run_id).await;
+                        }
+
                         let recorded = self
                             .execute_and_record_tool_call(user_id, run_id, &tool, arguments.clone())
                             .await?;
                         last_tool_terminal_status = recorded.terminal_status;
+                        last_recorded_step_id = Some(recorded.step_id);
                         let observation_status = if recorded.execution.succeeded_status() {
                             ToolObservationStatus::Succeeded
                         } else {
@@ -735,61 +802,62 @@ impl AgentService {
                             observation_payload,
                         )
                         .await?;
-
-                        if runtime_state.should_compact_context() {
-                            if let Some(compaction) = runtime_state.compact_context() {
-                                let compaction_item = AgentTurnItem::ContextCompaction {
-                                    summary: compaction.summary.clone(),
-                                };
-                                let mut compaction_payload =
-                                    agent_turn_item_event_payload(&compaction_item);
-                                if let Some(object) = compaction_payload.as_object_mut() {
-                                    object.insert("runtimeMode".to_owned(), json!("model_loop"));
-                                    object.insert(
-                                        "compactionWindowId".to_owned(),
-                                        json!(compaction.window_id),
-                                    );
-                                    object.insert(
-                                        "retainedItemCount".to_owned(),
-                                        json!(compaction.retained_item_count),
-                                    );
-                                    object.insert(
-                                        "compactedItemCount".to_owned(),
-                                        json!(compaction.compacted_item_count),
-                                    );
-                                }
-                                self.append_event(
-                                    user_id,
-                                    run_id,
-                                    Some(recorded.step_id),
-                                    RunEventKind::Observation,
-                                    run_status_code(RunStatus::Running),
-                                    compaction_payload,
-                                )
-                                .await?;
-                                let summary = compaction.summary.as_str();
-                                messages = build_compacted_model_loop_messages(
-                                    &command.input,
-                                    summary,
-                                    &tool_codes,
-                                );
-                                continue;
-                            }
-                        }
-
-                        messages.push(ModelChatMessage {
-                            role: "assistant".to_owned(),
-                            content: model_response.answer.clone(),
-                        });
-                        messages.push(ModelChatMessage {
-                            role: "user".to_owned(),
-                            content: build_observation_follow_up_prompt(
-                                &tool.code,
-                                &recorded.execution.response_payload,
-                            ),
-                        });
-                        continue;
+                        batch_observations.push((
+                            tool.code.clone(),
+                            recorded.execution.response_payload.clone(),
+                        ));
                     }
+
+                    if runtime_state.should_compact_context() {
+                        if let Some(compaction) = runtime_state.compact_context() {
+                            let compaction_item = AgentTurnItem::ContextCompaction {
+                                summary: compaction.summary.clone(),
+                            };
+                            let mut compaction_payload =
+                                agent_turn_item_event_payload(&compaction_item);
+                            if let Some(object) = compaction_payload.as_object_mut() {
+                                object.insert("runtimeMode".to_owned(), json!("model_loop"));
+                                object.insert(
+                                    "compactionWindowId".to_owned(),
+                                    json!(compaction.window_id),
+                                );
+                                object.insert(
+                                    "retainedItemCount".to_owned(),
+                                    json!(compaction.retained_item_count),
+                                );
+                                object.insert(
+                                    "compactedItemCount".to_owned(),
+                                    json!(compaction.compacted_item_count),
+                                );
+                            }
+                            self.append_event(
+                                user_id,
+                                run_id,
+                                last_recorded_step_id,
+                                RunEventKind::Observation,
+                                run_status_code(RunStatus::Running),
+                                compaction_payload,
+                            )
+                            .await?;
+                            let summary = compaction.summary.as_str();
+                            messages = build_compacted_model_loop_messages(
+                                &command.input,
+                                summary,
+                                &tool_codes,
+                            );
+                            continue;
+                        }
+                    }
+
+                    messages.push(ModelChatMessage {
+                        role: "assistant".to_owned(),
+                        content: model_response.answer.clone(),
+                    });
+                    messages.push(ModelChatMessage {
+                        role: "user".to_owned(),
+                        content: build_observation_batch_follow_up_prompt(&batch_observations),
+                    });
+                    continue;
                 }
                 _ => {
                     runtime_state.push_item(parsed.item);
@@ -2756,7 +2824,7 @@ fn build_model_loop_tool_router() -> Result<ToolRouter, ToolRouteError> {
 
 fn build_model_loop_system_prompt(tool_codes: &[String]) -> String {
     format!(
-        "You are Novex Agent Runtime. You may answer directly or request tool calls while staying within the run budget. Available tools: {}. After each tool observation, decide whether another tool call is necessary or produce the final answer. To call a tool, reply with compact JSON exactly like {{\"type\":\"tool_call\",\"callId\":\"call-1\",\"toolCode\":\"rag.search\",\"arguments\":{{\"query\":\"...\"}}}}. Otherwise reply with the final answer. Never request a tool outside the available tools or after the tool-call budget is exhausted.",
+        "You are Novex Agent Runtime. You may answer directly or request tool calls while staying within the run budget. Available tools: {}. After each tool observation, decide whether another tool call is necessary or produce the final answer. To call one tool, reply with compact JSON exactly like {{\"type\":\"tool_call\",\"callId\":\"call-1\",\"toolCode\":\"rag.search\",\"arguments\":{{\"query\":\"...\"}}}}. To call multiple independent tools in the same turn, reply with compact JSON exactly like {{\"type\":\"tool_calls\",\"calls\":[{{\"callId\":\"call-1\",\"toolCode\":\"rag.search\",\"arguments\":{{\"query\":\"...\"}}}},{{\"callId\":\"call-2\",\"toolCode\":\"github.repo.read\",\"arguments\":{{\"repository\":\"org/repo\",\"path\":\"README.md\"}}}}]}}. Otherwise reply with the final answer. Never request a tool outside the available tools or after the tool-call budget is exhausted.",
         tool_codes.join(", ")
     )
 }
@@ -2775,6 +2843,28 @@ fn build_observation_follow_up_prompt(tool_code: &str, observation: &Value) -> S
     format!(
         "Tool `{tool_code}` returned this observation:\n{}\nUse it to produce the final answer. If the observation is insufficient, say what is missing.",
         serde_json::to_string_pretty(observation).unwrap_or_else(|_| "{}".to_owned())
+    )
+}
+
+fn build_observation_batch_follow_up_prompt(observations: &[(String, Value)]) -> String {
+    if observations.len() == 1 {
+        if let Some((tool_code, observation)) = observations.first() {
+            return build_observation_follow_up_prompt(tool_code, observation);
+        }
+    }
+
+    let payload = observations
+        .iter()
+        .map(|(tool_code, observation)| {
+            json!({
+                "toolCode": tool_code,
+                "observation": observation,
+            })
+        })
+        .collect::<Vec<_>>();
+    format!(
+        "The requested tool batch returned these observations:\n{}\nUse them to produce the final answer. If the observations are insufficient, say what is missing.",
+        serde_json::to_string_pretty(&payload).unwrap_or_else(|_| "[]".to_owned())
     )
 }
 
@@ -3315,6 +3405,17 @@ mod tests {
     }
 
     #[test]
+    fn model_loop_prompt_advertises_tool_call_batches() {
+        let prompt = build_model_loop_system_prompt(&[
+            "rag.search".to_owned(),
+            "github.repo.read".to_owned(),
+        ]);
+
+        assert!(prompt.contains("\"type\":\"tool_calls\""));
+        assert!(prompt.contains("\"calls\""));
+    }
+
+    #[test]
     fn agent_service_model_loop_uses_runtime_state_budget_gate() {
         let source = include_str!("agent_service.rs")
             .split("#[cfg(test)]")
@@ -3359,6 +3460,19 @@ mod tests {
 
         assert!(source.contains("\"concurrencyPolicy\""));
         assert!(source.contains("serde_json::to_value(&routed_call.tool.concurrency"));
+    }
+
+    #[test]
+    fn agent_service_model_loop_plans_parsed_tool_call_batches() {
+        let source = include_str!("agent_service.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+
+        assert!(source.contains("parsed.items"));
+        assert!(source.contains("ToolBatchPlan::from_routed_calls"));
+        assert!(source.contains("\"batchExecutionMode\""));
+        assert!(source.contains("\"toolCallBatch\""));
     }
 
     #[test]
