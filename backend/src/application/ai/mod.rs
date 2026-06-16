@@ -1,6 +1,7 @@
 pub mod agent_service;
 pub mod capability_service;
 pub mod chat_flow_service;
+pub mod customer_service_agent;
 pub mod eval_service;
 pub mod foundation_service;
 pub mod integration_service;
