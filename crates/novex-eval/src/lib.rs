@@ -113,6 +113,19 @@ impl EvalCaseCandidate {
             "hasApprovalPause".to_owned(),
             json!(summary.has_approval_pause),
         );
+        let guardian_review = trace_guardian_review_summary(bundle);
+        if let Some(outcome) = guardian_review.outcome.as_deref() {
+            tags.insert("guardianReviewOutcome".to_owned(), json!(outcome));
+        }
+        if let Some(source) = guardian_review.source.as_deref() {
+            tags.insert("guardianReviewSource".to_owned(), json!(source));
+        }
+        if let Some(requires_human_approval) = guardian_review.requires_human_approval {
+            tags.insert(
+                "guardianReviewRequiresHumanApproval".to_owned(),
+                json!(requires_human_approval),
+            );
+        }
         if let Some(tool_code) = tool_code.as_deref() {
             tags.insert("toolCode".to_owned(), json!(tool_code));
         }
@@ -703,6 +716,33 @@ fn trace_first_cancellation_reason(bundle: &TraceBundle) -> Option<String> {
 }
 
 #[derive(Debug, Default)]
+struct TraceGuardianReviewSummary {
+    outcome: Option<String>,
+    source: Option<String>,
+    requires_human_approval: Option<bool>,
+}
+
+fn trace_guardian_review_summary(bundle: &TraceBundle) -> TraceGuardianReviewSummary {
+    let Some(review) = bundle
+        .events
+        .iter()
+        .find(|event| event.kind == TraceEventKind::ApprovalRequested)
+        .and_then(|event| event.payload.get("guardianReview"))
+    else {
+        return TraceGuardianReviewSummary::default();
+    };
+
+    TraceGuardianReviewSummary {
+        outcome: trace_value_text(review.get("outcome")),
+        source: trace_value_text(review.get("source")),
+        requires_human_approval: review
+            .get("requiresHumanApproval")
+            .or_else(|| review.get("requires_human_approval"))
+            .and_then(Value::as_bool),
+    }
+}
+
+#[derive(Debug, Default)]
 struct TraceRuntimeSupervisorSummary {
     task_kind: Option<String>,
     cancel_signal_sent: Option<bool>,
@@ -1088,6 +1128,33 @@ mod tests {
         assert_eq!(candidate.tags["runtimeSupervisorTaskKind"], "model_loop");
         assert_eq!(candidate.tags["runtimeSupervisorCancelSignalSent"], true);
         assert_eq!(candidate.tags["runtimeSupervisorActiveBeforeCancel"], true);
+    }
+
+    #[test]
+    fn guardian_review_trace_eval_candidate_tags_approval_review() {
+        let bundle = TraceBundle::new("trace-guardian")
+            .with_event(TraceEvent::user_message(1, "write an issue"))
+            .with_event(TraceEvent {
+                sequence_no: 2,
+                kind: TraceEventKind::ApprovalRequested,
+                payload: json!({
+                    "toolCode": "github.issue.write",
+                    "guardianReview": {
+                        "outcome": "needs_human",
+                        "source": "policy",
+                        "requiresHumanApproval": true
+                    }
+                }),
+            });
+
+        let candidate = EvalCaseCandidate::from_trace_bundle(&bundle);
+
+        assert_eq!(candidate.tags["guardianReviewOutcome"], "needs_human");
+        assert_eq!(candidate.tags["guardianReviewSource"], "policy");
+        assert_eq!(
+            candidate.tags["guardianReviewRequiresHumanApproval"],
+            true
+        );
     }
 
     #[test]
