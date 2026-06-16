@@ -36,6 +36,12 @@ pub struct AppConfig {
     pub parser_queue_publisher_enabled: bool,
     pub parser_queue_tick_seconds: u64,
     pub parser_queue_batch_size: i64,
+    pub agent_queue_enabled: bool,
+    pub agent_queue_tick_seconds: u64,
+    pub agent_queue_batch_size: i64,
+    pub agent_queue_lease_seconds: u64,
+    pub agent_queue_max_attempts: i32,
+    pub agent_queue_worker_id: String,
     pub redis_url: String,
     pub rabbitmq_parser_exchange: String,
     pub rabbitmq_parser_execute_queue: String,
@@ -124,6 +130,26 @@ impl AppConfig {
             "PARSER_QUEUE_BATCH_SIZE",
             &env::var("PARSER_QUEUE_BATCH_SIZE").unwrap_or_else(|_| "50".to_owned()),
         )?;
+        let agent_queue_enabled =
+            parse_bool_env(env::var("AGENT_QUEUE_ENABLED").ok().as_deref(), false)?;
+        let agent_queue_tick_seconds = parse_positive_u64_env(
+            "AGENT_QUEUE_TICK_SECONDS",
+            &env::var("AGENT_QUEUE_TICK_SECONDS").unwrap_or_else(|_| "2".to_owned()),
+        )?;
+        let agent_queue_batch_size = parse_positive_i64_env(
+            "AGENT_QUEUE_BATCH_SIZE",
+            &env::var("AGENT_QUEUE_BATCH_SIZE").unwrap_or_else(|_| "10".to_owned()),
+        )?;
+        let agent_queue_lease_seconds = parse_positive_u64_env(
+            "AGENT_QUEUE_LEASE_SECONDS",
+            &env::var("AGENT_QUEUE_LEASE_SECONDS").unwrap_or_else(|_| "120".to_owned()),
+        )?;
+        let agent_queue_max_attempts = parse_positive_i64_env(
+            "AGENT_QUEUE_MAX_ATTEMPTS",
+            &env::var("AGENT_QUEUE_MAX_ATTEMPTS").unwrap_or_else(|_| "3".to_owned()),
+        )? as i32;
+        let agent_queue_worker_id = env::var("AGENT_QUEUE_WORKER_ID")
+            .unwrap_or_else(|_| format!("agent-worker-{}", std::process::id()));
         let redis_url =
             env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:16379/0".to_owned());
         let rabbitmq_parser_exchange =
@@ -177,6 +203,12 @@ impl AppConfig {
             parser_queue_publisher_enabled,
             parser_queue_tick_seconds,
             parser_queue_batch_size,
+            agent_queue_enabled,
+            agent_queue_tick_seconds,
+            agent_queue_batch_size,
+            agent_queue_lease_seconds,
+            agent_queue_max_attempts,
+            agent_queue_worker_id,
             redis_url,
             rabbitmq_parser_exchange,
             rabbitmq_parser_execute_queue,

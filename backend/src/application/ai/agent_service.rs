@@ -666,11 +666,6 @@ impl AgentService {
         let run_id = next_id();
         let trace_id = format!("agent-{run_id}");
         let now = Utc::now().naive_utc();
-        let initial_status = if plan.requires_approval {
-            run_status_code(RunStatus::WaitingApproval)
-        } else {
-            run_status_code(RunStatus::Running)
-        };
 
         self.create_run_records(user_id, run_id, &trace_id, &command, &plan, now)
             .await?;
@@ -688,6 +683,26 @@ impl AgentService {
             input_payload,
         )
         .await?;
+        self.execute_deterministic_plan(user_id, run_id, command, plan, selected_tool, now)
+            .await?;
+
+        self.get_run(run_id).await
+    }
+
+    async fn execute_deterministic_plan(
+        &self,
+        user_id: i64,
+        run_id: i64,
+        command: AgentRunCommand,
+        plan: AgentPlanSummary,
+        selected_tool: Option<ToolLookupRecord>,
+        now: NaiveDateTime,
+    ) -> Result<(), AppError> {
+        let initial_status = if plan.requires_approval {
+            run_status_code(RunStatus::WaitingApproval)
+        } else {
+            run_status_code(RunStatus::Running)
+        };
         self.append_event(
             user_id,
             run_id,
@@ -797,8 +812,7 @@ impl AgentService {
             self.refresh_trace_snapshot(user_id, run_id, Value::Null)
                 .await?;
         }
-
-        self.get_run(run_id).await
+        Ok(())
     }
 
     async fn create_queued_run(
@@ -806,14 +820,14 @@ impl AgentService {
         user_id: i64,
         command: AgentRunCommand,
     ) -> Result<AgentRunResp, AppError> {
+        if command.runtime_mode.as_deref() == Some("model_loop") {
+            return Err(AppError::bad_request(
+                "Agent queued model_loop execution 暂未支持",
+            ));
+        }
         let memory_context = self.load_agent_memory_context(user_id).await?;
         let mut plan = build_agent_plan(&command, memory_context)?;
-        if command.runtime_mode.as_deref() == Some("model_loop") {
-            plan.loop_kind = "model_loop".to_owned();
-            plan.selected_tool_code = None;
-            plan.requires_approval = false;
-            plan.pause_reason = None;
-        } else if let Some(tool_code) = plan.selected_tool_code.as_deref() {
+        if let Some(tool_code) = plan.selected_tool_code.as_deref() {
             let Some(tool) = self
                 .capability_repo
                 .find_tool_by_code(self.tenant_id, tool_code)
@@ -894,6 +908,81 @@ impl AgentService {
                 "executionMode": "queued",
                 "runtimeMode": command.runtime_mode
             }),
+        )
+        .await?;
+
+        self.get_run(run_id).await
+    }
+
+    pub async fn execute_queued_run(
+        &self,
+        user_id: i64,
+        run_id: i64,
+        queue_payload: Value,
+    ) -> Result<AgentRunResp, AppError> {
+        let command = agent_run_command_from_queue_payload(queue_payload)?;
+        if command.runtime_mode.as_deref() == Some("model_loop") {
+            return Err(AppError::bad_request(
+                "Agent queued model_loop execution 暂未支持",
+            ));
+        }
+        let run = self.get_run(run_id).await?;
+        let Some(current_status) = parse_run_status_code(&run.status) else {
+            return Err(AppError::conflict(format!("未知 Run 状态: {}", run.status)));
+        };
+        if current_status.is_terminal() || current_status == RunStatus::WaitingApproval {
+            return Ok(run);
+        }
+        if current_status != RunStatus::Running {
+            ensure_agent_run_transition(&run.status, RunStatus::Running)?;
+            self.update_status(AgentStatusUpdate {
+                user_id,
+                run_id,
+                status: run_status_code(RunStatus::Running),
+                output_payload: Value::Null,
+                final_output: None,
+                pause_reason: None,
+                finished: false,
+            })
+            .await?;
+            self.append_event(
+                user_id,
+                run_id,
+                None,
+                RunEventKind::StatusChanged,
+                run_status_code(RunStatus::Running),
+                json!({
+                    "status": run_status_code(RunStatus::Running),
+                    "executionMode": "queued"
+                }),
+            )
+            .await?;
+        }
+
+        let memory_context = self.load_agent_memory_context(user_id).await?;
+        let mut plan = build_agent_plan(&command, memory_context)?;
+        let selected_tool = if let Some(tool_code) = plan.selected_tool_code.as_deref() {
+            let Some(tool) = self
+                .capability_repo
+                .find_tool_by_code(self.tenant_id, tool_code)
+                .await?
+            else {
+                return Err(AppError::NotFound);
+            };
+            let policy = agent_tool_policy_decision(&tool, command.auto_approve);
+            plan.requires_approval = policy.requires_approval;
+            plan.pause_reason = policy.pause_reason;
+            Some(tool)
+        } else {
+            None
+        };
+        self.execute_deterministic_plan(
+            user_id,
+            run_id,
+            command,
+            plan,
+            selected_tool,
+            Utc::now().naive_utc(),
         )
         .await?;
 
@@ -4246,6 +4335,13 @@ fn agent_run_command_payload(command: &AgentRunCommand) -> Value {
     })
 }
 
+fn agent_run_command_from_queue_payload(payload: Value) -> Result<AgentRunCommand, AppError> {
+    let command_payload = payload.get("command").cloned().unwrap_or(payload);
+    let command = serde_json::from_value::<AgentRunCommand>(command_payload)
+        .map_err(|_| AppError::bad_request("Agent queued command payload 无效"))?;
+    normalize_agent_run_command(command)
+}
+
 fn build_model_loop_tool_router() -> Result<ToolRouter, ToolRouteError> {
     ToolRouter::from_definitions(agent_model_loop_tool_definitions())
 }
@@ -5356,6 +5452,20 @@ mod tests {
         assert!(source.contains("AgentRunQueueSaveRecord"));
         assert!(source.contains("\"executionMode\""));
         assert!(source.contains("RunEventKind::StatusChanged"));
+    }
+
+    #[test]
+    fn agent_service_queued_execution_uses_existing_run_contract() {
+        let source = include_str!("agent_service.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+
+        assert!(source.contains("execute_queued_run"));
+        assert!(source.contains("agent_run_command_from_queue_payload"));
+        assert!(source.contains("ensure_agent_run_transition(&run.status, RunStatus::Running)"));
+        assert!(source.contains("execute_deterministic_plan"));
+        assert!(source.contains("create_run_records_with_status"));
     }
 
     #[test]

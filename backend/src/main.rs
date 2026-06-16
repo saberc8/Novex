@@ -1,6 +1,8 @@
 use std::net::SocketAddr;
 
 use backend_rust::{
+    application::ai::agent_queue_runtime::{agent_queue_from_config, spawn_agent_queue_worker},
+    application::ai::agent_service::AgentRuntimeRegistry,
     application::ai::parser_queue_runtime::{
         parser_queue_from_config, parser_rabbitmq_from_config, spawn_parser_queue_publisher,
     },
@@ -8,7 +10,7 @@ use backend_rust::{
         http_safety_from_config, rabbitmq_from_config, spawn_scheduler_runtime,
     },
     infrastructure::{db::init_pool, security::jwt::JwtService},
-    interfaces::http::build_router_with_scheduler_http_safety,
+    interfaces::http::build_router_with_agent_runtime_and_scheduler_http_safety,
     shared::config::AppConfig,
 };
 use tokio::net::TcpListener;
@@ -28,6 +30,7 @@ async fn main() -> anyhow::Result<()> {
 
     let jwt = JwtService::new(config.auth_jwt_secret.clone(), config.auth_jwt_ttl_hours);
     let scheduler_http_safety = http_safety_from_config(&config)?;
+    let agent_runtime = AgentRuntimeRegistry::default();
     if config.scheduler_embedded {
         spawn_scheduler_runtime(
             db.clone(),
@@ -38,15 +41,21 @@ async fn main() -> anyhow::Result<()> {
             config.scheduler_batch_size,
         );
     }
+    spawn_agent_queue_worker(
+        db.clone(),
+        agent_queue_from_config(&config),
+        agent_runtime.clone(),
+    );
     spawn_parser_queue_publisher(
         db.clone(),
         parser_queue_from_config(&config),
         parser_rabbitmq_from_config(&config),
     );
-    let app = build_router_with_scheduler_http_safety(
+    let app = build_router_with_agent_runtime_and_scheduler_http_safety(
         db,
         &config.cors_allowed_origins,
         jwt,
+        agent_runtime,
         scheduler_http_safety,
     )?;
     let addr = SocketAddr::from(([0, 0, 0, 0], config.http_port));
