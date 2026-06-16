@@ -2,6 +2,7 @@ use std::{env, time::Duration};
 
 use chrono::{NaiveDateTime, Utc};
 use novex_agent::{plan_react_run_with_memory, AgentIntent, AgentLoopKind};
+use novex_agent_protocol::{AgentTurnItem, ToolObservationStatus};
 use novex_agent_runtime::parse_model_turn_output;
 use novex_ai_core::{validate_run_transition, RunEventKind, RunStatus, RunStepType, TaskBudget};
 use novex_connectors::{
@@ -89,6 +90,14 @@ struct AgentToolExecution {
     dry_run: bool,
     error_message: Option<String>,
     final_output: String,
+}
+
+#[derive(Debug, Clone)]
+struct RecordedToolExecution {
+    audit_id: i64,
+    step_id: i64,
+    execution: AgentToolExecution,
+    terminal_status: RunStatus,
 }
 
 #[derive(Debug, Clone)]
@@ -478,10 +487,10 @@ impl AgentService {
                 .await?;
                 self.finish_without_tool(user_id, run_id, &content).await?;
             }
-            novex_agent_protocol::AgentTurnItem::ToolCall {
+            AgentTurnItem::ToolCall {
+                call_id,
                 tool_code,
                 arguments,
-                ..
             } => {
                 self.append_event(
                     user_id,
@@ -518,26 +527,165 @@ impl AgentService {
                     self.pause_for_approval(user_id, run_id, &tool, &command.input, now)
                         .await?;
                 } else {
+                    let recorded = self
+                        .execute_and_record_tool_call(user_id, run_id, &tool, arguments.clone())
+                        .await?;
+                    let observation_status = if recorded.execution.succeeded_status() {
+                        ToolObservationStatus::Succeeded
+                    } else {
+                        ToolObservationStatus::Failed
+                    };
+                    let observation_item = AgentTurnItem::tool_observation(
+                        &call_id,
+                        observation_status,
+                        recorded.execution.response_payload.clone(),
+                    );
+                    let mut observation_payload = agent_turn_item_event_payload(&observation_item);
+                    if let Some(object) = observation_payload.as_object_mut() {
+                        object.insert("toolCode".to_owned(), json!(&tool.code));
+                        object.insert("auditId".to_owned(), json!(recorded.audit_id));
+                        object.insert("dryRun".to_owned(), json!(recorded.execution.dry_run));
+                        object.insert("runtimeMode".to_owned(), json!("model_loop"));
+                    }
                     self.append_event(
                         user_id,
                         run_id,
-                        None,
+                        Some(recorded.step_id),
                         RunEventKind::ToolCalled,
                         run_status_code(RunStatus::Running),
                         json!({
                             "toolCode": tool.code,
-                            "arguments": arguments,
-                            "dryRun": true,
+                            "arguments": arguments.clone(),
+                            "auditId": recorded.audit_id,
+                            "dryRun": recorded.execution.dry_run,
                             "runtimeMode": "model_loop"
                         }),
                     )
                     .await?;
-                    let final_output = format!(
-                        "Model loop selected `{}`. Tool execution is deferred to the observation loop.",
-                        tool.code
-                    );
-                    self.finish_without_tool(user_id, run_id, &final_output)
+                    self.append_event(
+                        user_id,
+                        run_id,
+                        Some(recorded.step_id),
+                        RunEventKind::Observation,
+                        run_status_code(RunStatus::Running),
+                        observation_payload,
+                    )
+                    .await?;
+
+                    let follow_up_response = self
+                        .model_runtime
+                        .chat_completion_for_purpose(
+                            ModelRoutePurpose::CodeAgent,
+                            ModelChatCommand {
+                                messages: vec![
+                                    ModelChatMessage {
+                                        role: "system".to_owned(),
+                                        content: "You are Novex Agent Runtime. You have already used the one allowed tool call. Produce the final answer only; do not request another tool.".to_owned(),
+                                    },
+                                    ModelChatMessage {
+                                        role: "user".to_owned(),
+                                        content: command.input.clone(),
+                                    },
+                                    ModelChatMessage {
+                                        role: "assistant".to_owned(),
+                                        content: model_response.answer.clone(),
+                                    },
+                                    ModelChatMessage {
+                                        role: "user".to_owned(),
+                                        content: build_observation_follow_up_prompt(
+                                            &tool.code,
+                                            &recorded.execution.response_payload,
+                                        ),
+                                    },
+                                ],
+                                temperature: Some(0.2),
+                                max_tokens: Some(1024),
+                                ..ModelChatCommand::default()
+                            },
+                        )
                         .await?;
+                    let follow_up_parsed = parse_model_turn_output(&follow_up_response.answer)
+                        .map_err(|err| {
+                            AppError::bad_request(format!(
+                                "Agent observation 后模型输出解析失败: {}",
+                                err.message
+                            ))
+                        })?;
+                    let (final_output, final_payload, final_status) = match follow_up_parsed.item {
+                        AgentTurnItem::FinalAnswer { content } => {
+                            let payload =
+                                agent_turn_item_event_payload(&AgentTurnItem::FinalAnswer {
+                                    content: content.clone(),
+                                });
+                            (content, payload, recorded.terminal_status)
+                        }
+                        AgentTurnItem::ToolCall { tool_code, .. } => {
+                            let content = format!(
+                                "Agent stopped after one tool call because the model requested another tool: {tool_code}."
+                            );
+                            let payload =
+                                agent_turn_item_event_payload(&AgentTurnItem::FinalAnswer {
+                                    content: content.clone(),
+                                });
+                            (content, payload, RunStatus::Failed)
+                        }
+                        item => {
+                            let content = follow_up_response.answer.clone();
+                            let mut payload =
+                                agent_turn_item_event_payload(&AgentTurnItem::FinalAnswer {
+                                    content: content.clone(),
+                                });
+                            if let Some(object) = payload.as_object_mut() {
+                                object.insert(
+                                    "rawFollowUpItem".to_owned(),
+                                    serde_json::to_value(item).unwrap_or(Value::Null),
+                                );
+                            }
+                            (content, payload, recorded.terminal_status)
+                        }
+                    };
+                    ensure_agent_run_transition(
+                        &run_status_code(RunStatus::Running),
+                        final_status,
+                    )?;
+                    let final_status_code = run_status_code(final_status);
+                    self.update_status(AgentStatusUpdate {
+                        user_id,
+                        run_id,
+                        status: final_status_code.clone(),
+                        output_payload: json!({
+                            "answer": final_output.clone(),
+                            "auditId": recorded.audit_id,
+                            "runtimeMode": "model_loop"
+                        }),
+                        final_output: Some(&final_output),
+                        pause_reason: None,
+                        finished: true,
+                    })
+                    .await?;
+                    self.append_event(
+                        user_id,
+                        run_id,
+                        Some(recorded.step_id),
+                        RunEventKind::StatusChanged,
+                        final_status_code.clone(),
+                        json!({
+                            "status": final_status_code.clone(),
+                            "toolCode": tool.code,
+                            "auditId": recorded.audit_id,
+                            "runtimeMode": "model_loop"
+                        }),
+                    )
+                    .await?;
+                    self.append_event(
+                        user_id,
+                        run_id,
+                        Some(recorded.step_id),
+                        RunEventKind::FinalOutput,
+                        final_status_code,
+                        final_payload,
+                    )
+                    .await?;
                 }
             }
             _ => {
@@ -936,13 +1084,13 @@ impl AgentService {
         ))
     }
 
-    async fn execute_tool_and_finish(
+    async fn execute_and_record_tool_call(
         &self,
         user_id: i64,
         run_id: i64,
         tool: &ToolLookupRecord,
         input: Value,
-    ) -> Result<(), AppError> {
+    ) -> Result<RecordedToolExecution, AppError> {
         let now = Utc::now().naive_utc();
         let audit_id = next_id();
         let connector_credential = if is_github_connector_tool(&tool.code) {
@@ -964,7 +1112,6 @@ impl AgentService {
         } else {
             RunStatus::Failed
         };
-        ensure_agent_run_transition(&run_status_code(RunStatus::Running), terminal_status)?;
         let step_status = run_status_code(terminal_status);
         self.capability_repo
             .create_tool_call_audit(&ToolAuditSaveRecord {
@@ -1013,30 +1160,54 @@ impl AgentService {
                 now,
             })
             .await?;
+        Ok(RecordedToolExecution {
+            audit_id,
+            step_id,
+            execution,
+            terminal_status,
+        })
+    }
+
+    async fn execute_tool_and_finish(
+        &self,
+        user_id: i64,
+        run_id: i64,
+        tool: &ToolLookupRecord,
+        input: Value,
+    ) -> Result<(), AppError> {
+        let recorded = self
+            .execute_and_record_tool_call(user_id, run_id, tool, input)
+            .await?;
+        ensure_agent_run_transition(
+            &run_status_code(RunStatus::Running),
+            recorded.terminal_status,
+        )?;
+        let step_status = run_status_code(recorded.terminal_status);
+        let final_output = recorded.execution.final_output.clone();
         self.append_event(
             user_id,
             run_id,
-            Some(step_id),
+            Some(recorded.step_id),
             RunEventKind::ToolCalled,
             run_status_code(RunStatus::Running),
-            json!({ "toolCode": tool.code, "auditId": audit_id }),
+            json!({ "toolCode": tool.code, "auditId": recorded.audit_id }),
         )
         .await?;
         self.append_event(
             user_id,
             run_id,
-            Some(step_id),
+            Some(recorded.step_id),
             RunEventKind::Observation,
             run_status_code(RunStatus::Running),
-            execution.response_payload.clone(),
+            recorded.execution.response_payload.clone(),
         )
         .await?;
         self.update_status(AgentStatusUpdate {
             user_id,
             run_id,
             status: step_status.clone(),
-            output_payload: json!({ "answer": execution.final_output, "auditId": audit_id }),
-            final_output: Some(&execution.final_output),
+            output_payload: json!({ "answer": final_output.clone(), "auditId": recorded.audit_id }),
+            final_output: Some(&final_output),
             pause_reason: None,
             finished: true,
         })
@@ -1044,7 +1215,7 @@ impl AgentService {
         self.append_event(
             user_id,
             run_id,
-            Some(step_id),
+            Some(recorded.step_id),
             RunEventKind::StatusChanged,
             step_status.clone(),
             json!({ "status": step_status, "toolCode": tool.code }),
@@ -1053,16 +1224,16 @@ impl AgentService {
         self.append_event(
             user_id,
             run_id,
-            Some(step_id),
+            Some(recorded.step_id),
             RunEventKind::FinalOutput,
             step_status,
-            json!({ "answer": execution.final_output }),
+            json!({ "answer": final_output }),
         )
         .await?;
         self.refresh_trace_snapshot(
             user_id,
             run_id,
-            json!({ "toolCode": tool.code, "auditId": audit_id }),
+            json!({ "toolCode": tool.code, "auditId": recorded.audit_id }),
         )
         .await
     }
@@ -2223,6 +2394,13 @@ fn build_model_loop_system_prompt(tool_codes: &[String]) -> String {
     )
 }
 
+fn build_observation_follow_up_prompt(tool_code: &str, observation: &Value) -> String {
+    format!(
+        "Tool `{tool_code}` returned this observation:\n{}\nUse it to produce the final answer. If the observation is insufficient, say what is missing.",
+        serde_json::to_string_pretty(observation).unwrap_or_else(|_| "{}".to_owned())
+    )
+}
+
 fn build_agent_plan(
     command: &AgentRunCommand,
     memory_context: MemoryContext,
@@ -2564,6 +2742,18 @@ mod tests {
         assert!(prompt.contains("You are Novex Agent Runtime"));
         assert!(prompt.contains("rag.search"));
         assert!(prompt.contains("\"type\":\"tool_call\""));
+    }
+
+    #[test]
+    fn observation_prompt_includes_tool_result_and_final_answer_instruction() {
+        let prompt = build_observation_follow_up_prompt(
+            "rag.search",
+            &serde_json::json!({"hits":[{"title":"Policy"}]}),
+        );
+
+        assert!(prompt.contains("rag.search"));
+        assert!(prompt.contains("Policy"));
+        assert!(prompt.contains("final answer"));
     }
 
     #[test]
