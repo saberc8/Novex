@@ -7,10 +7,23 @@
 | Tool schema | `codex-rs/tools/src/*` | `crates/novex-tools` | direct/adapt | slice-1 implemented | ToolDefinition and model-visible tool schema are in place |
 | Tool router | `codex-rs/core/src/tools/router.rs` | `crates/novex-tools` | adapt | partial | Model output parser and backend dispatch path exist; registry-driven router is next |
 | Parallel tools | `codex-rs/core/src/tools/parallel.rs` | `crates/novex-tools` | adapt | planned | Cancellation and non-parallel lock semantics |
-| Rollout trace | `codex-rs/rollout*` | `crates/novex-trace` | adapt | planned | Replay/eval foundation; see `2026-06-16-agent-rollout-eval.md` |
-| MCP | `codex-rs/codex-mcp`, `rmcp-client` | `crates/novex-mcp` | adapt | planned | MCP server/tool discovery; see `2026-06-16-agent-mcp-gateway.md` |
+| Rollout trace | `codex-rs/rollout*` | `crates/novex-trace` | adapt | slice-1 implemented | TraceBundle, replay API, `ai_rollout`, eval case capture, and `trace_replay` eval gate are in place; inference/MCP/compaction spans remain next |
+| MCP | `codex-rs/codex-mcp`, `rmcp-client` | `crates/novex-mcp` | adapt | slice-1 implemented | Tenant-governed server registration, deterministic discovery, model-visible tool mapping, audit path, and mock/dry-run invocation are in place; live streaming MCP client remains next |
 | Guardian | `codex-rs/core/src/guardian` | `crates/novex-approval-review` | adapt | deferred | Automatic approval review |
 | Exec policy | `codex-rs/execpolicy`, `sandboxing`, `exec-server` | `services/sandbox-runner` | service adapt | deferred | No backend shell execution |
+
+## Current Acceptance Evidence
+
+Updated on 2026-06-16 from branch `feat/enterprise-agent-foundation`.
+
+| Slice | Current acceptance evidence | Verification command |
+| --- | --- | --- |
+| Agent protocol | `crates/novex-agent-protocol` serializes turn items, tool calls, observations, and terminal outcomes | `cargo test -p novex-agent-protocol --offline` |
+| Runtime loop POC | `runtimeMode=model_loop` uses configured `runtime.llm.code_agent`, parses model output, executes one tool, records observation, and asks the model for final answer | `cargo test -p backend-rust model_loop_prompt_mentions_available_tool_schema observation_prompt_includes_tool_result_and_final_answer_instruction --offline` |
+| Codex POC UI | `apps/codex-app-poc` sends real Agent run requests with `runtimeMode=model_loop` | `cd apps/codex-app-poc && pnpm test -- src/api/agent.test.ts` |
+| MCP gateway | MCP tools can be registered, discovered, converted to `ai_tool`, audited, and routed through Agent observations | `cargo test -p backend-rust mcp_ agent_runtime_routes_mcp_tools_through_audited_observation_path --offline` |
+| Rollout/trace/eval | Agent events convert to trace bundles, replay via API, persist `ai_rollout`, capture eval candidates, and score `trace_replay` eval runs | `cargo test -p backend-rust agent_run_events_convert_to_trace_bundle eval_case_capture eval_runtime_normalizes_trace_replay_run_mode --offline` |
+| Full Rust workspace | Rust crates and backend remain coherent after the agent foundation slices | `cargo fmt -- --check && cargo test --workspace --offline` |
 
 ## Follow-up Implementation Plans
 

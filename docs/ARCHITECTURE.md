@@ -84,6 +84,7 @@ Novex/
     novex-trigger/         Rust，webhook、schedule、plugin event、外部事件路由
     novex-memory/          Rust，session/user/org/project memory
     novex-eval/            Rust，eval runner、指标、报告
+    novex-trace/           Rust，agent trace、rollout bundle、replay summary、eval capture boundary
   services/
     parser-worker/         Python，MinerU、LibreOffice、OCR、格式转换
     model-runtime/         可选，Python 或独立进程，内网开源模型和本地 embedding/rerank adapter
@@ -383,6 +384,11 @@ crates/novex-eval/
   dataset/         eval dataset、case、版本
   runner/          RAG、intent、tool、ReAct 评测 runner
   metrics/         recall、faithfulness、tool accuracy、cost、latency
+
+crates/novex-trace/
+  bundle/          TraceBundle、TraceEvent、ReplaySummary
+  rollout/         event bundle、summary payload、run replay boundary
+  adapters/        Run Graph events -> trace events -> eval candidates
 
 services/parser-worker/    Python
   MinerU                   PDF、扫描件、复杂版面解析
@@ -1328,7 +1334,7 @@ POC 不做：
 交付：
 
 - Rust workspace 和 `crates/` 目录骨架，核心 AI 能力默认 Rust。
-- `novex-ai-core`、`novex-model`、`novex-rag`、`novex-agent`、`novex-tools`、`novex-connectors`、`novex-mcp`、`novex-plugin`、`novex-trigger`、`novex-memory`、`novex-eval` crate 骨架。
+- `novex-ai-core`、`novex-model`、`novex-rag`、`novex-agent`、`novex-tools`、`novex-connectors`、`novex-mcp`、`novex-plugin`、`novex-trigger`、`novex-memory`、`novex-eval`、`novex-trace` crate 骨架。
 - `services/parser-worker/` Python 目录骨架，限定为解析和 ML sidecar。
 - `services/model-runtime/` 可选目录骨架，限定为内网模型和 ML adapter。
 - `apps/` Next.js + TypeScript 目录骨架。
