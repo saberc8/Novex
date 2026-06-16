@@ -17,6 +17,8 @@ use crate::{
 pub const MODEL_LIST_PERMISSION: &str = "ai:model:list";
 pub const MODEL_HEALTH_PERMISSION: &str = "ai:model:healthCheck";
 pub const MODEL_CHAT_PERMISSION: &str = "ai:model:chat";
+pub const MODEL_CIRCUIT_BREAKER_LIST_PERMISSION: &str = "ai:model:circuitBreaker:list";
+pub const MODEL_CIRCUIT_BREAKER_CLEAR_PERMISSION: &str = "ai:model:circuitBreaker:clear";
 
 pub fn routes() -> Router<AppState> {
     Router::new()
@@ -154,6 +156,16 @@ mod tests {
         assert!(seed.contains(MODEL_LIST_PERMISSION));
         assert!(seed.contains(MODEL_HEALTH_PERMISSION));
         assert!(chat_seed.contains(MODEL_CHAT_PERMISSION));
+    }
+
+    #[test]
+    fn model_circuit_breaker_permission_seed_contains_controls() {
+        let seed = include_str!(
+            "../../../../migrations/202606170002_seed_ai_model_circuit_breaker_permissions.sql"
+        );
+
+        assert!(seed.contains(MODEL_CIRCUIT_BREAKER_LIST_PERMISSION));
+        assert!(seed.contains(MODEL_CIRCUIT_BREAKER_CLEAR_PERMISSION));
     }
 
     #[test]
