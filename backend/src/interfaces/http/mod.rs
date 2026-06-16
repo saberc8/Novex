@@ -66,10 +66,27 @@ pub fn build_router_with_scheduler_http_safety(
     jwt: JwtService,
     scheduler_http_safety: HttpSafetyConfig,
 ) -> Result<Router> {
+    build_router_with_agent_runtime_and_scheduler_http_safety(
+        db,
+        cors_allowed_origins,
+        jwt,
+        AgentRuntimeRegistry::default(),
+        scheduler_http_safety,
+    )
+}
+
+pub fn build_router_with_agent_runtime_and_scheduler_http_safety(
+    db: PgPool,
+    cors_allowed_origins: &[String],
+    jwt: JwtService,
+    agent_runtime: AgentRuntimeRegistry,
+    scheduler_http_safety: HttpSafetyConfig,
+) -> Result<Router> {
     build_router_inner(
         db,
         cors_allowed_origins,
         jwt,
+        agent_runtime,
         scheduler_http_safety,
         parser_callback_token_from_env(),
         parser_callback_user_id_from_env(),
@@ -87,6 +104,7 @@ pub fn build_router_with_parser_callback_token(
         db,
         cors_allowed_origins,
         jwt,
+        AgentRuntimeRegistry::default(),
         HttpSafetyConfig::default(),
         parser_callback_token,
         parser_callback_user_id.max(1),
@@ -97,6 +115,7 @@ fn build_router_inner(
     db: PgPool,
     cors_allowed_origins: &[String],
     jwt: JwtService,
+    agent_runtime: AgentRuntimeRegistry,
     scheduler_http_safety: HttpSafetyConfig,
     parser_callback_token: Option<String>,
     parser_callback_user_id: i64,
@@ -106,7 +125,7 @@ fn build_router_inner(
         db,
         jwt,
         captcha: captcha::CaptchaStore::default(),
-        agent_runtime: AgentRuntimeRegistry::default(),
+        agent_runtime,
         scheduler_http_safety,
         parser_callback_token,
         parser_callback_user_id,

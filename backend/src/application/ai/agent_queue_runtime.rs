@@ -1,0 +1,214 @@
+use std::time::Duration;
+
+use chrono::Utc;
+use sqlx::PgPool;
+
+use crate::{
+    application::ai::agent_service::{AgentRuntimeRegistry, AgentService},
+    infrastructure::persistence::ai_agent_repository::AiAgentRepository,
+    shared::{config::AppConfig, error::AppError},
+};
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentQueueRuntimeConfig {
+    pub enabled: bool,
+    pub tick_seconds: u64,
+    pub batch_size: i64,
+    pub lease_seconds: u64,
+    pub max_attempts: i32,
+    pub worker_id: String,
+}
+
+pub fn agent_queue_from_config(config: &AppConfig) -> AgentQueueRuntimeConfig {
+    AgentQueueRuntimeConfig {
+        enabled: config.agent_queue_enabled,
+        tick_seconds: config.agent_queue_tick_seconds,
+        batch_size: config.agent_queue_batch_size,
+        lease_seconds: config.agent_queue_lease_seconds,
+        max_attempts: config.agent_queue_max_attempts,
+        worker_id: config.agent_queue_worker_id.clone(),
+    }
+}
+
+pub fn spawn_agent_queue_worker(
+    db: PgPool,
+    runtime: AgentQueueRuntimeConfig,
+    agent_runtime: AgentRuntimeRegistry,
+) {
+    if !runtime.enabled {
+        return;
+    }
+
+    tokio::spawn(async move {
+        if let Err(error) = run_agent_queue_worker(db, runtime, agent_runtime).await {
+            tracing::error!(error = ?error, "agent queue worker stopped");
+        }
+    });
+}
+
+pub async fn run_agent_queue_worker(
+    db: PgPool,
+    runtime: AgentQueueRuntimeConfig,
+    agent_runtime: AgentRuntimeRegistry,
+) -> Result<(), AppError> {
+    let mut interval = tokio::time::interval(Duration::from_secs(runtime.tick_seconds.max(1)));
+    loop {
+        interval.tick().await;
+        match run_agent_queue_tick(db.clone(), runtime.clone(), agent_runtime.clone()).await {
+            Ok(count) if count > 0 => {
+                tracing::debug!(count, "executed queued agent runs");
+            }
+            Ok(_) => {}
+            Err(error) => tracing::error!(error = ?error, "execute queued agent runs failed"),
+        }
+    }
+}
+
+pub async fn run_agent_queue_tick(
+    db: PgPool,
+    runtime: AgentQueueRuntimeConfig,
+    agent_runtime: AgentRuntimeRegistry,
+) -> Result<usize, AppError> {
+    if !runtime.enabled {
+        return Ok(0);
+    }
+
+    let repo = AiAgentRepository::new(db.clone());
+    let now = Utc::now().naive_utc();
+    let lease_until = now + chrono::Duration::seconds(runtime.lease_seconds.max(1) as i64);
+    let claims = repo
+        .claim_agent_run_queue(
+            None,
+            runtime.batch_size,
+            &runtime.worker_id,
+            lease_until,
+            0,
+            now,
+        )
+        .await?;
+    let mut executed = 0usize;
+    for claim in claims {
+        let service = AgentService::for_tenant_with_runtime(
+            db.clone(),
+            claim.tenant_id,
+            agent_runtime.clone(),
+        );
+        match service
+            .execute_queued_run(0, claim.run_id, claim.payload.clone())
+            .await
+        {
+            Ok(run) if run.status == "cancelled" => {
+                repo.mark_agent_run_queue_cancelled(claim.id, 0, Utc::now().naive_utc())
+                    .await?;
+                executed += 1;
+            }
+            Ok(_) => {
+                repo.mark_agent_run_queue_succeeded(claim.id, 0, Utc::now().naive_utc())
+                    .await?;
+                executed += 1;
+            }
+            Err(error) if claim.attempt_count < claim.max_attempts => {
+                repo.mark_agent_run_queue_retrying(
+                    claim.id,
+                    &error.to_string(),
+                    0,
+                    Utc::now().naive_utc(),
+                )
+                .await?;
+            }
+            Err(error) => {
+                repo.mark_agent_run_queue_failed(
+                    claim.id,
+                    &error.to_string(),
+                    0,
+                    Utc::now().naive_utc(),
+                )
+                .await?;
+                executed += 1;
+            }
+        }
+    }
+    Ok(executed)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn agent_queue_runtime_defines_worker_claim_and_completion_contract() {
+        let source = include_str!("agent_queue_runtime.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+
+        assert!(source.contains("AgentQueueRuntimeConfig"));
+        assert!(source.contains("agent_queue_from_config"));
+        assert!(source.contains("spawn_agent_queue_worker"));
+        assert!(source.contains("run_agent_queue_worker"));
+        assert!(source.contains("run_agent_queue_tick"));
+        assert!(source.contains("claim_agent_run_queue"));
+        assert!(source.contains("execute_queued_run"));
+        assert!(source.contains("mark_agent_run_queue_succeeded"));
+        assert!(source.contains("mark_agent_run_queue_retrying"));
+        assert!(source.contains("mark_agent_run_queue_failed"));
+        assert!(source.contains("mark_agent_run_queue_cancelled"));
+    }
+
+    #[test]
+    fn agent_queue_runtime_config_uses_agent_specific_defaults() {
+        let config = AppConfig {
+            http_port: 4398,
+            database_url: "postgres://postgres:postgres@127.0.0.1:15432/novex".to_owned(),
+            database_max_connections: 5,
+            db_auto_migrate: false,
+            cors_allowed_origins: vec!["http://localhost:4399".to_owned()],
+            auth_jwt_secret: "local-dev-only-change-this-secret-32chars-min".to_owned(),
+            auth_jwt_ttl_hours: 24,
+            scheduler_embedded: false,
+            scheduler_worker_enabled: true,
+            scheduler_tick_seconds: 5,
+            scheduler_batch_size: 50,
+            scheduler_worker_id: "scheduler-test".to_owned(),
+            scheduler_http_allowlist_mode: "default".to_owned(),
+            scheduler_http_allowlist: Vec::new(),
+            rabbitmq_url: "amqp://guest:guest@127.0.0.1:5673/%2f".to_owned(),
+            rabbitmq_exchange: "avalon.scheduler".to_owned(),
+            rabbitmq_execute_queue: "avalon.scheduler.execute".to_owned(),
+            rabbitmq_retry_queue: "avalon.scheduler.retry".to_owned(),
+            rabbitmq_dead_queue: "avalon.scheduler.dead".to_owned(),
+            rabbitmq_execute_routing_key: "scheduler.execute".to_owned(),
+            rabbitmq_retry_routing_key: "scheduler.retry".to_owned(),
+            rabbitmq_dead_routing_key: "scheduler.dead".to_owned(),
+            rabbitmq_retry_ttl_ms: 30_000,
+            parser_queue_enabled: false,
+            parser_queue_publisher_enabled: false,
+            parser_queue_tick_seconds: 5,
+            parser_queue_batch_size: 50,
+            agent_queue_enabled: true,
+            agent_queue_tick_seconds: 2,
+            agent_queue_batch_size: 10,
+            agent_queue_lease_seconds: 120,
+            agent_queue_max_attempts: 3,
+            agent_queue_worker_id: "agent-test".to_owned(),
+            redis_url: "redis://127.0.0.1:16379/0".to_owned(),
+            rabbitmq_parser_exchange: "novex.parser".to_owned(),
+            rabbitmq_parser_execute_queue: "novex.parser.execute".to_owned(),
+            rabbitmq_parser_retry_queue: "novex.parser.retry".to_owned(),
+            rabbitmq_parser_dead_queue: "novex.parser.dead".to_owned(),
+            rabbitmq_parser_execute_routing_key: "parser.execute".to_owned(),
+            rabbitmq_parser_retry_routing_key: "parser.retry".to_owned(),
+            rabbitmq_parser_dead_routing_key: "parser.dead".to_owned(),
+            rabbitmq_parser_retry_ttl_ms: 30_000,
+        };
+
+        let runtime = agent_queue_from_config(&config);
+
+        assert!(runtime.enabled);
+        assert_eq!(runtime.tick_seconds, 2);
+        assert_eq!(runtime.batch_size, 10);
+        assert_eq!(runtime.lease_seconds, 120);
+        assert_eq!(runtime.max_attempts, 3);
+        assert_eq!(runtime.worker_id, "agent-test");
+    }
+}

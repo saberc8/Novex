@@ -1,3 +1,4 @@
+pub mod agent_queue_runtime;
 pub mod agent_service;
 pub mod capability_service;
 pub mod chat_flow_service;

@@ -10,6 +10,7 @@ export interface TaskBudget {
 export interface AgentRunCommand {
   input: string;
   runtimeMode?: "model_loop";
+  executionMode?: "inline" | "queued";
   autoApprove?: boolean;
   budget?: TaskBudget;
 }

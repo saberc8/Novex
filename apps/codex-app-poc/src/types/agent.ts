@@ -8,6 +8,7 @@ export type TaskBudget = {
 export type AgentRunCommand = {
   input: string;
   runtimeMode?: "model_loop";
+  executionMode?: "inline" | "queued";
   autoApprove?: boolean;
   budget?: TaskBudget;
 };
