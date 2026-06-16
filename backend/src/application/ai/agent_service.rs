@@ -53,9 +53,9 @@ use crate::{
     infrastructure::persistence::{
         ai_agent_repository::{
             AgentRolloutSaveRecord, AgentRunFilter, AgentRunRecord, AgentRunSaveRecord,
-            AgentRunStatusUpdate, AgentTraceSaveRecord, AiAgentRepository, RunEventFilter,
-            RunEventRecord, RunEventSaveRecord, RunPauseSaveRecord, RunSaveRecord, RunStatusUpdate,
-            RunStepSaveRecord,
+            AgentRunStatusUpdate, AgentTraceSaveRecord, AiAgentRepository, RunEventCursorFilter,
+            RunEventFilter, RunEventRecord, RunEventSaveRecord, RunPauseSaveRecord, RunSaveRecord,
+            RunStatusUpdate, RunStepSaveRecord,
         },
         ai_capability_repository::{AiCapabilityRepository, ToolAuditSaveRecord, ToolLookupRecord},
         ai_capability_repository::{ConnectorCredentialLookupRecord, McpToolExecutionRecord},
@@ -72,6 +72,13 @@ use crate::{
 const DEFAULT_TENANT_ID: i64 = 1;
 const DEFAULT_AGENT_PAGE_SIZE: u64 = 20;
 const DEFAULT_EVENT_PAGE_SIZE: u64 = 100;
+const DEFAULT_EVENT_STREAM_BATCH_SIZE: u64 = 50;
+const MAX_EVENT_STREAM_BATCH_SIZE: u64 = 200;
+const DEFAULT_EVENT_STREAM_POLL_MS: u64 = 1000;
+const MIN_EVENT_STREAM_POLL_MS: u64 = 250;
+const MAX_EVENT_STREAM_POLL_MS: u64 = 5000;
+const DEFAULT_EVENT_STREAM_MAX_IDLE_MS: u64 = 30_000;
+const MAX_EVENT_STREAM_MAX_IDLE_MS: u64 = 300_000;
 const MAX_TRACE_REPLAY_EVENTS: i64 = 1000;
 const FEISHU_TOOL_CODE: &str = "feishu.message.send";
 const MEDIA_IMAGE_TOOL_CODE: &str = "media.image.generate";
@@ -457,6 +464,55 @@ pub struct AgentRunEventQuery {
     pub page: u64,
     #[serde(default = "default_event_size")]
     pub size: u64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentRunEventStreamQuery {
+    #[serde(default)]
+    pub after_sequence_no: i64,
+    pub batch_size: Option<u64>,
+    pub poll_ms: Option<u64>,
+    pub max_idle_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentRunEventStreamSettings {
+    pub after_sequence_no: i64,
+    pub batch_size: i64,
+    pub poll_ms: u64,
+    pub max_idle_ms: u64,
+}
+
+impl Default for AgentRunEventStreamQuery {
+    fn default() -> Self {
+        Self {
+            after_sequence_no: 0,
+            batch_size: None,
+            poll_ms: None,
+            max_idle_ms: None,
+        }
+    }
+}
+
+impl AgentRunEventStreamQuery {
+    pub fn settings(&self) -> AgentRunEventStreamSettings {
+        AgentRunEventStreamSettings {
+            after_sequence_no: self.after_sequence_no.max(0),
+            batch_size: self
+                .batch_size
+                .unwrap_or(DEFAULT_EVENT_STREAM_BATCH_SIZE)
+                .clamp(1, MAX_EVENT_STREAM_BATCH_SIZE) as i64,
+            poll_ms: self
+                .poll_ms
+                .unwrap_or(DEFAULT_EVENT_STREAM_POLL_MS)
+                .clamp(MIN_EVENT_STREAM_POLL_MS, MAX_EVENT_STREAM_POLL_MS),
+            max_idle_ms: self
+                .max_idle_ms
+                .unwrap_or(DEFAULT_EVENT_STREAM_MAX_IDLE_MS)
+                .clamp(1, MAX_EVENT_STREAM_MAX_IDLE_MS),
+        }
+    }
 }
 
 impl Default for AgentRunEventQuery {
@@ -1684,6 +1740,34 @@ impl AgentService {
             .map(AgentRunEventResp::from)
             .collect();
         Ok(PageResult::new(list, total))
+    }
+
+    pub async fn list_events_after_sequence(
+        &self,
+        run_id: i64,
+        after_sequence_no: i64,
+        limit: i64,
+    ) -> Result<Vec<AgentRunEventResp>, AppError> {
+        let filter = RunEventCursorFilter {
+            tenant_id: self.tenant_id,
+            run_id,
+            after_sequence_no: after_sequence_no.max(0),
+            limit: limit.clamp(1, MAX_EVENT_STREAM_BATCH_SIZE as i64),
+        };
+        Ok(self
+            .repo
+            .list_events_after_sequence(&filter)
+            .await?
+            .into_iter()
+            .map(AgentRunEventResp::from)
+            .collect())
+    }
+
+    pub async fn is_run_terminal(&self, run_id: i64) -> Result<bool, AppError> {
+        let Some(record) = self.repo.find_run(self.tenant_id, run_id).await? else {
+            return Err(AppError::NotFound);
+        };
+        Ok(parse_run_status_code(&record.status).is_some_and(|status| status.is_terminal()))
     }
 
     pub async fn get_run_trace(&self, run_id: i64) -> Result<AgentTraceReplayResp, AppError> {
@@ -6138,6 +6222,35 @@ mod tests {
         assert!(normalized_batch_branch.contains("guardian_auto_approved_calls.insert"));
         assert!(batch_branch.contains("guardian_review_override"));
         assert!(source.contains("guardian_review_override: Option<Value>"));
+    }
+
+    #[test]
+    fn agent_event_stream_query_clamps_cursor_batch_and_timeouts() {
+        let settings = AgentRunEventStreamQuery {
+            after_sequence_no: -10,
+            batch_size: Some(999),
+            poll_ms: Some(1),
+            max_idle_ms: Some(999_999),
+        }
+        .settings();
+
+        assert_eq!(settings.after_sequence_no, 0);
+        assert_eq!(settings.batch_size, 200);
+        assert_eq!(settings.poll_ms, 250);
+        assert_eq!(settings.max_idle_ms, 300_000);
+    }
+
+    #[test]
+    fn agent_event_stream_service_exposes_cursor_and_terminal_helpers() {
+        let source = include_str!("agent_service.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+
+        assert!(source.contains("list_events_after_sequence"));
+        assert!(source.contains("RunEventCursorFilter"));
+        assert!(source.contains("is_run_terminal"));
+        assert!(source.contains(".is_terminal()"));
     }
 
     #[test]

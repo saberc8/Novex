@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   cancelAgentRun,
   createAgentRun,
+  fetchAgentRunEventStream,
   listAgentRunEvents,
   listAgentRuns,
   resumeAgentRun
@@ -111,6 +112,29 @@ describe("agent workspace api", () => {
     expect(fetchMock.mock.calls[3]?.[0]).toBe("http://localhost:4398/ai/agents/runs/42/cancel");
     expect(fetchMock.mock.calls[3]?.[1]).toMatchObject({
       method: "POST"
+    });
+  });
+
+  it("opens the agent run event stream with bearer auth and cursor query", async () => {
+    window.localStorage.setItem("novex_token", "token-1");
+    fetchMock.mockResolvedValueOnce(new Response("", { status: 200 }));
+
+    await fetchAgentRunEventStream(42, {
+      afterSequenceNo: 9,
+      batchSize: 25,
+      pollMs: 500,
+      maxIdleMs: 30000
+    });
+
+    expect(fetchMock.mock.calls[0]?.[0]).toBe(
+      "http://localhost:4398/ai/agents/runs/42/events/stream?afterSequenceNo=9&batchSize=25&pollMs=500&maxIdleMs=30000"
+    );
+    expect(fetchMock.mock.calls[0]?.[1]).toMatchObject({
+      method: "GET",
+      headers: expect.objectContaining({
+        Accept: "text/event-stream",
+        Authorization: "Bearer token-1"
+      })
     });
   });
 });

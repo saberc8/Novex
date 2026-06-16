@@ -150,6 +150,14 @@ pub struct RunEventFilter {
     pub offset: i64,
 }
 
+#[derive(Debug, Clone)]
+pub struct RunEventCursorFilter {
+    pub tenant_id: i64,
+    pub run_id: i64,
+    pub after_sequence_no: i64,
+    pub limit: i64,
+}
+
 #[derive(Debug, Clone, FromRow)]
 pub struct AgentRunRecord {
     pub run_id: i64,
@@ -619,6 +627,27 @@ LIMIT $3 OFFSET $4;
         .await?)
     }
 
+    pub async fn list_events_after_sequence(
+        &self,
+        filter: &RunEventCursorFilter,
+    ) -> Result<Vec<RunEventRecord>, AppError> {
+        Ok(sqlx::query_as::<_, RunEventRecord>(
+            r#"
+SELECT id, run_id, step_id, event_type, sequence_no, status, payload, create_time
+FROM ai_run_event
+WHERE tenant_id = $1 AND run_id = $2 AND sequence_no > $3
+ORDER BY sequence_no ASC
+LIMIT $4;
+"#,
+        )
+        .bind(filter.tenant_id)
+        .bind(filter.run_id)
+        .bind(filter.after_sequence_no)
+        .bind(filter.limit)
+        .fetch_all(&self.db)
+        .await?)
+    }
+
     pub async fn find_rollout_by_run_id(
         &self,
         tenant_id: i64,
@@ -719,4 +748,21 @@ fn agent_run_select_sql_with_where(where_clause: &'static str) -> String {
 
 fn non_empty(value: Option<&str>) -> Option<&str> {
     value.map(str::trim).filter(|value| !value.is_empty())
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn agent_event_stream_repository_uses_sequence_cursor() {
+        let source = include_str!("ai_agent_repository.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+
+        assert!(source.contains("RunEventCursorFilter"));
+        assert!(source.contains("list_events_after_sequence"));
+        assert!(source.contains("sequence_no > $3"));
+        assert!(source.contains("ORDER BY sequence_no ASC"));
+        assert!(source.contains("LIMIT $4"));
+    }
 }

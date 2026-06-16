@@ -25,6 +25,13 @@ export interface AgentRunQuery extends PageQuery {
 
 export type AgentRunEventQuery = PageQuery;
 
+export interface AgentRunEventStreamQuery {
+  afterSequenceNo?: number;
+  batchSize?: number;
+  pollMs?: number;
+  maxIdleMs?: number;
+}
+
 export interface AgentRunResp {
   runId: number;
   traceId: string;

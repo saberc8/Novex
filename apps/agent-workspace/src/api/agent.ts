@@ -1,9 +1,11 @@
-import { apiRequest } from "@/lib/api";
+import { apiRequest, apiUrl } from "@/lib/api";
+import { getAuthToken } from "@/lib/auth";
 import type { PageResult } from "@/types/api";
 import type {
   AgentRunCommand,
   AgentRunEventQuery,
   AgentRunEventResp,
+  AgentRunEventStreamQuery,
   AgentRunQuery,
   AgentRunResp,
   AgentRunResumeCommand
@@ -31,6 +33,24 @@ export function getAgentRun(runId: number) {
 export function listAgentRunEvents(runId: number, query: AgentRunEventQuery = {}) {
   return apiRequest<PageResult<AgentRunEventResp>>(`${AGENT_RUN_URL}/${runId}/events`, {
     query
+  });
+}
+
+export function fetchAgentRunEventStream(
+  runId: number,
+  query: AgentRunEventStreamQuery = {}
+) {
+  const headers: Record<string, string> = {
+    Accept: "text/event-stream"
+  };
+  const token = getAuthToken();
+  if (token) {
+    headers.Authorization = `Bearer ${token}`;
+  }
+
+  return fetch(apiUrl(`${AGENT_RUN_URL}/${runId}/events/stream`, query), {
+    method: "GET",
+    headers
   });
 }
 
