@@ -390,6 +390,8 @@ dependencies = [
  "lapin",
  "mime_guess",
  "novex-agent",
+ "novex-agent-protocol",
+ "novex-agent-runtime",
  "novex-ai-core",
  "novex-connectors",
  "novex-eval",

@@ -314,13 +314,18 @@ impl AgentService {
 
         self.create_run_records(user_id, run_id, &trace_id, &command, &plan, now)
             .await?;
+        let input_item = novex_agent_protocol::AgentTurnItem::user_message(command.input.as_str());
+        let mut input_payload = agent_turn_item_event_payload(&input_item);
+        if let Some(object) = input_payload.as_object_mut() {
+            object.insert("input".to_owned(), json!(&command.input));
+        }
         self.append_event(
             user_id,
             run_id,
             None,
             RunEventKind::InputReceived,
             run_status_code(RunStatus::Running),
-            json!({ "input": command.input }),
+            input_payload,
         )
         .await?;
         self.append_event(
@@ -2143,6 +2148,13 @@ fn agent_context_retrieval_payload(input: &str, memory_context: &MemoryContext) 
     })
 }
 
+fn agent_turn_item_event_payload(item: &novex_agent_protocol::AgentTurnItem) -> Value {
+    json!({
+        "eventSource": "novex-agent-runtime",
+        "item": serde_json::to_value(item).unwrap_or(Value::Null),
+    })
+}
+
 impl From<AgentRunRecord> for AgentRunResp {
     fn from(record: AgentRunRecord) -> Self {
         Self {
@@ -2333,6 +2345,20 @@ mod tests {
     }
 
     #[test]
+    fn agent_runtime_event_payload_preserves_turn_item_shape() {
+        let item = novex_agent_protocol::AgentTurnItem::tool_call(
+            "call-1",
+            "rag.search",
+            serde_json::json!({"query":"policy"}),
+        );
+        let payload = agent_turn_item_event_payload(&item);
+
+        assert_eq!(payload["item"]["type"], "tool_call");
+        assert_eq!(payload["item"]["callId"], "call-1");
+        assert_eq!(payload["eventSource"], "novex-agent-runtime");
+    }
+
+    #[test]
     fn agent_runtime_low_risk_tool_can_finish_without_approval() {
         let command = normalize_agent_run_command(AgentRunCommand {
             input: "search the training handbook".to_owned(),
@@ -2506,6 +2532,7 @@ mod tests {
 
         for needle in [
             "RunEventKind::IntentRouted",
+            "agent_turn_item_event_payload(&input_item)",
             "record_retrieval_context",
             "RunEventKind::Retrieval",
             "step_type_code(RunStepType::Retrieval)",
