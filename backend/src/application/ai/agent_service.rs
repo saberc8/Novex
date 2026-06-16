@@ -3637,10 +3637,7 @@ fn guardian_review_for_tool_policy(
     })
 }
 
-fn guardian_review_payload_for_tool_policy(
-    tool: &ToolLookupRecord,
-    auto_approved: bool,
-) -> Value {
+fn guardian_review_payload_for_tool_policy(tool: &ToolLookupRecord, auto_approved: bool) -> Value {
     serde_json::to_value(guardian_review_for_tool_policy(tool, auto_approved))
         .unwrap_or(Value::Null)
 }
@@ -4563,8 +4560,8 @@ fn default_event_size() -> u64 {
 mod tests {
     use super::*;
     use crate::application::ai::model_service::{ModelChatUsage, ModelProviderAttempt};
-    use novex_approval_review::GuardianReviewOutcome;
     use novex_ai_core::TaskBudget;
+    use novex_approval_review::GuardianReviewOutcome;
     use novex_trace::TraceEventKind;
     use sqlx::postgres::PgPoolOptions;
 

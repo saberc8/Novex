@@ -1151,10 +1151,7 @@ mod tests {
 
         assert_eq!(candidate.tags["guardianReviewOutcome"], "needs_human");
         assert_eq!(candidate.tags["guardianReviewSource"], "policy");
-        assert_eq!(
-            candidate.tags["guardianReviewRequiresHumanApproval"],
-            true
-        );
+        assert_eq!(candidate.tags["guardianReviewRequiresHumanApproval"], true);
     }
 
     #[test]
