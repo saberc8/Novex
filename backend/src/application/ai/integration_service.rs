@@ -1787,6 +1787,7 @@ mod tests {
                     completion_tokens: Some(8),
                     total_tokens: Some(17),
                 },
+                cost_cents: None,
             },
         );
 

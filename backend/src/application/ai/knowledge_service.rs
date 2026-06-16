@@ -6405,6 +6405,7 @@ mod tests {
             model: Some("deepseek-test".to_owned()),
             latency_ms: 12,
             usage: ModelChatUsage::default(),
+            cost_cents: None,
         };
 
         let answer = rag_answer_from_model_chat(chat, &hits, "llm_grounded");
