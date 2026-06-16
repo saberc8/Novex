@@ -29,8 +29,6 @@ use novex_tools::{
     ToolBatchExecutionMode, ToolBatchPlan, ToolExecutionPolicyDecision, ToolExecutionPolicyInput,
     ToolKind, ToolRiskLevel, ToolRouteError, ToolRouteErrorKind, ToolRouter,
 };
-#[cfg(test)]
-use novex_trace::TraceEventKind;
 use novex_trace::{TraceBundle, TraceEvent, TraceReplaySummary};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -3876,6 +3874,7 @@ fn default_event_size() -> u64 {
 mod tests {
     use super::*;
     use novex_ai_core::TaskBudget;
+    use novex_trace::TraceEventKind;
     use sqlx::postgres::PgPoolOptions;
 
     fn test_prepared_tool_call(
