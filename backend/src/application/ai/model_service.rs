@@ -3686,6 +3686,19 @@ mod tests {
     }
 
     #[test]
+    fn model_health_automation_migration_defines_alert_table_and_seed_job() {
+        let migration =
+            include_str!("../../../migrations/202606170004_create_ai_model_ops_alert.sql");
+
+        assert!(migration.contains("CREATE TABLE IF NOT EXISTS ai_model_ops_alert"));
+        assert!(migration.contains("uk_ai_model_ops_alert_active_key"));
+        assert!(migration.contains("WHERE resolved_at IS NULL"));
+        assert!(migration.contains("INSERT INTO sys_job"));
+        assert!(migration.contains("'ai.model.health_check'"));
+        assert!(migration.contains("'*/5 * * * * *'"));
+    }
+
+    #[test]
     fn multi_hop_fallback_allows_bounded_new_routes() {
         let mut visited = std::collections::HashSet::from(["runtime.llm".to_owned()]);
 
