@@ -17,9 +17,10 @@ use novex_memory::{
 };
 use novex_model::ModelRoutePurpose;
 use novex_tools::{
-    evaluate_tool_execution_policy, parse_media_image_generation_response, ApprovalPolicy,
-    MediaImageGenerationRequest, ToolExecutionPolicyDecision, ToolExecutionPolicyInput, ToolKind,
-    ToolRiskLevel,
+    agent_model_loop_tool_definitions, evaluate_tool_execution_policy,
+    parse_media_image_generation_response, ApprovalPolicy, MediaImageGenerationRequest,
+    ToolExecutionPolicyDecision, ToolExecutionPolicyInput, ToolKind, ToolRiskLevel, ToolRouteError,
+    ToolRouteErrorKind, ToolRouter,
 };
 use novex_trace::{TraceBundle, TraceEvent, TraceReplaySummary};
 use serde::{Deserialize, Serialize};
@@ -463,10 +464,12 @@ impl AgentService {
         )
         .await?;
 
+        let tool_router = build_model_loop_tool_router().map_err(tool_route_error_to_app_error)?;
+        let tool_codes = tool_router.tool_codes();
         let mut messages = vec![
             ModelChatMessage {
                 role: "system".to_owned(),
-                content: build_model_loop_system_prompt(&model_loop_tool_codes()),
+                content: build_model_loop_system_prompt(&tool_codes),
             },
             ModelChatMessage {
                 role: "user".to_owned(),
@@ -570,7 +573,68 @@ impl AgentService {
                         return self.get_run(run_id).await;
                     }
 
+                    let routed_call = match tool_router.route_tool_call(
+                        &call_id,
+                        &tool_code,
+                        arguments.clone(),
+                    ) {
+                        Ok(routed_call) => routed_call,
+                        Err(err) => {
+                            let stop_reason = tool_route_stop_reason(err.kind);
+                            let final_output = tool_route_failure_message(&err);
+                            let final_payload =
+                                agent_turn_item_event_payload(&AgentTurnItem::FinalAnswer {
+                                    content: final_output.clone(),
+                                });
+                            self.append_event(
+                                user_id,
+                                run_id,
+                                None,
+                                RunEventKind::ActionSelected,
+                                run_status_code(RunStatus::Failed),
+                                json!({
+                                    "toolCode": tool_code,
+                                    "arguments": arguments,
+                                    "runtimeMode": "model_loop",
+                                    "stopReason": stop_reason,
+                                    "toolRouteError": err
+                                }),
+                            )
+                            .await?;
+                            self.finish_model_loop_run(
+                                user_id,
+                                run_id,
+                                None,
+                                RunStatus::Failed,
+                                &final_output,
+                                json!({
+                                    "answer": final_output.clone(),
+                                    "runtimeMode": "model_loop",
+                                    "stopReason": stop_reason
+                                }),
+                                final_payload,
+                            )
+                            .await?;
+                            self.refresh_trace_snapshot(
+                                user_id,
+                                run_id,
+                                json!({
+                                    "runtimeMode": "model_loop",
+                                    "stopReason": stop_reason
+                                }),
+                            )
+                            .await?;
+                            return self.get_run(run_id).await;
+                        }
+                    };
+                    let tool_code = routed_call.tool.code;
+                    let arguments = routed_call.arguments;
                     runtime_state.push_item(AgentTurnItem::tool_call(
+                        call_id.clone(),
+                        tool_code.clone(),
+                        arguments.clone(),
+                    ));
+                    let action_payload = agent_turn_item_event_payload(&AgentTurnItem::tool_call(
                         call_id.clone(),
                         tool_code.clone(),
                         arguments.clone(),
@@ -581,7 +645,7 @@ impl AgentService {
                         None,
                         RunEventKind::ActionSelected,
                         run_status_code(RunStatus::Running),
-                        parsed_payload,
+                        action_payload,
                     )
                     .await?;
                     let Some(tool) = self
@@ -697,8 +761,11 @@ impl AgentService {
                                 )
                                 .await?;
                                 let summary = compaction.summary.as_str();
-                                messages =
-                                    build_compacted_model_loop_messages(&command.input, summary);
+                                messages = build_compacted_model_loop_messages(
+                                    &command.input,
+                                    summary,
+                                    &tool_codes,
+                                );
                                 continue;
                             }
                         }
@@ -2676,17 +2743,8 @@ fn normalize_agent_runtime_mode(runtime_mode: Option<String>) -> Result<Option<S
     Err(AppError::bad_request("Agent runtimeMode 不支持"))
 }
 
-fn model_loop_tool_codes() -> Vec<String> {
-    [
-        "rag.search",
-        GITHUB_REPO_SEARCH_TOOL_CODE,
-        GITHUB_REPO_READ_TOOL_CODE,
-        MEDIA_IMAGE_TOOL_CODE,
-        FEISHU_TOOL_CODE,
-    ]
-    .into_iter()
-    .map(ToOwned::to_owned)
-    .collect()
+fn build_model_loop_tool_router() -> Result<ToolRouter, ToolRouteError> {
+    ToolRouter::from_definitions(agent_model_loop_tool_definitions())
 }
 
 fn build_model_loop_system_prompt(tool_codes: &[String]) -> String {
@@ -2716,11 +2774,12 @@ fn build_observation_follow_up_prompt(tool_code: &str, observation: &Value) -> S
 fn build_compacted_model_loop_messages(
     original_input: &str,
     summary: &str,
+    tool_codes: &[String],
 ) -> Vec<ModelChatMessage> {
     vec![
         ModelChatMessage {
             role: "system".to_owned(),
-            content: build_model_loop_system_prompt(&model_loop_tool_codes()),
+            content: build_model_loop_system_prompt(tool_codes),
         },
         ModelChatMessage {
             role: "user".to_owned(),
@@ -2733,6 +2792,31 @@ fn build_compacted_model_loop_messages(
             ),
         },
     ]
+}
+
+fn tool_route_error_to_app_error(err: ToolRouteError) -> AppError {
+    AppError::bad_request(format!("Agent 工具路由初始化失败: {}", err.message))
+}
+
+fn tool_route_stop_reason(kind: ToolRouteErrorKind) -> &'static str {
+    match kind {
+        ToolRouteErrorKind::UnknownTool => "unknown_tool",
+        ToolRouteErrorKind::EmptyToolCode => "invalid_tool",
+        ToolRouteErrorKind::DuplicateToolCode => "tool_router_error",
+    }
+}
+
+fn tool_route_failure_message(err: &ToolRouteError) -> String {
+    match err.kind {
+        ToolRouteErrorKind::UnknownTool => format!(
+            "Model requested unavailable tool `{}`.",
+            err.tool_code.as_deref().unwrap_or("unknown")
+        ),
+        ToolRouteErrorKind::EmptyToolCode => "Model requested an empty tool code.".to_owned(),
+        ToolRouteErrorKind::DuplicateToolCode => {
+            format!("Tool router configuration error: {}", err.message)
+        }
+    }
 }
 
 fn build_agent_plan(
@@ -3248,6 +3332,41 @@ mod tests {
     }
 
     #[test]
+    fn agent_service_model_loop_uses_novex_tool_router() {
+        let source = include_str!("agent_service.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+
+        assert!(source.contains("ToolRouter::from_definitions"));
+        assert!(source.contains("agent_model_loop_tool_definitions"));
+        assert!(source.contains("tool_router.route_tool_call"));
+    }
+
+    #[test]
+    fn model_loop_tool_router_exposes_prompt_codes() {
+        let router = build_model_loop_tool_router().unwrap();
+
+        assert!(router.tool_codes().contains(&"rag.search".to_owned()));
+        assert!(router.tool_codes().contains(&"github.repo.read".to_owned()));
+    }
+
+    #[test]
+    fn agent_service_model_loop_records_unknown_tool_stop_reason() {
+        let source = include_str!("agent_service.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+
+        assert!(source.contains("\"stopReason\": stop_reason"));
+        assert!(source.contains("\"toolRouteError\": err"));
+        assert_eq!(
+            tool_route_stop_reason(ToolRouteErrorKind::UnknownTool),
+            "unknown_tool"
+        );
+    }
+
+    #[test]
     fn agent_service_model_loop_records_context_compaction_event() {
         let source = include_str!("agent_service.rs")
             .split("#[cfg(test)]")
@@ -3288,14 +3407,17 @@ mod tests {
 
     #[test]
     fn compacted_model_loop_messages_preserve_prompt_input_and_summary() {
+        let tool_codes = build_model_loop_tool_router().unwrap().tool_codes();
         let messages = build_compacted_model_loop_messages(
             "Find refund policy",
             "Observation for call-1: refund within 7 days",
+            &tool_codes,
         );
 
         assert_eq!(messages.len(), 3);
         assert_eq!(messages[0].role, "system");
         assert!(messages[0].content.contains("Novex Agent Runtime"));
+        assert!(messages[0].content.contains("github.repo.read"));
         assert_eq!(messages[1].role, "user");
         assert_eq!(messages[1].content, "Find refund policy");
         assert_eq!(messages[2].role, "user");
