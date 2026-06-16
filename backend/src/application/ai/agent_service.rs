@@ -2,6 +2,7 @@ use std::{env, time::Duration};
 
 use chrono::{NaiveDateTime, Utc};
 use novex_agent::{plan_react_run_with_memory, AgentIntent, AgentLoopKind};
+use novex_agent_runtime::parse_model_turn_output;
 use novex_ai_core::{validate_run_transition, RunEventKind, RunStatus, RunStepType, TaskBudget};
 use novex_connectors::{
     parse_credential_scope, parse_github_code_search_response, select_connector_credential,
@@ -23,7 +24,7 @@ use serde_json::{json, Value};
 use sqlx::PgPool;
 
 use crate::{
-    application::ai::model_service::ModelRuntimeService,
+    application::ai::model_service::{ModelChatCommand, ModelChatMessage, ModelRuntimeService},
     application::system::{ensure_max_chars, format_datetime},
     infrastructure::persistence::{
         ai_agent_repository::{
@@ -129,6 +130,8 @@ impl AgentToolExecution {
 pub struct AgentRunCommand {
     #[serde(default)]
     pub input: String,
+    #[serde(default)]
+    pub runtime_mode: Option<String>,
     #[serde(default)]
     pub auto_approve: bool,
     #[serde(default)]
@@ -286,6 +289,9 @@ impl AgentService {
         command: AgentRunCommand,
     ) -> Result<AgentRunResp, AppError> {
         let command = normalize_agent_run_command(command)?;
+        if command.runtime_mode.as_deref() == Some("model_loop") {
+            return self.create_model_loop_run(user_id, command).await;
+        }
         let memory_context = self.load_agent_memory_context(user_id).await?;
         let mut plan = build_agent_plan(&command, memory_context)?;
         let selected_tool = if let Some(tool_code) = plan.selected_tool_code.as_deref() {
@@ -395,6 +401,153 @@ impl AgentService {
                 .await?;
         }
 
+        self.get_run(run_id).await
+    }
+
+    async fn create_model_loop_run(
+        &self,
+        user_id: i64,
+        command: AgentRunCommand,
+    ) -> Result<AgentRunResp, AppError> {
+        let memory_context = self.load_agent_memory_context(user_id).await?;
+        let mut plan = build_agent_plan(&command, memory_context)?;
+        plan.loop_kind = "model_loop".to_owned();
+        plan.selected_tool_code = None;
+        plan.requires_approval = false;
+        plan.pause_reason = None;
+
+        let run_id = next_id();
+        let trace_id = format!("agent-{run_id}");
+        let now = Utc::now().naive_utc();
+        self.create_run_records(user_id, run_id, &trace_id, &command, &plan, now)
+            .await?;
+
+        let input_item = novex_agent_protocol::AgentTurnItem::user_message(command.input.as_str());
+        let mut input_payload = agent_turn_item_event_payload(&input_item);
+        if let Some(object) = input_payload.as_object_mut() {
+            object.insert("input".to_owned(), json!(&command.input));
+            object.insert("runtimeMode".to_owned(), json!("model_loop"));
+        }
+        self.append_event(
+            user_id,
+            run_id,
+            None,
+            RunEventKind::InputReceived,
+            run_status_code(RunStatus::Running),
+            input_payload,
+        )
+        .await?;
+
+        let model_response = self
+            .model_runtime
+            .chat_completion_for_purpose(
+                ModelRoutePurpose::CodeAgent,
+                ModelChatCommand {
+                    messages: vec![
+                        ModelChatMessage {
+                            role: "system".to_owned(),
+                            content: build_model_loop_system_prompt(&model_loop_tool_codes()),
+                        },
+                        ModelChatMessage {
+                            role: "user".to_owned(),
+                            content: command.input.clone(),
+                        },
+                    ],
+                    temperature: Some(0.2),
+                    max_tokens: Some(1024),
+                    ..ModelChatCommand::default()
+                },
+            )
+            .await?;
+
+        let parsed = parse_model_turn_output(&model_response.answer).map_err(|err| {
+            AppError::bad_request(format!("Agent 模型输出解析失败: {}", err.message))
+        })?;
+        let parsed_payload = agent_turn_item_event_payload(&parsed.item);
+
+        match parsed.item {
+            novex_agent_protocol::AgentTurnItem::FinalAnswer { content } => {
+                self.append_event(
+                    user_id,
+                    run_id,
+                    None,
+                    RunEventKind::FinalOutput,
+                    run_status_code(RunStatus::Running),
+                    parsed_payload,
+                )
+                .await?;
+                self.finish_without_tool(user_id, run_id, &content).await?;
+            }
+            novex_agent_protocol::AgentTurnItem::ToolCall {
+                tool_code,
+                arguments,
+                ..
+            } => {
+                self.append_event(
+                    user_id,
+                    run_id,
+                    None,
+                    RunEventKind::ActionSelected,
+                    run_status_code(RunStatus::Running),
+                    parsed_payload,
+                )
+                .await?;
+                let Some(tool) = self
+                    .capability_repo
+                    .find_tool_by_code(self.tenant_id, &tool_code)
+                    .await?
+                else {
+                    return Err(AppError::NotFound);
+                };
+                let policy = agent_tool_policy_decision(&tool, command.auto_approve);
+                if policy.requires_approval {
+                    ensure_agent_run_transition(
+                        &run_status_code(RunStatus::Running),
+                        RunStatus::WaitingApproval,
+                    )?;
+                    self.update_status(AgentStatusUpdate {
+                        user_id,
+                        run_id,
+                        status: run_status_code(RunStatus::WaitingApproval),
+                        output_payload: json!({ "toolCode": tool.code }),
+                        final_output: None,
+                        pause_reason: policy.pause_reason.as_deref(),
+                        finished: false,
+                    })
+                    .await?;
+                    self.pause_for_approval(user_id, run_id, &tool, &command.input, now)
+                        .await?;
+                } else {
+                    self.append_event(
+                        user_id,
+                        run_id,
+                        None,
+                        RunEventKind::ToolCalled,
+                        run_status_code(RunStatus::Running),
+                        json!({
+                            "toolCode": tool.code,
+                            "arguments": arguments,
+                            "dryRun": true,
+                            "runtimeMode": "model_loop"
+                        }),
+                    )
+                    .await?;
+                    let final_output = format!(
+                        "Model loop selected `{}`. Tool execution is deferred to the observation loop.",
+                        tool.code
+                    );
+                    self.finish_without_tool(user_id, run_id, &final_output)
+                        .await?;
+                }
+            }
+            _ => {
+                self.finish_without_tool(user_id, run_id, &model_response.answer)
+                    .await?;
+            }
+        }
+
+        self.refresh_trace_snapshot(user_id, run_id, json!({ "runtimeMode": "model_loop" }))
+            .await?;
         self.get_run(run_id).await
     }
 
@@ -2031,9 +2184,43 @@ pub fn normalize_agent_run_command(
         return Err(AppError::bad_request("Agent 输入不能为空"));
     }
     ensure_max_chars("Agent 输入", &command.input, 4000)?;
+    command.runtime_mode = normalize_agent_runtime_mode(command.runtime_mode)?;
     command.budget = novex_ai_core::normalize_task_budget(command.budget)
         .map_err(|err| AppError::bad_request(format!("任务预算超出限制: {}", err.field)))?;
     Ok(command)
+}
+
+fn normalize_agent_runtime_mode(runtime_mode: Option<String>) -> Result<Option<String>, AppError> {
+    let Some(runtime_mode) = runtime_mode
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+    else {
+        return Ok(None);
+    };
+    if runtime_mode == "model_loop" {
+        return Ok(Some(runtime_mode));
+    }
+    Err(AppError::bad_request("Agent runtimeMode 不支持"))
+}
+
+fn model_loop_tool_codes() -> Vec<String> {
+    [
+        "rag.search",
+        GITHUB_REPO_SEARCH_TOOL_CODE,
+        GITHUB_REPO_READ_TOOL_CODE,
+        MEDIA_IMAGE_TOOL_CODE,
+        FEISHU_TOOL_CODE,
+    ]
+    .into_iter()
+    .map(ToOwned::to_owned)
+    .collect()
+}
+
+fn build_model_loop_system_prompt(tool_codes: &[String]) -> String {
+    format!(
+        "You are Novex Agent Runtime. You may either answer directly or request one tool call. Available tools: {}. To call a tool, reply with compact JSON exactly like {{\"type\":\"tool_call\",\"callId\":\"call-1\",\"toolCode\":\"rag.search\",\"arguments\":{{\"query\":\"...\"}}}}. Otherwise reply with the final answer.",
+        tool_codes.join(", ")
+    )
 }
 
 fn build_agent_plan(
@@ -2336,6 +2523,7 @@ mod tests {
     fn agent_runtime_rejects_blank_run_input() {
         let err = normalize_agent_run_command(AgentRunCommand {
             input: "   ".to_owned(),
+            runtime_mode: None,
             auto_approve: false,
             budget: TaskBudget::default(),
         })
@@ -2359,9 +2547,30 @@ mod tests {
     }
 
     #[test]
+    fn agent_run_command_accepts_model_runtime_mode() {
+        let command: AgentRunCommand = serde_json::from_value(serde_json::json!({
+            "input": "search policy",
+            "runtimeMode": "model_loop"
+        }))
+        .unwrap();
+
+        assert_eq!(command.runtime_mode.as_deref(), Some("model_loop"));
+    }
+
+    #[test]
+    fn model_loop_prompt_mentions_available_tool_schema() {
+        let prompt = build_model_loop_system_prompt(&["rag.search".to_owned()]);
+
+        assert!(prompt.contains("You are Novex Agent Runtime"));
+        assert!(prompt.contains("rag.search"));
+        assert!(prompt.contains("\"type\":\"tool_call\""));
+    }
+
+    #[test]
     fn agent_runtime_low_risk_tool_can_finish_without_approval() {
         let command = normalize_agent_run_command(AgentRunCommand {
             input: "search the training handbook".to_owned(),
+            runtime_mode: None,
             auto_approve: false,
             budget: TaskBudget {
                 max_steps: Some(6),
@@ -2382,6 +2591,7 @@ mod tests {
     fn agent_runtime_medium_risk_tool_pauses_without_auto_approval() {
         let command = normalize_agent_run_command(AgentRunCommand {
             input: "send a Feishu reminder".to_owned(),
+            runtime_mode: None,
             auto_approve: false,
             budget: TaskBudget {
                 max_steps: Some(6),
@@ -2415,6 +2625,7 @@ mod tests {
         };
         let command = normalize_agent_run_command(AgentRunCommand {
             input: "answer in my preferred language".to_owned(),
+            runtime_mode: None,
             auto_approve: false,
             budget: TaskBudget::default(),
         })
@@ -2533,6 +2744,9 @@ mod tests {
         for needle in [
             "RunEventKind::IntentRouted",
             "agent_turn_item_event_payload(&input_item)",
+            "command.runtime_mode.as_deref() == Some(\"model_loop\")",
+            "create_model_loop_run",
+            "chat_completion_for_purpose",
             "record_retrieval_context",
             "RunEventKind::Retrieval",
             "step_type_code(RunStepType::Retrieval)",
@@ -2828,6 +3042,7 @@ mod tests {
     fn agent_runtime_tool_budget_rejects_tool_plan_when_zero_tool_calls_allowed() {
         let err = normalize_agent_run_command(AgentRunCommand {
             input: "search the training handbook".to_owned(),
+            runtime_mode: None,
             auto_approve: false,
             budget: TaskBudget {
                 max_steps: Some(6),
