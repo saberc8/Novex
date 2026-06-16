@@ -304,8 +304,27 @@ pub struct ModelRouteOpsSummaryResp {
     pub last_health_status: Option<String>,
     pub last_health_checked_at: Option<String>,
     pub last_health_latency_ms: Option<i64>,
+    pub active_alert_count: usize,
     pub degraded: bool,
     pub usage_24h: ModelOpsUsageSummaryResp,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelOpsAlertResp {
+    pub alert_key: String,
+    pub alert_kind: String,
+    pub severity: String,
+    pub status: String,
+    pub route_id: Option<String>,
+    pub route_purpose: Option<String>,
+    pub provider: Option<String>,
+    pub model: Option<String>,
+    pub source_ref: String,
+    pub message: String,
+    pub first_seen_at: String,
+    pub last_seen_at: String,
+    pub event_payload: Value,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -315,7 +334,9 @@ pub struct ModelOpsSummaryResp {
     pub active_route_count: usize,
     pub open_breaker_count: usize,
     pub degraded_route_count: usize,
+    pub active_alert_count: usize,
     pub usage_24h: ModelOpsUsageSummaryResp,
+    pub alerts: Vec<ModelOpsAlertResp>,
     pub routes: Vec<ModelRouteOpsSummaryResp>,
 }
 
@@ -428,6 +449,22 @@ struct ModelRouteOpsSummaryRow {
     pub total_tokens_24h: i64,
     pub cost_cents_24h: f64,
     pub avg_latency_ms_24h: Option<f64>,
+}
+
+#[derive(Debug, Clone, PartialEq, FromRow)]
+struct ModelOpsAlertRow {
+    pub alert_key: String,
+    pub alert_kind: String,
+    pub severity: String,
+    pub status: String,
+    pub route_code: Option<String>,
+    pub route_purpose: Option<String>,
+    pub provider_code: Option<String>,
+    pub model_name: Option<String>,
+    pub source_ref: String,
+    pub event_payload: Value,
+    pub first_seen_at: NaiveDateTime,
+    pub last_seen_at: NaiveDateTime,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, FromRow)]
@@ -770,7 +807,11 @@ ORDER BY r.priority ASC, r.id ASC;
         .fetch_all(&self.db)
         .await?;
 
-        Ok(model_ops_summary_from_rows(rows, Utc::now().naive_utc()))
+        Ok(model_ops_summary_from_rows(
+            rows,
+            Vec::new(),
+            Utc::now().naive_utc(),
+        ))
     }
 
     async fn fallback_plan_for_purpose_with_route_id(
@@ -2188,6 +2229,7 @@ impl From<ModelChatConversationRow> for ModelChatConversationResp {
 
 fn model_ops_summary_from_rows(
     rows: Vec<ModelRouteOpsSummaryRow>,
+    alert_rows: Vec<ModelOpsAlertRow>,
     now: NaiveDateTime,
 ) -> ModelOpsSummaryResp {
     let route_count = rows.len();
@@ -2198,6 +2240,12 @@ fn model_ops_summary_from_rows(
     let mut weighted_latency_sum = 0.0f64;
     let mut weighted_latency_count = 0i64;
     let mut routes = Vec::with_capacity(rows.len());
+    let mut route_alert_counts = HashMap::<String, usize>::new();
+    for alert in &alert_rows {
+        if let Some(route_code) = &alert.route_code {
+            *route_alert_counts.entry(route_code.clone()).or_default() += 1;
+        }
+    }
 
     for row in rows {
         let breaker_remaining_ms = row
@@ -2205,11 +2253,15 @@ fn model_ops_summary_from_rows(
             .map(|opened_until| (opened_until - now).num_milliseconds().max(0))
             .unwrap_or(0);
         let breaker_open = breaker_remaining_ms > 0;
+        let active_alert_count = route_alert_counts
+            .get(&row.route_code)
+            .copied()
+            .unwrap_or_default();
         let health_degraded = row
             .last_health_status
             .as_deref()
             .is_some_and(|status| status != "ok");
-        let degraded = breaker_open || health_degraded;
+        let degraded = breaker_open || health_degraded || active_alert_count > 0;
         if breaker_open {
             open_breaker_count += 1;
         }
@@ -2247,6 +2299,7 @@ fn model_ops_summary_from_rows(
             last_health_status: row.last_health_status,
             last_health_checked_at: row.last_health_checked_at.map(format_datetime),
             last_health_latency_ms: row.last_health_latency_ms,
+            active_alert_count,
             degraded,
             usage_24h: usage,
         });
@@ -2261,8 +2314,40 @@ fn model_ops_summary_from_rows(
         active_route_count,
         open_breaker_count,
         degraded_route_count,
+        active_alert_count: alert_rows.len(),
         usage_24h,
+        alerts: alert_rows
+            .into_iter()
+            .map(ModelOpsAlertResp::from)
+            .collect(),
         routes,
+    }
+}
+
+impl From<ModelOpsAlertRow> for ModelOpsAlertResp {
+    fn from(row: ModelOpsAlertRow) -> Self {
+        let message = row
+            .event_payload
+            .get("message")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned();
+
+        Self {
+            alert_key: row.alert_key,
+            alert_kind: row.alert_kind,
+            severity: row.severity,
+            status: row.status,
+            route_id: row.route_code,
+            route_purpose: row.route_purpose,
+            provider: row.provider_code,
+            model: row.model_name,
+            source_ref: row.source_ref,
+            message,
+            first_seen_at: format_datetime(row.first_seen_at),
+            last_seen_at: format_datetime(row.last_seen_at),
+            event_payload: row.event_payload,
+        }
     }
 }
 
@@ -3786,41 +3871,22 @@ mod tests {
             NaiveDateTime::parse_from_str("2026-06-17 10:00:00", "%Y-%m-%d %H:%M:%S").unwrap();
         let summary = model_ops_summary_from_rows(
             vec![
-                ModelRouteOpsSummaryRow {
-                    route_code: "runtime.llm.chat".to_owned(),
-                    route_purpose: "chat".to_owned(),
-                    provider_code: "deepseek".to_owned(),
-                    provider_type: "deep-seek".to_owned(),
-                    model_name: "deepseek-v4".to_owned(),
-                    network_zone: "public".to_owned(),
-                    status: 1,
-                    breaker_opened_until: Some(now + chrono::Duration::minutes(5)),
-                    last_health_status: Some("ok".to_owned()),
-                    last_health_checked_at: Some(now),
-                    last_health_latency_ms: Some(120),
-                    request_count_24h: 3,
-                    total_tokens_24h: 1200,
-                    cost_cents_24h: 1.5,
-                    avg_latency_ms_24h: Some(330.0),
-                },
-                ModelRouteOpsSummaryRow {
-                    route_code: "runtime.embedding".to_owned(),
-                    route_purpose: "embedding".to_owned(),
-                    provider_code: "dashscope".to_owned(),
-                    provider_type: "dash-scope".to_owned(),
-                    model_name: "text-embedding-v4".to_owned(),
-                    network_zone: "public".to_owned(),
-                    status: 1,
-                    breaker_opened_until: None,
-                    last_health_status: Some("provider returned HTTP 500".to_owned()),
-                    last_health_checked_at: Some(now),
-                    last_health_latency_ms: Some(800),
-                    request_count_24h: 2,
-                    total_tokens_24h: 500,
-                    cost_cents_24h: 0.25,
-                    avg_latency_ms_24h: Some(90.0),
-                },
+                model_ops_route_row(
+                    "runtime.llm.chat",
+                    "chat",
+                    1,
+                    Some(now + chrono::Duration::minutes(5)),
+                    Some("ok"),
+                ),
+                model_ops_route_row(
+                    "runtime.embedding",
+                    "embedding",
+                    1,
+                    None,
+                    Some("provider returned HTTP 500"),
+                ),
             ],
+            vec![],
             now,
         );
 
@@ -3830,6 +3896,116 @@ mod tests {
         assert_eq!(summary.degraded_route_count, 2);
         assert_eq!(summary.usage_24h.request_count, 5);
         assert_eq!(summary.usage_24h.total_tokens, 1700);
+    }
+
+    #[test]
+    fn model_ops_summary_includes_active_alerts_and_route_counts() {
+        let now =
+            NaiveDateTime::parse_from_str("2026-06-17 10:00:00", "%Y-%m-%d %H:%M:%S").unwrap();
+        let summary = model_ops_summary_from_rows(
+            vec![model_ops_route_row(
+                "runtime.llm.chat",
+                "chat",
+                1,
+                None,
+                Some("ok"),
+            )],
+            vec![model_ops_alert_row(
+                "model_health:llm:route:11",
+                Some("runtime.llm.chat"),
+                Some("chat"),
+                "provider unavailable",
+                now,
+            )],
+            now,
+        );
+
+        assert_eq!(summary.active_alert_count, 1);
+        assert_eq!(summary.alerts.len(), 1);
+        assert_eq!(summary.alerts[0].alert_key, "model_health:llm:route:11");
+        assert_eq!(
+            summary.alerts[0].route_id.as_deref(),
+            Some("runtime.llm.chat")
+        );
+        assert_eq!(summary.alerts[0].message, "provider unavailable");
+        assert_eq!(summary.routes[0].active_alert_count, 1);
+    }
+
+    #[test]
+    fn model_ops_summary_marks_route_degraded_when_active_alert_exists() {
+        let now =
+            NaiveDateTime::parse_from_str("2026-06-17 10:00:00", "%Y-%m-%d %H:%M:%S").unwrap();
+        let summary = model_ops_summary_from_rows(
+            vec![model_ops_route_row(
+                "runtime.llm.chat",
+                "chat",
+                1,
+                None,
+                Some("ok"),
+            )],
+            vec![model_ops_alert_row(
+                "model_health:llm:route:11",
+                Some("runtime.llm.chat"),
+                Some("chat"),
+                "provider unavailable",
+                now,
+            )],
+            now,
+        );
+
+        assert!(summary.routes[0].degraded);
+        assert_eq!(summary.degraded_route_count, 1);
+    }
+
+    fn model_ops_route_row(
+        route_code: &str,
+        route_purpose: &str,
+        status: i16,
+        breaker_opened_until: Option<NaiveDateTime>,
+        last_health_status: Option<&str>,
+    ) -> ModelRouteOpsSummaryRow {
+        ModelRouteOpsSummaryRow {
+            route_code: route_code.to_owned(),
+            route_purpose: route_purpose.to_owned(),
+            provider_code: "deepseek".to_owned(),
+            provider_type: "deep-seek".to_owned(),
+            model_name: "deepseek-v4".to_owned(),
+            network_zone: "public".to_owned(),
+            status,
+            breaker_opened_until,
+            last_health_status: last_health_status.map(str::to_owned),
+            last_health_checked_at: Some(
+                NaiveDateTime::parse_from_str("2026-06-17 09:59:00", "%Y-%m-%d %H:%M:%S").unwrap(),
+            ),
+            last_health_latency_ms: Some(120),
+            request_count_24h: if route_purpose == "chat" { 3 } else { 2 },
+            total_tokens_24h: if route_purpose == "chat" { 1200 } else { 500 },
+            cost_cents_24h: if route_purpose == "chat" { 1.5 } else { 0.25 },
+            avg_latency_ms_24h: Some(if route_purpose == "chat" { 330.0 } else { 90.0 }),
+        }
+    }
+
+    fn model_ops_alert_row(
+        alert_key: &str,
+        route_code: Option<&str>,
+        route_purpose: Option<&str>,
+        message: &str,
+        now: NaiveDateTime,
+    ) -> ModelOpsAlertRow {
+        ModelOpsAlertRow {
+            alert_key: alert_key.to_owned(),
+            alert_kind: "model_health".to_owned(),
+            severity: "critical".to_owned(),
+            status: "active".to_owned(),
+            route_code: route_code.map(str::to_owned),
+            route_purpose: route_purpose.map(str::to_owned),
+            provider_code: Some("deepseek".to_owned()),
+            model_name: Some("deepseek-v4".to_owned()),
+            source_ref: "health_check:99".to_owned(),
+            event_payload: json!({"message": message}),
+            first_seen_at: now,
+            last_seen_at: now,
+        }
     }
 
     #[test]
