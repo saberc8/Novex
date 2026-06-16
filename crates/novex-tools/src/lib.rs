@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use novex_ai_core::FoundationModule;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -77,6 +79,115 @@ pub struct ModelToolSpec {
     pub metadata: Value,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolRouteErrorKind {
+    EmptyToolCode,
+    DuplicateToolCode,
+    UnknownTool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolRouteError {
+    pub kind: ToolRouteErrorKind,
+    pub tool_code: Option<String>,
+    pub message: String,
+}
+
+impl ToolRouteError {
+    fn empty_tool_code() -> Self {
+        Self {
+            kind: ToolRouteErrorKind::EmptyToolCode,
+            tool_code: None,
+            message: "tool code is empty".to_owned(),
+        }
+    }
+
+    fn duplicate_tool_code(code: impl Into<String>) -> Self {
+        let code = code.into();
+        Self {
+            kind: ToolRouteErrorKind::DuplicateToolCode,
+            tool_code: Some(code.clone()),
+            message: format!("duplicate tool code `{code}`"),
+        }
+    }
+
+    fn unknown_tool(code: impl Into<String>) -> Self {
+        let code = code.into();
+        Self {
+            kind: ToolRouteErrorKind::UnknownTool,
+            tool_code: Some(code.clone()),
+            message: format!("model requested unregistered tool `{code}`"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RoutedToolCall {
+    pub call_id: String,
+    pub tool: ToolDefinition,
+    pub arguments: Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolRouter {
+    tools: BTreeMap<String, ToolDefinition>,
+}
+
+impl ToolRouter {
+    pub fn from_definitions(
+        definitions: impl IntoIterator<Item = ToolDefinition>,
+    ) -> Result<Self, ToolRouteError> {
+        let mut tools = BTreeMap::new();
+        for mut definition in definitions {
+            let code = definition.code.trim().to_owned();
+            if code.is_empty() {
+                return Err(ToolRouteError::empty_tool_code());
+            }
+            if tools.contains_key(&code) {
+                return Err(ToolRouteError::duplicate_tool_code(code));
+            }
+            definition.code = code.clone();
+            tools.insert(code, definition);
+        }
+        Ok(Self { tools })
+    }
+
+    pub fn tool_codes(&self) -> Vec<String> {
+        self.tools.keys().cloned().collect()
+    }
+
+    pub fn model_tool_specs(&self) -> Vec<ModelToolSpec> {
+        self.tools
+            .values()
+            .map(ToolDefinition::to_model_tool_spec)
+            .collect()
+    }
+
+    pub fn route_tool_call(
+        &self,
+        call_id: impl Into<String>,
+        tool_code: impl AsRef<str>,
+        arguments: Value,
+    ) -> Result<RoutedToolCall, ToolRouteError> {
+        let tool_code = tool_code.as_ref().trim();
+        if tool_code.is_empty() {
+            return Err(ToolRouteError::empty_tool_code());
+        }
+        let Some(tool) = self.tools.get(tool_code) else {
+            return Err(ToolRouteError::unknown_tool(tool_code));
+        };
+        Ok(RoutedToolCall {
+            call_id: call_id.into(),
+            tool: tool.clone(),
+            arguments,
+        })
+    }
+}
+
 impl ToolDefinition {
     pub fn to_model_tool_spec(&self) -> ModelToolSpec {
         ModelToolSpec {
@@ -92,6 +203,137 @@ impl ToolDefinition {
             }),
         }
     }
+}
+
+pub fn agent_model_loop_tool_definitions() -> Vec<ToolDefinition> {
+    vec![
+        ToolDefinition {
+            code: "rag.search".to_owned(),
+            name: "Search knowledge".to_owned(),
+            description: "Search tenant-scoped knowledge base chunks and return grounded hits."
+                .to_owned(),
+            input_schema: json!({
+                "type": "object",
+                "required": ["query"],
+                "properties": {
+                    "query": {"type": "string"},
+                    "datasetId": {"type": "integer"},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 20}
+                }
+            }),
+            output_schema: Some(json!({
+                "type": "object",
+                "properties": {
+                    "hits": {"type": "array"},
+                    "citations": {"type": "array"},
+                    "answer": {"type": "string"}
+                }
+            })),
+            risk_level: ToolRiskLevel::Low,
+            approval_policy: ApprovalPolicy::OnRisk,
+            permission_code: Some("ai:knowledge:ask".to_owned()),
+        },
+        ToolDefinition {
+            code: "github.repo.search".to_owned(),
+            name: "Search GitHub repository".to_owned(),
+            description: "Search code in an authorized GitHub repository or organization."
+                .to_owned(),
+            input_schema: json!({
+                "type": "object",
+                "required": ["query"],
+                "properties": {
+                    "query": {"type": "string"},
+                    "repository": {"type": "string"},
+                    "path": {"type": "string"}
+                }
+            }),
+            output_schema: Some(json!({
+                "type": "object",
+                "properties": {
+                    "items": {"type": "array"},
+                    "toolCode": {"type": "string"}
+                }
+            })),
+            risk_level: ToolRiskLevel::Low,
+            approval_policy: ApprovalPolicy::OnRisk,
+            permission_code: Some("ai:tool:dryRun".to_owned()),
+        },
+        ToolDefinition {
+            code: "github.repo.read".to_owned(),
+            name: "Read GitHub file".to_owned(),
+            description: "Read a file from an authorized GitHub repository.".to_owned(),
+            input_schema: json!({
+                "type": "object",
+                "required": ["repository", "path"],
+                "properties": {
+                    "repository": {"type": "string"},
+                    "path": {"type": "string"},
+                    "ref": {"type": "string"}
+                }
+            }),
+            output_schema: Some(json!({
+                "type": "object",
+                "properties": {
+                    "content": {"type": "string"},
+                    "path": {"type": "string"},
+                    "sha": {"type": "string"}
+                }
+            })),
+            risk_level: ToolRiskLevel::Low,
+            approval_policy: ApprovalPolicy::OnRisk,
+            permission_code: Some("ai:tool:dryRun".to_owned()),
+        },
+        ToolDefinition {
+            code: "media.image.generate".to_owned(),
+            name: "Generate image".to_owned(),
+            description: "Generate an image asset through the tenant-bound image model route."
+                .to_owned(),
+            input_schema: json!({
+                "type": "object",
+                "required": ["prompt"],
+                "properties": {
+                    "prompt": {"type": "string"},
+                    "size": {"type": "string"},
+                    "count": {"type": "integer", "minimum": 1, "maximum": 4}
+                }
+            }),
+            output_schema: Some(json!({
+                "type": "object",
+                "properties": {
+                    "assetUrl": {"type": "string"},
+                    "jobId": {"type": "integer"},
+                    "assetId": {"type": "integer"}
+                }
+            })),
+            risk_level: ToolRiskLevel::Medium,
+            approval_policy: ApprovalPolicy::OnRisk,
+            permission_code: Some("ai:tool:dryRun".to_owned()),
+        },
+        ToolDefinition {
+            code: "feishu.message.send".to_owned(),
+            name: "Send Feishu message".to_owned(),
+            description: "Send an audited Feishu message through a tenant connector.".to_owned(),
+            input_schema: json!({
+                "type": "object",
+                "required": ["message"],
+                "properties": {
+                    "message": {"type": "string"},
+                    "recipient": {"type": "string"}
+                }
+            }),
+            output_schema: Some(json!({
+                "type": "object",
+                "properties": {
+                    "status": {"type": "string"},
+                    "dryRun": {"type": "boolean"},
+                    "toolCode": {"type": "string"}
+                }
+            })),
+            risk_level: ToolRiskLevel::Medium,
+            approval_policy: ApprovalPolicy::OnRisk,
+            permission_code: Some("ai:agent:run".to_owned()),
+        },
+    ]
 }
 
 pub fn tool_risk_code(risk: ToolRiskLevel) -> &'static str {
@@ -486,5 +728,74 @@ mod tests {
             Some("ai:customer-service:ticket")
         );
         assert_eq!(ticket.input_schema["required"][0], "customerId");
+    }
+
+    #[test]
+    fn tool_router_exposes_sorted_model_visible_specs() {
+        let router = ToolRouter::from_definitions(vec![
+            test_tool_definition("media.image.generate"),
+            test_tool_definition("rag.search"),
+        ])
+        .unwrap();
+
+        assert_eq!(
+            router.tool_codes(),
+            vec!["media.image.generate".to_owned(), "rag.search".to_owned()]
+        );
+        assert_eq!(router.model_tool_specs()[0].name, "media.image.generate");
+    }
+
+    #[test]
+    fn tool_router_rejects_duplicate_tool_codes() {
+        let err = ToolRouter::from_definitions(vec![
+            test_tool_definition("rag.search"),
+            test_tool_definition("rag.search"),
+        ])
+        .unwrap_err();
+
+        assert_eq!(err.kind, ToolRouteErrorKind::DuplicateToolCode);
+        assert_eq!(err.tool_code.as_deref(), Some("rag.search"));
+    }
+
+    #[test]
+    fn tool_router_rejects_unknown_model_tool_call() {
+        let router = ToolRouter::from_definitions(vec![test_tool_definition("rag.search")])
+            .expect("router should build from one definition");
+
+        let err = router
+            .route_tool_call("call-1", "sandbox.exec", serde_json::json!({}))
+            .unwrap_err();
+
+        assert_eq!(err.kind, ToolRouteErrorKind::UnknownTool);
+        assert_eq!(err.tool_code.as_deref(), Some("sandbox.exec"));
+    }
+
+    #[test]
+    fn agent_model_loop_tool_definitions_cover_builtin_agent_tools() {
+        let router = ToolRouter::from_definitions(agent_model_loop_tool_definitions())
+            .expect("agent model loop tools should build a router");
+        let codes = router.tool_codes();
+
+        assert!(codes.contains(&"rag.search".to_owned()));
+        assert!(codes.contains(&"github.repo.search".to_owned()));
+        assert!(codes.contains(&"github.repo.read".to_owned()));
+        assert!(codes.contains(&"media.image.generate".to_owned()));
+        assert!(codes.contains(&"feishu.message.send".to_owned()));
+    }
+
+    fn test_tool_definition(code: &str) -> ToolDefinition {
+        ToolDefinition {
+            code: code.to_owned(),
+            name: code.to_owned(),
+            description: format!("Tool {code}"),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {}
+            }),
+            output_schema: None,
+            risk_level: ToolRiskLevel::Low,
+            approval_policy: ApprovalPolicy::OnRisk,
+            permission_code: Some("ai:tool:dryRun".to_owned()),
+        }
     }
 }
