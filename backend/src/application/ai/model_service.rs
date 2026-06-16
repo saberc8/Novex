@@ -1060,6 +1060,31 @@ ORDER BY r.priority ASC, r.id ASC;
         Self::registry_summary_for_tenant(db, DEFAULT_TENANT_ID).await
     }
 
+    pub async fn refresh_active_tenant_model_health(db: &PgPool) -> Result<usize, AppError> {
+        let tenant_ids = sqlx::query_scalar::<_, i64>(
+            r#"
+SELECT DISTINCT tenant_id
+FROM ai_model_route
+WHERE status = 1
+ORDER BY tenant_id;
+"#,
+        )
+        .fetch_all(db)
+        .await?;
+        let mut count = 0usize;
+        for tenant_id in tenant_ids {
+            let service = Self::for_tenant(db.clone(), tenant_id);
+            let response = service
+                .health_check_for_tenant(ModelHealthCheckCommand {
+                    target: Some("all".to_owned()),
+                })
+                .await?;
+            count += response.results.len();
+        }
+
+        Ok(count)
+    }
+
     pub async fn registry_summary_for_tenant(
         db: &PgPool,
         tenant_id: i64,
@@ -3644,6 +3669,20 @@ mod tests {
         assert_eq!(record.route_id, Some(11));
         assert_eq!(record.provider_id, Some(22));
         assert_eq!(record.model_profile_id, Some(33));
+    }
+
+    #[test]
+    fn refresh_active_tenant_model_health_source_contract_reads_active_tenants() {
+        let source = include_str!("model_service.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+
+        assert!(source.contains("pub async fn refresh_active_tenant_model_health"));
+        assert!(source.contains("SELECT DISTINCT tenant_id"));
+        assert!(source.contains("FROM ai_model_route"));
+        assert!(source.contains("WHERE status = 1"));
+        assert!(source.contains("health_check_for_tenant(ModelHealthCheckCommand"));
     }
 
     #[test]
