@@ -62,6 +62,7 @@ const GITHUB_CONNECTOR_CODE: &str = "github.default";
 const FEISHU_WEBHOOK_TIMEOUT: Duration = Duration::from_secs(10);
 const MEDIA_IMAGE_TIMEOUT: Duration = Duration::from_secs(30);
 const GITHUB_CONNECTOR_TIMEOUT: Duration = Duration::from_secs(15);
+const AGENT_TOOL_IO_TIMEOUT: Duration = Duration::from_secs(45);
 const MAX_AGENT_MEMORY_SNIPPETS: usize = 6;
 const MAX_AGENT_MEMORY_CANDIDATES: i64 = 32;
 
@@ -112,6 +113,7 @@ struct PreparedAgentToolCall {
     tool: ToolLookupRecord,
     arguments: Value,
     concurrency_policy: Value,
+    timeout: Duration,
 }
 
 #[derive(Debug, Clone)]
@@ -150,8 +152,22 @@ impl AgentToolExecution {
         }
     }
 
+    fn cancelled(response_payload: Value, final_output: String) -> Self {
+        Self {
+            response_payload,
+            status: "cancelled".to_owned(),
+            dry_run: false,
+            error_message: Some(final_output.clone()),
+            final_output,
+        }
+    }
+
     fn succeeded_status(&self) -> bool {
         self.status == "succeeded"
+    }
+
+    fn cancelled_status(&self) -> bool {
+        self.status == "cancelled"
     }
 }
 
@@ -715,6 +731,7 @@ impl AgentService {
                             tool,
                             arguments: arguments.clone(),
                             concurrency_policy: concurrency_policy_payload.clone(),
+                            timeout: AGENT_TOOL_IO_TIMEOUT,
                         };
                         if batch_policy.requires_approval {
                             runtime_state.push_item(AgentTurnItem::tool_call(
@@ -857,11 +874,8 @@ impl AgentService {
                             .await?;
                         last_tool_terminal_status = executed_terminal_status;
                         last_recorded_step_id = Some(recorded.step_id);
-                        let observation_status = if recorded.execution.succeeded_status() {
-                            ToolObservationStatus::Succeeded
-                        } else {
-                            ToolObservationStatus::Failed
-                        };
+                        let observation_status =
+                            tool_observation_status_for_execution(&recorded.execution);
                         let observation_item = AgentTurnItem::tool_observation(
                             &prepared.call_id,
                             observation_status,
@@ -1434,6 +1448,7 @@ impl AgentService {
             tool: tool.clone(),
             arguments: input,
             concurrency_policy: Value::Null,
+            timeout: AGENT_TOOL_IO_TIMEOUT,
         };
         let executed = self.execute_agent_tool_io(user_id, prepared).await?;
         self.record_agent_tool_execution(user_id, run_id, &executed.prepared, executed.execution)
@@ -1468,7 +1483,9 @@ impl AgentService {
             Some(&self.model_runtime),
         )
         .await;
-        let terminal_status = if execution.succeeded_status() {
+        let terminal_status = if execution.cancelled_status() {
+            RunStatus::Cancelled
+        } else if execution.succeeded_status() {
             RunStatus::Succeeded
         } else {
             RunStatus::Failed
@@ -1873,16 +1890,53 @@ where
 {
     match mode {
         ToolBatchExecutionMode::Parallel => {
-            let results = join_all(prepared_calls.into_iter().map(execute)).await;
+            let results = join_all(
+                prepared_calls
+                    .into_iter()
+                    .map(|prepared| execute_agent_tool_io_with_timeout(prepared, &execute)),
+            )
+            .await;
             results.into_iter().collect()
         }
         ToolBatchExecutionMode::Serial => {
             let mut executions = Vec::with_capacity(prepared_calls.len());
             for prepared in prepared_calls {
-                executions.push(execute(prepared).await?);
+                executions.push(execute_agent_tool_io_with_timeout(prepared, &execute).await?);
             }
             Ok(executions)
         }
+    }
+}
+
+async fn execute_agent_tool_io_with_timeout<F, Fut>(
+    prepared: PreparedAgentToolCall,
+    execute: &F,
+) -> Result<ExecutedAgentToolCall, AppError>
+where
+    F: Fn(PreparedAgentToolCall) -> Fut,
+    Fut: Future<Output = Result<ExecutedAgentToolCall, AppError>>,
+{
+    let timeout = prepared.timeout;
+    match tokio::time::timeout(timeout, execute(prepared.clone())).await {
+        Ok(result) => result,
+        Err(_) => Ok(ExecutedAgentToolCall {
+            execution: AgentToolExecution::cancelled(
+                json!({
+                    "status": "cancelled",
+                    "cancelReason": "tool_io_timeout",
+                    "toolCode": prepared.tool.code,
+                    "callId": prepared.call_id,
+                    "timeoutMs": timeout.as_millis() as u64,
+                }),
+                format!(
+                    "Tool `{}` was cancelled after {} ms.",
+                    prepared.tool.code,
+                    timeout.as_millis()
+                ),
+            ),
+            prepared,
+            terminal_status: RunStatus::Cancelled,
+        }),
     }
 }
 
@@ -3029,6 +3083,16 @@ fn build_observation_batch_follow_up_prompt(observations: &[(String, Value)]) ->
     )
 }
 
+fn tool_observation_status_for_execution(execution: &AgentToolExecution) -> ToolObservationStatus {
+    if execution.succeeded_status() {
+        return ToolObservationStatus::Succeeded;
+    }
+    if execution.cancelled_status() {
+        return ToolObservationStatus::Cancelled;
+    }
+    ToolObservationStatus::Failed
+}
+
 fn build_compacted_model_loop_messages(
     original_input: &str,
     summary: &str,
@@ -3517,6 +3581,7 @@ mod tests {
             },
             arguments: json!({ "batchIndex": batch_index }),
             concurrency_policy: Value::Null,
+            timeout: AGENT_TOOL_IO_TIMEOUT,
         }
     }
 
@@ -3730,6 +3795,65 @@ mod tests {
             *order.lock().unwrap(),
             vec!["call-1".to_owned(), "call-2".to_owned()]
         );
+    }
+
+    #[tokio::test]
+    async fn tool_io_timeout_returns_cancelled_execution() {
+        let mut call = test_prepared_tool_call(0, "call-1", "rag.search");
+        call.timeout = std::time::Duration::from_millis(10);
+        let calls = vec![call];
+
+        let result = execute_agent_tool_io_batch(
+            ToolBatchExecutionMode::Serial,
+            calls,
+            |prepared| async move {
+                tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                Ok(test_executed_tool_call(prepared))
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result[0].execution.status, "cancelled");
+        assert_eq!(result[0].terminal_status, RunStatus::Cancelled);
+        assert_eq!(
+            result[0].execution.response_payload["cancelReason"],
+            "tool_io_timeout"
+        );
+    }
+
+    #[test]
+    fn cancelled_tool_execution_maps_to_cancelled_observation_status() {
+        let execution = AgentToolExecution::cancelled(
+            serde_json::json!({"cancelReason":"tool_io_timeout"}),
+            "timeout".to_owned(),
+        );
+
+        assert_eq!(
+            tool_observation_status_for_execution(&execution),
+            ToolObservationStatus::Cancelled
+        );
+    }
+
+    #[test]
+    fn agent_service_model_loop_maps_cancelled_tool_observations() {
+        let source = include_str!("agent_service.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+
+        assert!(source.contains("tool_observation_status_for_execution"));
+    }
+
+    #[test]
+    fn agent_service_model_loop_records_tool_timeout_cancel_reason() {
+        let source = include_str!("agent_service.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+
+        assert!(source.contains("\"cancelReason\""));
+        assert!(source.contains("tool_io_timeout"));
     }
 
     #[test]
