@@ -1788,6 +1788,7 @@ mod tests {
                     total_tokens: Some(17),
                 },
                 cost_cents: None,
+                provider_attempts: vec![],
             },
         );
 
