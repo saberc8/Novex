@@ -431,6 +431,29 @@ struct ModelRouteOpsSummaryRow {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, FromRow)]
+struct ModelHealthCheckRouteIdsRow {
+    pub route_id: i64,
+    pub provider_id: i64,
+    pub model_profile_id: i64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct ModelHealthCheckSaveRecord {
+    pub id: i64,
+    pub tenant_id: i64,
+    pub route_id: Option<i64>,
+    pub provider_id: Option<i64>,
+    pub model_profile_id: Option<i64>,
+    pub status: String,
+    pub http_status: Option<i32>,
+    pub latency_ms: Option<i64>,
+    pub checked_at: NaiveDateTime,
+    pub error_message: Option<String>,
+    pub detail: Value,
+    pub user_id: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, FromRow)]
 pub struct ModelChatConversationRow {
     pub id: i64,
     pub title: String,
@@ -1255,8 +1278,68 @@ ORDER BY r.priority, r.id
                 }),
             }
         }
+        self.persist_model_health_check_results(&results, DEFAULT_TENANT_ID)
+            .await?;
 
         Ok(ModelHealthCheckResp { results })
+    }
+
+    async fn persist_model_health_check_results(
+        &self,
+        results: &[ModelHealthCheckResult],
+        user_id: i64,
+    ) -> Result<usize, AppError> {
+        let mut count = 0usize;
+        for result in results {
+            let route_ids = self
+                .model_health_check_route_ids(default_purpose_for_target(result.target))
+                .await?
+                .map(|row| (row.route_id, row.provider_id, row.model_profile_id));
+            let record = model_health_check_record_from_result(
+                self.tenant_id,
+                user_id,
+                route_ids,
+                result,
+                Utc::now().naive_utc(),
+            );
+            persist_model_health_check_record(&self.db, &record).await?;
+            count += 1;
+        }
+        Ok(count)
+    }
+
+    async fn model_health_check_route_ids(
+        &self,
+        purpose: ModelRoutePurpose,
+    ) -> Result<Option<ModelHealthCheckRouteIdsRow>, AppError> {
+        sqlx::query_as::<_, ModelHealthCheckRouteIdsRow>(
+            r#"
+SELECT
+    r.id AS route_id,
+    provider.id AS provider_id,
+    profile.id AS model_profile_id
+FROM ai_model_route r
+JOIN ai_model_profile profile
+  ON profile.tenant_id = r.tenant_id
+ AND profile.id = r.model_profile_id
+JOIN ai_model_deployment deployment
+  ON deployment.tenant_id = profile.tenant_id
+ AND deployment.id = profile.deployment_id
+JOIN ai_model_provider provider
+  ON provider.tenant_id = deployment.tenant_id
+ AND provider.id = deployment.provider_id
+WHERE r.tenant_id = $1
+  AND r.route_purpose = $2
+  AND r.status = 1
+ORDER BY r.priority ASC, r.id ASC
+LIMIT 1;
+"#,
+        )
+        .bind(self.tenant_id)
+        .bind(purpose.as_str())
+        .fetch_optional(&self.db)
+        .await
+        .map_err(AppError::from)
     }
 
     pub async fn chat_completion(command: ModelChatCommand) -> Result<ModelChatResp, AppError> {
@@ -2129,6 +2212,82 @@ fn model_ops_summary_from_rows(
         usage_24h,
         routes,
     }
+}
+
+fn model_health_check_record_from_result(
+    tenant_id: i64,
+    user_id: i64,
+    route_ids: Option<(i64, i64, i64)>,
+    result: &ModelHealthCheckResult,
+    now: NaiveDateTime,
+) -> ModelHealthCheckSaveRecord {
+    let (route_id, provider_id, model_profile_id) = route_ids
+        .map(|(route_id, provider_id, model_profile_id)| {
+            (Some(route_id), Some(provider_id), Some(model_profile_id))
+        })
+        .unwrap_or((None, None, None));
+    let error_message = (!result.ok).then(|| result.message.clone());
+    let detail = json!({
+        "target": result.target.as_str(),
+        "configured": result.configured,
+        "endpoint": result.endpoint,
+        "maskedApiKey": result.masked_api_key,
+        "message": result.message,
+        "detail": result.detail,
+    });
+
+    ModelHealthCheckSaveRecord {
+        id: next_id(),
+        tenant_id,
+        route_id,
+        provider_id,
+        model_profile_id,
+        status: if result.ok {
+            "ok".to_owned()
+        } else {
+            preview_chars(&result.message, 32)
+        },
+        http_status: result.http_status.map(i32::from),
+        latency_ms: Some(u128_to_i64(result.latency_ms)),
+        checked_at: now,
+        error_message,
+        detail,
+        user_id,
+    }
+}
+
+async fn persist_model_health_check_record(
+    db: &PgPool,
+    record: &ModelHealthCheckSaveRecord,
+) -> Result<(), AppError> {
+    sqlx::query(
+        r#"
+INSERT INTO ai_model_health_check (
+    id, tenant_id, route_id, provider_id, model_profile_id, status,
+    http_status, latency_ms, checked_at, error_message, detail, create_user, create_time
+)
+VALUES (
+    $1, $2, $3, $4, $5, $6,
+    $7, $8, $9, $10, $11, $12, $9
+);
+"#,
+    )
+    .bind(record.id)
+    .bind(record.tenant_id)
+    .bind(record.route_id)
+    .bind(record.provider_id)
+    .bind(record.model_profile_id)
+    .bind(&record.status)
+    .bind(record.http_status)
+    .bind(record.latency_ms)
+    .bind(record.checked_at)
+    .bind(record.error_message.as_deref())
+    .bind(&record.detail)
+    .bind(record.user_id)
+    .execute(db)
+    .await?;
+
+    Ok(())
 }
 
 fn model_chat_history_records(
@@ -3444,6 +3603,47 @@ mod tests {
         assert_eq!(summary.degraded_route_count, 2);
         assert_eq!(summary.usage_24h.request_count, 5);
         assert_eq!(summary.usage_24h.total_tokens, 1700);
+    }
+
+    #[test]
+    fn model_health_persistence_source_contract_records_tenant_health_rows() {
+        let source = include_str!("model_service.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+
+        assert!(source.contains("persist_model_health_check_results"));
+        assert!(source.contains("INSERT INTO ai_model_health_check"));
+        assert!(source.contains("WHERE r.tenant_id = $1"));
+        assert!(source.contains("default_purpose_for_target(result.target)"));
+        assert!(source.contains("health_check_for_tenant"));
+    }
+
+    #[test]
+    fn model_health_persistence_record_from_result_maps_status_and_metadata() {
+        let now =
+            NaiveDateTime::parse_from_str("2026-06-17 10:00:00", "%Y-%m-%d %H:%M:%S").unwrap();
+        let result = ModelHealthCheckResult {
+            target: ModelRuntimeTarget::Llm,
+            configured: true,
+            ok: false,
+            endpoint: Some("https://llm.example.com/v1/chat/completions".to_owned()),
+            masked_api_key: Some("sk-****0001".to_owned()),
+            http_status: Some(502),
+            latency_ms: 123,
+            message: "provider returned HTTP 502".to_owned(),
+            detail: Some(json!({"choiceCount": 0})),
+        };
+
+        let record = model_health_check_record_from_result(1, 7, Some((11, 22, 33)), &result, now);
+
+        assert_eq!(record.status, "provider returned HTTP 502");
+        assert_eq!(record.http_status, Some(502));
+        assert_eq!(record.latency_ms, Some(123));
+        assert_eq!(record.detail["target"], "llm");
+        assert_eq!(record.route_id, Some(11));
+        assert_eq!(record.provider_id, Some(22));
+        assert_eq!(record.model_profile_id, Some(33));
     }
 
     #[test]
