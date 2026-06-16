@@ -25,8 +25,8 @@ Novex 已有能力：
 - `crates/novex-agent`: 已有 deterministic intent router、tool selector 和 ReAct plan skeleton。
 - `crates/novex-model`: 已有模型类型、provider、route purpose、OpenAI-compatible runtime route、token/cost usage。
 - `backend/src/application/ai/model_service.rs`: 已有 chat/completions、embedding、rerank、模型健康检查、聊天历史和用量记录。
-- `backend/src/application/ai/agent_service.rs`: 已有 Agent run、approval pause/resume/cancel、GitHub/Feishu/image tool 执行和事件记录。
-- `apps/codex-app-poc`: 目前是静态 Codex-like UI。
+- `backend/src/application/ai/agent_service.rs`: 已有 Agent run、approval pause/resume/cancel、GitHub/Feishu/image tool 执行、model-loop POC 和事件记录。
+- `apps/codex-app-poc`: 已能从 Codex-like composer 提交 `runtimeMode=model_loop` 的真实 Agent run。
 - `apps/agent-workspace`: 已有 Agent run API client 和最小执行视图。
 
 Codex 可迁移能力：
