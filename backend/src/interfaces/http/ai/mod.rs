@@ -11,6 +11,7 @@ pub mod integration;
 pub mod knowledge;
 pub mod memory;
 pub mod model;
+pub mod notebook;
 pub mod studio;
 pub mod template;
 pub mod training;
@@ -27,6 +28,7 @@ pub fn routes() -> Router<AppState> {
         .merge(knowledge::routes())
         .merge(memory::routes())
         .merge(model::routes())
+        .merge(notebook::routes())
         .merge(studio::routes())
         .merge(template::routes())
         .merge(trigger::routes())
