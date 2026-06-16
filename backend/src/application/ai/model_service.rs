@@ -1273,12 +1273,12 @@ ORDER BY r.priority, r.id
                 .as_ref()
                 .is_some_and(|plan| plan.decision.enabled)
             {
-                let open_attempt = match model_circuit_breaker_open_attempt(&current_route) {
+                let open_attempt = match self
+                    .persistent_model_circuit_breaker_open_attempt(&current_route)
+                    .await?
+                {
                     Some(attempt) => Some(attempt),
-                    None => {
-                        self.persistent_model_circuit_breaker_open_attempt(&current_route)
-                            .await?
-                    }
+                    None => model_circuit_breaker_open_attempt(&current_route),
                 };
                 if let Some(mut skipped_attempt) = open_attempt {
                     skipped_attempt.attempt_kind = attempt_kind.to_owned();
@@ -3155,6 +3155,23 @@ mod tests {
         assert!(source.contains("DELETE FROM ai_model_route_circuit_breaker"));
         assert!(source.contains("WHERE tenant_id = $1"));
         assert!(source.contains("model_circuit_breaker_clear(route_id)"));
+    }
+
+    #[test]
+    fn route_breaker_controls_source_contract_checks_persistent_before_local_cache() {
+        let source = include_str!("model_service.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+
+        let persistent = source
+            .find("persistent_model_circuit_breaker_open_attempt(&current_route)")
+            .unwrap();
+        let local = source
+            .find("model_circuit_breaker_open_attempt(&current_route)")
+            .unwrap();
+
+        assert!(persistent < local);
     }
 
     #[test]
