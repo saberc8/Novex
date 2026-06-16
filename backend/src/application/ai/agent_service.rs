@@ -36,7 +36,9 @@ use sqlx::PgPool;
 use tokio::sync::watch;
 
 use crate::{
-    application::ai::model_service::{ModelChatCommand, ModelChatMessage, ModelRuntimeService},
+    application::ai::model_service::{
+        ModelChatCommand, ModelChatMessage, ModelChatResp, ModelRuntimeService,
+    },
     application::system::{ensure_max_chars, format_datetime},
     infrastructure::persistence::{
         ai_agent_repository::{
@@ -662,6 +664,16 @@ impl AgentService {
                     return self.get_run(run_id).await;
                 }
             };
+
+            self.append_event(
+                user_id,
+                run_id,
+                None,
+                RunEventKind::Thought,
+                run_status_code(RunStatus::Running),
+                model_inference_event_payload(&model_response),
+            )
+            .await?;
 
             let parsed = parse_model_turn_output(&model_response.answer).map_err(|err| {
                 AppError::bad_request(format!("Agent 模型输出解析失败: {}", err.message))
@@ -3383,6 +3395,25 @@ fn model_loop_external_cancel_payload(stage: &str) -> Value {
     })
 }
 
+fn model_inference_event_payload(response: &ModelChatResp) -> Value {
+    json!({
+        "runtimeMode": "model_loop",
+        "item": {
+            "type": "model_inference",
+            "routeId": &response.route_id,
+            "provider": &response.provider,
+            "model": &response.model,
+            "latencyMs": u128_to_i64(response.latency_ms),
+            "usage": &response.usage,
+            "costCents": Value::Null,
+        }
+    })
+}
+
+fn u128_to_i64(value: u128) -> i64 {
+    value.min(i64::MAX as u128) as i64
+}
+
 fn build_compacted_model_loop_messages(
     original_input: &str,
     summary: &str,
@@ -3595,6 +3626,11 @@ fn trace_event_from_run_event(event: &RunEventRecord) -> Option<TraceEvent> {
             trace_payload_text(&event.payload, &["input", "content", "query"])
                 .unwrap_or_else(|| trace_payload_fallback(&event.payload)),
         )),
+        "thought"
+            if trace_payload_item_type(&event.payload).as_deref() == Some("model_inference") =>
+        {
+            Some(TraceEvent::inference(sequence_no, event.payload.clone()))
+        }
         "thought" => Some(TraceEvent::assistant_message(
             sequence_no,
             trace_payload_text(&event.payload, &["message", "content", "summary"])
@@ -4247,6 +4283,19 @@ mod tests {
     }
 
     #[test]
+    fn agent_service_model_loop_records_model_inference_spans() {
+        let source = include_str!("agent_service.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+
+        assert!(source.contains("model_inference_event_payload(&model_response)"));
+        assert!(source.contains("\"type\": \"model_inference\""));
+        assert!(source.contains("\"latencyMs\""));
+        assert!(source.contains("\"usage\""));
+    }
+
+    #[test]
     fn agent_service_tool_io_awaits_runtime_registry_cancel_token() {
         let source = include_str!("agent_service.rs")
             .split("#[cfg(test)]")
@@ -4654,6 +4703,38 @@ mod tests {
             .iter()
             .any(|event| event.kind == TraceEventKind::Cancellation));
         assert_eq!(bundle.replay_summary().final_status, "cancelled");
+    }
+
+    #[test]
+    fn agent_run_events_convert_inference_spans_to_trace_bundle() {
+        let events = vec![fake_agent_event(
+            "thought",
+            1,
+            json!({
+                "runtimeMode": "model_loop",
+                "item": {
+                    "type": "model_inference",
+                    "routeId": "runtime.llm.code_agent",
+                    "provider": "deep-seek",
+                    "model": "deepseek-v4-flash",
+                    "latencyMs": 42,
+                    "usage": {
+                        "promptTokens": 11,
+                        "completionTokens": 7,
+                        "totalTokens": 18
+                    },
+                    "costCents": null
+                }
+            }),
+        )];
+
+        let bundle = agent_events_to_trace_bundle("agent-1", events);
+
+        assert_eq!(bundle.events[0].kind, TraceEventKind::Inference);
+        assert_eq!(
+            bundle.events[0].payload["item"]["routeId"],
+            "runtime.llm.code_agent"
+        );
     }
 
     #[test]
