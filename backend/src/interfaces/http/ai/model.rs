@@ -1,13 +1,14 @@
 use axum::{
-    extract::State,
-    routing::{get, post},
+    extract::{Path, State},
+    routing::{delete, get, post},
     Json, Router,
 };
 
 use crate::{
     application::ai::model_service::{
         ModelChatCommand, ModelChatConversationResp, ModelChatResp, ModelHealthCheckCommand,
-        ModelHealthCheckResp, ModelRegistrySummary, ModelRuntimeService,
+        ModelHealthCheckResp, ModelRegistrySummary, ModelRouteCircuitBreakerResp,
+        ModelRuntimeService,
     },
     domain::auth::model::CurrentUser,
     interfaces::http::{middleware::permission::require_permission, AppState},
@@ -25,6 +26,14 @@ pub fn routes() -> Router<AppState> {
         .route("/ai/models/runtime-config", get(runtime_config))
         .route("/ai/models/registry", get(model_registry))
         .route("/ai/models/health-check", post(health_check))
+        .route(
+            "/ai/models/route-circuit-breakers",
+            get(list_route_circuit_breakers),
+        )
+        .route(
+            "/ai/models/route-circuit-breakers/:route_id",
+            delete(clear_route_circuit_breaker),
+        )
         .route(
             "/ai/models/chat/conversations",
             get(list_chat_conversations),
@@ -66,6 +75,31 @@ async fn health_check(
     Ok(Json(ApiResponse::ok(
         service.health_check_for_tenant(command).await?,
     )))
+}
+
+async fn list_route_circuit_breakers(
+    State(state): State<AppState>,
+    current_user: CurrentUser,
+) -> Result<Json<ApiResponse<Vec<ModelRouteCircuitBreakerResp>>>, AppError> {
+    require_permission(&current_user, MODEL_CIRCUIT_BREAKER_LIST_PERMISSION)?;
+    let service = ModelRuntimeService::for_tenant(state.db, current_user.tenant_id);
+
+    Ok(Json(ApiResponse::ok(
+        service.list_route_circuit_breakers().await?,
+    )))
+}
+
+async fn clear_route_circuit_breaker(
+    State(state): State<AppState>,
+    current_user: CurrentUser,
+    Path(route_id): Path<String>,
+) -> Result<Json<ApiResponse<()>>, AppError> {
+    require_permission(&current_user, MODEL_CIRCUIT_BREAKER_CLEAR_PERMISSION)?;
+    let service = ModelRuntimeService::for_tenant(state.db, current_user.tenant_id);
+
+    service.clear_route_circuit_breaker(&route_id).await?;
+
+    Ok(Json(ApiResponse::ok(())))
 }
 
 async fn chat_completion(
@@ -307,6 +341,36 @@ mod tests {
             .unwrap_err();
 
         assert!(matches!(err, AppError::Forbidden));
+    }
+
+    #[tokio::test]
+    async fn model_circuit_breaker_list_handler_rejects_missing_permission() {
+        let err = list_route_circuit_breakers(State(test_state()), user_with_permissions(vec![]))
+            .await
+            .unwrap_err();
+
+        assert!(matches!(err, AppError::Forbidden));
+    }
+
+    #[tokio::test]
+    async fn model_circuit_breaker_clear_handler_rejects_missing_permission() {
+        let err = clear_route_circuit_breaker(
+            State(test_state()),
+            user_with_permissions(vec![]),
+            axum::extract::Path("runtime.llm.code_agent".to_owned()),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(matches!(err, AppError::Forbidden));
+    }
+
+    #[test]
+    fn model_circuit_breaker_routes_are_registered() {
+        let source = include_str!("model.rs");
+
+        assert!(source.contains("/ai/models/route-circuit-breakers"));
+        assert!(source.contains("/ai/models/route-circuit-breakers/:route_id"));
     }
 
     #[tokio::test]
