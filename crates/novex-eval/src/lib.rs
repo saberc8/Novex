@@ -139,6 +139,22 @@ impl EvalCaseCandidate {
         if let Some(cancel_reason) = trace_first_cancellation_reason(bundle) {
             tags.insert("cancelReason".to_owned(), json!(cancel_reason));
         }
+        let runtime_supervisor = trace_runtime_supervisor_summary(bundle);
+        if let Some(task_kind) = runtime_supervisor.task_kind.as_deref() {
+            tags.insert("runtimeSupervisorTaskKind".to_owned(), json!(task_kind));
+        }
+        if let Some(signal_sent) = runtime_supervisor.cancel_signal_sent {
+            tags.insert(
+                "runtimeSupervisorCancelSignalSent".to_owned(),
+                json!(signal_sent),
+            );
+        }
+        if let Some(active_before_cancel) = runtime_supervisor.active_before_cancel {
+            tags.insert(
+                "runtimeSupervisorActiveBeforeCancel".to_owned(),
+                json!(active_before_cancel),
+            );
+        }
         let inference_summary = trace_inference_summary(bundle);
         tags.insert("inferenceCount".to_owned(), json!(inference_summary.count));
         if inference_summary.error_count > 0 {
@@ -666,6 +682,36 @@ fn trace_first_cancellation_reason(bundle: &TraceBundle) -> Option<String> {
 }
 
 #[derive(Debug, Default)]
+struct TraceRuntimeSupervisorSummary {
+    task_kind: Option<String>,
+    cancel_signal_sent: Option<bool>,
+    active_before_cancel: Option<bool>,
+}
+
+fn trace_runtime_supervisor_summary(bundle: &TraceBundle) -> TraceRuntimeSupervisorSummary {
+    let Some(payload) = bundle
+        .events
+        .iter()
+        .find(|event| event.kind == TraceEventKind::Cancellation)
+        .map(|event| &event.payload)
+    else {
+        return TraceRuntimeSupervisorSummary::default();
+    };
+    let supervisor = payload.get("runtimeSupervisor");
+
+    TraceRuntimeSupervisorSummary {
+        task_kind: supervisor
+            .and_then(|value| value.get("taskKind"))
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned),
+        cancel_signal_sent: payload.get("runtimeSignalSent").and_then(Value::as_bool),
+        active_before_cancel: supervisor
+            .and_then(|value| value.get("activeBeforeCancel"))
+            .and_then(Value::as_bool),
+    }
+}
+
+#[derive(Debug, Default)]
 struct TraceInferenceSummary {
     count: usize,
     route_id: Option<String>,
@@ -997,6 +1043,30 @@ mod tests {
         assert_eq!(candidate.tags["compactionCount"], 1);
         assert_eq!(candidate.tags["cancelled"], true);
         assert_eq!(candidate.tags["cancelReason"], "external_cancel");
+    }
+
+    #[test]
+    fn runtime_supervisor_trace_eval_candidate_tags_runtime_cancellation() {
+        let bundle = TraceBundle::new("agent-supervisor")
+            .with_event(TraceEvent::user_message(1, "stop"))
+            .with_event(TraceEvent::cancellation(
+                2,
+                json!({
+                    "cancelReason": "external_cancel",
+                    "runtimeSignalSent": true,
+                    "runtimeSupervisor": {
+                        "activeBeforeCancel": true,
+                        "taskKind": "model_loop",
+                        "status": "cancelling"
+                    }
+                }),
+            ));
+
+        let candidate = EvalCaseCandidate::from_trace_bundle(&bundle);
+
+        assert_eq!(candidate.tags["runtimeSupervisorTaskKind"], "model_loop");
+        assert_eq!(candidate.tags["runtimeSupervisorCancelSignalSent"], true);
+        assert_eq!(candidate.tags["runtimeSupervisorActiveBeforeCancel"], true);
     }
 
     #[test]
