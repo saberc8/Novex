@@ -665,6 +665,44 @@ impl AgentService {
                         )
                         .await?;
 
+                        if runtime_state.should_compact_context() {
+                            if let Some(compaction) = runtime_state.compact_context() {
+                                let compaction_item = AgentTurnItem::ContextCompaction {
+                                    summary: compaction.summary.clone(),
+                                };
+                                let mut compaction_payload =
+                                    agent_turn_item_event_payload(&compaction_item);
+                                if let Some(object) = compaction_payload.as_object_mut() {
+                                    object.insert("runtimeMode".to_owned(), json!("model_loop"));
+                                    object.insert(
+                                        "compactionWindowId".to_owned(),
+                                        json!(compaction.window_id),
+                                    );
+                                    object.insert(
+                                        "retainedItemCount".to_owned(),
+                                        json!(compaction.retained_item_count),
+                                    );
+                                    object.insert(
+                                        "compactedItemCount".to_owned(),
+                                        json!(compaction.compacted_item_count),
+                                    );
+                                }
+                                self.append_event(
+                                    user_id,
+                                    run_id,
+                                    Some(recorded.step_id),
+                                    RunEventKind::Observation,
+                                    run_status_code(RunStatus::Running),
+                                    compaction_payload,
+                                )
+                                .await?;
+                                let summary = compaction.summary.as_str();
+                                messages =
+                                    build_compacted_model_loop_messages(&command.input, summary);
+                                continue;
+                            }
+                        }
+
                         messages.push(ModelChatMessage {
                             role: "assistant".to_owned(),
                             content: model_response.answer.clone(),
@@ -2664,6 +2702,7 @@ fn agent_runtime_budget_from_task_budget(budget: TaskBudget) -> AgentRuntimeBudg
         max_tool_calls: budget
             .max_tool_calls
             .unwrap_or(novex_ai_core::DEFAULT_MAX_TOOL_CALLS) as usize,
+        compact_after_observations: Some(2),
     }
 }
 
@@ -2672,6 +2711,28 @@ fn build_observation_follow_up_prompt(tool_code: &str, observation: &Value) -> S
         "Tool `{tool_code}` returned this observation:\n{}\nUse it to produce the final answer. If the observation is insufficient, say what is missing.",
         serde_json::to_string_pretty(observation).unwrap_or_else(|_| "{}".to_owned())
     )
+}
+
+fn build_compacted_model_loop_messages(
+    original_input: &str,
+    summary: &str,
+) -> Vec<ModelChatMessage> {
+    vec![
+        ModelChatMessage {
+            role: "system".to_owned(),
+            content: build_model_loop_system_prompt(&model_loop_tool_codes()),
+        },
+        ModelChatMessage {
+            role: "user".to_owned(),
+            content: original_input.to_owned(),
+        },
+        ModelChatMessage {
+            role: "user".to_owned(),
+            content: format!(
+                "Prior agent context was compacted to keep the run inside the model context window:\n{summary}\nContinue from this compacted context. You may call another available tool if needed, otherwise produce the final answer."
+            ),
+        },
+    ]
 }
 
 fn build_agent_plan(
@@ -3184,6 +3245,64 @@ mod tests {
         assert!(source.contains("tool_call_budget_exhausted"));
         assert!(source.contains("RunStatus::Failed"));
         assert!(source.contains("Tool call budget exhausted"));
+    }
+
+    #[test]
+    fn agent_service_model_loop_records_context_compaction_event() {
+        let source = include_str!("agent_service.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+
+        assert!(source.contains("runtime_state.should_compact_context()"));
+        assert!(source.contains("runtime_state.compact_context()"));
+        assert!(source.contains("AgentTurnItem::ContextCompaction"));
+        assert!(source.contains("\"compactionWindowId\""));
+    }
+
+    #[test]
+    fn agent_service_model_loop_uses_compacted_messages_for_next_sample() {
+        let source = include_str!("agent_service.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+        let normalized_source = source.split_whitespace().collect::<Vec<_>>().join(" ");
+
+        assert!(source.contains("build_compacted_model_loop_messages"));
+        assert!(normalized_source.contains("messages = build_compacted_model_loop_messages"));
+    }
+
+    #[test]
+    fn model_loop_budget_enables_context_compaction_threshold() {
+        let budget = agent_runtime_budget_from_task_budget(TaskBudget {
+            max_steps: Some(6),
+            max_tool_calls: Some(3),
+            max_seconds: Some(30),
+            max_cost_cents: Some(0),
+        });
+
+        assert_eq!(budget.max_turns, 6);
+        assert_eq!(budget.max_tool_calls, 3);
+        assert_eq!(budget.compact_after_observations, Some(2));
+    }
+
+    #[test]
+    fn compacted_model_loop_messages_preserve_prompt_input_and_summary() {
+        let messages = build_compacted_model_loop_messages(
+            "Find refund policy",
+            "Observation for call-1: refund within 7 days",
+        );
+
+        assert_eq!(messages.len(), 3);
+        assert_eq!(messages[0].role, "system");
+        assert!(messages[0].content.contains("Novex Agent Runtime"));
+        assert_eq!(messages[1].role, "user");
+        assert_eq!(messages[1].content, "Find refund policy");
+        assert_eq!(messages[2].role, "user");
+        assert!(messages[2].content.contains("refund within 7 days"));
+        assert!(messages[2]
+            .content
+            .contains("Continue from this compacted context"));
     }
 
     #[test]

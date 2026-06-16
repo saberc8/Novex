@@ -3,7 +3,7 @@
 | Module | Codex Source | Novex Target | Mode | Status | Notes |
 | --- | --- | --- | --- | --- | --- |
 | Agent protocol | `codex-rs/protocol/src/items.rs` | `crates/novex-agent-protocol` | direct/adapt | slice-1 implemented | Turn item, tool call, observation, and final answer vocabulary are in place |
-| Runtime loop | `codex-rs/core/src/session/turn.rs` | `crates/novex-agent-runtime` | adapt | slice-2 implemented | Budget-bounded multi-turn model loop maps model output, tool call, observation, and final answer to Run Graph events; compaction remains next |
+| Runtime loop | `codex-rs/core/src/session/turn.rs`, `codex-rs/core/src/compact*` | `crates/novex-agent-runtime` | adapt | slice-3 implemented | Budget-bounded multi-turn model loop maps model output, tool call, observation, context compaction, and final answer to Run Graph events; remote/model compaction remains next |
 | Tool schema | `codex-rs/tools/src/*` | `crates/novex-tools` | direct/adapt | slice-1 implemented | ToolDefinition and model-visible tool schema are in place |
 | Tool router | `codex-rs/core/src/tools/router.rs` | `crates/novex-tools` | adapt | partial | Model output parser and backend dispatch path exist; registry-driven router is next |
 | Parallel tools | `codex-rs/core/src/tools/parallel.rs` | `crates/novex-tools` | adapt | planned | Cancellation and non-parallel lock semantics |
@@ -19,7 +19,7 @@ Updated on 2026-06-16 from branch `feat/enterprise-agent-foundation`.
 | Slice | Current acceptance evidence | Verification command |
 | --- | --- | --- |
 | Agent protocol | `crates/novex-agent-protocol` serializes turn items, tool calls, observations, and terminal outcomes | `cargo test -p novex-agent-protocol --offline` |
-| Runtime loop POC | `runtimeMode=model_loop` uses configured `runtime.llm.code_agent`, parses model output, executes budget-bounded tool calls, records observations, and keeps sampling until final answer, approval pause, or budget stop | `cargo test -p backend-rust model_loop agent_service_model_loop --offline` |
+| Runtime loop POC | `runtimeMode=model_loop` uses configured `runtime.llm.code_agent`, parses model output, executes budget-bounded tool calls, records observations, compacts accumulated context after tool observations, and keeps sampling until final answer, approval pause, or budget stop | `cargo test -p backend-rust model_loop --offline` |
 | Codex POC UI | `apps/codex-app-poc` sends real Agent run requests with `runtimeMode=model_loop` | `cd apps/codex-app-poc && pnpm test -- src/api/agent.test.ts` |
 | MCP gateway | MCP tools can be registered, discovered, converted to `ai_tool`, audited, and routed through Agent observations | `cargo test -p backend-rust mcp_ agent_runtime_routes_mcp_tools_through_audited_observation_path --offline` |
 | Rollout/trace/eval | Agent events convert to trace bundles, replay via API, persist `ai_rollout`, capture eval candidates, and score `trace_replay` eval runs | `cargo test -p backend-rust agent_run_events_convert_to_trace_bundle eval_case_capture eval_runtime_normalizes_trace_replay_run_mode --offline` |
