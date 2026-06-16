@@ -136,6 +136,12 @@ enum ModelLoopCancelCheck {
     Cancelled,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ModelLoopFutureAwait<T> {
+    Completed(T),
+    Cancelled,
+}
+
 #[derive(Debug, Clone)]
 struct MediaPersistenceRecords {
     asset: Option<MediaAssetSaveRecord>,
@@ -218,6 +224,7 @@ impl AgentRunCancellationToken {
                 return;
             }
         }
+        std::future::pending::<()>().await;
     }
 }
 
@@ -575,6 +582,8 @@ impl AgentService {
         let now = Utc::now().naive_utc();
         self.create_run_records(user_id, run_id, &trace_id, &command, &plan, now)
             .await?;
+        let (_active_run_guard, cancel_token) =
+            self.agent_runtime.register_run(self.tenant_id, run_id);
 
         let input_item = novex_agent_protocol::AgentTurnItem::user_message(command.input.as_str());
         let mut runtime_state = AgentRuntimeState::with_budget(
@@ -620,9 +629,10 @@ impl AgentService {
                 return self.get_run(run_id).await;
             }
 
-            let model_response = self
-                .model_runtime
-                .chat_completion_for_purpose(
+            let model_response = match await_model_loop_future_or_cancelled(
+                cancel_token.clone(),
+                "model_call",
+                self.model_runtime.chat_completion_for_purpose(
                     ModelRoutePurpose::CodeAgent,
                     ModelChatCommand {
                         messages: messages.clone(),
@@ -630,8 +640,28 @@ impl AgentService {
                         max_tokens: Some(1024),
                         ..ModelChatCommand::default()
                     },
-                )
-                .await?;
+                ),
+            )
+            .await?
+            {
+                ModelLoopFutureAwait::Completed(model_response) => model_response,
+                ModelLoopFutureAwait::Cancelled => {
+                    if self
+                        .check_model_loop_cancelled(user_id, run_id, "model_call")
+                        .await?
+                        == ModelLoopCancelCheck::Continue
+                    {
+                        self.finish_model_loop_cancelled(
+                            user_id,
+                            run_id,
+                            &run_status_code(RunStatus::Cancelling),
+                            "model_call",
+                        )
+                        .await?;
+                    }
+                    return self.get_run(run_id).await;
+                }
+            };
 
             let parsed = parse_model_turn_output(&model_response.answer).map_err(|err| {
                 AppError::bad_request(format!("Agent 模型输出解析失败: {}", err.message))
@@ -979,6 +1009,7 @@ impl AgentService {
                         execute_agent_tool_io_batch(
                             batch_execution_mode,
                             prepared_calls,
+                            cancel_token.clone(),
                             |prepared| async move {
                                 self.execute_agent_tool_io(user_id, prepared).await
                             },
@@ -1333,7 +1364,6 @@ impl AgentService {
     pub async fn cancel_run(&self, user_id: i64, run_id: i64) -> Result<AgentRunResp, AppError> {
         let run = self.get_run(run_id).await?;
         ensure_agent_run_transition(&run.status, RunStatus::Cancelling)?;
-        let _runtime_signal_sent = self.agent_runtime.cancel_run(self.tenant_id, run_id);
         self.update_status(AgentStatusUpdate {
             user_id,
             run_id,
@@ -1353,6 +1383,7 @@ impl AgentService {
             json!({ "requestedBy": user_id }),
         )
         .await?;
+        let runtime_signal_sent = self.agent_runtime.cancel_run(self.tenant_id, run_id);
         let now = Utc::now().naive_utc();
         self.repo
             .cancel_active_pauses(self.tenant_id, run_id, user_id, now)
@@ -1377,7 +1408,7 @@ impl AgentService {
             None,
             RunEventKind::Cancelled,
             run_status_code(RunStatus::Cancelled),
-            json!({ "cancelled": true }),
+            json!({ "cancelled": true, "runtimeSignalSent": runtime_signal_sent }),
         )
         .await?;
         self.refresh_trace_snapshot(user_id, run_id, json!({ "cancelled": true }))
@@ -2079,9 +2110,25 @@ async fn execute_agent_tool(
     )
 }
 
+async fn await_model_loop_future_or_cancelled<F, T>(
+    cancel_token: AgentRunCancellationToken,
+    _stage: &str,
+    future: F,
+) -> Result<ModelLoopFutureAwait<T>, AppError>
+where
+    F: Future<Output = Result<T, AppError>>,
+{
+    tokio::select! {
+        biased;
+        _ = cancel_token.cancelled() => Ok(ModelLoopFutureAwait::Cancelled),
+        result = future => result.map(ModelLoopFutureAwait::Completed),
+    }
+}
+
 async fn execute_agent_tool_io_batch<F, Fut>(
     mode: ToolBatchExecutionMode,
     prepared_calls: Vec<PreparedAgentToolCall>,
+    cancel_token: AgentRunCancellationToken,
     execute: F,
 ) -> Result<Vec<ExecutedAgentToolCall>, AppError>
 where
@@ -2090,26 +2137,36 @@ where
 {
     match mode {
         ToolBatchExecutionMode::Parallel => {
-            let results = join_all(
-                prepared_calls
-                    .into_iter()
-                    .map(|prepared| execute_agent_tool_io_with_timeout(prepared, &execute)),
-            )
+            let results = join_all(prepared_calls.into_iter().map(|prepared| {
+                execute_agent_tool_io_with_timeout_and_cancel(
+                    prepared,
+                    cancel_token.clone(),
+                    &execute,
+                )
+            }))
             .await;
             results.into_iter().collect()
         }
         ToolBatchExecutionMode::Serial => {
             let mut executions = Vec::with_capacity(prepared_calls.len());
             for prepared in prepared_calls {
-                executions.push(execute_agent_tool_io_with_timeout(prepared, &execute).await?);
+                executions.push(
+                    execute_agent_tool_io_with_timeout_and_cancel(
+                        prepared,
+                        cancel_token.clone(),
+                        &execute,
+                    )
+                    .await?,
+                );
             }
             Ok(executions)
         }
     }
 }
 
-async fn execute_agent_tool_io_with_timeout<F, Fut>(
+async fn execute_agent_tool_io_with_timeout_and_cancel<F, Fut>(
     prepared: PreparedAgentToolCall,
+    cancel_token: AgentRunCancellationToken,
     execute: &F,
 ) -> Result<ExecutedAgentToolCall, AppError>
 where
@@ -2117,9 +2174,25 @@ where
     Fut: Future<Output = Result<ExecutedAgentToolCall, AppError>>,
 {
     let timeout = prepared.timeout;
-    match tokio::time::timeout(timeout, execute(prepared.clone())).await {
-        Ok(result) => result,
-        Err(_) => Ok(ExecutedAgentToolCall {
+    tokio::select! {
+        biased;
+        _ = cancel_token.cancelled() => Ok(ExecutedAgentToolCall {
+            execution: AgentToolExecution::cancelled(
+                json!({
+                    "status": "cancelled",
+                    "cancelReason": "external_cancel",
+                    "cancelStage": "tool_io",
+                    "toolCode": prepared.tool.code,
+                    "callId": prepared.call_id,
+                }),
+                format!("Tool `{}` was cancelled by run cancellation.", prepared.tool.code),
+            ),
+            prepared,
+            terminal_status: RunStatus::Cancelled,
+        }),
+        result = tokio::time::timeout(timeout, execute(prepared.clone())) => match result {
+            Ok(result) => result,
+            Err(_) => Ok(ExecutedAgentToolCall {
             execution: AgentToolExecution::cancelled(
                 json!({
                     "status": "cancelled",
@@ -2136,7 +2209,8 @@ where
             ),
             prepared,
             terminal_status: RunStatus::Cancelled,
-        }),
+            }),
+        },
     }
 }
 
@@ -3813,6 +3887,10 @@ mod tests {
         }
     }
 
+    fn test_cancel_token() -> (ActiveAgentRunGuard, AgentRunCancellationToken) {
+        AgentRuntimeRegistry::default().register_run(1, 1)
+    }
+
     #[tokio::test]
     async fn agent_service_can_be_bound_to_request_tenant() {
         let db = PgPoolOptions::new()
@@ -3982,10 +4060,11 @@ mod tests {
             test_prepared_tool_call(0, "call-1", "rag.search"),
             test_prepared_tool_call(1, "call-2", "github.repo.read"),
         ];
+        let (_guard, cancel_token) = test_cancel_token();
 
         let result = tokio::time::timeout(
             std::time::Duration::from_millis(250),
-            execute_agent_tool_io_batch(ToolBatchExecutionMode::Parallel, calls, {
+            execute_agent_tool_io_batch(ToolBatchExecutionMode::Parallel, calls, cancel_token, {
                 let barrier = barrier.clone();
                 move |prepared| {
                     let barrier = barrier.clone();
@@ -4013,19 +4092,21 @@ mod tests {
             test_prepared_tool_call(0, "call-1", "media.image.generate"),
             test_prepared_tool_call(1, "call-2", "feishu.message.send"),
         ];
+        let (_guard, cancel_token) = test_cancel_token();
 
-        let result = execute_agent_tool_io_batch(ToolBatchExecutionMode::Serial, calls, {
-            let order = order.clone();
-            move |prepared| {
+        let result =
+            execute_agent_tool_io_batch(ToolBatchExecutionMode::Serial, calls, cancel_token, {
                 let order = order.clone();
-                async move {
-                    order.lock().unwrap().push(prepared.call_id.clone());
-                    Ok(test_executed_tool_call(prepared))
+                move |prepared| {
+                    let order = order.clone();
+                    async move {
+                        order.lock().unwrap().push(prepared.call_id.clone());
+                        Ok(test_executed_tool_call(prepared))
+                    }
                 }
-            }
-        })
-        .await
-        .unwrap();
+            })
+            .await
+            .unwrap();
 
         assert_eq!(result.len(), 2);
         assert_eq!(
@@ -4039,10 +4120,12 @@ mod tests {
         let mut call = test_prepared_tool_call(0, "call-1", "rag.search");
         call.timeout = std::time::Duration::from_millis(10);
         let calls = vec![call];
+        let (_guard, cancel_token) = test_cancel_token();
 
         let result = execute_agent_tool_io_batch(
             ToolBatchExecutionMode::Serial,
             calls,
+            cancel_token,
             |prepared| async move {
                 tokio::time::sleep(std::time::Duration::from_secs(60)).await;
                 Ok(test_executed_tool_call(prepared))
@@ -4125,6 +4208,75 @@ mod tests {
         assert!(source.contains("before_tool_batch"));
         assert!(source.contains("after_tool_batch"));
         assert!(source.contains("before_next_turn"));
+    }
+
+    #[test]
+    fn agent_service_model_loop_awaits_model_with_runtime_registry_token() {
+        let source = include_str!("agent_service.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+
+        assert!(source.contains("await_model_loop_future_or_cancelled"));
+        assert!(source.contains("model_call"));
+    }
+
+    #[test]
+    fn agent_service_tool_io_awaits_runtime_registry_cancel_token() {
+        let source = include_str!("agent_service.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+
+        assert!(source.contains("execute_agent_tool_io_with_timeout_and_cancel"));
+        assert!(source.contains("\"cancelReason\": \"external_cancel\""));
+    }
+
+    #[tokio::test]
+    async fn model_loop_future_runtime_registry_cancel_returns_cancelled_await() {
+        let registry = AgentRuntimeRegistry::default();
+        let (_guard, token) = registry.register_run(1, 42);
+        assert!(registry.cancel_run(1, 42));
+
+        let result = await_model_loop_future_or_cancelled(token, "model_call", async {
+            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+            Ok::<_, AppError>("finished")
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(result, ModelLoopFutureAwait::Cancelled);
+    }
+
+    #[tokio::test]
+    async fn tool_io_runtime_registry_cancel_returns_external_cancel_execution() {
+        let registry = AgentRuntimeRegistry::default();
+        let (_guard, token) = registry.register_run(1, 42);
+        assert!(registry.cancel_run(1, 42));
+        let calls = vec![test_prepared_tool_call(0, "call-1", "rag.search")];
+
+        let result = execute_agent_tool_io_batch(
+            ToolBatchExecutionMode::Serial,
+            calls,
+            token,
+            |prepared| async move {
+                tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                Ok(test_executed_tool_call(prepared))
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result[0].execution.status, "cancelled");
+        assert_eq!(result[0].terminal_status, RunStatus::Cancelled);
+        assert_eq!(
+            result[0].execution.response_payload["cancelReason"],
+            "external_cancel"
+        );
+        assert_eq!(
+            result[0].execution.response_payload["cancelStage"],
+            "tool_io"
+        );
     }
 
     #[test]
