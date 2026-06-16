@@ -30,10 +30,11 @@ use crate::{
 const DEFAULT_TEMPLATE_PAGE_SIZE: u64 = 20;
 const ENABLED_STATUS: i16 = 1;
 const DEFAULT_SMOKE_TIMEOUT_SECS: u64 = 300;
-const TEMPLATE_MANIFESTS: [&str; 4] = [
+const TEMPLATE_MANIFESTS: [&str; 5] = [
     include_str!("../../../../templates/llm-chat/template.json"),
     include_str!("../../../../templates/knowledge-base-chat/template.json"),
     include_str!("../../../../templates/agent-workspace/template.json"),
+    include_str!("../../../../templates/customer-service-agent/template.json"),
     include_str!("../../../../templates/training-app/template.json"),
 ];
 
@@ -1121,6 +1122,9 @@ mod tests {
                 include_str!("../../../../templates/knowledge-base-chat/README.md")
             }
             "agent_workspace" => include_str!("../../../../templates/agent-workspace/README.md"),
+            "customer_service_agent" => {
+                include_str!("../../../../templates/customer-service-agent/README.md")
+            }
             "training_app" => include_str!("../../../../templates/training-app/README.md"),
             _ => "",
         }
@@ -1135,6 +1139,9 @@ mod tests {
             "agent_workspace" => {
                 include_str!("../../../../templates/agent-workspace/template.json")
             }
+            "customer_service_agent" => {
+                include_str!("../../../../templates/customer-service-agent/template.json")
+            }
             "training_app" => include_str!("../../../../templates/training-app/template.json"),
             _ => "",
         }
@@ -1145,6 +1152,7 @@ mod tests {
             "llm_chat" => "llm-chat",
             "knowledge_base_chat" => "knowledge-base-chat",
             "agent_workspace" => "agent-workspace",
+            "customer_service_agent" => "customer-service-agent",
             "training_app" => "training-app",
             _ => "",
         }
@@ -1158,10 +1166,11 @@ mod tests {
             .map(|template| template.code.as_str())
             .collect::<Vec<_>>();
 
-        assert_eq!(templates.len(), 4);
+        assert_eq!(templates.len(), 5);
         assert!(codes.contains(&"llm_chat"));
         assert!(codes.contains(&"knowledge_base_chat"));
         assert!(codes.contains(&"agent_workspace"));
+        assert!(codes.contains(&"customer_service_agent"));
         assert!(codes.contains(&"training_app"));
     }
 
@@ -1385,6 +1394,41 @@ mod tests {
         assert_eq!(page_codes, vec!["workspace", "approvals", "traces"]);
         assert!(template.smoke_checks.iter().any(|check| {
             check.workdir == "apps/agent-workspace" && check.command == "pnpm test"
+        }));
+    }
+
+    #[test]
+    fn delivery_template_manifest_registers_customer_service_agent_metadata() {
+        let template = get_delivery_template("customer_service_agent").unwrap();
+        let page_codes = template
+            .frontend_pages
+            .iter()
+            .map(|page| page.code.as_str())
+            .collect::<Vec<_>>();
+        let operator = template
+            .roles
+            .iter()
+            .find(|role| role.code == "customer_service_operator")
+            .unwrap();
+        let eval_set = template
+            .eval_sets
+            .iter()
+            .find(|eval_set| eval_set.code == "customer-service-agent-regression")
+            .unwrap();
+
+        assert_eq!(template.frontend_app, "customer-service-agent");
+        assert_eq!(page_codes, vec!["console", "runs", "knowledge"]);
+        assert!(operator
+            .permissions
+            .contains(&"ai:customer-service:agent:run".to_owned()));
+        assert!(operator
+            .permissions
+            .contains(&"ai:customer-service:read".to_owned()));
+        assert!(eval_set
+            .metrics
+            .contains(&"citation_correctness".to_owned()));
+        assert!(template.smoke_checks.iter().any(|check| {
+            check.workdir == "backend" && check.command.contains("customer_service_")
         }));
     }
 
