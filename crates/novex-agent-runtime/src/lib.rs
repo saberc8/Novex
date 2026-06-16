@@ -1,5 +1,6 @@
 use novex_agent_protocol::{AgentTurnItem, TurnOutcome};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 pub const CRATE_ID: &str = "novex-agent-runtime";
 
@@ -80,6 +81,56 @@ impl AgentRuntimeState {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ParsedModelTurnOutput {
+    pub item: AgentTurnItem,
+    pub outcome: TurnOutcome,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelTurnParseError {
+    pub message: String,
+}
+
+pub fn parse_model_turn_output(output: &str) -> Result<ParsedModelTurnOutput, ModelTurnParseError> {
+    let trimmed = output.trim();
+    if trimmed.is_empty() {
+        return Err(ModelTurnParseError {
+            message: "model output is empty".to_owned(),
+        });
+    }
+
+    if let Ok(value) = serde_json::from_str::<Value>(trimmed) {
+        if value.get("type").and_then(Value::as_str) == Some("tool_call") {
+            let call_id = value
+                .get("callId")
+                .and_then(Value::as_str)
+                .unwrap_or("call-1")
+                .to_owned();
+            let tool_code = value
+                .get("toolCode")
+                .and_then(Value::as_str)
+                .ok_or_else(|| ModelTurnParseError {
+                    message: "toolCode is required".to_owned(),
+                })?
+                .to_owned();
+            let arguments = value.get("arguments").cloned().unwrap_or(Value::Null);
+            return Ok(ParsedModelTurnOutput {
+                item: AgentTurnItem::tool_call(call_id, tool_code, arguments),
+                outcome: TurnOutcome::NeedsFollowUp,
+            });
+        }
+    }
+
+    Ok(ParsedModelTurnOutput {
+        item: AgentTurnItem::FinalAnswer {
+            content: trimmed.to_owned(),
+        },
+        outcome: TurnOutcome::Final,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -116,5 +167,36 @@ mod tests {
         state.push_item(AgentTurnItem::tool_call("call-2", "rag.search", json!({})));
 
         assert_eq!(state.next_outcome(), TurnOutcome::BudgetExceeded);
+    }
+
+    #[test]
+    fn parser_reads_json_tool_call_from_model_answer() {
+        let parsed = parse_model_turn_output(
+            r#"{"type":"tool_call","callId":"call-1","toolCode":"rag.search","arguments":{"query":"policy"}}"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            parsed.item,
+            AgentTurnItem::tool_call(
+                "call-1",
+                "rag.search",
+                serde_json::json!({"query":"policy"})
+            )
+        );
+        assert_eq!(parsed.outcome, TurnOutcome::NeedsFollowUp);
+    }
+
+    #[test]
+    fn parser_treats_plain_text_as_final_answer() {
+        let parsed = parse_model_turn_output("Here is the answer.").unwrap();
+
+        assert_eq!(
+            parsed.item,
+            AgentTurnItem::FinalAnswer {
+                content: "Here is the answer.".to_owned()
+            }
+        );
+        assert_eq!(parsed.outcome, TurnOutcome::Final);
     }
 }
