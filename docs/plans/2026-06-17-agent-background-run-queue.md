@@ -4,6 +4,8 @@
 
 **Goal:** Add durable Agent run queueing so HTTP can create queued Agent runs and a background worker can claim and execute them using the same Agent runtime code.
 
+**Progress 2026-06-17:** Implemented the durable queue table/repository, `executionMode=queued` API contract, queued Run Graph creation, replayable queued events, config-gated embedded worker, Postgres `FOR UPDATE SKIP LOCKED` claim/lease polling, shared HTTP/worker `AgentRuntimeRegistry`, and deterministic existing-run execution. `runtimeMode=model_loop + executionMode=queued` is intentionally rejected until the model-loop body is extracted into the same existing-run execution shape.
+
 **Architecture:** A Postgres-backed `ai_agent_run_queue` owns durable queue state and leases. `AgentService` creates queued runs and exposes an existing-run execution entrypoint. `agent_queue_runtime.rs` polls/claims queue rows and calls the service; SSE over `ai_run_event` remains the client progress API.
 
 **Tech Stack:** Rust, Axum service layer, SQLx/Postgres, existing Run Graph tables, existing Agent runtime/model/tool crates.
@@ -11,6 +13,8 @@
 ---
 
 ### Task 1: Queue Migration And Repository Contract
+
+Status: Completed in `feat: add agent run queue repository`.
 
 **Files:**
 - Create: `backend/migrations/202606170006_create_ai_agent_run_queue.sql`
@@ -56,6 +60,8 @@ git commit -m "feat: add agent run queue repository"
 ```
 
 ### Task 2: Command Execution Mode And Queued Run Creation
+
+Status: Completed in `feat: create queued agent runs`.
 
 **Files:**
 - Modify: `backend/src/application/ai/agent_service.rs`
@@ -103,6 +109,8 @@ git commit -m "feat: create queued agent runs"
 ```
 
 ### Task 3: Existing-Run Execution Entry Point And Worker Runtime
+
+Status: Completed in `feat: execute queued agent runs` for deterministic Agent runs. Remaining follow-up: extract model-loop execution into an existing-run entrypoint so queued model-loop can be enabled without creating a second run.
 
 **Files:**
 - Create: `backend/src/application/ai/agent_queue_runtime.rs`
@@ -154,6 +162,8 @@ git commit -m "feat: execute queued agent runs"
 
 ### Task 4: Matrix And Final Verification
 
+Status: In progress.
+
 **Files:**
 - Modify: `docs/plans/2026-06-16-codex-migration-matrix.md`
 - Modify: `docs/plans/2026-06-17-agent-background-run-queue.md`
@@ -165,6 +175,7 @@ Record:
 - Runtime loop slice moves to background queue implemented.
 - Current evidence includes queue migration, repository, service, runtime worker, and config.
 - Remaining gaps: broker wake-up transport, cross-process provider abort, resume requeue for human approval.
+- Remaining gaps: queued model-loop existing-run extraction, broker wake-up transport, cross-process provider abort, resume requeue for human approval.
 
 **Step 2: Verify**
 
