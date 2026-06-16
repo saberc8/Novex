@@ -806,10 +806,46 @@ ORDER BY r.priority ASC, r.id ASC;
         .bind(self.tenant_id)
         .fetch_all(&self.db)
         .await?;
+        let alert_rows = sqlx::query_as::<_, ModelOpsAlertRow>(
+            r#"
+SELECT
+    alert.alert_key,
+    alert.alert_kind,
+    alert.severity,
+    alert.status,
+    route.code AS route_code,
+    route.route_purpose,
+    provider.code AS provider_code,
+    profile.model_name,
+    COALESCE(alert.source_ref, '') AS source_ref,
+    alert.event_payload,
+    alert.first_seen_at,
+    alert.last_seen_at
+FROM ai_model_ops_alert alert
+LEFT JOIN ai_model_route route
+  ON route.tenant_id = alert.tenant_id
+ AND route.id = alert.route_id
+LEFT JOIN ai_model_profile profile
+  ON profile.tenant_id = alert.tenant_id
+ AND profile.id = alert.model_profile_id
+LEFT JOIN ai_model_deployment deployment
+  ON deployment.tenant_id = alert.tenant_id
+ AND deployment.id = profile.deployment_id
+LEFT JOIN ai_model_provider provider
+  ON provider.tenant_id = alert.tenant_id
+ AND provider.id = alert.provider_id
+WHERE alert.tenant_id = $1
+  AND alert.resolved_at IS NULL
+ORDER BY alert.last_seen_at DESC, alert.id DESC;
+"#,
+        )
+        .bind(self.tenant_id)
+        .fetch_all(&self.db)
+        .await?;
 
         Ok(model_ops_summary_from_rows(
             rows,
-            Vec::new(),
+            alert_rows,
             Utc::now().naive_utc(),
         ))
     }
@@ -3863,6 +3899,20 @@ mod tests {
         assert!(source.contains("ai_model_usage"));
         assert!(source.contains("WHERE r.tenant_id = $1"));
         assert!(source.contains("INTERVAL '24 hours'"));
+    }
+
+    #[test]
+    fn model_ops_summary_source_contract_reads_active_model_ops_alerts() {
+        let source = include_str!("model_service.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+
+        assert!(source.contains("ai_model_ops_alert alert"));
+        assert!(source.contains("alert.resolved_at IS NULL"));
+        assert!(source.contains("ORDER BY alert.last_seen_at DESC"));
+        assert!(source.contains("model_ops_summary_from_rows("));
+        assert!(source.contains("alert_rows,"));
     }
 
     #[test]
