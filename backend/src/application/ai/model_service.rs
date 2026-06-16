@@ -1099,7 +1099,10 @@ ORDER BY r.priority, r.id
         let fallback_plan = self
             .fallback_plan_for_purpose_with_route_id(purpose, Some(primary_route.route_id()))
             .await?;
-        if fallback_plan.as_ref().is_some_and(|plan| plan.decision.enabled) {
+        if fallback_plan
+            .as_ref()
+            .is_some_and(|plan| plan.decision.enabled)
+        {
             if let Some(primary_attempt) = model_circuit_breaker_open_attempt(primary_route) {
                 let Some(fallback_route_id) = fallback_plan
                     .as_ref()
