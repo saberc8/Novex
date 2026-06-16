@@ -15,8 +15,12 @@ use novex_agent_runtime::{
 };
 use novex_ai_core::{validate_run_transition, RunEventKind, RunStatus, RunStepType, TaskBudget};
 use novex_approval_review::{
-    review_tool_approval, GuardianApprovalPolicy, GuardianReviewDecision, GuardianReviewInput,
-    GuardianRiskLevel, GuardianUserAuthorization,
+    build_guardian_model_review_prompt, guardian_review_failure_decision,
+    parse_guardian_model_assessment, review_tool_approval,
+    review_tool_approval_with_model_assessment, GuardianApprovalPolicy,
+    GuardianModelReviewRequest, GuardianReviewDecision, GuardianReviewFailureReason,
+    GuardianReviewInput, GuardianReviewedAction, GuardianRiskLevel, GuardianTranscriptEntry,
+    GuardianTranscriptRole, GuardianUserAuthorization,
 };
 use novex_connectors::{
     parse_credential_scope, parse_github_code_search_response, resolve_env_secret_ref,
@@ -78,6 +82,7 @@ const FEISHU_WEBHOOK_TIMEOUT: Duration = Duration::from_secs(10);
 const MEDIA_IMAGE_TIMEOUT: Duration = Duration::from_secs(30);
 const GITHUB_CONNECTOR_TIMEOUT: Duration = Duration::from_secs(15);
 const AGENT_TOOL_IO_TIMEOUT: Duration = Duration::from_secs(45);
+const GUARDIAN_REVIEW_TIMEOUT: Duration = Duration::from_secs(90);
 const MAX_AGENT_MEMORY_SNIPPETS: usize = 6;
 const MAX_AGENT_MEMORY_CANDIDATES: i64 = 32;
 const CODE_AGENT_MODEL_ROUTE_ID: &str = "runtime.llm.code_agent";
@@ -651,6 +656,8 @@ impl AgentService {
                     run_id,
                     &tool,
                     &command.input,
+                    None,
+                    json!({ "input": command.input }),
                     command.auto_approve,
                     now,
                 )
@@ -1160,6 +1167,8 @@ impl AgentService {
                                 run_id,
                                 &prepared_call.tool,
                                 &command.input,
+                                Some(&runtime_state.items),
+                                prepared_call.arguments.clone(),
                                 command.auto_approve,
                                 now,
                             )
@@ -1906,11 +1915,21 @@ impl AgentService {
         run_id: i64,
         tool: &ToolLookupRecord,
         input: &str,
+        runtime_items: Option<&[AgentTurnItem]>,
+        tool_arguments: Value,
         auto_approved: bool,
         now: NaiveDateTime,
     ) -> Result<(), AppError> {
         let step_id = next_id();
-        let guardian_review = guardian_review_payload_for_tool_policy(tool, auto_approved);
+        let guardian_review = self
+            .guardian_review_payload_for_tool_policy(
+                input,
+                runtime_items,
+                tool,
+                tool_arguments,
+                auto_approved,
+            )
+            .await;
         self.repo
             .create_step(&RunStepSaveRecord {
                 id: step_id,
@@ -1982,6 +2001,104 @@ impl AgentService {
             json!({ "pauseReason": "approval" }),
         )
         .await
+    }
+
+    async fn guardian_review_payload_for_tool_policy(
+        &self,
+        input: &str,
+        runtime_items: Option<&[AgentTurnItem]>,
+        tool: &ToolLookupRecord,
+        arguments: Value,
+        auto_approved: bool,
+    ) -> Value {
+        serde_json::to_value(
+            self.guardian_review_decision_for_tool_policy(
+                input,
+                runtime_items,
+                tool,
+                arguments,
+                auto_approved,
+            )
+            .await,
+        )
+        .unwrap_or(Value::Null)
+    }
+
+    async fn guardian_review_decision_for_tool_policy(
+        &self,
+        input: &str,
+        runtime_items: Option<&[AgentTurnItem]>,
+        tool: &ToolLookupRecord,
+        arguments: Value,
+        auto_approved: bool,
+    ) -> GuardianReviewDecision {
+        let review_input = guardian_review_input_for_tool_policy(tool, auto_approved, auto_approved);
+        if !auto_approved {
+            return review_tool_approval(review_input);
+        }
+
+        let request =
+            guardian_model_review_request_for_tool(input, runtime_items, tool, arguments);
+        let prompt_messages = match build_guardian_model_review_prompt(&request) {
+            Ok(messages) => messages,
+            Err(err) => {
+                return guardian_review_failure_decision(
+                    review_input,
+                    GuardianReviewFailureReason::Parse,
+                    format!("guardian review prompt build failed: {err}"),
+                );
+            }
+        };
+        let messages = prompt_messages
+            .into_iter()
+            .map(|message| ModelChatMessage {
+                role: message.role,
+                content: message.content,
+            })
+            .collect();
+        let started = Instant::now();
+        let result = tokio::time::timeout(
+            GUARDIAN_REVIEW_TIMEOUT,
+            self.model_runtime.chat_completion_for_purpose(
+                ModelRoutePurpose::GuardianReview,
+                ModelChatCommand {
+                    messages,
+                    temperature: Some(0.0),
+                    max_tokens: Some(512),
+                    ..ModelChatCommand::default()
+                },
+            ),
+        )
+        .await;
+
+        match result {
+            Err(_) => guardian_review_failure_decision(
+                review_input,
+                GuardianReviewFailureReason::Timeout,
+                "guardian review timed out",
+            ),
+            Ok(Err(err)) => guardian_review_failure_decision(
+                review_input,
+                GuardianReviewFailureReason::Session,
+                format!("guardian review model call failed: {err}"),
+            ),
+            Ok(Ok(response)) => match parse_guardian_model_assessment(&response.answer) {
+                Ok(assessment) => guardian_review_decision_with_model_metadata(
+                    review_tool_approval_with_model_assessment(review_input, assessment),
+                    &response,
+                    started.elapsed().as_millis(),
+                ),
+                Err(err) => guardian_review_decision_with_model_metadata(
+                    guardian_review_failure_decision(
+                        review_input,
+                        err.kind,
+                        format!("guardian review parse failed: {}", err.message),
+                    ),
+                    &response,
+                    started.elapsed().as_millis(),
+                ),
+            },
+        }
     }
 
     async fn record_retrieval_context(
@@ -3619,11 +3736,24 @@ fn agent_tool_policy_decision(
     })
 }
 
+#[cfg(test)]
 fn guardian_review_for_tool_policy(
     tool: &ToolLookupRecord,
     auto_approved: bool,
 ) -> GuardianReviewDecision {
-    review_tool_approval(GuardianReviewInput {
+    review_tool_approval(guardian_review_input_for_tool_policy(
+        tool,
+        auto_approved,
+        false,
+    ))
+}
+
+fn guardian_review_input_for_tool_policy(
+    tool: &ToolLookupRecord,
+    auto_approved: bool,
+    reviewer_enabled: bool,
+) -> GuardianReviewInput {
+    GuardianReviewInput {
         tool_code: tool.code.clone(),
         risk_level: guardian_risk_level(tool.risk_level),
         approval_policy: guardian_approval_policy(tool.approval_policy),
@@ -3633,13 +3763,90 @@ fn guardian_review_for_tool_policy(
             GuardianUserAuthorization::Missing
         },
         auto_approved,
-        reviewer_enabled: false,
-    })
+        reviewer_enabled,
+    }
 }
 
-fn guardian_review_payload_for_tool_policy(tool: &ToolLookupRecord, auto_approved: bool) -> Value {
-    serde_json::to_value(guardian_review_for_tool_policy(tool, auto_approved))
-        .unwrap_or(Value::Null)
+fn guardian_model_review_request_for_tool(
+    input: &str,
+    runtime_items: Option<&[AgentTurnItem]>,
+    tool: &ToolLookupRecord,
+    arguments: Value,
+) -> GuardianModelReviewRequest {
+    GuardianModelReviewRequest {
+        transcript: guardian_transcript_entries(input, runtime_items),
+        reviewed_action: GuardianReviewedAction {
+            tool_code: tool.code.clone(),
+            arguments,
+            permission_code: tool.permission_code.clone(),
+        },
+        retry_reason: None,
+    }
+}
+
+fn guardian_transcript_entries(
+    input: &str,
+    runtime_items: Option<&[AgentTurnItem]>,
+) -> Vec<GuardianTranscriptEntry> {
+    let mut entries = runtime_items
+        .unwrap_or_default()
+        .iter()
+        .filter_map(guardian_transcript_entry_from_turn_item)
+        .collect::<Vec<_>>();
+    if entries.is_empty() {
+        entries.push(GuardianTranscriptEntry {
+            role: GuardianTranscriptRole::User,
+            content: input.to_owned(),
+        });
+    }
+    entries
+}
+
+fn guardian_transcript_entry_from_turn_item(
+    item: &AgentTurnItem,
+) -> Option<GuardianTranscriptEntry> {
+    match item {
+        AgentTurnItem::UserMessage { content } => Some(GuardianTranscriptEntry {
+            role: GuardianTranscriptRole::User,
+            content: content.clone(),
+        }),
+        AgentTurnItem::AssistantMessage { content } | AgentTurnItem::FinalAnswer { content } => {
+            Some(GuardianTranscriptEntry {
+                role: GuardianTranscriptRole::Assistant,
+                content: content.clone(),
+            })
+        }
+        AgentTurnItem::Reasoning { summary } | AgentTurnItem::ContextCompaction { summary } => {
+            Some(GuardianTranscriptEntry {
+                role: GuardianTranscriptRole::Assistant,
+                content: summary.clone(),
+            })
+        }
+        AgentTurnItem::ToolCall {
+            tool_code,
+            arguments,
+            ..
+        } => Some(GuardianTranscriptEntry {
+            role: GuardianTranscriptRole::Tool,
+            content: format!("tool_call {tool_code} arguments: {arguments}"),
+        }),
+        AgentTurnItem::ToolObservation { status, output, .. } => Some(GuardianTranscriptEntry {
+            role: GuardianTranscriptRole::Tool,
+            content: format!("tool_observation status: {status:?} output: {output}"),
+        }),
+    }
+}
+
+fn guardian_review_decision_with_model_metadata(
+    mut decision: GuardianReviewDecision,
+    response: &ModelChatResp,
+    latency_ms: u128,
+) -> GuardianReviewDecision {
+    decision.model_route_id = Some(response.route_id.clone());
+    decision.model_provider = Some(response.provider.clone());
+    decision.model_name = response.model.clone();
+    decision.review_latency_ms = Some(latency_ms);
+    decision
 }
 
 fn agent_tool_kind(tool: &ToolLookupRecord) -> ToolKind {
@@ -4561,7 +4768,7 @@ mod tests {
     use super::*;
     use crate::application::ai::model_service::{ModelChatUsage, ModelProviderAttempt};
     use novex_ai_core::TaskBudget;
-    use novex_approval_review::GuardianReviewOutcome;
+    use novex_approval_review::{GuardianReviewOutcome, GuardianReviewStatus};
     use novex_trace::TraceEventKind;
     use sqlx::postgres::PgPoolOptions;
 
@@ -5661,9 +5868,102 @@ mod tests {
             .next()
             .unwrap();
 
-        assert!(source.contains("guardian_review_for_tool_policy"));
+        assert!(source.contains("guardian_review_payload_for_tool_policy"));
+        assert!(source.contains("guardian_review_decision_for_tool_policy"));
         assert!(source.contains("review_tool_approval"));
         assert!(source.contains("\"guardianReview\""));
+    }
+
+    #[test]
+    fn guardian_model_review_backend_uses_dedicated_route_and_timeout() {
+        let source = include_str!("agent_service.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+        let normalized_source = source.split_whitespace().collect::<Vec<_>>().join(" ");
+
+        assert!(source.contains("GUARDIAN_REVIEW_TIMEOUT"));
+        assert!(normalized_source.contains("tokio::time::timeout( GUARDIAN_REVIEW_TIMEOUT"));
+        assert!(source.contains("ModelRoutePurpose::GuardianReview"));
+        assert!(source.contains("build_guardian_model_review_prompt"));
+        assert!(source.contains("parse_guardian_model_assessment"));
+    }
+
+    #[test]
+    fn guardian_model_review_request_includes_runtime_transcript_and_tool_action() {
+        let mut runtime_state = AgentRuntimeState::new("run-1");
+        runtime_state.push_item(AgentTurnItem::user_message("create an issue"));
+        runtime_state.push_item(AgentTurnItem::tool_observation(
+            "call-1",
+            ToolObservationStatus::Succeeded,
+            json!({"repo":"owner/repo"}),
+        ));
+        let tool = ToolLookupRecord {
+            id: 1,
+            code: "github.issue.write".to_owned(),
+            tool_kind: "connector".to_owned(),
+            executor_kind: "connector".to_owned(),
+            risk_level: 3,
+            approval_policy: 1,
+            permission_code: Some("ai:agent:run".to_owned()),
+        };
+
+        let request = guardian_model_review_request_for_tool(
+            "create an issue",
+            Some(&runtime_state.items),
+            &tool,
+            json!({"title":"Bug"}),
+        );
+
+        assert!(request
+            .transcript
+            .iter()
+            .any(|entry| entry.content.contains("create an issue")));
+        assert!(request
+            .transcript
+            .iter()
+            .any(|entry| entry.content.contains("owner/repo")));
+        assert_eq!(request.reviewed_action.tool_code, "github.issue.write");
+        assert_eq!(request.reviewed_action.arguments["title"], "Bug");
+        assert_eq!(
+            request.reviewed_action.permission_code.as_deref(),
+            Some("ai:agent:run")
+        );
+    }
+
+    #[test]
+    fn guardian_model_review_metadata_is_added_to_decision() {
+        let mut decision = guardian_review_for_tool_policy(
+            &ToolLookupRecord {
+                id: 1,
+                code: "github.issue.write".to_owned(),
+                tool_kind: "connector".to_owned(),
+                executor_kind: "connector".to_owned(),
+                risk_level: 3,
+                approval_policy: 1,
+                permission_code: Some("ai:agent:run".to_owned()),
+            },
+            true,
+        );
+        decision.review_status = GuardianReviewStatus::Reviewed;
+        let response = ModelChatResp {
+            conversation_id: None,
+            answer: "{}".to_owned(),
+            route_id: "runtime.llm.guardian".to_owned(),
+            provider: "deep-seek".to_owned(),
+            model: Some("deepseek-v4-flash".to_owned()),
+            latency_ms: 17,
+            usage: ModelChatUsage::default(),
+            cost_cents: None,
+            provider_attempts: vec![],
+        };
+
+        let decision = guardian_review_decision_with_model_metadata(decision, &response, 19);
+
+        assert_eq!(decision.model_route_id.as_deref(), Some("runtime.llm.guardian"));
+        assert_eq!(decision.model_provider.as_deref(), Some("deep-seek"));
+        assert_eq!(decision.model_name.as_deref(), Some("deepseek-v4-flash"));
+        assert_eq!(decision.review_latency_ms, Some(19));
     }
 
     #[test]
