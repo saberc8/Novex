@@ -10,6 +10,35 @@
 
 ---
 
+## Current Status
+
+Backend slice is implemented and verified.
+
+- Persistence: `ai_notebook_workspace`, `ai_notebook_source`, `ai_notebook_artifact`.
+- API: workspace create/list, source add/list, artifact list/generate, cited ask.
+- Permissions: `ai:notebook:list`, `ai:notebook:create`, `ai:notebook:source`, `ai:notebook:artifact`, `ai:notebook:ask`.
+- Retrieval: Notebook ask builds on `KnowledgeService` and constrains local/Milvus retrieval with workspace source document filters.
+- Artifacts: `summary`, `faq`, `study_guide`, and `note` generation save `citation_payload` and `source_trace_id`.
+
+Verification evidence:
+
+```bash
+cargo test -p backend-rust notebook_migration_defines_workspace_source_and_artifact_tables --offline
+cargo test -p backend-rust notebook_ --offline
+cargo test -p backend-rust notebook_ask --offline
+cargo test -p backend-rust knowledge_service --offline
+cargo test -p backend-rust notebook_artifact --offline
+cargo test -p backend-rust --offline
+cargo fmt -- --check
+cargo test --workspace --offline
+```
+
+Remaining product work:
+
+- Build a dedicated Notebook UI or wire these APIs into an existing POC screen.
+- Add collaborative editing, PDF visual annotation, and multi-user comments when the product asks for them.
+- Upgrade multi-dataset answer synthesis beyond the current best-trace response selection.
+
 ## Scope
 
 In scope:
@@ -142,6 +171,7 @@ Permissions:
 - `ai:notebook:create`
 - `ai:notebook:source`
 - `ai:notebook:artifact`
+- `ai:notebook:ask`
 
 **Step 4: Verify**
 
