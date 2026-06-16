@@ -71,6 +71,16 @@ impl AgentRuntimeState {
         !self.is_tool_call_budget_exhausted()
     }
 
+    pub fn can_execute_tool_calls(&self, requested: usize) -> bool {
+        requested <= self.remaining_tool_call_budget()
+    }
+
+    pub fn remaining_tool_call_budget(&self) -> usize {
+        self.budget
+            .max_tool_calls
+            .saturating_sub(self.tool_call_count())
+    }
+
     pub fn is_tool_call_budget_exhausted(&self) -> bool {
         self.tool_call_count() >= self.budget.max_tool_calls
     }
@@ -213,6 +223,8 @@ fn compact_text(text: &str, max_chars: usize) -> String {
 #[serde(rename_all = "camelCase")]
 pub struct ParsedModelTurnOutput {
     pub item: AgentTurnItem,
+    #[serde(default)]
+    pub items: Vec<AgentTurnItem>,
     pub outcome: TurnOutcome,
 }
 
@@ -230,33 +242,72 @@ pub fn parse_model_turn_output(output: &str) -> Result<ParsedModelTurnOutput, Mo
     }
 
     if let Ok(value) = serde_json::from_str::<Value>(trimmed) {
-        if value.get("type").and_then(Value::as_str) == Some("tool_call") {
-            let call_id = value
-                .get("callId")
-                .and_then(Value::as_str)
-                .unwrap_or("call-1")
-                .to_owned();
-            let tool_code = value
-                .get("toolCode")
-                .and_then(Value::as_str)
-                .ok_or_else(|| ModelTurnParseError {
-                    message: "toolCode is required".to_owned(),
-                })?
-                .to_owned();
-            let arguments = value.get("arguments").cloned().unwrap_or(Value::Null);
-            return Ok(ParsedModelTurnOutput {
-                item: AgentTurnItem::tool_call(call_id, tool_code, arguments),
-                outcome: TurnOutcome::NeedsFollowUp,
-            });
+        match value.get("type").and_then(Value::as_str) {
+            Some("tool_call") => {
+                let item = parse_tool_call_value(&value, 0)?;
+                return Ok(ParsedModelTurnOutput {
+                    item: item.clone(),
+                    items: vec![item],
+                    outcome: TurnOutcome::NeedsFollowUp,
+                });
+            }
+            Some("tool_calls") => {
+                let calls = value
+                    .get("calls")
+                    .and_then(Value::as_array)
+                    .ok_or_else(|| ModelTurnParseError {
+                        message: "tool_calls.calls is required".to_owned(),
+                    })?;
+                if calls.is_empty() {
+                    return Err(ModelTurnParseError {
+                        message: "tool_calls requires at least one call".to_owned(),
+                    });
+                }
+
+                let items = calls
+                    .iter()
+                    .enumerate()
+                    .map(|(index, call)| parse_tool_call_value(call, index))
+                    .collect::<Result<Vec<_>, _>>()?;
+                return Ok(ParsedModelTurnOutput {
+                    item: items[0].clone(),
+                    items,
+                    outcome: TurnOutcome::NeedsFollowUp,
+                });
+            }
+            _ => {}
         }
     }
 
+    let item = AgentTurnItem::FinalAnswer {
+        content: trimmed.to_owned(),
+    };
     Ok(ParsedModelTurnOutput {
-        item: AgentTurnItem::FinalAnswer {
-            content: trimmed.to_owned(),
-        },
+        item: item.clone(),
+        items: vec![item],
         outcome: TurnOutcome::Final,
     })
+}
+
+fn parse_tool_call_value(
+    value: &Value,
+    index: usize,
+) -> Result<AgentTurnItem, ModelTurnParseError> {
+    let call_id = value
+        .get("callId")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .unwrap_or_else(|| format!("call-{}", index + 1));
+    let tool_code = value
+        .get("toolCode")
+        .and_then(Value::as_str)
+        .ok_or_else(|| ModelTurnParseError {
+            message: "toolCode is required".to_owned(),
+        })?
+        .to_owned();
+    let arguments = value.get("arguments").cloned().unwrap_or(Value::Null);
+
+    Ok(AgentTurnItem::tool_call(call_id, tool_code, arguments))
 }
 
 #[cfg(test)]
@@ -323,6 +374,21 @@ mod tests {
 
         assert!(!state.can_execute_tool_call());
         assert!(state.is_tool_call_budget_exhausted());
+    }
+
+    #[test]
+    fn runtime_budget_reports_remaining_tool_call_capacity() {
+        let budget = AgentRuntimeBudget {
+            max_turns: 4,
+            max_tool_calls: 3,
+            compact_after_observations: None,
+        };
+        let mut state = AgentRuntimeState::with_budget("run-1", budget);
+        state.push_item(AgentTurnItem::tool_call("call-1", "rag.search", json!({})));
+
+        assert_eq!(state.remaining_tool_call_budget(), 2);
+        assert!(state.can_execute_tool_calls(2));
+        assert!(!state.can_execute_tool_calls(3));
     }
 
     #[test]
@@ -394,7 +460,42 @@ mod tests {
                 serde_json::json!({"query":"policy"})
             )
         );
+        assert_eq!(parsed.items.len(), 1);
         assert_eq!(parsed.outcome, TurnOutcome::NeedsFollowUp);
+    }
+
+    #[test]
+    fn parser_reads_json_tool_call_batch_from_model_answer() {
+        let parsed = parse_model_turn_output(
+            r#"{"type":"tool_calls","calls":[{"callId":"call-1","toolCode":"rag.search","arguments":{"query":"policy"}},{"callId":"call-2","toolCode":"github.repo.read","arguments":{"repository":"org/repo","path":"README.md"}}]}"#,
+        )
+        .unwrap();
+
+        assert_eq!(parsed.outcome, TurnOutcome::NeedsFollowUp);
+        assert_eq!(parsed.items.len(), 2);
+        assert_eq!(
+            parsed.items[0],
+            AgentTurnItem::tool_call(
+                "call-1",
+                "rag.search",
+                serde_json::json!({"query":"policy"})
+            )
+        );
+        assert_eq!(
+            parsed.items[1],
+            AgentTurnItem::tool_call(
+                "call-2",
+                "github.repo.read",
+                serde_json::json!({"repository":"org/repo","path":"README.md"})
+            )
+        );
+    }
+
+    #[test]
+    fn parser_rejects_empty_tool_call_batch() {
+        let err = parse_model_turn_output(r#"{"type":"tool_calls","calls":[]}"#).unwrap_err();
+
+        assert_eq!(err.message, "tool_calls requires at least one call");
     }
 
     #[test]
@@ -407,6 +508,7 @@ mod tests {
                 content: "Here is the answer.".to_owned()
             }
         );
+        assert_eq!(parsed.items.len(), 1);
         assert_eq!(parsed.outcome, TurnOutcome::Final);
     }
 }
