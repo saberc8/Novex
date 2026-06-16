@@ -267,6 +267,18 @@ pub struct ModelRouteRegistryResp {
     pub masked_credential: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelRouteCircuitBreakerResp {
+    pub route_id: String,
+    pub opened_until: String,
+    pub open_reason: String,
+    pub last_error_kind: Option<String>,
+    pub last_http_status: Option<i32>,
+    pub is_open: bool,
+    pub remaining_ms: i64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, FromRow)]
 pub struct ModelProviderRegistryRow {
     pub id: i64,
@@ -348,6 +360,15 @@ struct ModelRouteFallbackPolicyRow {
 #[derive(Debug, Clone, PartialEq, Eq, FromRow)]
 struct ModelRouteCircuitBreakerRow {
     pub opened_until: NaiveDateTime,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, FromRow)]
+struct ModelRouteCircuitBreakerControlRow {
+    pub route_id: String,
+    pub opened_until: NaiveDateTime,
+    pub open_reason: String,
+    pub last_error_kind: Option<String>,
+    pub last_http_status: Option<i32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, FromRow)]
@@ -528,6 +549,63 @@ LIMIT 1;
     ) -> Result<Option<ModelRouteFallbackPlan>, AppError> {
         self.fallback_plan_for_purpose_with_route_id(purpose, None)
             .await
+    }
+
+    pub async fn list_route_circuit_breakers(
+        &self,
+    ) -> Result<Vec<ModelRouteCircuitBreakerResp>, AppError> {
+        let rows = sqlx::query_as::<_, ModelRouteCircuitBreakerControlRow>(
+            r#"
+SELECT route_id, opened_until, open_reason, last_error_kind, last_http_status
+FROM ai_model_route_circuit_breaker
+WHERE tenant_id = $1
+ORDER BY opened_until DESC, route_id ASC;
+"#,
+        )
+        .bind(self.tenant_id)
+        .fetch_all(&self.db)
+        .await?;
+        let now = Utc::now().naive_utc();
+
+        Ok(rows
+            .into_iter()
+            .map(|row| {
+                let remaining_ms = (row.opened_until - now).num_milliseconds().max(0);
+
+                ModelRouteCircuitBreakerResp {
+                    route_id: row.route_id,
+                    opened_until: format_datetime(row.opened_until),
+                    open_reason: row.open_reason,
+                    last_error_kind: row.last_error_kind,
+                    last_http_status: row.last_http_status,
+                    is_open: remaining_ms > 0,
+                    remaining_ms,
+                }
+            })
+            .collect())
+    }
+
+    pub async fn clear_route_circuit_breaker(&self, route_id: &str) -> Result<(), AppError> {
+        let route_id = route_id.trim();
+        if route_id.is_empty() {
+            return Err(AppError::bad_request("模型路由不能为空"));
+        }
+        ensure_max_chars("模型路由", route_id, 128)?;
+
+        sqlx::query(
+            r#"
+DELETE FROM ai_model_route_circuit_breaker
+WHERE tenant_id = $1
+  AND route_id = $2;
+"#,
+        )
+        .bind(self.tenant_id)
+        .bind(route_id)
+        .execute(&self.db)
+        .await?;
+        model_circuit_breaker_clear(route_id);
+
+        Ok(())
     }
 
     async fn fallback_plan_for_purpose_with_route_id(
@@ -1195,12 +1273,12 @@ ORDER BY r.priority, r.id
                 .as_ref()
                 .is_some_and(|plan| plan.decision.enabled)
             {
-                let open_attempt = match model_circuit_breaker_open_attempt(&current_route) {
+                let open_attempt = match self
+                    .persistent_model_circuit_breaker_open_attempt(&current_route)
+                    .await?
+                {
                     Some(attempt) => Some(attempt),
-                    None => {
-                        self.persistent_model_circuit_breaker_open_attempt(&current_route)
-                            .await?
-                    }
+                    None => model_circuit_breaker_open_attempt(&current_route),
                 };
                 if let Some(mut skipped_attempt) = open_attempt {
                     skipped_attempt.attempt_kind = attempt_kind.to_owned();
@@ -3051,6 +3129,49 @@ mod tests {
         assert!(source.contains(".persistent_model_circuit_breaker_open("));
         assert!(source
             .contains("model_circuit_breaker_open(current_route.route_id(), cooldown_seconds)"));
+    }
+
+    #[test]
+    fn route_breaker_controls_source_contract_lists_tenant_breakers() {
+        let source = include_str!("model_service.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+
+        assert!(source.contains("pub async fn list_route_circuit_breakers"));
+        assert!(source.contains("FROM ai_model_route_circuit_breaker"));
+        assert!(source.contains("WHERE tenant_id = $1"));
+        assert!(source.contains("ORDER BY opened_until DESC"));
+    }
+
+    #[test]
+    fn route_breaker_controls_source_contract_clears_tenant_breaker_and_local_cache() {
+        let source = include_str!("model_service.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+
+        assert!(source.contains("pub async fn clear_route_circuit_breaker"));
+        assert!(source.contains("DELETE FROM ai_model_route_circuit_breaker"));
+        assert!(source.contains("WHERE tenant_id = $1"));
+        assert!(source.contains("model_circuit_breaker_clear(route_id)"));
+    }
+
+    #[test]
+    fn route_breaker_controls_source_contract_checks_persistent_before_local_cache() {
+        let source = include_str!("model_service.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+
+        let persistent = source
+            .find("persistent_model_circuit_breaker_open_attempt(&current_route)")
+            .unwrap();
+        let local = source
+            .find("model_circuit_breaker_open_attempt(&current_route)")
+            .unwrap();
+
+        assert!(persistent < local);
     }
 
     #[test]
