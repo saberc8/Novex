@@ -7,7 +7,7 @@
 | Tool schema | `codex-rs/tools/src/*` | `crates/novex-tools` | direct/adapt | slice-1 implemented | ToolDefinition and model-visible tool schema are in place |
 | Tool router | `codex-rs/core/src/tools/router.rs`, `codex-rs/core/src/tools/registry.rs` | `crates/novex-tools` | adapt | slice-1 implemented | Registry-owned model-visible specs, tool-call validation, unknown-tool stop reason, and backend model-loop routing are in place; executor registry and parallel runtime remain next |
 | Parallel tools | `codex-rs/core/src/tools/parallel.rs` | `crates/novex-tools` + backend model loop | adapt | slice-5 implemented | Shared/exclusive lock policy, cancellation-wait metadata, deterministic batch planning, parsed tool-call batches, backend batch event visibility, true parallel tool I/O, timeout-driven cancelled observations, and runtime-token external cancellation are in place; provider-native abort and background join-handle control remain next |
-| Rollout trace | `codex-rs/rollout*` | `crates/novex-trace` | adapt | slice-1 implemented | TraceBundle, replay API, `ai_rollout`, eval case capture, and `trace_replay` eval gate are in place; inference/MCP/compaction spans remain next |
+| Rollout trace | `codex-rs/rollout*` | `crates/novex-trace` | adapt | slice-2 implemented | TraceBundle, replay API, `ai_rollout`, eval case capture, `trace_replay` eval gate, runtime span preservation for retrieval/action selection/context compaction/cancellation, and eval runtime tags are in place; inference latency/cost and nested provider spans remain next |
 | MCP | `codex-rs/codex-mcp`, `rmcp-client` | `crates/novex-mcp` | adapt | slice-1 implemented | Tenant-governed server registration, deterministic discovery, model-visible tool mapping, audit path, and mock/dry-run invocation are in place; live streaming MCP client remains next |
 | Guardian | `codex-rs/core/src/guardian` | `crates/novex-approval-review` | adapt | deferred | Automatic approval review |
 | Exec policy | `codex-rs/execpolicy`, `sandboxing`, `exec-server` | `services/sandbox-runner` | service adapt | deferred | No backend shell execution |
@@ -24,13 +24,14 @@ Updated on 2026-06-17 from branch `feat/enterprise-agent-foundation`.
 | Parallel tools | `novex-tools` exposes shared/exclusive locks, cancellation-wait metadata, deterministic batch planning, and backend `ActionSelected` `concurrencyPolicy`, `batchExecutionMode`, `toolCallBatch`, plus parallel tool I/O with serial audit/step persistence, timeout-driven `Cancelled` observations, and runtime-token external cancellation | `cargo test -p novex-tools --offline && cargo test -p backend-rust runtime_registry --offline && cargo test -p backend-rust tool_io_timeout --offline && cargo test -p backend-rust parallel_tool --offline && cargo test -p backend-rust model_loop --offline` |
 | Codex POC UI | `apps/codex-app-poc` sends real Agent run requests with `runtimeMode=model_loop` | `cd apps/codex-app-poc && pnpm test -- src/api/agent.test.ts` |
 | MCP gateway | MCP tools can be registered, discovered, converted to `ai_tool`, audited, and routed through Agent observations | `cargo test -p backend-rust mcp_ agent_runtime_routes_mcp_tools_through_audited_observation_path --offline` |
-| Rollout/trace/eval | Agent events convert to trace bundles, replay via API, persist `ai_rollout`, capture eval candidates, and score `trace_replay` eval runs | `cargo test -p backend-rust agent_run_events_convert_to_trace_bundle eval_case_capture eval_runtime_normalizes_trace_replay_run_mode --offline` |
+| Rollout/trace/eval | Agent events convert to trace bundles, preserve runtime spans, replay via API, persist `ai_rollout`, capture eval candidates with runtime tags, and score `trace_replay` eval runs | `cargo test -p novex-trace runtime_span --offline && cargo test -p backend-rust runtime_spans --offline && cargo test -p novex-eval runtime_spans --offline && cargo test -p backend-rust agent_run_events_convert_to_trace_bundle eval_case_capture eval_runtime_normalizes_trace_replay_run_mode --offline` |
 | Full Rust workspace | Rust crates and backend remain coherent after the agent foundation slices | `cargo fmt -- --check && cargo test --workspace --offline` |
 
 ## Follow-up Implementation Plans
 
 - MCP gateway: `docs/plans/2026-06-16-agent-mcp-gateway.md`
 - Rollout, trace, replay, eval: `docs/plans/2026-06-16-agent-rollout-eval.md`
+- Agent runtime trace spans: `docs/plans/2026-06-17-agent-runtime-trace-spans.md`
 - Notebook workspace: `docs/plans/2026-06-16-notebook-workspace.md`
 - Customer service agent: `docs/plans/2026-06-16-customer-service-agent.md`
 - Agent run cancellation checkpoints: `docs/plans/2026-06-17-agent-run-cancellation.md`
