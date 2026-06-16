@@ -1,0 +1,17 @@
+[
+  {
+    "code": "console",
+    "path": "/customer-service",
+    "permission": "ai:customer-service:agent:run"
+  },
+  {
+    "code": "runs",
+    "path": "/customer-service/runs",
+    "permission": "ai:customer-service:agent:list"
+  },
+  {
+    "code": "knowledge",
+    "path": "/customer-service/knowledge",
+    "permission": "ai:customer-service:read"
+  }
+]

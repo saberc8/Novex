@@ -1446,6 +1446,20 @@ mod tests {
     }
 
     #[test]
+    fn delivery_template_frontend_entries_exist_for_smoke_checks() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../");
+        for template in delivery_templates().unwrap() {
+            let frontend_entry = root.join(&template.frontend_entry);
+            assert!(
+                frontend_entry.join("package.json").exists(),
+                "{} frontend entry {} must contain package.json",
+                template.code,
+                template.frontend_entry
+            );
+        }
+    }
+
+    #[test]
     fn delivery_template_menus_cover_customer_frontend_pages() {
         for template in delivery_templates().unwrap() {
             for page in &template.frontend_pages {
