@@ -7,7 +7,7 @@ use axum::{
 use crate::{
     application::ai::agent_service::{
         AgentRunCommand, AgentRunEventQuery, AgentRunEventResp, AgentRunQuery, AgentRunResp,
-        AgentRunResumeCommand, AgentService,
+        AgentRunResumeCommand, AgentService, AgentTraceReplayResp,
     },
     domain::auth::model::CurrentUser,
     interfaces::http::{middleware::permission::require_permission, AppState},
@@ -25,6 +25,7 @@ pub fn routes() -> Router<AppState> {
         .route("/ai/agents/runs", post(create_run).get(list_runs))
         .route("/ai/agents/runs/:run_id", get(get_run))
         .route("/ai/agents/runs/:run_id/events", get(list_events))
+        .route("/ai/agents/runs/:run_id/trace", get(get_run_trace))
         .route("/ai/agents/runs/:run_id/resume", post(resume_run))
         .route("/ai/agents/runs/:run_id/cancel", post(cancel_run))
 }
@@ -76,6 +77,17 @@ async fn list_events(
     Ok(Json(ApiResponse::ok(
         service.list_events(run_id, query).await?,
     )))
+}
+
+async fn get_run_trace(
+    State(state): State<AppState>,
+    current_user: CurrentUser,
+    Path(run_id): Path<i64>,
+) -> Result<Json<ApiResponse<AgentTraceReplayResp>>, AppError> {
+    require_permission(&current_user, AGENT_EVENT_LIST_PERMISSION)?;
+    let service = AgentService::for_tenant(state.db, current_user.tenant_id);
+
+    Ok(Json(ApiResponse::ok(service.get_run_trace(run_id).await?)))
 }
 
 async fn resume_run(
@@ -207,6 +219,15 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn agent_trace_handler_rejects_missing_permission() {
+        let err = get_run_trace(State(test_state()), user_with_permissions(vec![]), Path(42))
+            .await
+            .unwrap_err();
+
+        assert!(matches!(err, AppError::Forbidden));
+    }
+
+    #[tokio::test]
     async fn agent_resume_handler_rejects_missing_permission() {
         let err = resume_run(
             State(test_state()),
@@ -271,6 +292,31 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/ai/agents/runs/42/events")
+                    .header(header::ACCEPT, "application/json")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let body = serde_json::from_slice::<Value>(&body).unwrap();
+        assert_eq!(body["code"], "401");
+    }
+
+    #[tokio::test]
+    async fn agent_trace_route_is_registered_and_requires_auth() {
+        let db = PgPoolOptions::new()
+            .connect_lazy("postgres://postgres:postgres@localhost:5432/avalon_admin")
+            .unwrap();
+        let jwt = JwtService::new("test-secret".to_owned(), 24);
+        let app = build_router(db, &["http://localhost:4399".to_owned()], jwt).unwrap();
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/ai/agents/runs/42/trace")
                     .header(header::ACCEPT, "application/json")
                     .body(Body::empty())
                     .unwrap(),

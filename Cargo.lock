@@ -402,6 +402,7 @@ dependencies = [
  "novex-rag",
  "novex-skill",
  "novex-tools",
+ "novex-trace",
  "novex-trigger",
  "rand 0.8.6",
  "reqwest",

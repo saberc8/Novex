@@ -21,6 +21,7 @@ use novex_tools::{
     MediaImageGenerationRequest, ToolExecutionPolicyDecision, ToolExecutionPolicyInput, ToolKind,
     ToolRiskLevel,
 };
+use novex_trace::{TraceBundle, TraceEvent, TraceReplaySummary};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sqlx::PgPool;
@@ -50,6 +51,7 @@ use crate::{
 const DEFAULT_TENANT_ID: i64 = 1;
 const DEFAULT_AGENT_PAGE_SIZE: u64 = 20;
 const DEFAULT_EVENT_PAGE_SIZE: u64 = 100;
+const MAX_TRACE_REPLAY_EVENTS: i64 = 1000;
 const FEISHU_TOOL_CODE: &str = "feishu.message.send";
 const MEDIA_IMAGE_TOOL_CODE: &str = "media.image.generate";
 const GITHUB_REPO_SEARCH_TOOL_CODE: &str = "github.repo.search";
@@ -253,6 +255,14 @@ pub struct AgentRunEventResp {
     pub status: String,
     pub payload: Value,
     pub create_time: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentTraceReplayResp {
+    pub trace_id: String,
+    pub events: Vec<TraceEvent>,
+    pub summary: TraceReplaySummary,
 }
 
 #[derive(Debug, Clone)]
@@ -750,6 +760,24 @@ impl AgentService {
             .map(AgentRunEventResp::from)
             .collect();
         Ok(PageResult::new(list, total))
+    }
+
+    pub async fn get_run_trace(&self, run_id: i64) -> Result<AgentTraceReplayResp, AppError> {
+        let Some(run) = self.repo.find_run(self.tenant_id, run_id).await? else {
+            return Err(AppError::NotFound);
+        };
+        let filter = RunEventFilter {
+            tenant_id: self.tenant_id,
+            run_id,
+            limit: MAX_TRACE_REPLAY_EVENTS,
+            offset: 0,
+        };
+        let events = self.repo.list_events(&filter).await?;
+
+        Ok(AgentTraceReplayResp::from(agent_events_to_trace_bundle(
+            run.trace_id,
+            events,
+        )))
     }
 
     pub async fn resume_run(
@@ -1373,18 +1401,13 @@ impl AgentService {
             limit: DEFAULT_EVENT_PAGE_SIZE as i64,
             offset: 0,
         };
-        let events: Vec<AgentRunEventResp> = self
-            .repo
-            .list_events(&filter)
-            .await?
-            .into_iter()
-            .map(AgentRunEventResp::from)
-            .collect();
+        let events = self.repo.list_events(&filter).await?;
+        let event_snapshot = agent_trace_snapshot_payload(&format!("agent-{run_id}"), &events);
         self.repo
             .update_trace_snapshot(
                 self.tenant_id,
                 run_id,
-                &serde_json::to_value(events).unwrap_or_else(|_| json!([])),
+                &event_snapshot,
                 &tool_snapshot,
                 user_id,
                 Utc::now().naive_utc(),
@@ -2669,6 +2692,122 @@ fn agent_turn_item_event_payload(item: &novex_agent_protocol::AgentTurnItem) -> 
     })
 }
 
+fn agent_events_to_trace_bundle(
+    trace_id: impl Into<String>,
+    events: Vec<RunEventRecord>,
+) -> TraceBundle {
+    let mut bundle = TraceBundle::new(trace_id);
+    for event in events {
+        if let Some(trace_event) = trace_event_from_run_event(&event) {
+            bundle = bundle.with_event(trace_event);
+        }
+    }
+    bundle
+}
+
+fn agent_trace_snapshot_payload(trace_id: &str, events: &[RunEventRecord]) -> Value {
+    let event_snapshot = events
+        .iter()
+        .cloned()
+        .map(AgentRunEventResp::from)
+        .collect::<Vec<_>>();
+    let bundle = agent_events_to_trace_bundle(trace_id, events.to_vec());
+    let summary = bundle.replay_summary();
+
+    json!({
+        "events": event_snapshot,
+        "traceEvents": bundle.events,
+        "summary": summary,
+    })
+}
+
+fn trace_event_from_run_event(event: &RunEventRecord) -> Option<TraceEvent> {
+    let sequence_no = trace_sequence_no(event.sequence_no);
+    match event.event_type.as_str() {
+        "input_received" => Some(TraceEvent::user_message(
+            sequence_no,
+            trace_payload_text(&event.payload, &["input", "content", "query"])
+                .unwrap_or_else(|| trace_payload_fallback(&event.payload)),
+        )),
+        "thought" => Some(TraceEvent::assistant_message(
+            sequence_no,
+            trace_payload_text(&event.payload, &["message", "content", "summary"])
+                .unwrap_or_else(|| trace_payload_fallback(&event.payload)),
+        )),
+        "tool_called" => Some(TraceEvent::tool_call(
+            sequence_no,
+            trace_call_id(event),
+            trace_payload_text(&event.payload, &["toolCode", "tool_code"])
+                .unwrap_or_else(|| "unknown".to_owned()),
+        )),
+        "observation" => Some(TraceEvent::observation(
+            sequence_no,
+            trace_call_id(event),
+            trace_observation_output(&event.payload),
+        )),
+        "approval_requested" => Some(TraceEvent::approval_requested(
+            sequence_no,
+            trace_payload_text(&event.payload, &["toolCode", "tool_code"])
+                .unwrap_or_else(|| "unknown".to_owned()),
+        )),
+        "final_output" => Some(TraceEvent::final_answer(
+            sequence_no,
+            trace_payload_text(&event.payload, &["answer", "content"])
+                .unwrap_or_else(|| trace_payload_fallback(&event.payload)),
+        )),
+        "error" => Some(TraceEvent::error(
+            sequence_no,
+            trace_payload_text(&event.payload, &["message", "error"])
+                .unwrap_or_else(|| trace_payload_fallback(&event.payload)),
+        )),
+        _ => None,
+    }
+}
+
+fn trace_sequence_no(sequence_no: i64) -> i32 {
+    sequence_no.clamp(i32::MIN as i64, i32::MAX as i64) as i32
+}
+
+fn trace_call_id(event: &RunEventRecord) -> String {
+    trace_payload_text(&event.payload, &["callId", "call_id"])
+        .or_else(|| event.step_id.map(|step_id| format!("step-{step_id}")))
+        .unwrap_or_else(|| format!("call-{}", event.sequence_no))
+}
+
+fn trace_payload_text(payload: &Value, keys: &[&str]) -> Option<String> {
+    keys.iter().find_map(|key| {
+        trace_value_text(payload.get(*key)).or_else(|| {
+            payload
+                .get("item")
+                .and_then(|item| trace_value_text(item.get(*key)))
+        })
+    })
+}
+
+fn trace_value_text(value: Option<&Value>) -> Option<String> {
+    match value? {
+        Value::String(value) => {
+            let value = value.trim();
+            (!value.is_empty()).then(|| value.to_owned())
+        }
+        Value::Null => None,
+        value => Some(value.to_string()),
+    }
+}
+
+fn trace_observation_output(payload: &Value) -> Value {
+    payload
+        .get("item")
+        .and_then(|item| item.get("output"))
+        .cloned()
+        .or_else(|| payload.get("output").cloned())
+        .unwrap_or_else(|| payload.clone())
+}
+
+fn trace_payload_fallback(payload: &Value) -> String {
+    payload.to_string()
+}
+
 impl From<AgentRunRecord> for AgentRunResp {
     fn from(record: AgentRunRecord) -> Self {
         Self {
@@ -2698,6 +2837,17 @@ impl From<RunEventRecord> for AgentRunEventResp {
             status: record.status,
             payload: record.payload,
             create_time: format_datetime(record.create_time),
+        }
+    }
+}
+
+impl From<TraceBundle> for AgentTraceReplayResp {
+    fn from(bundle: TraceBundle) -> Self {
+        let summary = bundle.replay_summary();
+        Self {
+            trace_id: bundle.trace_id,
+            events: bundle.events,
+            summary,
         }
     }
 }
@@ -3065,6 +3215,38 @@ mod tests {
         assert!(source.contains("RunEventKind::Observation"));
     }
 
+    #[test]
+    fn agent_run_events_convert_to_trace_bundle() {
+        let events = vec![
+            fake_agent_event(
+                "input_received",
+                1,
+                json!({"item":{"type":"user_message","content":"hi"}}),
+            ),
+            fake_agent_event("tool_called", 2, json!({"toolCode":"rag.search"})),
+            fake_agent_event("final_output", 3, json!({"answer":"done"})),
+        ];
+
+        let bundle = agent_events_to_trace_bundle("agent-1", events);
+
+        assert_eq!(bundle.trace_id, "agent-1");
+        assert_eq!(bundle.tool_call_count(), 1);
+        assert_eq!(bundle.replay_summary().final_status, "succeeded");
+    }
+
+    #[test]
+    fn agent_trace_snapshot_contains_replay_summary() {
+        let events = vec![
+            fake_agent_event("tool_called", 2, json!({"toolCode":"rag.search"})),
+            fake_agent_event("final_output", 3, json!({"answer":"done"})),
+        ];
+
+        let snapshot = agent_trace_snapshot_payload("agent-1", &events);
+
+        assert_eq!(snapshot["summary"]["toolCallCount"], 1);
+        assert_eq!(snapshot["summary"]["finalStatus"], "succeeded");
+    }
+
     #[tokio::test]
     async fn mcp_tool_execution_uses_mock_response_without_exposing_secret() {
         let tool = McpToolExecutionRecord {
@@ -3118,6 +3300,19 @@ mod tests {
         });
         assert_eq!(auth["resolved"], true);
         assert!(!auth.to_string().contains("test-token"));
+    }
+
+    fn fake_agent_event(event_type: &str, sequence_no: i64, payload: Value) -> RunEventRecord {
+        RunEventRecord {
+            id: sequence_no,
+            run_id: 42,
+            step_id: None,
+            event_type: event_type.to_owned(),
+            sequence_no,
+            status: "running".to_owned(),
+            payload,
+            create_time: Utc::now().naive_utc(),
+        }
     }
 
     #[test]
