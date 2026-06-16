@@ -52,6 +52,14 @@ impl AgentRuntimeState {
             .count()
     }
 
+    pub fn can_execute_tool_call(&self) -> bool {
+        !self.is_tool_call_budget_exhausted()
+    }
+
+    pub fn is_tool_call_budget_exhausted(&self) -> bool {
+        self.tool_call_count() >= self.budget.max_tool_calls
+    }
+
     pub fn turn_count(&self) -> usize {
         self.items
             .iter()
@@ -167,6 +175,31 @@ mod tests {
         state.push_item(AgentTurnItem::tool_call("call-2", "rag.search", json!({})));
 
         assert_eq!(state.next_outcome(), TurnOutcome::BudgetExceeded);
+    }
+
+    #[test]
+    fn runtime_budget_allows_tool_calls_up_to_limit() {
+        let budget = AgentRuntimeBudget {
+            max_turns: 4,
+            max_tool_calls: 1,
+        };
+        let state = AgentRuntimeState::with_budget("run-1", budget);
+
+        assert!(state.can_execute_tool_call());
+        assert!(!state.is_tool_call_budget_exhausted());
+    }
+
+    #[test]
+    fn runtime_budget_exceeds_when_tool_calls_reach_limit_before_next_call() {
+        let budget = AgentRuntimeBudget {
+            max_turns: 4,
+            max_tool_calls: 1,
+        };
+        let mut state = AgentRuntimeState::with_budget("run-1", budget);
+        state.push_item(AgentTurnItem::tool_call("call-1", "rag.search", json!({})));
+
+        assert!(!state.can_execute_tool_call());
+        assert!(state.is_tool_call_budget_exhausted());
     }
 
     #[test]
