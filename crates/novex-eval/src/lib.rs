@@ -158,6 +158,12 @@ impl EvalCaseCandidate {
                 tags.insert("modelFallbackRouteId".to_owned(), json!(route_id));
             }
         }
+        if inference_summary.circuit_open_count > 0 {
+            tags.insert(
+                "modelCircuitOpenCount".to_owned(),
+                json!(inference_summary.circuit_open_count),
+            );
+        }
         if let Some(route_id) = inference_summary.route_id.as_deref() {
             tags.insert("modelRouteId".to_owned(), json!(route_id));
         }
@@ -635,6 +641,7 @@ struct TraceInferenceSummary {
     retryable_error_count: usize,
     provider_attempt_count: usize,
     fallback_count: usize,
+    circuit_open_count: usize,
     fallback_route_id: Option<String>,
     error_kind: Option<String>,
     http_status: Option<i64>,
@@ -690,11 +697,17 @@ fn trace_inference_summary(bundle: &TraceBundle) -> TraceInferenceSummary {
                 let status = trace_value_text(attempt.get("status"))
                     .unwrap_or_default()
                     .to_ascii_lowercase();
+                let error_kind = trace_value_text(attempt.get("errorKind"))
+                    .unwrap_or_default()
+                    .to_ascii_lowercase();
                 if attempt_kind == "fallback" && status == "succeeded" {
                     summary.fallback_count += 1;
                     if summary.fallback_route_id.is_none() {
                         summary.fallback_route_id = trace_value_text(attempt.get("routeId"));
                     }
+                }
+                if error_kind == "circuit_open" {
+                    summary.circuit_open_count += 1;
                 }
             }
         }
@@ -1084,6 +1097,36 @@ mod tests {
         assert_eq!(candidate.tags["modelProviderAttemptCount"], 2);
         assert_eq!(candidate.tags["modelFallbackCount"], 1);
         assert_eq!(candidate.tags["modelFallbackRouteId"], "runtime.llm.backup");
+    }
+
+    #[test]
+    fn trace_eval_candidate_tags_circuit_breaker_attempts() {
+        let bundle = TraceBundle::new("agent-1").with_event(TraceEvent::inference(
+            1,
+            json!({
+                "item": {
+                    "type": "model_inference",
+                    "providerAttempts": [
+                        {
+                            "attemptKind": "primary",
+                            "routeId": "runtime.llm",
+                            "status": "skipped",
+                            "errorKind": "circuit_open"
+                        },
+                        {
+                            "attemptKind": "fallback",
+                            "routeId": "runtime.llm.backup",
+                            "status": "succeeded"
+                        }
+                    ]
+                }
+            }),
+        ));
+
+        let candidate = EvalCaseCandidate::from_trace_bundle(&bundle);
+
+        assert_eq!(candidate.tags["modelCircuitOpenCount"], 1);
+        assert_eq!(candidate.tags["modelFallbackCount"], 1);
     }
 
     #[test]

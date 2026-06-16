@@ -3486,6 +3486,10 @@ fn model_inference_event_payload(response: &ModelChatResp) -> Value {
         .iter()
         .find(|attempt| attempt.attempt_kind == "fallback" && attempt.status == "succeeded")
         .map(|attempt| attempt.route_id.clone());
+    let circuit_open = response
+        .provider_attempts
+        .iter()
+        .any(|attempt| attempt.error_kind.as_deref() == Some("circuit_open"));
     let mut item = json!({
         "type": "model_inference",
         "routeId": &response.route_id,
@@ -3505,6 +3509,9 @@ fn model_inference_event_payload(response: &ModelChatResp) -> Value {
         if let Some(fallback_route_id) = fallback_route_id {
             object.insert("fallbackUsed".to_owned(), json!(true));
             object.insert("fallbackRouteId".to_owned(), json!(fallback_route_id));
+        }
+        if circuit_open {
+            object.insert("circuitOpen".to_owned(), json!(true));
         }
     }
 
@@ -4172,6 +4179,20 @@ mod tests {
         route_id: &str,
         status: &str,
     ) -> ModelProviderAttempt {
+        test_provider_attempt_with_error(
+            attempt_kind,
+            route_id,
+            status,
+            (status == "failed").then_some("provider_http"),
+        )
+    }
+
+    fn test_provider_attempt_with_error(
+        attempt_kind: &str,
+        route_id: &str,
+        status: &str,
+        error_kind: Option<&str>,
+    ) -> ModelProviderAttempt {
         ModelProviderAttempt {
             attempt_kind: attempt_kind.to_owned(),
             route_id: route_id.to_owned(),
@@ -4179,9 +4200,9 @@ mod tests {
             model: Some("deepseek-v4-flash".to_owned()),
             status: status.to_owned(),
             latency_ms: 12,
-            error_kind: (status == "failed").then(|| "provider_http".to_owned()),
+            error_kind: error_kind.map(str::to_owned),
             http_status: (status == "failed").then_some(502),
-            message: (status == "failed").then(|| "LLM 模型调用失败: HTTP 502".to_owned()),
+            message: error_kind.map(|kind| format!("provider attempt {kind}")),
         }
     }
 
@@ -4579,6 +4600,37 @@ mod tests {
         assert_eq!(
             payload["item"]["providerAttempts"].as_array().map(Vec::len),
             Some(2)
+        );
+    }
+
+    #[test]
+    fn route_circuit_breaker_trace_payload_marks_circuit_open_attempts() {
+        let response = ModelChatResp {
+            conversation_id: None,
+            answer: "ok".to_owned(),
+            route_id: "runtime.llm.backup".to_owned(),
+            provider: "deep-seek".to_owned(),
+            model: Some("deepseek-v4-flash".to_owned()),
+            latency_ms: 20,
+            usage: ModelChatUsage::default(),
+            cost_cents: None,
+            provider_attempts: vec![
+                test_provider_attempt_with_error(
+                    "primary",
+                    "runtime.llm",
+                    "skipped",
+                    Some("circuit_open"),
+                ),
+                test_provider_attempt("fallback", "runtime.llm.backup", "succeeded"),
+            ],
+        };
+
+        let payload = model_inference_event_payload(&response);
+
+        assert_eq!(payload["item"]["circuitOpen"], true);
+        assert_eq!(
+            payload["item"]["providerAttempts"][0]["errorKind"],
+            "circuit_open"
         );
     }
 
