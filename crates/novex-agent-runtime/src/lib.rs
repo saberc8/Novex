@@ -32,6 +32,45 @@ pub struct AgentContextCompaction {
     pub compacted_item_count: usize,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentRemoteCompactionImplementation {
+    ResponsesCompactionV2,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentCompactionTrigger {
+    Auto,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentCompactionReason {
+    ObservationThreshold,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentCompactionPhase {
+    ModelLoopFollowUp,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentRemoteCompactionRequest {
+    pub window_id: u64,
+    pub implementation: AgentRemoteCompactionImplementation,
+    pub trigger: AgentCompactionTrigger,
+    pub reason: AgentCompactionReason,
+    pub phase: AgentCompactionPhase,
+    pub input_history: Vec<AgentTurnItem>,
+    pub retained_history: Vec<AgentTurnItem>,
+    pub tool_codes: Vec<String>,
+    pub compacted_item_count: usize,
+    pub retained_item_count: usize,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentRuntimeState {
@@ -133,6 +172,30 @@ impl AgentRuntimeState {
             .then(|| build_compaction_summary(&self.items_since_last_compaction()))
     }
 
+    pub fn remote_compaction_request(
+        &self,
+        tool_codes: Vec<String>,
+    ) -> Option<AgentRemoteCompactionRequest> {
+        if !self.should_compact_context() {
+            return None;
+        }
+
+        let input_history = self.items_since_last_compaction();
+        let retained_history = retained_remote_compaction_history(&input_history);
+        Some(AgentRemoteCompactionRequest {
+            window_id: self.compaction_window_id.saturating_add(1),
+            implementation: AgentRemoteCompactionImplementation::ResponsesCompactionV2,
+            trigger: AgentCompactionTrigger::Auto,
+            reason: AgentCompactionReason::ObservationThreshold,
+            phase: AgentCompactionPhase::ModelLoopFollowUp,
+            compacted_item_count: input_history.len(),
+            retained_item_count: retained_history.len(),
+            input_history,
+            retained_history,
+            tool_codes,
+        })
+    }
+
     pub fn compact_context_with_summary(
         &mut self,
         summary: impl Into<String>,
@@ -174,6 +237,19 @@ impl AgentRuntimeState {
             .rev()
             .collect()
     }
+}
+
+fn retained_remote_compaction_history(items: &[AgentTurnItem]) -> Vec<AgentTurnItem> {
+    items
+        .iter()
+        .filter(|item| {
+            matches!(
+                item,
+                AgentTurnItem::UserMessage { .. } | AgentTurnItem::ContextCompaction { .. }
+            )
+        })
+        .cloned()
+        .collect()
 }
 
 fn build_compaction_summary(items: &[AgentTurnItem]) -> String {
@@ -491,6 +567,76 @@ mod tests {
             Some(AgentTurnItem::ContextCompaction { summary })
                 if summary == "Model summary: refunds are allowed within 7 days."
         ));
+    }
+
+    #[test]
+    fn remote_compaction_request_exposes_endpoint_metadata() {
+        let budget = AgentRuntimeBudget {
+            max_turns: 8,
+            max_tool_calls: 4,
+            compact_after_observations: Some(1),
+        };
+        let mut state = AgentRuntimeState::with_budget("run-1", budget);
+        state.push_item(AgentTurnItem::user_message("find refund policy"));
+        state.push_item(AgentTurnItem::tool_call(
+            "call-1",
+            "rag.search",
+            json!({"query":"refund"}),
+        ));
+        state.push_item(AgentTurnItem::tool_observation(
+            "call-1",
+            ToolObservationStatus::Succeeded,
+            json!({"hits":[{"text":"refund within 7 days"}]}),
+        ));
+
+        let request = state
+            .remote_compaction_request(vec!["rag.search".to_owned(), "github.repo.read".to_owned()])
+            .unwrap();
+
+        assert_eq!(request.window_id, 1);
+        assert_eq!(
+            request.implementation,
+            AgentRemoteCompactionImplementation::ResponsesCompactionV2
+        );
+        assert_eq!(request.trigger, AgentCompactionTrigger::Auto);
+        assert_eq!(request.reason, AgentCompactionReason::ObservationThreshold);
+        assert_eq!(request.phase, AgentCompactionPhase::ModelLoopFollowUp);
+        assert_eq!(request.compacted_item_count, 3);
+        assert_eq!(request.retained_item_count, 1);
+        assert_eq!(
+            request.tool_codes,
+            vec!["rag.search".to_owned(), "github.repo.read".to_owned()]
+        );
+    }
+
+    #[test]
+    fn remote_compaction_request_retains_user_and_previous_summary() {
+        let budget = AgentRuntimeBudget {
+            max_turns: 8,
+            max_tool_calls: 4,
+            compact_after_observations: Some(1),
+        };
+        let mut state = AgentRuntimeState::with_budget("run-1", budget);
+        state.push_item(AgentTurnItem::ContextCompaction {
+            summary: "previous compacted context".to_owned(),
+        });
+        state.push_item(AgentTurnItem::user_message("continue"));
+        state.push_item(AgentTurnItem::tool_observation(
+            "call-2",
+            ToolObservationStatus::Succeeded,
+            json!({"text":"new evidence"}),
+        ));
+
+        let request = state.remote_compaction_request(vec![]).unwrap();
+
+        assert!(request
+            .retained_history
+            .iter()
+            .any(|item| matches!(item, AgentTurnItem::UserMessage { .. })));
+        assert!(!request
+            .retained_history
+            .iter()
+            .any(|item| matches!(item, AgentTurnItem::ToolObservation { .. })));
     }
 
     #[test]
