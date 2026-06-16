@@ -14,6 +14,10 @@ use novex_agent_runtime::{
     parse_model_turn_output, AgentRemoteCompactionRequest, AgentRuntimeBudget, AgentRuntimeState,
 };
 use novex_ai_core::{validate_run_transition, RunEventKind, RunStatus, RunStepType, TaskBudget};
+use novex_approval_review::{
+    review_tool_approval, GuardianApprovalPolicy, GuardianReviewDecision, GuardianReviewInput,
+    GuardianRiskLevel, GuardianUserAuthorization,
+};
 use novex_connectors::{
     parse_credential_scope, parse_github_code_search_response, resolve_env_secret_ref,
     select_connector_credential, ConnectorCredentialBinding, FeishuTextMessage,
@@ -642,8 +646,15 @@ impl AgentService {
 
         if let Some(tool) = selected_tool {
             if plan.requires_approval {
-                self.pause_for_approval(user_id, run_id, &tool, &command.input, now)
-                    .await?;
+                self.pause_for_approval(
+                    user_id,
+                    run_id,
+                    &tool,
+                    &command.input,
+                    command.auto_approve,
+                    now,
+                )
+                .await?;
                 self.update_status(AgentStatusUpdate {
                     user_id,
                     run_id,
@@ -1149,6 +1160,7 @@ impl AgentService {
                                 run_id,
                                 &prepared_call.tool,
                                 &command.input,
+                                command.auto_approve,
                                 now,
                             )
                             .await?;
@@ -1894,9 +1906,11 @@ impl AgentService {
         run_id: i64,
         tool: &ToolLookupRecord,
         input: &str,
+        auto_approved: bool,
         now: NaiveDateTime,
     ) -> Result<(), AppError> {
         let step_id = next_id();
+        let guardian_review = guardian_review_payload_for_tool_policy(tool, auto_approved);
         self.repo
             .create_step(&RunStepSaveRecord {
                 id: step_id,
@@ -1922,7 +1936,11 @@ impl AgentService {
             Some(step_id),
             RunEventKind::ActionSelected,
             run_status_code(RunStatus::Running),
-            json!({ "toolCode": tool.code, "riskLevel": tool.risk_level }),
+            json!({
+                "toolCode": tool.code,
+                "riskLevel": tool.risk_level,
+                "guardianReview": guardian_review.clone()
+            }),
         )
         .await?;
         self.append_event(
@@ -1931,7 +1949,11 @@ impl AgentService {
             Some(step_id),
             RunEventKind::ApprovalRequested,
             run_status_code(RunStatus::WaitingApproval),
-            json!({ "toolCode": tool.code, "permissionCode": tool.permission_code }),
+            json!({
+                "toolCode": tool.code,
+                "permissionCode": tool.permission_code,
+                "guardianReview": guardian_review
+            }),
         )
         .await?;
         self.repo
@@ -3597,6 +3619,29 @@ fn agent_tool_policy_decision(
     })
 }
 
+fn guardian_review_for_tool_policy(
+    tool: &ToolLookupRecord,
+    auto_approved: bool,
+) -> GuardianReviewDecision {
+    review_tool_approval(GuardianReviewInput {
+        tool_code: tool.code.clone(),
+        risk_level: guardian_risk_level(tool.risk_level),
+        approval_policy: guardian_approval_policy(tool.approval_policy),
+        user_authorization: if auto_approved {
+            GuardianUserAuthorization::Implicit
+        } else {
+            GuardianUserAuthorization::Missing
+        },
+        auto_approved,
+        reviewer_enabled: false,
+    })
+}
+
+fn guardian_review_payload_for_tool_policy(tool: &ToolLookupRecord, auto_approved: bool) -> Value {
+    serde_json::to_value(guardian_review_for_tool_policy(tool, auto_approved))
+        .unwrap_or(Value::Null)
+}
+
 fn agent_tool_kind(tool: &ToolLookupRecord) -> ToolKind {
     let executor = tool.executor_kind.trim().to_ascii_lowercase();
     let kind = tool.tool_kind.trim().to_ascii_lowercase();
@@ -3631,6 +3676,22 @@ fn tool_approval_policy(value: i16) -> ApprovalPolicy {
         0 => ApprovalPolicy::Never,
         3 => ApprovalPolicy::Always,
         _ => ApprovalPolicy::OnRisk,
+    }
+}
+
+fn guardian_risk_level(value: i16) -> GuardianRiskLevel {
+    match value {
+        value if value <= 1 => GuardianRiskLevel::Low,
+        2 => GuardianRiskLevel::Medium,
+        _ => GuardianRiskLevel::High,
+    }
+}
+
+fn guardian_approval_policy(value: i16) -> GuardianApprovalPolicy {
+    match value {
+        0 => GuardianApprovalPolicy::Never,
+        3 => GuardianApprovalPolicy::Always,
+        _ => GuardianApprovalPolicy::OnRisk,
     }
 }
 
@@ -4245,11 +4306,11 @@ fn trace_event_from_run_event(event: &RunEventRecord) -> Option<TraceEvent> {
             trace_call_id(event),
             trace_observation_output(&event.payload),
         )),
-        "approval_requested" => Some(TraceEvent::approval_requested(
+        "approval_requested" => Some(TraceEvent {
             sequence_no,
-            trace_payload_text(&event.payload, &["toolCode", "tool_code"])
-                .unwrap_or_else(|| "unknown".to_owned()),
-        )),
+            kind: novex_trace::TraceEventKind::ApprovalRequested,
+            payload: event.payload.clone(),
+        }),
         "final_output" => Some(TraceEvent::final_answer(
             sequence_no,
             trace_payload_text(&event.payload, &["answer", "content"])
@@ -4500,6 +4561,7 @@ mod tests {
     use super::*;
     use crate::application::ai::model_service::{ModelChatUsage, ModelProviderAttempt};
     use novex_ai_core::TaskBudget;
+    use novex_approval_review::GuardianReviewOutcome;
     use novex_trace::TraceEventKind;
     use sqlx::postgres::PgPoolOptions;
 
@@ -5572,6 +5634,39 @@ mod tests {
     }
 
     #[test]
+    fn guardian_review_high_risk_policy_requires_human_even_when_auto_approved() {
+        let decision = guardian_review_for_tool_policy(
+            &ToolLookupRecord {
+                id: 1,
+                code: "github.issue.write".to_owned(),
+                tool_kind: "connector".to_owned(),
+                executor_kind: "connector".to_owned(),
+                risk_level: 3,
+                approval_policy: 1,
+                permission_code: Some("ai:agent:run".to_owned()),
+            },
+            true,
+        );
+
+        assert_eq!(decision.outcome, GuardianReviewOutcome::NeedsHuman);
+        assert!(decision.requires_human_approval);
+        assert!(!decision.can_execute);
+        assert_eq!(decision.rationale, "high_risk_requires_human_approval");
+    }
+
+    #[test]
+    fn guardian_review_approval_pause_payload_is_recorded() {
+        let source = include_str!("agent_service.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+
+        assert!(source.contains("guardian_review_for_tool_policy"));
+        assert!(source.contains("review_tool_approval"));
+        assert!(source.contains("\"guardianReview\""));
+    }
+
+    #[test]
     fn agent_runtime_routes_mcp_tools_through_audited_observation_path() {
         let source = include_str!("agent_service.rs")
             .split("#[cfg(test)]")
@@ -5705,6 +5800,25 @@ mod tests {
             "model_inference_error"
         );
         assert_eq!(bundle.events[0].payload["item"]["httpStatus"], 502);
+    }
+
+    #[test]
+    fn guardian_review_approval_requested_trace_preserves_payload() {
+        let payload = json!({
+            "toolCode": "github.issue.write",
+            "permissionCode": "ai:agent:run",
+            "guardianReview": {
+                "outcome": "needs_human",
+                "source": "policy",
+                "requiresHumanApproval": true
+            }
+        });
+        let event = fake_agent_event("approval_requested", 7, payload.clone());
+
+        let trace_event = trace_event_from_run_event(&event).unwrap();
+
+        assert_eq!(trace_event.kind, TraceEventKind::ApprovalRequested);
+        assert_eq!(trace_event.payload, payload);
     }
 
     #[test]

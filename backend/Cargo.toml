@@ -21,6 +21,7 @@ novex-agent.workspace = true
 novex-agent-protocol.workspace = true
 novex-agent-runtime.workspace = true
 novex-ai-core.workspace = true
+novex-approval-review.workspace = true
 novex-connectors.workspace = true
 novex-eval.workspace = true
 novex-mcp.workspace = true
