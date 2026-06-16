@@ -1,9 +1,14 @@
+use std::collections::{BTreeMap, BTreeSet};
+
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sqlx::PgPool;
 
 use crate::{
+    application::ai::knowledge_service::{
+        CitationResp, KnowledgeService, RagAskCommand, RagAskResp,
+    },
     application::system::{
         ensure_max_chars, format_datetime, format_optional_datetime, trim_to_none,
     },
@@ -19,11 +24,15 @@ const NOTEBOOK_WORKSPACE_NAME_MAX_CHARS: usize = 128;
 const NOTEBOOK_DESCRIPTION_MAX_CHARS: usize = 2_000;
 const NOTEBOOK_TITLE_MAX_CHARS: usize = 255;
 const NOTEBOOK_KIND_MAX_CHARS: usize = 64;
+const NOTEBOOK_ASK_QUESTION_MAX_CHARS: usize = 2_000;
+const DEFAULT_NOTEBOOK_ASK_LIMIT: usize = 6;
+const MAX_NOTEBOOK_ASK_LIMIT: usize = 10;
 const NOTEBOOK_SOURCE_TYPE_DATASET: &str = "dataset";
 const NOTEBOOK_SOURCE_TYPE_DOCUMENT: &str = "document";
 
 #[derive(Debug, Clone)]
 pub struct NotebookService {
+    db: PgPool,
     repo: AiNotebookRepository,
 }
 
@@ -72,6 +81,19 @@ pub struct NotebookArtifactCommand {
     pub source_trace_id: Option<String>,
     #[serde(default)]
     pub metadata: Value,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NotebookAskCommand {
+    #[serde(default)]
+    pub question: String,
+    #[serde(default)]
+    pub limit: Option<u64>,
+    #[serde(default)]
+    pub generation_profile: Option<String>,
+    #[serde(default)]
+    pub answer_model_route_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -126,9 +148,49 @@ pub struct NotebookArtifactResp {
     pub update_time: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NotebookFeedbackTargetResp {
+    pub resource_type: String,
+    pub resource_id: String,
+    pub trace_id: Option<String>,
+    pub metadata: Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NotebookAskResp {
+    pub trace_id: i64,
+    pub answer: String,
+    pub citations: Vec<CitationResp>,
+    pub retrieval_hit_count: usize,
+    pub answer_strategy: String,
+    pub embedding_model_route: String,
+    pub rerank_model_route: String,
+    pub answer_model_route: String,
+    pub answer_model: Option<String>,
+    pub source_ids: Vec<i64>,
+    pub knowledge_dataset_ids: Vec<i64>,
+    pub feedback_target: NotebookFeedbackTargetResp,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct NotebookSourceScope {
+    dataset_id: i64,
+    source_ids: Vec<i64>,
+    document_ids: Vec<i64>,
+}
+
+#[derive(Debug, Clone)]
+struct NotebookScopedRagCommand {
+    dataset_id: i64,
+    command: RagAskCommand,
+}
+
 impl NotebookService {
     pub fn new(db: PgPool) -> Self {
         Self {
+            db: db.clone(),
             repo: AiNotebookRepository::new(db),
         }
     }
@@ -291,6 +353,53 @@ impl NotebookService {
         Ok(rows.into_iter().map(NotebookArtifactResp::from).collect())
     }
 
+    pub async fn ask_workspace(
+        &self,
+        tenant_id: i64,
+        user_id: i64,
+        workspace_id: i64,
+        command: NotebookAskCommand,
+    ) -> Result<NotebookAskResp, AppError> {
+        ensure_positive_id("Notebook Workspace ID", workspace_id)?;
+        self.ensure_workspace(tenant_id, user_id, workspace_id)
+            .await?;
+        let command = normalize_ask_command(command)?;
+        let sources = self
+            .repo
+            .list_sources(tenant_id, user_id, workspace_id)
+            .await?;
+        let scopes = notebook_source_scopes(&sources)?;
+        if scopes.is_empty() {
+            return Err(AppError::bad_request("Notebook 至少需要一个可检索来源"));
+        }
+        let source_ids = notebook_source_ids(&scopes);
+        let dataset_ids = notebook_dataset_ids(&scopes);
+        let rag_commands = notebook_rag_commands_for_scopes(&command, &scopes)?;
+        let knowledge_service = KnowledgeService::new(self.db.clone());
+        let mut responses = Vec::new();
+        for scoped_command in rag_commands {
+            let response = knowledge_service
+                .ask_dataset_for_tenant(
+                    tenant_id,
+                    user_id,
+                    scoped_command.dataset_id,
+                    scoped_command.command,
+                )
+                .await?;
+            responses.push(response);
+        }
+        let response = responses
+            .into_iter()
+            .max_by_key(|response| response.retrieval_hit_count)
+            .ok_or_else(|| AppError::bad_request("Notebook 没有可用检索结果"))?;
+
+        Ok(notebook_ask_response_from_rag(
+            source_ids,
+            dataset_ids,
+            response,
+        ))
+    }
+
     async fn ensure_workspace(
         &self,
         tenant_id: i64,
@@ -336,6 +445,9 @@ fn normalize_source_command(
         NOTEBOOK_SOURCE_TYPE_DOCUMENT => {
             ensure_optional_positive_id("知识库 ID", command.knowledge_dataset_id)?;
             ensure_optional_positive_id("文档 ID", command.knowledge_document_id)?;
+            if command.knowledge_dataset_id.is_none() {
+                return Err(AppError::bad_request("文档来源必须提供知识库 ID"));
+            }
             if command.knowledge_document_id.is_none() {
                 return Err(AppError::bad_request("文档来源必须提供文档 ID"));
             }
@@ -390,6 +502,180 @@ fn normalize_artifact_command(
     command.citation_payload = normalize_json_array(command.citation_payload);
     command.metadata = normalize_json_object(command.metadata);
     Ok(command)
+}
+
+fn normalize_ask_command(mut command: NotebookAskCommand) -> Result<NotebookAskCommand, AppError> {
+    command.question = command.question.trim().to_owned();
+    if command.question.is_empty() {
+        return Err(AppError::bad_request("Notebook 问题不能为空"));
+    }
+    ensure_max_chars(
+        "Notebook 问题",
+        &command.question,
+        NOTEBOOK_ASK_QUESTION_MAX_CHARS,
+    )?;
+    command.limit = Some(
+        command
+            .limit
+            .and_then(|limit| usize::try_from(limit).ok())
+            .filter(|limit| *limit > 0)
+            .unwrap_or(DEFAULT_NOTEBOOK_ASK_LIMIT)
+            .min(MAX_NOTEBOOK_ASK_LIMIT) as u64,
+    );
+    command.generation_profile = command.generation_profile.and_then(trim_to_none);
+    if let Some(generation_profile) = &command.generation_profile {
+        ensure_max_chars("Notebook 生成配置", generation_profile, 128)?;
+    }
+    command.answer_model_route_id = command.answer_model_route_id.and_then(trim_to_none);
+    if let Some(route_id) = &command.answer_model_route_id {
+        ensure_max_chars("模型路由", route_id, 128)?;
+    }
+    Ok(command)
+}
+
+fn notebook_source_scopes(
+    sources: &[NotebookSourceRow],
+) -> Result<Vec<NotebookSourceScope>, AppError> {
+    #[derive(Default)]
+    struct ScopeBuilder {
+        source_ids: BTreeSet<i64>,
+        document_ids: BTreeSet<i64>,
+        whole_dataset: bool,
+    }
+
+    let mut builders = BTreeMap::<i64, ScopeBuilder>::new();
+    for source in sources
+        .iter()
+        .filter(|source| source.status == NOTEBOOK_STATUS_ACTIVE)
+    {
+        let dataset_id = source
+            .knowledge_dataset_id
+            .filter(|dataset_id| *dataset_id > 0)
+            .ok_or_else(|| AppError::bad_request("Notebook 来源缺少知识库 ID"))?;
+        let builder = builders.entry(dataset_id).or_default();
+        builder.source_ids.insert(source.id);
+        match source.source_type.as_str() {
+            NOTEBOOK_SOURCE_TYPE_DATASET => {
+                builder.whole_dataset = true;
+                builder.document_ids.clear();
+            }
+            NOTEBOOK_SOURCE_TYPE_DOCUMENT => {
+                if !builder.whole_dataset {
+                    let document_id = source
+                        .knowledge_document_id
+                        .filter(|document_id| *document_id > 0)
+                        .ok_or_else(|| AppError::bad_request("Notebook 文档来源缺少文档 ID"))?;
+                    builder.document_ids.insert(document_id);
+                }
+            }
+            _ => return Err(AppError::bad_request("Notebook 来源类型不支持检索")),
+        }
+    }
+
+    Ok(builders
+        .into_iter()
+        .map(|(dataset_id, builder)| NotebookSourceScope {
+            dataset_id,
+            source_ids: builder.source_ids.into_iter().collect(),
+            document_ids: if builder.whole_dataset {
+                Vec::new()
+            } else {
+                builder.document_ids.into_iter().collect()
+            },
+        })
+        .collect())
+}
+
+fn notebook_rag_commands_for_scopes(
+    command: &NotebookAskCommand,
+    scopes: &[NotebookSourceScope],
+) -> Result<Vec<NotebookScopedRagCommand>, AppError> {
+    let question = command.question.trim();
+    if question.is_empty() {
+        return Err(AppError::bad_request("Notebook 问题不能为空"));
+    }
+    Ok(scopes
+        .iter()
+        .map(|scope| NotebookScopedRagCommand {
+            dataset_id: scope.dataset_id,
+            command: RagAskCommand {
+                question: question.to_owned(),
+                limit: command
+                    .limit
+                    .and_then(|limit| usize::try_from(limit).ok())
+                    .filter(|limit| *limit > 0)
+                    .unwrap_or(DEFAULT_NOTEBOOK_ASK_LIMIT)
+                    .min(MAX_NOTEBOOK_ASK_LIMIT),
+                answer_model_route_id: command.answer_model_route_id.clone(),
+                answer_instruction: Some(notebook_answer_instruction(
+                    command.generation_profile.as_deref(),
+                )),
+                source_document_ids: scope.document_ids.clone(),
+            },
+        })
+        .collect())
+}
+
+fn notebook_answer_instruction(generation_profile: Option<&str>) -> String {
+    let mut instruction = "Answer as a Notebook workspace assistant. Use only the selected Notebook sources, preserve source citation labels, and say what evidence is missing when the selected sources are insufficient.".to_owned();
+    if let Some(profile) = generation_profile
+        .map(str::trim)
+        .filter(|profile| !profile.is_empty())
+    {
+        instruction.push_str("\nNotebook generation profile: ");
+        instruction.push_str(profile);
+    }
+    instruction
+}
+
+fn notebook_ask_response_from_rag(
+    source_ids: Vec<i64>,
+    knowledge_dataset_ids: Vec<i64>,
+    rag: RagAskResp,
+) -> NotebookAskResp {
+    let trace_id = rag.trace_id;
+    let feedback_metadata = json!({
+        "source": "notebook.ask",
+        "sourceIds": source_ids,
+        "knowledgeDatasetIds": knowledge_dataset_ids,
+    });
+    NotebookAskResp {
+        trace_id,
+        answer: rag.answer,
+        citations: rag.citations,
+        retrieval_hit_count: rag.retrieval_hit_count,
+        answer_strategy: rag.answer_strategy,
+        embedding_model_route: rag.embedding_model_route,
+        rerank_model_route: rag.rerank_model_route,
+        answer_model_route: rag.answer_model_route,
+        answer_model: rag.answer_model,
+        source_ids,
+        knowledge_dataset_ids,
+        feedback_target: NotebookFeedbackTargetResp {
+            resource_type: "rag_trace".to_owned(),
+            resource_id: trace_id.to_string(),
+            trace_id: Some(trace_id.to_string()),
+            metadata: feedback_metadata,
+        },
+    }
+}
+
+fn notebook_source_ids(scopes: &[NotebookSourceScope]) -> Vec<i64> {
+    scopes
+        .iter()
+        .flat_map(|scope| scope.source_ids.iter().copied())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+fn notebook_dataset_ids(scopes: &[NotebookSourceScope]) -> Vec<i64> {
+    scopes
+        .iter()
+        .map(|scope| scope.dataset_id)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
 }
 
 fn normalize_json_object(value: Value) -> Value {
@@ -523,5 +809,100 @@ mod tests {
         assert_eq!(command.title, "Brief");
         assert_eq!(command.citation_payload, json!([]));
         assert_eq!(command.metadata, json!({}));
+    }
+
+    #[test]
+    fn notebook_ask_retrieves_only_workspace_sources() {
+        let scopes = notebook_source_scopes(&[
+            source_row(1, "document", Some(7), Some(21)),
+            source_row(2, "document", Some(7), Some(22)),
+            source_row(3, "document", Some(8), Some(99)),
+        ])
+        .expect("source scopes should build");
+
+        let commands = notebook_rag_commands_for_scopes(
+            &NotebookAskCommand {
+                question: "How should support handle refunds?".to_owned(),
+                limit: Some(6),
+                generation_profile: Some("customer-support".to_owned()),
+                answer_model_route_id: None,
+            },
+            &scopes,
+        )
+        .expect("rag commands should build");
+
+        assert_eq!(commands.len(), 2);
+        assert_eq!(commands[0].dataset_id, 7);
+        assert_eq!(commands[0].command.source_document_ids, vec![21, 22]);
+        assert_eq!(commands[1].dataset_id, 8);
+        assert_eq!(commands[1].command.source_document_ids, vec![99]);
+    }
+
+    #[test]
+    fn notebook_answer_preserves_source_citation_labels() {
+        let rag = rag_answer_with_citation(42, "Refund answers must cite the policy [1].");
+        let response = notebook_ask_response_from_rag(vec![1, 2], vec![7], rag);
+
+        assert_eq!(response.answer, "Refund answers must cite the policy [1].");
+        assert_eq!(response.citations.len(), 1);
+        assert_eq!(response.citations[0].document_id, "21");
+        assert_eq!(response.citations[0].chunk_id, "policy:1");
+    }
+
+    #[test]
+    fn notebook_ask_records_agent_trace_and_feedback_target() {
+        let response =
+            notebook_ask_response_from_rag(vec![1], vec![7], rag_answer_with_citation(42, "Done"));
+
+        assert_eq!(response.trace_id, 42);
+        assert_eq!(response.feedback_target.resource_type, "rag_trace");
+        assert_eq!(response.feedback_target.resource_id, "42");
+        assert_eq!(response.feedback_target.trace_id.as_deref(), Some("42"));
+        assert_eq!(response.feedback_target.metadata["source"], "notebook.ask");
+        assert_eq!(response.source_ids, vec![1]);
+        assert_eq!(response.knowledge_dataset_ids, vec![7]);
+    }
+
+    fn source_row(
+        id: i64,
+        source_type: &str,
+        dataset_id: Option<i64>,
+        document_id: Option<i64>,
+    ) -> NotebookSourceRow {
+        let now = Utc::now().naive_utc();
+        NotebookSourceRow {
+            id,
+            tenant_id: 1,
+            workspace_id: 10,
+            source_type: source_type.to_owned(),
+            knowledge_dataset_id: dataset_id,
+            knowledge_document_id: document_id,
+            title: format!("source-{id}"),
+            citation_metadata: json!({}),
+            metadata: json!({}),
+            status: 1,
+            create_user: 1,
+            create_time: now,
+            update_time: None,
+        }
+    }
+
+    fn rag_answer_with_citation(trace_id: i64, answer: &str) -> RagAskResp {
+        RagAskResp {
+            trace_id,
+            answer: answer.to_owned(),
+            citations: vec![CitationResp {
+                document_id: "21".to_owned(),
+                chunk_id: "policy:1".to_owned(),
+                page_no: Some(3),
+                section_path: vec!["Refunds".to_owned()],
+            }],
+            retrieval_hit_count: 1,
+            answer_strategy: "llm_grounded".to_owned(),
+            embedding_model_route: "local-keyword".to_owned(),
+            rerank_model_route: "none".to_owned(),
+            answer_model_route: "local-extractive".to_owned(),
+            answer_model: None,
+        }
     }
 }

@@ -6,8 +6,8 @@ use axum::{
 
 use crate::{
     application::ai::notebook_service::{
-        NotebookArtifactResp, NotebookService, NotebookSourceCommand, NotebookSourceResp,
-        NotebookWorkspaceCommand, NotebookWorkspaceResp,
+        NotebookArtifactResp, NotebookAskCommand, NotebookAskResp, NotebookService,
+        NotebookSourceCommand, NotebookSourceResp, NotebookWorkspaceCommand, NotebookWorkspaceResp,
     },
     domain::auth::model::CurrentUser,
     interfaces::http::{middleware::permission::require_permission, AppState},
@@ -18,6 +18,7 @@ pub const NOTEBOOK_LIST_PERMISSION: &str = "ai:notebook:list";
 pub const NOTEBOOK_CREATE_PERMISSION: &str = "ai:notebook:create";
 pub const NOTEBOOK_SOURCE_PERMISSION: &str = "ai:notebook:source";
 pub const NOTEBOOK_ARTIFACT_PERMISSION: &str = "ai:notebook:artifact";
+pub const NOTEBOOK_ASK_PERMISSION: &str = "ai:notebook:ask";
 
 pub fn routes() -> Router<AppState> {
     Router::new()
@@ -32,6 +33,10 @@ pub fn routes() -> Router<AppState> {
         .route(
             "/ai/notebooks/workspaces/:workspace_id/artifacts",
             get(list_artifacts),
+        )
+        .route(
+            "/ai/notebooks/workspaces/:workspace_id/ask",
+            axum::routing::post(ask_workspace),
         )
 }
 
@@ -114,6 +119,24 @@ async fn list_artifacts(
     Ok(Json(ApiResponse::ok(
         service
             .list_artifacts(tenant_id, user_id, workspace_id)
+            .await?,
+    )))
+}
+
+async fn ask_workspace(
+    State(state): State<AppState>,
+    current_user: CurrentUser,
+    Path(workspace_id): Path<i64>,
+    Json(command): Json<NotebookAskCommand>,
+) -> Result<Json<ApiResponse<NotebookAskResp>>, AppError> {
+    require_permission(&current_user, NOTEBOOK_ASK_PERMISSION)?;
+    let tenant_id = current_user.tenant_id;
+    let user_id = current_user.id;
+    let service = NotebookService::new(state.db);
+
+    Ok(Json(ApiResponse::ok(
+        service
+            .ask_workspace(tenant_id, user_id, workspace_id, command)
             .await?,
     )))
 }
@@ -226,6 +249,7 @@ mod tests {
             NOTEBOOK_CREATE_PERMISSION,
             NOTEBOOK_SOURCE_PERMISSION,
             NOTEBOOK_ARTIFACT_PERMISSION,
+            NOTEBOOK_ASK_PERMISSION,
         ] {
             assert!(
                 seed.contains(permission),
@@ -248,5 +272,32 @@ mod tests {
         .unwrap_err();
 
         assert!(matches!(err, AppError::Forbidden));
+    }
+
+    #[tokio::test]
+    async fn notebook_ask_route_is_registered_and_requires_auth() {
+        let db = PgPoolOptions::new()
+            .connect_lazy("postgres://postgres:postgres@localhost:5432/avalon_admin")
+            .unwrap();
+        let jwt = JwtService::new("test-secret".to_owned(), 24);
+        let app = build_router(db, &["http://localhost:4399".to_owned()], jwt).unwrap();
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/ai/notebooks/workspaces/10/ask")
+                    .method("POST")
+                    .header(header::ACCEPT, "application/json")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"question":"What changed?"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let body = serde_json::from_slice::<Value>(&body).unwrap();
+        assert_eq!(body["code"], "401");
     }
 }

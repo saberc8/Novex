@@ -400,6 +400,8 @@ pub struct RagAskCommand {
     pub answer_model_route_id: Option<String>,
     #[serde(skip)]
     pub answer_instruction: Option<String>,
+    #[serde(skip)]
+    pub source_document_ids: Vec<i64>,
 }
 
 impl Default for RagAskCommand {
@@ -409,6 +411,7 @@ impl Default for RagAskCommand {
             limit: DEFAULT_RAG_LIMIT,
             answer_model_route_id: None,
             answer_instruction: None,
+            source_document_ids: Vec::new(),
         }
     }
 }
@@ -1301,7 +1304,10 @@ impl KnowledgeService {
             .repo
             .list_indexed_chunks(tenant_id, dataset_id, MAX_LOCAL_RETRIEVAL_CHUNKS)
             .await?;
-        let indexed_chunks = indexed_rag_chunks(chunk_records);
+        let indexed_chunks = filter_indexed_chunks_by_document_ids(
+            indexed_rag_chunks(chunk_records),
+            &command.source_document_ids,
+        );
         let vector_collection = self
             .repo
             .get_vector_collection(tenant_id, dataset_id)
@@ -1330,6 +1336,7 @@ impl KnowledgeService {
             dataset_id,
             vector_collection.as_ref(),
             &indexed_chunks,
+            &command.source_document_ids,
             candidate_limit,
         )
         .await?;
@@ -1893,6 +1900,7 @@ pub fn normalize_rag_ask_command(mut command: RagAskCommand) -> Result<RagAskCom
         command.limit = DEFAULT_RAG_LIMIT;
     }
     command.limit = command.limit.min(MAX_RAG_LIMIT);
+    command.source_document_ids = normalize_positive_ids(command.source_document_ids);
     if command.question.is_empty() {
         return Err(AppError::bad_request("问题不能为空"));
     }
@@ -1910,6 +1918,13 @@ fn normalize_optional_rag_model_route_id(
         ensure_max_chars("模型路由", route_id, 128)?;
     }
     Ok(route_id)
+}
+
+fn normalize_positive_ids(mut ids: Vec<i64>) -> Vec<i64> {
+    ids.retain(|id| *id > 0);
+    ids.sort_unstable();
+    ids.dedup();
+    ids
 }
 
 pub fn normalize_rag_feedback_command(
@@ -2979,6 +2994,20 @@ fn indexed_rag_chunks(records: Vec<ChunkRecord>) -> Vec<IndexedRagChunk> {
         .collect()
 }
 
+fn filter_indexed_chunks_by_document_ids(
+    chunks: Vec<IndexedRagChunk>,
+    document_ids: &[i64],
+) -> Vec<IndexedRagChunk> {
+    if document_ids.is_empty() {
+        return chunks;
+    }
+    let allowed = document_ids.iter().copied().collect::<HashSet<_>>();
+    chunks
+        .into_iter()
+        .filter(|chunk| allowed.contains(&chunk.document_id))
+        .collect()
+}
+
 #[cfg(test)]
 fn hybrid_retrieve_indexed_chunks(
     question: &str,
@@ -3001,6 +3030,7 @@ async fn hybrid_retrieve_indexed_chunks_with_milvus_or_local(
     dataset_id: i64,
     vector_collection: Option<&VectorCollectionRecord>,
     indexed_chunks: &[IndexedRagChunk],
+    document_ids: &[i64],
     limit: usize,
 ) -> Result<Vec<RetrievalHit>, AppError> {
     hybrid_retrieve_indexed_chunks_with_milvus_or_local_strict(
@@ -3010,6 +3040,7 @@ async fn hybrid_retrieve_indexed_chunks_with_milvus_or_local(
         dataset_id,
         vector_collection,
         indexed_chunks,
+        document_ids,
         limit,
         strict_live_rag_required(),
     )
@@ -3023,6 +3054,7 @@ async fn hybrid_retrieve_indexed_chunks_with_milvus_or_local_strict(
     dataset_id: i64,
     vector_collection: Option<&VectorCollectionRecord>,
     indexed_chunks: &[IndexedRagChunk],
+    document_ids: &[i64],
     limit: usize,
     strict: bool,
 ) -> Result<Vec<RetrievalHit>, AppError> {
@@ -3057,6 +3089,7 @@ async fn hybrid_retrieve_indexed_chunks_with_milvus_or_local_strict(
                 dataset_id,
                 collection,
                 query_vector,
+                document_ids,
                 limit,
             ) else {
                 if strict {
@@ -3139,6 +3172,7 @@ fn milvus_search_request_for_collection(
     dataset_id: i64,
     collection: &VectorCollectionRecord,
     query_vector: Vec<f32>,
+    document_ids: &[i64],
     limit: usize,
 ) -> Option<MilvusSearchRequest> {
     if limit == 0
@@ -3168,6 +3202,7 @@ fn milvus_search_request_for_collection(
             tenant_id,
             dataset_id,
         )
+        .with_document_ids(document_ids.to_vec())
         .with_metric_type(milvus_metric_type(&collection.metric_type)),
     )
 }
@@ -3728,6 +3763,7 @@ async fn retrieve_candidates_for_plan(
     dataset_id: i64,
     vector_collection: Option<&VectorCollectionRecord>,
     indexed_chunks: &[IndexedRagChunk],
+    document_ids: &[i64],
     limit: usize,
 ) -> Result<Vec<RetrievalHit>, AppError> {
     if limit == 0 {
@@ -3747,6 +3783,7 @@ async fn retrieve_candidates_for_plan(
             dataset_id,
             vector_collection,
             indexed_chunks,
+            document_ids,
             limit,
         )
         .await?;
@@ -5609,14 +5646,20 @@ mod tests {
             status: VECTOR_COLLECTION_STATUS_READY,
         };
 
-        let request = milvus_search_request_for_collection(42, 7, &collection, vec![0.1, 0.2], 4)
-            .expect("valid collection should build a milvus request");
+        let request =
+            milvus_search_request_for_collection(42, 7, &collection, vec![0.1, 0.2], &[21, 22], 4)
+                .expect("valid collection should build a milvus request");
         let body = request.to_rest_search_body();
 
         assert_eq!(body["collectionName"], "novex_t42_dataset_7");
-        assert_eq!(body["filter"], "tenant_id == 42 and dataset_id == 7");
+        assert_eq!(
+            body["filter"],
+            "tenant_id == 42 and dataset_id == 7 and document_id in [21, 22]"
+        );
         assert_eq!(body["searchParams"]["metric_type"], "IP");
-        assert!(milvus_search_request_for_collection(42, 7, &collection, vec![0.1], 4).is_none());
+        assert!(
+            milvus_search_request_for_collection(42, 7, &collection, vec![0.1], &[], 4).is_none()
+        );
     }
 
     #[test]
@@ -6452,6 +6495,7 @@ mod tests {
             7,
             None,
             &chunks,
+            &[],
             5,
             true,
         )
