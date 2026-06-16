@@ -27,7 +27,7 @@ Out of scope:
 - Long-running MCP resource subscriptions.
 - Sandbox command tools.
 
-## Task 1: Persist MCP Server and Tool Discovery Contracts
+## Task 1: Persist MCP Tool Discovery Contracts
 
 **Files:**
 - Modify: `backend/src/infrastructure/persistence/ai_capability_repository.rs`
@@ -36,19 +36,20 @@ Out of scope:
 
 **Step 1: Write failing migration contract test**
 
-Add a test near capability migration tests:
+Existing `ai_mcp_server` storage is already defined in `202606050006_create_ai_capability_registry.sql`. Add a test near capability migration tests for the missing discovered-tool table:
 
 ```rust
 #[test]
-fn mcp_gateway_migration_defines_server_and_discovered_tool_tables() {
+fn mcp_gateway_migration_defines_discovered_tool_table() {
     let migrations = include_str!("../../../migrations/202606160001_create_ai_mcp_gateway.sql");
 
-    assert!(migrations.contains("CREATE TABLE IF NOT EXISTS ai_mcp_server"));
     assert!(migrations.contains("CREATE TABLE IF NOT EXISTS ai_mcp_tool"));
-    assert!(migrations.contains("server_code"));
+    assert!(migrations.contains("server_id"));
     assert!(migrations.contains("tool_name"));
-    assert!(migrations.contains("network_allowlist"));
-    assert!(migrations.contains("secret_ref"));
+    assert!(migrations.contains("tool_code"));
+    assert!(migrations.contains("input_schema"));
+    assert!(migrations.contains("output_schema"));
+    assert!(migrations.contains("uk_ai_mcp_tool_tenant_tool_code"));
 }
 ```
 
@@ -57,34 +58,31 @@ fn mcp_gateway_migration_defines_server_and_discovered_tool_tables() {
 Run:
 
 ```bash
-cargo test -p backend-rust mcp_gateway_migration_defines_server_and_discovered_tool_tables --offline
+cargo test -p backend-rust mcp_gateway_migration_defines_discovered_tool_table --offline
 ```
 
-Expected: FAIL because the migration and test are not implemented.
+Expected: FAIL because the migration is not implemented.
 
 **Step 3: Add migration**
 
-Add:
+Add `ai_mcp_tool`: `id`, `tenant_id`, `server_id`, `tool_name`, `tool_code`, `description`, `input_schema`, `output_schema`, `risk_level`, `permission_code`, `status`, `metadata`, audit columns.
 
-- `ai_mcp_server`: `id`, `tenant_id`, `server_code`, `name`, `transport_kind`, `endpoint_url`, `auth_scope`, `auth_type`, `secret_ref`, `network_allowlist`, `tool_allowlist`, `status`, `metadata`, audit columns.
-- `ai_mcp_tool`: `id`, `tenant_id`, `server_id`, `tool_name`, `tool_code`, `description`, `input_schema`, `output_schema`, `risk_level`, `permission_code`, `status`, `metadata`, audit columns.
-- Unique constraints: `(tenant_id, server_code)`, `(tenant_id, server_id, tool_name)`, `(tenant_id, tool_code)`.
+Unique constraints:
+
+- `(tenant_id, server_id, tool_name)`
+- `(tenant_id, tool_code)`
 
 **Step 4: Add repository records**
 
 Add structs:
 
 ```rust
-pub struct McpServerSaveRecord { /* tenant_id, server_code, transport, auth, allowlists */ }
-pub struct McpServerRecord { /* DB row fields */ }
 pub struct McpToolSaveRecord { /* discovered tool fields */ }
 pub struct McpToolRecord { /* DB row fields */ }
 ```
 
 Add methods:
 
-- `create_or_update_mcp_server`
-- `list_mcp_servers`
 - `save_discovered_mcp_tools`
 - `list_mcp_tools_by_server`
 - `find_mcp_tool_by_tool_code`
@@ -94,7 +92,7 @@ Add methods:
 Run:
 
 ```bash
-cargo test -p backend-rust mcp_gateway_migration_defines_server_and_discovered_tool_tables --offline
+cargo test -p backend-rust mcp_gateway_migration_defines_discovered_tool_table --offline
 cargo test -p backend-rust capability --offline
 ```
 
