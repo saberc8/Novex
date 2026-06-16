@@ -205,6 +205,27 @@ mod tests {
     }
 
     #[test]
+    fn model_route_circuit_breaker_migration_defines_runtime_state_table() {
+        let migration = include_str!(
+            "../../../../migrations/202606170001_create_ai_model_route_circuit_breaker.sql"
+        );
+
+        for required in [
+            "CREATE TABLE IF NOT EXISTS ai_model_route_circuit_breaker",
+            "tenant_id",
+            "route_id",
+            "opened_until",
+            "open_reason",
+            "last_error_kind",
+            "last_http_status",
+            "uk_ai_model_route_circuit_breaker_tenant_route",
+            "idx_ai_model_route_circuit_breaker_opened_until",
+        ] {
+            assert!(migration.contains(required), "missing {required}");
+        }
+    }
+
+    #[test]
     fn model_chat_handlers_bind_runtime_to_current_tenant() {
         let source = include_str!("model.rs");
 
