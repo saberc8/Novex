@@ -3627,7 +3627,9 @@ fn trace_event_from_run_event(event: &RunEventRecord) -> Option<TraceEvent> {
                 .unwrap_or_else(|| trace_payload_fallback(&event.payload)),
         )),
         "thought"
-            if trace_payload_item_type(&event.payload).as_deref() == Some("model_inference") =>
+            if trace_payload_item_type(&event.payload)
+                .as_deref()
+                .is_some_and(is_model_inference_trace_item) =>
         {
             Some(TraceEvent::inference(sequence_no, event.payload.clone()))
         }
@@ -3680,6 +3682,10 @@ fn trace_event_from_run_event(event: &RunEventRecord) -> Option<TraceEvent> {
         )),
         _ => None,
     }
+}
+
+fn is_model_inference_trace_item(item_type: &str) -> bool {
+    matches!(item_type, "model_inference" | "model_inference_error")
 }
 
 fn trace_payload_item_type(payload: &Value) -> Option<String> {
@@ -4758,6 +4764,38 @@ mod tests {
             bundle.events[0].payload["item"]["routeId"],
             "runtime.llm.code_agent"
         );
+    }
+
+    #[test]
+    fn agent_run_events_convert_provider_error_spans_to_trace_bundle() {
+        let events = vec![fake_agent_event(
+            "thought",
+            1,
+            json!({
+                "runtimeMode": "model_loop",
+                "item": {
+                    "type": "model_inference_error",
+                    "routeId": "runtime.llm.code_agent",
+                    "routePurpose": "code_agent",
+                    "attempt": 1,
+                    "maxAttempts": 1,
+                    "retryable": true,
+                    "errorKind": "provider_http",
+                    "httpStatus": 502,
+                    "message": "LLM model call failed: HTTP 502",
+                    "latencyMs": 12
+                }
+            }),
+        )];
+
+        let bundle = agent_events_to_trace_bundle("agent-1", events);
+
+        assert_eq!(bundle.events[0].kind, TraceEventKind::Inference);
+        assert_eq!(
+            bundle.events[0].payload["item"]["type"],
+            "model_inference_error"
+        );
+        assert_eq!(bundle.events[0].payload["item"]["httpStatus"], 502);
     }
 
     #[test]
