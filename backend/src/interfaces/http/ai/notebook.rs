@@ -6,8 +6,9 @@ use axum::{
 
 use crate::{
     application::ai::notebook_service::{
-        NotebookArtifactResp, NotebookAskCommand, NotebookAskResp, NotebookService,
-        NotebookSourceCommand, NotebookSourceResp, NotebookWorkspaceCommand, NotebookWorkspaceResp,
+        NotebookArtifactGenerateCommand, NotebookArtifactResp, NotebookAskCommand, NotebookAskResp,
+        NotebookService, NotebookSourceCommand, NotebookSourceResp, NotebookWorkspaceCommand,
+        NotebookWorkspaceResp,
     },
     domain::auth::model::CurrentUser,
     interfaces::http::{middleware::permission::require_permission, AppState},
@@ -32,7 +33,7 @@ pub fn routes() -> Router<AppState> {
         )
         .route(
             "/ai/notebooks/workspaces/:workspace_id/artifacts",
-            get(list_artifacts),
+            get(list_artifacts).post(generate_artifact),
         )
         .route(
             "/ai/notebooks/workspaces/:workspace_id/ask",
@@ -119,6 +120,24 @@ async fn list_artifacts(
     Ok(Json(ApiResponse::ok(
         service
             .list_artifacts(tenant_id, user_id, workspace_id)
+            .await?,
+    )))
+}
+
+async fn generate_artifact(
+    State(state): State<AppState>,
+    current_user: CurrentUser,
+    Path(workspace_id): Path<i64>,
+    Json(command): Json<NotebookArtifactGenerateCommand>,
+) -> Result<Json<ApiResponse<NotebookArtifactResp>>, AppError> {
+    require_permission(&current_user, NOTEBOOK_ARTIFACT_PERMISSION)?;
+    let tenant_id = current_user.tenant_id;
+    let user_id = current_user.id;
+    let service = NotebookService::new(state.db);
+
+    Ok(Json(ApiResponse::ok(
+        service
+            .generate_artifact(tenant_id, user_id, workspace_id, command)
             .await?,
     )))
 }
@@ -265,6 +284,25 @@ mod tests {
             user_with_permissions(vec![]),
             axum::Json(NotebookWorkspaceCommand {
                 name: "Policy Notebook".to_owned(),
+                ..Default::default()
+            }),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(matches!(err, AppError::Forbidden));
+    }
+
+    #[tokio::test]
+    async fn generate_notebook_artifact_rejects_missing_permission() {
+        let err = generate_artifact(
+            State(test_state()),
+            user_with_permissions(vec![]),
+            Path(10),
+            axum::Json(NotebookArtifactGenerateCommand {
+                artifact_kind: "summary".to_owned(),
+                title: "Policy Summary".to_owned(),
+                topic: "refunds".to_owned(),
                 ..Default::default()
             }),
         )

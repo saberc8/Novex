@@ -29,6 +29,10 @@ const DEFAULT_NOTEBOOK_ASK_LIMIT: usize = 6;
 const MAX_NOTEBOOK_ASK_LIMIT: usize = 10;
 const NOTEBOOK_SOURCE_TYPE_DATASET: &str = "dataset";
 const NOTEBOOK_SOURCE_TYPE_DOCUMENT: &str = "document";
+const NOTEBOOK_ARTIFACT_KIND_SUMMARY: &str = "summary";
+const NOTEBOOK_ARTIFACT_KIND_FAQ: &str = "faq";
+const NOTEBOOK_ARTIFACT_KIND_STUDY_GUIDE: &str = "study_guide";
+const NOTEBOOK_ARTIFACT_KIND_NOTE: &str = "note";
 
 #[derive(Debug, Clone)]
 pub struct NotebookService {
@@ -81,6 +85,23 @@ pub struct NotebookArtifactCommand {
     pub source_trace_id: Option<String>,
     #[serde(default)]
     pub metadata: Value,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NotebookArtifactGenerateCommand {
+    #[serde(default)]
+    pub artifact_kind: String,
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub topic: String,
+    #[serde(default)]
+    pub limit: Option<u64>,
+    #[serde(default)]
+    pub generation_profile: Option<String>,
+    #[serde(default)]
+    pub answer_model_route_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -337,6 +358,23 @@ impl NotebookService {
         Ok(NotebookArtifactResp::from(row))
     }
 
+    pub async fn generate_artifact(
+        &self,
+        tenant_id: i64,
+        user_id: i64,
+        workspace_id: i64,
+        command: NotebookArtifactGenerateCommand,
+    ) -> Result<NotebookArtifactResp, AppError> {
+        let command = normalize_artifact_generate_command(command)?;
+        let ask_command = notebook_ask_command_for_artifact(&command);
+        let ask_response = self
+            .ask_workspace(tenant_id, user_id, workspace_id, ask_command)
+            .await?;
+        let artifact = notebook_artifact_command_from_ask(&command, &ask_response);
+        self.create_artifact(tenant_id, user_id, workspace_id, artifact)
+            .await
+    }
+
     pub async fn list_artifacts(
         &self,
         tenant_id: i64,
@@ -504,6 +542,78 @@ fn normalize_artifact_command(
     Ok(command)
 }
 
+fn normalize_artifact_generate_command(
+    mut command: NotebookArtifactGenerateCommand,
+) -> Result<NotebookArtifactGenerateCommand, AppError> {
+    command.artifact_kind = normalize_artifact_kind(command.artifact_kind)?;
+    command.topic = command.topic.trim().to_owned();
+    if command.topic.is_empty() {
+        command.topic = "selected Notebook sources".to_owned();
+    }
+    ensure_max_chars(
+        "Notebook Artifact 主题",
+        &command.topic,
+        NOTEBOOK_TITLE_MAX_CHARS,
+    )?;
+    command.title = command.title.trim().to_owned();
+    if command.title.is_empty() {
+        command.title = default_artifact_title(&command.artifact_kind, &command.topic);
+    }
+    ensure_max_chars(
+        "Notebook Artifact 标题",
+        &command.title,
+        NOTEBOOK_TITLE_MAX_CHARS,
+    )?;
+    command.limit = Some(
+        command
+            .limit
+            .and_then(|limit| usize::try_from(limit).ok())
+            .filter(|limit| *limit > 0)
+            .unwrap_or(DEFAULT_NOTEBOOK_ASK_LIMIT)
+            .min(MAX_NOTEBOOK_ASK_LIMIT) as u64,
+    );
+    command.generation_profile = command.generation_profile.and_then(trim_to_none);
+    if let Some(generation_profile) = &command.generation_profile {
+        ensure_max_chars("Notebook 生成配置", generation_profile, 128)?;
+    }
+    command.answer_model_route_id = command.answer_model_route_id.and_then(trim_to_none);
+    if let Some(route_id) = &command.answer_model_route_id {
+        ensure_max_chars("模型路由", route_id, 128)?;
+    }
+    Ok(command)
+}
+
+fn normalize_artifact_kind(kind: String) -> Result<String, AppError> {
+    let kind = kind.trim().replace('-', "_").to_ascii_lowercase();
+    if matches!(
+        kind.as_str(),
+        NOTEBOOK_ARTIFACT_KIND_SUMMARY
+            | NOTEBOOK_ARTIFACT_KIND_FAQ
+            | NOTEBOOK_ARTIFACT_KIND_STUDY_GUIDE
+            | NOTEBOOK_ARTIFACT_KIND_NOTE
+    ) {
+        Ok(kind)
+    } else {
+        Err(AppError::bad_request(
+            "Notebook Artifact 类型仅支持 summary、faq、study_guide、note",
+        ))
+    }
+}
+
+fn default_artifact_title(kind: &str, topic: &str) -> String {
+    format!("{}: {topic}", artifact_kind_label(kind))
+}
+
+fn artifact_kind_label(kind: &str) -> &'static str {
+    match kind {
+        NOTEBOOK_ARTIFACT_KIND_SUMMARY => "Summary",
+        NOTEBOOK_ARTIFACT_KIND_FAQ => "FAQ",
+        NOTEBOOK_ARTIFACT_KIND_STUDY_GUIDE => "Study guide",
+        NOTEBOOK_ARTIFACT_KIND_NOTE => "Note",
+        _ => "Artifact",
+    }
+}
+
 fn normalize_ask_command(mut command: NotebookAskCommand) -> Result<NotebookAskCommand, AppError> {
     command.question = command.question.trim().to_owned();
     if command.question.is_empty() {
@@ -626,6 +736,69 @@ fn notebook_answer_instruction(generation_profile: Option<&str>) -> String {
         instruction.push_str(profile);
     }
     instruction
+}
+
+fn notebook_ask_command_for_artifact(
+    command: &NotebookArtifactGenerateCommand,
+) -> NotebookAskCommand {
+    let kind_label = artifact_kind_label(&command.artifact_kind);
+    NotebookAskCommand {
+        question: format!(
+            "Generate a {kind_label} from the selected Notebook sources about \"{}\". Use source citations for factual claims. If the selected Notebook sources do not contain enough evidence, state what evidence is missing.",
+            command.topic
+        ),
+        limit: command.limit,
+        generation_profile: Some(notebook_artifact_generation_profile(command)),
+        answer_model_route_id: command.answer_model_route_id.clone(),
+    }
+}
+
+fn notebook_artifact_generation_profile(command: &NotebookArtifactGenerateCommand) -> String {
+    let mut profile = format!("artifactKind={}", command.artifact_kind);
+    if let Some(extra) = command
+        .generation_profile
+        .as_deref()
+        .map(str::trim)
+        .filter(|extra| !extra.is_empty())
+    {
+        profile.push_str("; ");
+        profile.push_str(extra);
+    }
+    profile
+}
+
+fn notebook_artifact_command_from_ask(
+    command: &NotebookArtifactGenerateCommand,
+    ask: &NotebookAskResp,
+) -> NotebookArtifactCommand {
+    let citation_payload = serde_json::to_value(&ask.citations).unwrap_or_else(|_| json!([]));
+    let feedback_target = serde_json::to_value(&ask.feedback_target).unwrap_or_else(|_| json!({}));
+    NotebookArtifactCommand {
+        artifact_kind: command.artifact_kind.clone(),
+        title: command.title.clone(),
+        content_json: json!({
+            "artifactKind": command.artifact_kind,
+            "title": command.title,
+            "topic": command.topic,
+            "content": ask.answer,
+            "citations": ask.citations,
+            "sourceIds": ask.source_ids,
+            "knowledgeDatasetIds": ask.knowledge_dataset_ids,
+            "traceId": ask.trace_id,
+            "feedbackTarget": feedback_target,
+        }),
+        content_text: ask.answer.clone(),
+        citation_payload,
+        source_trace_id: Some(ask.trace_id.to_string()),
+        metadata: json!({
+            "source": "notebook.artifact.generate",
+            "artifactKind": command.artifact_kind,
+            "retrievalHitCount": ask.retrieval_hit_count,
+            "answerStrategy": ask.answer_strategy,
+            "answerModelRoute": ask.answer_model_route,
+            "answerModel": ask.answer_model,
+        }),
+    }
 }
 
 fn notebook_ask_response_from_rag(
@@ -861,6 +1034,71 @@ mod tests {
         assert_eq!(response.feedback_target.metadata["source"], "notebook.ask");
         assert_eq!(response.source_ids, vec![1]);
         assert_eq!(response.knowledge_dataset_ids, vec![7]);
+    }
+
+    #[test]
+    fn notebook_artifact_command_accepts_summary_faq_and_study_guide() {
+        for kind in ["summary", "faq", "study-guide", "study_guide", "note"] {
+            let command = normalize_artifact_generate_command(NotebookArtifactGenerateCommand {
+                artifact_kind: kind.to_owned(),
+                title: " Support Pack ".to_owned(),
+                topic: " refunds ".to_owned(),
+                ..Default::default()
+            })
+            .expect("artifact kind should be accepted");
+
+            assert!(!command.title.is_empty());
+            assert!(matches!(
+                command.artifact_kind.as_str(),
+                "summary" | "faq" | "study_guide" | "note"
+            ));
+        }
+    }
+
+    #[test]
+    fn notebook_artifact_generation_uses_workspace_sources() {
+        let scopes = notebook_source_scopes(&[source_row(1, "document", Some(7), Some(21))])
+            .expect("source scopes should build");
+        let artifact = normalize_artifact_generate_command(NotebookArtifactGenerateCommand {
+            artifact_kind: "faq".to_owned(),
+            title: "Refund FAQ".to_owned(),
+            topic: "refund handling".to_owned(),
+            limit: Some(4),
+            generation_profile: None,
+            answer_model_route_id: None,
+        })
+        .expect("artifact command should normalize");
+        let ask = notebook_ask_command_for_artifact(&artifact);
+        let commands = notebook_rag_commands_for_scopes(&ask, &scopes)
+            .expect("artifact rag commands should build");
+
+        assert!(ask.question.contains("selected Notebook sources"));
+        assert!(ask.question.contains("FAQ"));
+        assert_eq!(commands[0].dataset_id, 7);
+        assert_eq!(commands[0].command.source_document_ids, vec![21]);
+    }
+
+    #[test]
+    fn notebook_artifact_records_citation_payload() {
+        let artifact = normalize_artifact_generate_command(NotebookArtifactGenerateCommand {
+            artifact_kind: "summary".to_owned(),
+            title: "Refund Summary".to_owned(),
+            topic: "refunds".to_owned(),
+            ..Default::default()
+        })
+        .expect("artifact command should normalize");
+        let ask_response = notebook_ask_response_from_rag(
+            vec![1],
+            vec![7],
+            rag_answer_with_citation(42, "Refunds need approval [1]."),
+        );
+        let save = notebook_artifact_command_from_ask(&artifact, &ask_response);
+
+        assert_eq!(save.artifact_kind, "summary");
+        assert_eq!(save.content_text, "Refunds need approval [1].");
+        assert_eq!(save.source_trace_id.as_deref(), Some("42"));
+        assert_eq!(save.citation_payload[0]["documentId"], "21");
+        assert_eq!(save.citation_payload[0]["chunkId"], "policy:1");
     }
 
     fn source_row(
