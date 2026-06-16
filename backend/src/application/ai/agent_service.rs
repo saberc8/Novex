@@ -1,4 +1,10 @@
-use std::{env, future::Future, time::Duration};
+use std::{
+    collections::HashMap,
+    env,
+    future::Future,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 
 use chrono::{NaiveDateTime, Utc};
 use futures_util::future::join_all;
@@ -27,6 +33,7 @@ use novex_trace::{TraceBundle, TraceEvent, TraceReplaySummary};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sqlx::PgPool;
+use tokio::sync::watch;
 
 use crate::{
     application::ai::model_service::{ModelChatCommand, ModelChatMessage, ModelRuntimeService},
@@ -136,6 +143,83 @@ struct MediaPersistenceRecords {
 }
 
 type GitHubConnectorAuth = ResolvedConnectorCredential;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct AgentRunKey {
+    tenant_id: i64,
+    run_id: i64,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct AgentRuntimeRegistry {
+    inner: Arc<Mutex<HashMap<AgentRunKey, watch::Sender<bool>>>>,
+}
+
+#[derive(Debug)]
+pub struct ActiveAgentRunGuard {
+    key: AgentRunKey,
+    registry: AgentRuntimeRegistry,
+}
+
+#[derive(Debug, Clone)]
+pub struct AgentRunCancellationToken {
+    receiver: watch::Receiver<bool>,
+}
+
+impl AgentRuntimeRegistry {
+    pub fn register_run(
+        &self,
+        tenant_id: i64,
+        run_id: i64,
+    ) -> (ActiveAgentRunGuard, AgentRunCancellationToken) {
+        let key = AgentRunKey { tenant_id, run_id };
+        let (sender, receiver) = watch::channel(false);
+        self.inner.lock().unwrap().insert(key, sender);
+        (
+            ActiveAgentRunGuard {
+                key,
+                registry: self.clone(),
+            },
+            AgentRunCancellationToken { receiver },
+        )
+    }
+
+    pub fn cancel_run(&self, tenant_id: i64, run_id: i64) -> bool {
+        let key = AgentRunKey { tenant_id, run_id };
+        let Some(sender) = self.inner.lock().unwrap().get(&key).cloned() else {
+            return false;
+        };
+        let _ = sender.send(true);
+        true
+    }
+
+    fn unregister_run(&self, key: AgentRunKey) {
+        self.inner.lock().unwrap().remove(&key);
+    }
+}
+
+impl Drop for ActiveAgentRunGuard {
+    fn drop(&mut self) {
+        self.registry.unregister_run(self.key);
+    }
+}
+
+impl AgentRunCancellationToken {
+    pub fn is_cancelled(&self) -> bool {
+        *self.receiver.borrow()
+    }
+
+    pub async fn cancelled(mut self) {
+        if self.is_cancelled() {
+            return;
+        }
+        while self.receiver.changed().await.is_ok() {
+            if self.is_cancelled() {
+                return;
+            }
+        }
+    }
+}
 
 impl AgentToolExecution {
     fn succeeded(response_payload: Value, dry_run: bool, final_output: String) -> Self {
@@ -3726,6 +3810,17 @@ mod tests {
         let service = AgentService::for_tenant(db, 42);
 
         assert_eq!(service.tenant_id, 42);
+    }
+
+    #[tokio::test]
+    async fn agent_runtime_registry_signals_registered_run_cancellation() {
+        let registry = AgentRuntimeRegistry::default();
+        let (_guard, token) = registry.register_run(42, 1001);
+
+        assert!(!token.is_cancelled());
+        assert!(registry.cancel_run(42, 1001));
+        token.clone().cancelled().await;
+        assert!(token.is_cancelled());
     }
 
     #[test]
