@@ -393,6 +393,7 @@ dependencies = [
  "novex-agent-protocol",
  "novex-agent-runtime",
  "novex-ai-core",
+ "novex-approval-review",
  "novex-connectors",
  "novex-eval",
  "novex-mcp",
@@ -1808,6 +1809,14 @@ name = "novex-ai-core"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "serde",
+]
+
+[[package]]
+name = "novex-approval-review"
+version = "0.1.0"
+dependencies = [
+ "novex-ai-core",
  "serde",
 ]
 
