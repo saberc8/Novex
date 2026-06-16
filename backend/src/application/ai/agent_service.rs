@@ -29,6 +29,8 @@ use novex_tools::{
     ToolBatchExecutionMode, ToolBatchPlan, ToolExecutionPolicyDecision, ToolExecutionPolicyInput,
     ToolKind, ToolRiskLevel, ToolRouteError, ToolRouteErrorKind, ToolRouter,
 };
+#[cfg(test)]
+use novex_trace::TraceEventKind;
 use novex_trace::{TraceBundle, TraceEvent, TraceReplaySummary};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -3606,6 +3608,19 @@ fn trace_event_from_run_event(event: &RunEventRecord) -> Option<TraceEvent> {
             trace_payload_text(&event.payload, &["toolCode", "tool_code"])
                 .unwrap_or_else(|| "unknown".to_owned()),
         )),
+        "retrieval" => Some(TraceEvent::retrieval(sequence_no, event.payload.clone())),
+        "action_selected" => Some(TraceEvent::action_selected(
+            sequence_no,
+            event.payload.clone(),
+        )),
+        "observation"
+            if trace_payload_item_type(&event.payload).as_deref() == Some("context_compaction") =>
+        {
+            Some(TraceEvent::context_compaction(
+                sequence_no,
+                event.payload.clone(),
+            ))
+        }
         "observation" => Some(TraceEvent::observation(
             sequence_no,
             trace_call_id(event),
@@ -3621,6 +3636,9 @@ fn trace_event_from_run_event(event: &RunEventRecord) -> Option<TraceEvent> {
             trace_payload_text(&event.payload, &["answer", "content"])
                 .unwrap_or_else(|| trace_payload_fallback(&event.payload)),
         )),
+        "cancel_requested" | "cancelled" => {
+            Some(TraceEvent::cancellation(sequence_no, event.payload.clone()))
+        }
         "error" => Some(TraceEvent::error(
             sequence_no,
             trace_payload_text(&event.payload, &["message", "error"])
@@ -3628,6 +3646,14 @@ fn trace_event_from_run_event(event: &RunEventRecord) -> Option<TraceEvent> {
         )),
         _ => None,
     }
+}
+
+fn trace_payload_item_type(payload: &Value) -> Option<String> {
+    payload
+        .get("item")
+        .and_then(|item| item.get("type"))
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned)
 }
 
 fn trace_sequence_no(sequence_no: i64) -> i32 {
@@ -4588,6 +4614,47 @@ mod tests {
         assert_eq!(bundle.trace_id, "agent-1");
         assert_eq!(bundle.tool_call_count(), 1);
         assert_eq!(bundle.replay_summary().final_status, "succeeded");
+    }
+
+    #[test]
+    fn agent_run_events_convert_runtime_spans_to_trace_bundle() {
+        let events = vec![
+            fake_agent_event("retrieval", 1, json!({"hitCount":2,"source":"ai_memory"})),
+            fake_agent_event(
+                "action_selected",
+                2,
+                json!({"toolCallBatch":[{"toolCode":"rag.search"}]}),
+            ),
+            fake_agent_event(
+                "observation",
+                3,
+                json!({
+                    "item":{"type":"context_compaction","summary":"older tool results compacted"},
+                    "compactedItemCount":4
+                }),
+            ),
+            fake_agent_event("cancelled", 4, json!({"cancelReason":"external_cancel"})),
+        ];
+
+        let bundle = agent_events_to_trace_bundle("agent-1", events);
+
+        assert!(bundle
+            .events
+            .iter()
+            .any(|event| event.kind == TraceEventKind::Retrieval));
+        assert!(bundle
+            .events
+            .iter()
+            .any(|event| event.kind == TraceEventKind::ActionSelected));
+        assert!(bundle
+            .events
+            .iter()
+            .any(|event| event.kind == TraceEventKind::ContextCompaction));
+        assert!(bundle
+            .events
+            .iter()
+            .any(|event| event.kind == TraceEventKind::Cancellation));
+        assert_eq!(bundle.replay_summary().final_status, "cancelled");
     }
 
     #[test]
