@@ -147,6 +147,17 @@ enum ModelLoopFutureAwait<T> {
 }
 
 #[derive(Debug, Clone)]
+struct ModelLoopContextCompactionOutcome {
+    summary: String,
+    strategy: String,
+    status: String,
+    cancelled: bool,
+    model_payload: Option<Value>,
+    error_payload: Option<Value>,
+    error_message: Option<String>,
+}
+
+#[derive(Debug, Clone)]
 struct MediaPersistenceRecords {
     asset: Option<MediaAssetSaveRecord>,
     job: MediaJobSaveRecord,
@@ -1180,7 +1191,42 @@ impl AgentService {
                     }
 
                     if runtime_state.should_compact_context() {
-                        if let Some(compaction) = runtime_state.compact_context() {
+                        if let Some(deterministic_summary) =
+                            runtime_state.compaction_candidate_summary()
+                        {
+                            let compaction_outcome = self
+                                .model_loop_context_compaction_outcome(
+                                    cancel_token.clone(),
+                                    &command.input,
+                                    &deterministic_summary,
+                                    &tool_codes,
+                                )
+                                .await?;
+                            if compaction_outcome.cancelled {
+                                if self
+                                    .check_model_loop_cancelled(
+                                        user_id,
+                                        run_id,
+                                        "context_compaction",
+                                    )
+                                    .await?
+                                    == ModelLoopCancelCheck::Continue
+                                {
+                                    self.finish_model_loop_cancelled(
+                                        user_id,
+                                        run_id,
+                                        &run_status_code(RunStatus::Cancelling),
+                                        "context_compaction",
+                                    )
+                                    .await?;
+                                }
+                                return self.get_run(run_id).await;
+                            }
+                            let Some(compaction) = runtime_state
+                                .compact_context_with_summary(compaction_outcome.summary.clone())
+                            else {
+                                continue;
+                            };
                             let compaction_item = AgentTurnItem::ContextCompaction {
                                 summary: compaction.summary.clone(),
                             };
@@ -1200,6 +1246,24 @@ impl AgentService {
                                     "compactedItemCount".to_owned(),
                                     json!(compaction.compacted_item_count),
                                 );
+                                object.insert(
+                                    "compactionStrategy".to_owned(),
+                                    json!(&compaction_outcome.strategy),
+                                );
+                                object.insert(
+                                    "compactionStatus".to_owned(),
+                                    json!(&compaction_outcome.status),
+                                );
+                                if let Some(model_payload) = &compaction_outcome.model_payload {
+                                    object
+                                        .insert("modelInference".to_owned(), model_payload.clone());
+                                }
+                                if let Some(error_payload) = &compaction_outcome.error_payload {
+                                    object.insert("modelError".to_owned(), error_payload.clone());
+                                }
+                                if let Some(error_message) = &compaction_outcome.error_message {
+                                    object.insert("errorMessage".to_owned(), json!(error_message));
+                                }
                             }
                             self.append_event(
                                 user_id,
@@ -1295,6 +1359,79 @@ impl AgentService {
         )
         .await?;
         self.get_run(run_id).await
+    }
+
+    async fn model_loop_context_compaction_outcome(
+        &self,
+        cancel_token: AgentRunCancellationToken,
+        original_input: &str,
+        deterministic_summary: &str,
+        tool_codes: &[String],
+    ) -> Result<ModelLoopContextCompactionOutcome, AppError> {
+        let messages = build_model_loop_context_compaction_messages(
+            original_input,
+            deterministic_summary,
+            tool_codes,
+        );
+        let started = Instant::now();
+        let result = await_model_loop_future_or_cancelled(
+            cancel_token,
+            "context_compaction",
+            self.model_runtime.chat_completion_for_purpose(
+                ModelRoutePurpose::CodeAgent,
+                ModelChatCommand {
+                    messages,
+                    temperature: Some(0.1),
+                    max_tokens: Some(512),
+                    ..ModelChatCommand::default()
+                },
+            ),
+        )
+        .await;
+
+        match result {
+            Ok(ModelLoopFutureAwait::Completed(response)) => {
+                let summary = model_loop_context_compaction_summary_from_response(&response.answer);
+                Ok(ModelLoopContextCompactionOutcome {
+                    summary: if summary.is_empty() {
+                        deterministic_summary.to_owned()
+                    } else {
+                        summary
+                    },
+                    strategy: "model".to_owned(),
+                    status: "succeeded".to_owned(),
+                    cancelled: false,
+                    model_payload: model_inference_event_payload(&response)
+                        .get("item")
+                        .cloned(),
+                    error_payload: None,
+                    error_message: None,
+                })
+            }
+            Ok(ModelLoopFutureAwait::Cancelled) => Ok(ModelLoopContextCompactionOutcome {
+                summary: deterministic_summary.to_owned(),
+                strategy: "model".to_owned(),
+                status: "cancelled".to_owned(),
+                cancelled: true,
+                model_payload: None,
+                error_payload: None,
+                error_message: Some("context compaction cancelled".to_owned()),
+            }),
+            Err(err) => Ok(ModelLoopContextCompactionOutcome {
+                summary: deterministic_summary.to_owned(),
+                strategy: "deterministic_fallback".to_owned(),
+                status: "fallback_used".to_owned(),
+                cancelled: false,
+                model_payload: None,
+                error_payload: model_inference_error_event_payload(
+                    &err,
+                    started.elapsed().as_millis(),
+                )
+                .get("item")
+                .cloned(),
+                error_message: Some(model_inference_error_message(&err)),
+            }),
+        }
     }
 
     pub async fn list_runs(
@@ -3656,6 +3793,44 @@ fn build_compacted_model_loop_messages(
     ]
 }
 
+fn build_model_loop_context_compaction_messages(
+    original_input: &str,
+    deterministic_summary: &str,
+    tool_codes: &[String],
+) -> Vec<ModelChatMessage> {
+    vec![
+        ModelChatMessage {
+            role: "system".to_owned(),
+            content: "You are Novex Agent Context Compactor. Rewrite prior agent context into a compact, factual summary for the next model turn. Preserve user intent, tool evidence, unresolved questions, citations, and decisions. Do not answer the user and do not request tools. Return either plain text or compact JSON like {\"summary\":\"...\"}.".to_owned(),
+        },
+        ModelChatMessage {
+            role: "user".to_owned(),
+            content: format!(
+                "Original user request:\n{original_input}\n\nAvailable tools for the next turn:\n{}\n\nExisting deterministic summary candidate:\n{deterministic_summary}\n\nProduce the shortest useful continuation summary.",
+                tool_codes.join(", ")
+            ),
+        },
+    ]
+}
+
+fn model_loop_context_compaction_summary_from_response(answer: &str) -> String {
+    let trimmed = answer.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    if let Ok(value) = serde_json::from_str::<Value>(trimmed) {
+        if let Some(summary) = value
+            .get("summary")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|summary| !summary.is_empty())
+        {
+            return summary.to_owned();
+        }
+    }
+    trimmed.to_owned()
+}
+
 fn tool_route_error_to_app_error(err: ToolRouteError) -> AppError {
     AppError::bad_request(format!("Agent 工具路由初始化失败: {}", err.message))
 }
@@ -4818,9 +4993,10 @@ mod tests {
             .split("#[cfg(test)]")
             .next()
             .unwrap();
+        let normalized_source = source.split_whitespace().collect::<Vec<_>>().join(" ");
 
         assert!(source.contains("runtime_state.should_compact_context()"));
-        assert!(source.contains("runtime_state.compact_context()"));
+        assert!(normalized_source.contains("runtime_state .compact_context_with_summary"));
         assert!(source.contains("AgentTurnItem::ContextCompaction"));
         assert!(source.contains("\"compactionWindowId\""));
     }
@@ -4871,6 +5047,54 @@ mod tests {
         assert!(messages[2]
             .content
             .contains("Continue from this compacted context"));
+    }
+
+    #[test]
+    fn model_loop_compaction_prompt_uses_deterministic_candidate_and_tool_context() {
+        let tool_codes = vec!["rag.search".to_owned(), "github.repo.read".to_owned()];
+
+        let messages = build_model_loop_context_compaction_messages(
+            "Find refund policy",
+            "Observation for call-1: refund within 7 days",
+            &tool_codes,
+        );
+
+        assert_eq!(messages[0].role, "system");
+        assert!(messages[0]
+            .content
+            .contains("Novex Agent Context Compactor"));
+        assert!(messages[1].content.contains("Find refund policy"));
+        assert!(messages[1].content.contains("refund within 7 days"));
+        assert!(messages[1].content.contains("rag.search, github.repo.read"));
+    }
+
+    #[test]
+    fn model_loop_model_compaction_response_accepts_json_or_plain_text() {
+        assert_eq!(
+            model_loop_context_compaction_summary_from_response(r#"{"summary":"short policy"}"#),
+            "short policy"
+        );
+        assert_eq!(
+            model_loop_context_compaction_summary_from_response("plain short policy"),
+            "plain short policy"
+        );
+    }
+
+    #[test]
+    fn agent_service_model_loop_uses_model_assisted_context_compaction() {
+        let source = include_str!("agent_service.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+        let normalized_source = source.split_whitespace().collect::<Vec<_>>().join(" ");
+
+        assert!(source.contains("runtime_state.compaction_candidate_summary()"));
+        assert!(source.contains("model_loop_context_compaction_outcome"));
+        assert!(source.contains("chat_completion_for_purpose("));
+        assert!(source.contains("ModelRoutePurpose::CodeAgent"));
+        assert!(normalized_source.contains("runtime_state .compact_context_with_summary"));
+        assert!(source.contains("\"compactionStrategy\""));
+        assert!(source.contains("\"compactionStatus\""));
     }
 
     #[test]
