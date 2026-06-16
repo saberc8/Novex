@@ -820,14 +820,14 @@ impl AgentService {
         user_id: i64,
         command: AgentRunCommand,
     ) -> Result<AgentRunResp, AppError> {
-        if command.runtime_mode.as_deref() == Some("model_loop") {
-            return Err(AppError::bad_request(
-                "Agent queued model_loop execution 暂未支持",
-            ));
-        }
         let memory_context = self.load_agent_memory_context(user_id).await?;
         let mut plan = build_agent_plan(&command, memory_context)?;
-        if let Some(tool_code) = plan.selected_tool_code.as_deref() {
+        if command.runtime_mode.as_deref() == Some("model_loop") {
+            plan.loop_kind = "model_loop".to_owned();
+            plan.selected_tool_code = None;
+            plan.requires_approval = false;
+            plan.pause_reason = None;
+        } else if let Some(tool_code) = plan.selected_tool_code.as_deref() {
             let Some(tool) = self
                 .capability_repo
                 .find_tool_by_code(self.tenant_id, tool_code)
@@ -921,11 +921,6 @@ impl AgentService {
         queue_payload: Value,
     ) -> Result<AgentRunResp, AppError> {
         let command = agent_run_command_from_queue_payload(queue_payload)?;
-        if command.runtime_mode.as_deref() == Some("model_loop") {
-            return Err(AppError::bad_request(
-                "Agent queued model_loop execution 暂未支持",
-            ));
-        }
         let run = self.get_run(run_id).await?;
         let Some(current_status) = parse_run_status_code(&run.status) else {
             return Err(AppError::conflict(format!("未知 Run 状态: {}", run.status)));
@@ -957,6 +952,11 @@ impl AgentService {
                 }),
             )
             .await?;
+        }
+        if command.runtime_mode.as_deref() == Some("model_loop") {
+            return self
+                .execute_model_loop_existing_run(user_id, run_id, command, false)
+                .await;
         }
 
         let memory_context = self.load_agent_memory_context(user_id).await?;
@@ -1000,26 +1000,24 @@ impl AgentService {
         plan.selected_tool_code = None;
         plan.requires_approval = false;
         plan.pause_reason = None;
-        let model_retry_policy: ModelRetryPolicy = self
-            .model_runtime
-            .retry_policy_for_purpose(ModelRoutePurpose::CodeAgent)
-            .await?;
 
         let run_id = next_id();
         let trace_id = format!("agent-{run_id}");
         let now = Utc::now().naive_utc();
         self.create_run_records(user_id, run_id, &trace_id, &command, &plan, now)
             .await?;
-        let (_active_run_guard, cancel_token) =
-            self.agent_runtime.register_run(self.tenant_id, run_id);
+        self.execute_model_loop_existing_run(user_id, run_id, command, true)
+            .await
+    }
 
-        let input_item = novex_agent_protocol::AgentTurnItem::user_message(command.input.as_str());
-        let mut runtime_state = AgentRuntimeState::with_budget(
-            run_id.to_string(),
-            agent_runtime_budget_from_task_budget(command.budget),
-        );
-        runtime_state.push_item(input_item.clone());
-        let mut input_payload = agent_turn_item_event_payload(&input_item);
+    async fn record_model_loop_input_event(
+        &self,
+        user_id: i64,
+        run_id: i64,
+        command: &AgentRunCommand,
+        input_item: &AgentTurnItem,
+    ) -> Result<(), AppError> {
+        let mut input_payload = agent_turn_item_event_payload(input_item);
         if let Some(object) = input_payload.as_object_mut() {
             object.insert("input".to_owned(), json!(&command.input));
             object.insert("runtimeMode".to_owned(), json!("model_loop"));
@@ -1032,7 +1030,33 @@ impl AgentService {
             run_status_code(RunStatus::Running),
             input_payload,
         )
-        .await?;
+        .await
+    }
+
+    async fn execute_model_loop_existing_run(
+        &self,
+        user_id: i64,
+        run_id: i64,
+        command: AgentRunCommand,
+        record_input_event: bool,
+    ) -> Result<AgentRunResp, AppError> {
+        let model_retry_policy: ModelRetryPolicy = self
+            .model_runtime
+            .retry_policy_for_purpose(ModelRoutePurpose::CodeAgent)
+            .await?;
+        let (_active_run_guard, cancel_token) =
+            self.agent_runtime.register_run(self.tenant_id, run_id);
+
+        let input_item = novex_agent_protocol::AgentTurnItem::user_message(command.input.as_str());
+        let mut runtime_state = AgentRuntimeState::with_budget(
+            run_id.to_string(),
+            agent_runtime_budget_from_task_budget(command.budget),
+        );
+        runtime_state.push_item(input_item.clone());
+        if record_input_event {
+            self.record_model_loop_input_event(user_id, run_id, &command, &input_item)
+                .await?;
+        }
 
         let tool_router = build_model_loop_tool_router().map_err(tool_route_error_to_app_error)?;
         let tool_codes = tool_router.tool_codes();
@@ -1463,6 +1487,7 @@ impl AgentService {
                             })
                             .await?;
                             let guardian_review_override = Some(guardian_review);
+                            let now = Utc::now().naive_utc();
                             self.pause_for_approval(
                                 user_id,
                                 run_id,
@@ -5466,6 +5491,27 @@ mod tests {
         assert!(source.contains("ensure_agent_run_transition(&run.status, RunStatus::Running)"));
         assert!(source.contains("execute_deterministic_plan"));
         assert!(source.contains("create_run_records_with_status"));
+    }
+
+    #[test]
+    fn queued_model_loop_uses_existing_run_model_loop_executor() {
+        let source = include_str!("agent_service.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+        let normalized_source = source.split_whitespace().collect::<String>();
+        let create_queued_run = &source[source.find("async fn create_queued_run").unwrap()
+            ..source.find("pub async fn execute_queued_run").unwrap()];
+
+        assert!(!source.contains("Agent queued model_loop execution 暂未支持"));
+        assert!(source.contains("execute_model_loop_existing_run"));
+        assert!(source.contains("record_model_loop_input_event"));
+        assert!(normalized_source
+            .contains("execute_model_loop_existing_run(user_id,run_id,command,true)"));
+        assert!(normalized_source
+            .contains("execute_model_loop_existing_run(user_id,run_id,command,false)"));
+        assert!(create_queued_run.contains("plan.loop_kind = \"model_loop\""));
+        assert!(create_queued_run.contains("plan.selected_tool_code = None"));
     }
 
     #[test]

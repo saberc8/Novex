@@ -4,6 +4,8 @@
 
 **Goal:** Enable `executionMode=queued` for `runtimeMode=model_loop` by extracting the inline model-loop body into an existing-run execution entrypoint shared by HTTP and the Agent queue worker.
 
+**Progress 2026-06-17:** Implemented `execute_model_loop_existing_run`, optional inline input-event recording, queued model-loop creation, and queued execution dispatch through the shared model-loop executor.
+
 **Architecture:** `create_model_loop_run` creates Run Graph records, then calls `execute_model_loop_existing_run`. `execute_queued_run` marks queued runs running and dispatches model-loop commands to the same helper. The worker remains a thin claim/lease executor and never creates a second run.
 
 **Tech Stack:** Rust, Axum service layer, SQLx/Postgres, existing Novex Agent runtime/model/tool crates, existing `ai_agent_run_queue`.
@@ -11,6 +13,8 @@
 ---
 
 ### Task 1: Source Contract And Red Tests
+
+Status: Completed.
 
 **Files:**
 - Modify: `backend/src/application/ai/agent_service.rs`
@@ -35,6 +39,8 @@ cargo test -p backend-rust queued_model_loop --offline
 Expected: FAIL until the helper exists and the rejection strings are removed.
 
 ### Task 2: Extract Existing-Run Model Loop
+
+Status: Completed.
 
 **Files:**
 - Modify: `backend/src/application/ai/agent_service.rs`
@@ -71,6 +77,8 @@ cargo test -p backend-rust queued_model_loop --offline
 
 ### Task 3: Enable Queued Model Loop Dispatch
 
+Status: Completed.
+
 **Files:**
 - Modify: `backend/src/application/ai/agent_service.rs`
 - Modify: `docs/plans/2026-06-16-codex-migration-matrix.md`
@@ -102,6 +110,8 @@ if command.runtime_mode.as_deref() == Some("model_loop") {
 Record that background queue now supports model-loop existing-run execution. Remaining gaps are broker wake-up transport, cross-process provider abort, resume requeue, and distributed cancellation.
 
 ### Task 4: Verify, Commit, Merge
+
+Status: In progress.
 
 **Step 1: Verify feature branch**
 
