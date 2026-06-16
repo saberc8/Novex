@@ -15,6 +15,7 @@ pub enum EvalTargetKind {
     Tool,
     ReAct,
     Safety,
+    CustomerService,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -27,6 +28,8 @@ pub enum EvalMetricKind {
     ToolAccuracy,
     Cost,
     Latency,
+    GroundedResolution,
+    HandoffAccuracy,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -183,6 +186,9 @@ pub fn score_case(
         EvalTargetKind::Rag => score_rag_case(expected, actual),
         EvalTargetKind::Intent => score_intent_case(expected, actual),
         EvalTargetKind::Tool => score_tool_case(expected, actual),
+        EvalTargetKind::CustomerService => {
+            score_customer_service_grounded_resolution_case(String::new(), expected, actual)
+        }
         EvalTargetKind::ReAct | EvalTargetKind::Safety => {
             score_exact_answer_case(target_kind, expected, actual)
         }
@@ -254,6 +260,88 @@ pub fn score_tool_case(expected: &EvalCaseExpected, actual: &EvalCaseActual) -> 
             "tool matched".to_owned()
         } else {
             "tool mismatch".to_owned()
+        },
+        cost_cents: actual.cost_cents,
+        latency_ms: actual.latency_ms,
+    }
+}
+
+pub fn score_customer_service_grounded_resolution_case(
+    case_id: impl Into<String>,
+    expected: &EvalCaseExpected,
+    actual: &EvalCaseActual,
+) -> EvalCaseScore {
+    let answer_ok = expected.answer_contains.iter().all(|needle| {
+        actual
+            .answer
+            .as_deref()
+            .is_some_and(|answer| contains_case_insensitive(answer, needle))
+    });
+    let expects_insufficient_evidence = expected
+        .answer_contains
+        .iter()
+        .any(|needle| contains_case_insensitive(needle, "insufficient evidence"));
+    let citation_ok = if expected.citations.is_empty() {
+        !expects_insufficient_evidence || actual.citations.is_empty()
+    } else {
+        expected
+            .citations
+            .iter()
+            .all(|citation| actual.citations.iter().any(|actual| actual == citation))
+    };
+    let score = match (answer_ok, citation_ok) {
+        (true, true) => 1.0,
+        (true, false) => 0.5,
+        (false, _) => 0.0,
+    };
+
+    EvalCaseScore {
+        case_id: case_id.into(),
+        target_kind: EvalTargetKind::CustomerService,
+        metric: EvalMetricKind::GroundedResolution,
+        score,
+        passed: score >= 1.0,
+        reason: if score >= 1.0 {
+            if expects_insufficient_evidence {
+                "insufficient evidence handled".to_owned()
+            } else {
+                "customer service answer grounded".to_owned()
+            }
+        } else if !citation_ok {
+            "missing evidence or citation".to_owned()
+        } else {
+            "customer service answer mismatch".to_owned()
+        },
+        cost_cents: actual.cost_cents,
+        latency_ms: actual.latency_ms,
+    }
+}
+
+pub fn score_customer_service_handoff_accuracy_case(
+    case_id: impl Into<String>,
+    expected: &EvalCaseExpected,
+    actual: &EvalCaseActual,
+) -> EvalCaseScore {
+    let expected_tool_ok = expected
+        .tool_code
+        .as_deref()
+        .is_none_or(|expected| actual.tool_code.as_deref() == Some(expected));
+    let expected_intent_ok = expected
+        .intent
+        .as_deref()
+        .is_none_or(|expected| actual.intent.as_deref() == Some(expected));
+    let passed = expected_tool_ok && expected_intent_ok;
+
+    EvalCaseScore {
+        case_id: case_id.into(),
+        target_kind: EvalTargetKind::CustomerService,
+        metric: EvalMetricKind::HandoffAccuracy,
+        score: if passed { 1.0 } else { 0.0 },
+        passed,
+        reason: if passed {
+            "handoff matched".to_owned()
+        } else {
+            "handoff mismatch".to_owned()
         },
         cost_cents: actual.cost_cents,
         latency_ms: actual.latency_ms,
@@ -707,6 +795,82 @@ mod tests {
         assert_eq!(
             report.metric_breakdown.get(&EvalMetricKind::IntentAccuracy),
             Some(&0.0)
+        );
+    }
+
+    #[test]
+    fn customer_service_eval_scores_citation_and_handoff_accuracy() {
+        let grounded_score = score_customer_service_grounded_resolution_case(
+            "cs-refund",
+            &EvalCaseExpected {
+                answer_contains: vec!["30 days".to_owned()],
+                citations: vec!["cs-faq:refunds".to_owned()],
+                intent: None,
+                tool_code: None,
+            },
+            &EvalCaseActual {
+                answer: Some("Refunds are available within 30 days.".to_owned()),
+                citations: vec!["cs-faq:refunds".to_owned()],
+                intent: None,
+                tool_code: None,
+                cost_cents: 0,
+                latency_ms: 18,
+            },
+        );
+        let handoff_score = score_customer_service_handoff_accuracy_case(
+            "cs-handoff",
+            &EvalCaseExpected {
+                answer_contains: vec![],
+                citations: vec![],
+                intent: Some("human_handoff".to_owned()),
+                tool_code: Some("handoff.request".to_owned()),
+            },
+            &EvalCaseActual {
+                answer: Some("I will request a human handoff.".to_owned()),
+                citations: vec![],
+                intent: Some("human_handoff".to_owned()),
+                tool_code: Some("handoff.request".to_owned()),
+                cost_cents: 0,
+                latency_ms: 22,
+            },
+        );
+
+        assert!(grounded_score.passed);
+        assert_eq!(grounded_score.target_kind, EvalTargetKind::CustomerService);
+        assert_eq!(grounded_score.metric, EvalMetricKind::GroundedResolution);
+        assert!(handoff_score.passed);
+        assert_eq!(handoff_score.metric, EvalMetricKind::HandoffAccuracy);
+    }
+
+    #[test]
+    fn customer_service_eval_report_flags_missing_evidence() {
+        let score = score_customer_service_grounded_resolution_case(
+            "cs-missing-citation",
+            &EvalCaseExpected {
+                answer_contains: vec!["refund".to_owned()],
+                citations: vec!["cs-faq:refunds".to_owned()],
+                intent: None,
+                tool_code: None,
+            },
+            &EvalCaseActual {
+                answer: Some("Refunds are available.".to_owned()),
+                citations: vec![],
+                intent: None,
+                tool_code: None,
+                cost_cents: 0,
+                latency_ms: 19,
+            },
+        );
+        let report = build_regression_report(&[score.clone()]);
+
+        assert!(!score.passed);
+        assert!(score.reason.contains("missing evidence"));
+        assert_eq!(report.failed_cases, 1);
+        assert_eq!(
+            report
+                .metric_breakdown
+                .get(&EvalMetricKind::GroundedResolution),
+            Some(&0.5)
         );
     }
 

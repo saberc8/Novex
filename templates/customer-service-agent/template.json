@@ -121,8 +121,8 @@
     {
       "code": "customer-service-agent-regression",
       "name": "Customer Service Agent Regression",
-      "caseCount": 8,
-      "metrics": ["grounded_resolution", "citation_correctness", "handoff_accuracy"]
+      "caseCount": 4,
+      "metrics": ["grounded_resolution", "citation_accuracy", "handoff_accuracy"]
     }
   ],
   "deploymentChecklist": [

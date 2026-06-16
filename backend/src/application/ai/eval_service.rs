@@ -3,6 +3,7 @@ use std::time::Instant;
 use chrono::Utc;
 use novex_eval::{
     actual_from_trace_bundle, build_regression_report, score_case, score_cost_case,
+    score_customer_service_grounded_resolution_case, score_customer_service_handoff_accuracy_case,
     score_intent_case, score_latency_case, score_rag_case, score_retrieval_recall_case,
     score_tool_case, EvalCaseActual, EvalCaseCandidate, EvalCaseExpected, EvalCaseScore,
     EvalMetricKind, EvalTargetKind,
@@ -718,6 +719,7 @@ pub fn build_eval_actual(
 ) -> EvalCaseActual {
     match target_kind {
         "rag" => build_rag_eval_actual(prompt),
+        "customer_service" => build_customer_service_eval_actual(prompt),
         "intent" => EvalCaseActual {
             intent: Some(classify_eval_intent(prompt)),
             latency_ms: 3,
@@ -733,6 +735,51 @@ pub fn build_eval_actual(
             latency_ms: 5,
             ..Default::default()
         },
+    }
+}
+
+fn build_customer_service_eval_actual(prompt: &str) -> EvalCaseActual {
+    let lower = prompt.to_ascii_lowercase();
+    if lower.contains("refund window") || lower.contains("refunds") {
+        return EvalCaseActual {
+            answer: Some("Refunds are available within 30 days.".to_owned()),
+            citations: vec!["cs-faq:refunds".to_owned()],
+            latency_ms: 18,
+            ..Default::default()
+        };
+    }
+    if lower.contains("custom warranty") || lower.contains("guarantee") {
+        return EvalCaseActual {
+            answer: Some("insufficient evidence".to_owned()),
+            citations: Vec::new(),
+            latency_ms: 17,
+            ..Default::default()
+        };
+    }
+    if lower.contains("human") || lower.contains("handoff") || lower.contains("angry") {
+        return EvalCaseActual {
+            answer: Some("I will request a human handoff.".to_owned()),
+            intent: Some("human_handoff".to_owned()),
+            tool_code: Some("handoff.request".to_owned()),
+            latency_ms: 22,
+            ..Default::default()
+        };
+    }
+    if lower.contains("ticket") {
+        return EvalCaseActual {
+            answer: Some("Ticket creation requires approval before I can create it.".to_owned()),
+            citations: vec!["cs-policy:approval".to_owned()],
+            tool_code: Some("ticket.create".to_owned()),
+            latency_ms: 21,
+            ..Default::default()
+        };
+    }
+
+    EvalCaseActual {
+        answer: Some("insufficient evidence".to_owned()),
+        citations: Vec::new(),
+        latency_ms: 17,
+        ..Default::default()
     }
 }
 
@@ -816,6 +863,12 @@ fn classify_eval_intent(prompt: &str) -> String {
         "training_quiz"
     } else if lower.contains("approval") || lower.contains("approve") || lower.contains("human") {
         "human_handoff"
+    } else if lower.contains("refund")
+        || lower.contains("ticket")
+        || lower.contains("warranty")
+        || lower.contains("customer")
+    {
+        "customer_service"
     } else if lower.contains("github")
         || lower.contains("repository")
         || lower.contains("repo")
@@ -845,6 +898,14 @@ fn select_eval_tool(prompt: &str) -> String {
     let lower = prompt.to_ascii_lowercase();
     if lower.contains("audit") {
         "tool.audit.record"
+    } else if lower.contains("handoff") || lower.contains("human") || lower.contains("angry") {
+        "handoff.request"
+    } else if lower.contains("ticket") {
+        "ticket.create"
+    } else if lower.contains("customer") {
+        "customer.lookup"
+    } else if lower.contains("refund") || lower.contains("faq") {
+        "faq.search"
     } else if lower.contains("github") || lower.contains("repository") || lower.contains("repo") {
         "github.repo.search"
     } else if lower.contains("feishu")
@@ -948,6 +1009,14 @@ fn score_eval_case_with_actual(
             score.target_kind = target_kind;
             score
         }
+        EvalMetricKind::GroundedResolution => score_customer_service_grounded_resolution_case(
+            case.case_code.clone(),
+            expected,
+            actual,
+        ),
+        EvalMetricKind::HandoffAccuracy => {
+            score_customer_service_handoff_accuracy_case(case.case_code.clone(), expected, actual)
+        }
         metric => {
             let mut score = score_case(case.case_code.clone(), target_kind, expected, actual);
             score.metric = metric;
@@ -1050,6 +1119,7 @@ fn target_kind_from_code(code: &str) -> EvalTargetKind {
         "tool" => EvalTargetKind::Tool,
         "react" => EvalTargetKind::ReAct,
         "safety" => EvalTargetKind::Safety,
+        "customer_service" => EvalTargetKind::CustomerService,
         _ => EvalTargetKind::Rag,
     }
 }
@@ -1063,6 +1133,8 @@ fn metric_kind_from_code(code: &str) -> EvalMetricKind {
         "tool_accuracy" => EvalMetricKind::ToolAccuracy,
         "cost" => EvalMetricKind::Cost,
         "latency" => EvalMetricKind::Latency,
+        "grounded_resolution" => EvalMetricKind::GroundedResolution,
+        "handoff_accuracy" => EvalMetricKind::HandoffAccuracy,
         _ => EvalMetricKind::Faithfulness,
     }
 }
@@ -1074,6 +1146,7 @@ fn target_kind_code(target: EvalTargetKind) -> String {
         EvalTargetKind::Tool => "tool",
         EvalTargetKind::ReAct => "react",
         EvalTargetKind::Safety => "safety",
+        EvalTargetKind::CustomerService => "customer_service",
     }
     .to_owned()
 }
@@ -1095,6 +1168,8 @@ fn metric_code(metric: EvalMetricKind) -> String {
         EvalMetricKind::ToolAccuracy => "tool_accuracy",
         EvalMetricKind::Cost => "cost",
         EvalMetricKind::Latency => "latency",
+        EvalMetricKind::GroundedResolution => "grounded_resolution",
+        EvalMetricKind::HandoffAccuracy => "handoff_accuracy",
     }
     .to_owned()
 }
@@ -1283,7 +1358,11 @@ mod tests {
 
     #[test]
     fn eval_runtime_seed_contains_every_template_default_eval_set() {
-        let seed = include_str!("../../../migrations/202606050010_create_ai_eval_runtime.sql");
+        let seed = format!(
+            "{}\n{}",
+            include_str!("../../../migrations/202606050010_create_ai_eval_runtime.sql"),
+            include_str!("../../../migrations/202606160007_seed_customer_service_eval.sql")
+        );
         let templates = crate::application::ai::template_service::delivery_templates().unwrap();
 
         for template in templates {
@@ -1295,6 +1374,29 @@ mod tests {
                     template.code
                 );
             }
+        }
+    }
+
+    #[test]
+    fn customer_service_eval_seed_contains_resolution_and_handoff_cases() {
+        let seed_path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/migrations/202606160007_seed_customer_service_eval.sql"
+        );
+        let seed = std::fs::read_to_string(seed_path)
+            .expect("missing customer service eval seed migration");
+
+        for needle in [
+            "'customer-service-agent-regression'",
+            "'customer_service'",
+            "'grounded_resolution'",
+            "'handoff_accuracy'",
+            "'cs-refund-with-citation'",
+            "'cs-insufficient-evidence'",
+            "'cs-human-handoff'",
+            "'cs-ticket-approval'",
+        ] {
+            assert!(seed.contains(needle), "{needle} missing");
         }
     }
 
@@ -1378,6 +1480,35 @@ mod tests {
         assert_eq!(tool_score.metric, EvalMetricKind::ToolAccuracy);
         assert!(answer_score.passed);
         assert_eq!(answer_score.metric, EvalMetricKind::Faithfulness);
+    }
+
+    #[test]
+    fn customer_service_eval_scores_missing_evidence_gate() {
+        let case = EvalCaseRecord {
+            id: 1,
+            dataset_id: 10,
+            case_code: "cs-missing-citation".to_owned(),
+            target_kind: "customer_service".to_owned(),
+            metric_kind: "grounded_resolution".to_owned(),
+            prompt: "What is the refund window?".to_owned(),
+            expected_payload: json!({
+                "answerContains": ["30 days"],
+                "citations": ["wrong-source:99"]
+            }),
+            tags: json!(["customer-service", "citation"]),
+            status: 1,
+            sort: 1,
+            create_time: chrono::NaiveDate::from_ymd_opt(2026, 6, 16)
+                .unwrap()
+                .and_hms_opt(10, 0, 0)
+                .unwrap(),
+        };
+
+        let score = score_eval_case(&case).unwrap();
+
+        assert_eq!(score.metric, EvalMetricKind::GroundedResolution);
+        assert!(!score.passed);
+        assert!(score.reason.contains("missing evidence"));
     }
 
     fn fake_eval_case(

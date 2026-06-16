@@ -1424,9 +1424,7 @@ mod tests {
         assert!(operator
             .permissions
             .contains(&"ai:customer-service:read".to_owned()));
-        assert!(eval_set
-            .metrics
-            .contains(&"citation_correctness".to_owned()));
+        assert!(eval_set.metrics.contains(&"citation_accuracy".to_owned()));
         assert!(template.smoke_checks.iter().any(|check| {
             check.workdir == "backend" && check.command.contains("customer_service_")
         }));
