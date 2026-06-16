@@ -10,7 +10,9 @@ use chrono::{NaiveDateTime, Utc};
 use futures_util::future::join_all;
 use novex_agent::{plan_react_run_with_memory, AgentIntent, AgentLoopKind};
 use novex_agent_protocol::{AgentTurnItem, ToolObservationStatus};
-use novex_agent_runtime::{parse_model_turn_output, AgentRuntimeBudget, AgentRuntimeState};
+use novex_agent_runtime::{
+    parse_model_turn_output, AgentRemoteCompactionRequest, AgentRuntimeBudget, AgentRuntimeState,
+};
 use novex_ai_core::{validate_run_transition, RunEventKind, RunStatus, RunStepType, TaskBudget};
 use novex_connectors::{
     parse_credential_scope, parse_github_code_search_response, resolve_env_secret_ref,
@@ -1297,12 +1299,15 @@ impl AgentService {
                         if let Some(deterministic_summary) =
                             runtime_state.compaction_candidate_summary()
                         {
+                            let remote_compaction_request =
+                                runtime_state.remote_compaction_request(tool_codes.clone());
                             let compaction_outcome = self
                                 .model_loop_context_compaction_outcome(
                                     cancel_token.clone(),
                                     &command.input,
                                     &deterministic_summary,
                                     &tool_codes,
+                                    remote_compaction_request.as_ref(),
                                 )
                                 .await?;
                             if compaction_outcome.cancelled {
@@ -1357,6 +1362,15 @@ impl AgentService {
                                     "compactionStatus".to_owned(),
                                     json!(&compaction_outcome.status),
                                 );
+                                object.insert(
+                                    "compactionImplementation".to_owned(),
+                                    json!("responses_compaction_v2"),
+                                );
+                                if let Some(remote_request) = &remote_compaction_request {
+                                    let remote_payload =
+                                        serde_json::to_value(remote_request).unwrap_or(Value::Null);
+                                    object.insert("remoteCompaction".to_owned(), remote_payload);
+                                }
                                 if let Some(model_payload) = &compaction_outcome.model_payload {
                                     object
                                         .insert("modelInference".to_owned(), model_payload.clone());
@@ -1470,11 +1484,13 @@ impl AgentService {
         original_input: &str,
         deterministic_summary: &str,
         tool_codes: &[String],
+        remote_compaction_request: Option<&AgentRemoteCompactionRequest>,
     ) -> Result<ModelLoopContextCompactionOutcome, AppError> {
-        let messages = build_model_loop_context_compaction_messages(
+        let messages = build_model_loop_remote_context_compaction_messages(
             original_input,
             deterministic_summary,
             tool_codes,
+            remote_compaction_request,
         );
         let started = Instant::now();
         let result = await_model_loop_future_or_cancelled(
@@ -3923,24 +3939,67 @@ fn build_compacted_model_loop_messages(
     ]
 }
 
+#[cfg(test)]
 fn build_model_loop_context_compaction_messages(
     original_input: &str,
     deterministic_summary: &str,
     tool_codes: &[String],
 ) -> Vec<ModelChatMessage> {
+    build_model_loop_remote_context_compaction_messages(
+        original_input,
+        deterministic_summary,
+        tool_codes,
+        None,
+    )
+}
+
+fn build_model_loop_remote_context_compaction_messages(
+    original_input: &str,
+    deterministic_summary: &str,
+    tool_codes: &[String],
+    remote_compaction_request: Option<&AgentRemoteCompactionRequest>,
+) -> Vec<ModelChatMessage> {
+    let remote_metadata = remote_compaction_request
+        .map(remote_compaction_prompt_metadata)
+        .unwrap_or_else(|| {
+            json!({
+                "implementation": "responses_compaction_v2",
+                "trigger": "auto",
+                "reason": "observation_threshold",
+                "phase": "model_loop_follow_up",
+                "inputHistoryCount": Value::Null,
+                "retainedHistoryCount": Value::Null,
+            })
+        });
     vec![
         ModelChatMessage {
             role: "system".to_owned(),
-            content: "You are Novex Agent Context Compactor. Rewrite prior agent context into a compact, factual summary for the next model turn. Preserve user intent, tool evidence, unresolved questions, citations, and decisions. Do not answer the user and do not request tools. Return either plain text or compact JSON like {\"summary\":\"...\"}.".to_owned(),
+            content: "You are Novex Agent Context Compactor, acting as a remote compaction endpoint adapter. Rewrite prior agent context into a compact, factual summary for the next model turn. Preserve user intent, tool evidence, unresolved questions, citations, and decisions. Do not answer the user and do not request tools. Return either plain text or compact JSON like {\"summary\":\"...\"}.".to_owned(),
         },
         ModelChatMessage {
             role: "user".to_owned(),
             content: format!(
-                "Original user request:\n{original_input}\n\nAvailable tools for the next turn:\n{}\n\nExisting deterministic summary candidate:\n{deterministic_summary}\n\nProduce the shortest useful continuation summary.",
+                "Original user request:\n{original_input}\n\nRemote compaction endpoint metadata:\n{}\n\nAvailable tools for the next turn:\n{}\n\nExisting deterministic summary candidate:\n{deterministic_summary}\n\nProduce the shortest useful continuation summary.",
+                remote_metadata,
                 tool_codes.join(", ")
             ),
         },
     ]
+}
+
+fn remote_compaction_prompt_metadata(request: &AgentRemoteCompactionRequest) -> Value {
+    json!({
+        "implementation": request.implementation,
+        "trigger": request.trigger,
+        "reason": request.reason,
+        "phase": request.phase,
+        "windowId": request.window_id,
+        "inputHistoryCount": request.input_history.len(),
+        "retainedHistoryCount": request.retained_history.len(),
+        "compactedItemCount": request.compacted_item_count,
+        "retainedItemCount": request.retained_item_count,
+        "toolCodes": request.tool_codes,
+    })
 }
 
 fn model_loop_context_compaction_summary_from_response(answer: &str) -> String {
@@ -4513,6 +4572,29 @@ mod tests {
 
     fn test_cancel_token() -> (ActiveAgentRunGuard, AgentRunCancellationToken) {
         AgentRuntimeRegistry::default().register_run(1, 1)
+    }
+
+    fn test_remote_compaction_request() -> novex_agent_runtime::AgentRemoteCompactionRequest {
+        novex_agent_runtime::AgentRemoteCompactionRequest {
+            window_id: 1,
+            implementation:
+                novex_agent_runtime::AgentRemoteCompactionImplementation::ResponsesCompactionV2,
+            trigger: novex_agent_runtime::AgentCompactionTrigger::Auto,
+            reason: novex_agent_runtime::AgentCompactionReason::ObservationThreshold,
+            phase: novex_agent_runtime::AgentCompactionPhase::ModelLoopFollowUp,
+            input_history: vec![
+                AgentTurnItem::user_message("find refund policy"),
+                AgentTurnItem::tool_observation(
+                    "call-1",
+                    ToolObservationStatus::Succeeded,
+                    json!({"text":"refund within 7 days"}),
+                ),
+            ],
+            retained_history: vec![AgentTurnItem::user_message("find refund policy")],
+            tool_codes: vec!["rag.search".to_owned()],
+            compacted_item_count: 2,
+            retained_item_count: 1,
+        }
     }
 
     #[tokio::test]
@@ -5270,6 +5352,25 @@ mod tests {
     }
 
     #[test]
+    fn remote_compaction_prompt_includes_endpoint_metadata() {
+        let request = test_remote_compaction_request();
+
+        let messages = build_model_loop_remote_context_compaction_messages(
+            "Find refund policy",
+            "Observation for call-1: refund within 7 days",
+            &["rag.search".to_owned()],
+            Some(&request),
+        );
+
+        assert!(messages[0]
+            .content
+            .contains("remote compaction endpoint adapter"));
+        assert!(messages[1].content.contains("responses_compaction_v2"));
+        assert!(messages[1].content.contains("observation_threshold"));
+        assert!(messages[1].content.contains("inputHistoryCount"));
+    }
+
+    #[test]
     fn model_loop_model_compaction_response_accepts_json_or_plain_text() {
         assert_eq!(
             model_loop_context_compaction_summary_from_response(r#"{"summary":"short policy"}"#),
@@ -5296,6 +5397,18 @@ mod tests {
         assert!(normalized_source.contains("runtime_state .compact_context_with_summary"));
         assert!(source.contains("\"compactionStrategy\""));
         assert!(source.contains("\"compactionStatus\""));
+    }
+
+    #[test]
+    fn remote_compaction_agent_service_records_endpoint_request() {
+        let source = include_str!("agent_service.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+
+        assert!(source.contains("remote_compaction_request"));
+        assert!(source.contains("\"remoteCompaction\""));
+        assert!(source.contains("\"compactionImplementation\""));
     }
 
     #[test]
