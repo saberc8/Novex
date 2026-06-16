@@ -20,6 +20,9 @@ use sqlx::{FromRow, PgPool};
 
 use crate::{
     application::system::{ensure_max_chars, format_datetime},
+    infrastructure::persistence::ai_capability_repository::{
+        AiCapabilityRepository, ToolAuditSaveRecord,
+    },
     shared::error::AppError,
     shared::id::next_id,
 };
@@ -27,6 +30,8 @@ use crate::{
 const MODEL_HEALTH_TIMEOUT: Duration = Duration::from_secs(20);
 const MODEL_ALERT_DELIVERY_TOOL_CODE: &str = "feishu.message.send";
 const MODEL_ALERT_DELIVERY_CHANNEL_FEISHU: &str = "feishu";
+const MODEL_ALERT_DELIVERY_TIMEOUT: Duration = Duration::from_secs(10);
+const MODEL_ALERT_DELIVERY_BATCH_LIMIT: i64 = 100;
 const MODEL_CHAT_TIMEOUT: Duration = Duration::from_secs(120);
 const MODEL_RERANK_TIMEOUT: Duration = Duration::from_secs(30);
 const MODEL_EMBEDDING_TIMEOUT: Duration = Duration::from_secs(30);
@@ -330,6 +335,26 @@ pub struct ModelOpsAlertResp {
     pub event_payload: Value,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelOpsAlertDeliverySummary {
+    pub attempted_count: usize,
+    pub sent_count: usize,
+    pub dry_run_count: usize,
+    pub failed_count: usize,
+}
+
+impl ModelOpsAlertDeliverySummary {
+    fn record(&mut self, result: &ModelOpsAlertDeliveryResult) {
+        self.attempted_count += 1;
+        match result.status.as_str() {
+            "sent" => self.sent_count += 1,
+            "dry_run" => self.dry_run_count += 1,
+            _ => self.failed_count += 1,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelOpsSummaryResp {
@@ -535,6 +560,46 @@ struct ModelOpsAlertDeliveryResult {
     pub request_payload: Value,
     pub response_payload: Value,
     pub error_message: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct ModelOpsAlertDeliverySaveRecord {
+    pub id: i64,
+    pub tenant_id: i64,
+    pub alert_id: i64,
+    pub alert_key: String,
+    pub channel: String,
+    pub status: String,
+    pub dry_run: bool,
+    pub tool_call_audit_id: Option<i64>,
+    pub request_payload: Value,
+    pub response_payload: Value,
+    pub error_message: Option<String>,
+    pub user_id: i64,
+    pub now: NaiveDateTime,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ModelOpsAlertFeishuConfig {
+    webhook_url: String,
+}
+
+impl ModelOpsAlertFeishuConfig {
+    fn from_env() -> Option<Self> {
+        Self::from_env_map(|key| env::var(key).ok())
+    }
+
+    fn from_env_map<F>(mut env_get: F) -> Option<Self>
+    where
+        F: FnMut(&str) -> Option<String>,
+    {
+        let webhook_url = env_get("FEISHU_WEBHOOK_URL")
+            .or_else(|| env_get("NOVEX_FEISHU_WEBHOOK_URL"))
+            .map(|value| value.trim().trim_end_matches('/').to_owned())
+            .filter(|value| !value.is_empty())?;
+
+        Some(Self { webhook_url })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, FromRow)]
@@ -1207,6 +1272,22 @@ ORDER BY tenant_id;
         }
 
         Ok(count)
+    }
+
+    pub async fn deliver_active_model_ops_alerts(
+        db: &PgPool,
+    ) -> Result<ModelOpsAlertDeliverySummary, AppError> {
+        let candidates =
+            model_ops_alert_delivery_candidates(db, MODEL_ALERT_DELIVERY_BATCH_LIMIT).await?;
+        let capability_repo = AiCapabilityRepository::new(db.clone());
+        let mut summary = ModelOpsAlertDeliverySummary::default();
+        for candidate in candidates {
+            let result =
+                deliver_model_ops_alert_candidate(db, &capability_repo, &candidate).await?;
+            summary.record(&result);
+        }
+
+        Ok(summary)
     }
 
     pub async fn registry_summary_for_tenant(
@@ -2572,6 +2653,254 @@ fn model_ops_alert_delivery_dry_run_result(
         }),
         error_message: None,
     }
+}
+
+async fn model_ops_alert_delivery_candidates(
+    db: &PgPool,
+    limit: i64,
+) -> Result<Vec<ModelOpsAlertDeliveryCandidateRow>, AppError> {
+    Ok(sqlx::query_as::<_, ModelOpsAlertDeliveryCandidateRow>(
+        r#"
+SELECT
+    alert.id AS alert_id,
+    alert.tenant_id,
+    alert.alert_key,
+    alert.alert_kind,
+    alert.severity,
+    route.code AS route_code,
+    route.route_purpose,
+    provider.code AS provider_code,
+    profile.model_name,
+    COALESCE(alert.source_ref, '') AS source_ref,
+    alert.event_payload,
+    alert.first_seen_at,
+    alert.last_seen_at
+FROM ai_model_ops_alert alert
+LEFT JOIN ai_model_route route
+    ON route.id = alert.route_id
+   AND route.tenant_id = alert.tenant_id
+LEFT JOIN ai_model_profile profile
+    ON profile.id = alert.model_profile_id
+   AND profile.tenant_id = alert.tenant_id
+LEFT JOIN ai_model_deployment deployment
+    ON deployment.id = profile.deployment_id
+   AND deployment.tenant_id = alert.tenant_id
+LEFT JOIN ai_model_provider provider
+    ON provider.id = COALESCE(alert.provider_id, deployment.provider_id)
+   AND provider.tenant_id = alert.tenant_id
+WHERE alert.resolved_at IS NULL
+  AND NOT EXISTS (
+      SELECT 1
+      FROM ai_model_ops_alert_delivery delivery
+      WHERE delivery.tenant_id = alert.tenant_id
+        AND delivery.alert_id = alert.id
+        AND delivery.channel = $1
+        AND delivery.status IN ('sent', 'dry_run')
+  )
+ORDER BY alert.last_seen_at DESC, alert.id DESC
+LIMIT $2;
+"#,
+    )
+    .bind(MODEL_ALERT_DELIVERY_CHANNEL_FEISHU)
+    .bind(limit)
+    .fetch_all(db)
+    .await?)
+}
+
+async fn deliver_model_ops_alert_candidate(
+    db: &PgPool,
+    capability_repo: &AiCapabilityRepository,
+    candidate: &ModelOpsAlertDeliveryCandidateRow,
+) -> Result<ModelOpsAlertDeliveryResult, AppError> {
+    let result = execute_model_ops_alert_feishu_delivery(candidate).await;
+    let now = Utc::now().naive_utc();
+    let audit_id =
+        record_model_ops_alert_delivery_audit(capability_repo, candidate, &result, now).await?;
+    let record = ModelOpsAlertDeliverySaveRecord {
+        id: next_id(),
+        tenant_id: candidate.tenant_id,
+        alert_id: candidate.alert_id,
+        alert_key: candidate.alert_key.clone(),
+        channel: MODEL_ALERT_DELIVERY_CHANNEL_FEISHU.to_owned(),
+        status: result.status.clone(),
+        dry_run: result.dry_run,
+        tool_call_audit_id: Some(audit_id),
+        request_payload: result.request_payload.clone(),
+        response_payload: result.response_payload.clone(),
+        error_message: result.error_message.clone(),
+        user_id: 1,
+        now,
+    };
+    persist_model_ops_alert_delivery(db, &record).await?;
+
+    Ok(result)
+}
+
+async fn execute_model_ops_alert_feishu_delivery(
+    alert: &ModelOpsAlertDeliveryCandidateRow,
+) -> ModelOpsAlertDeliveryResult {
+    let request_payload = model_ops_alert_delivery_request_payload(alert);
+    let Some(config) = ModelOpsAlertFeishuConfig::from_env() else {
+        return model_ops_alert_delivery_dry_run_result(alert);
+    };
+    let webhook_payload = request_payload
+        .get("webhookPayload")
+        .cloned()
+        .unwrap_or_else(|| json!({}));
+    let client = match reqwest::Client::builder()
+        .timeout(MODEL_ALERT_DELIVERY_TIMEOUT)
+        .build()
+    {
+        Ok(client) => client,
+        Err(error) => {
+            let error = format!("Feishu 客户端初始化失败: {error}");
+            return model_ops_alert_delivery_failed_result(request_payload, error);
+        }
+    };
+    let response = match client
+        .post(&config.webhook_url)
+        .json(&webhook_payload)
+        .send()
+        .await
+    {
+        Ok(response) => response,
+        Err(error) => {
+            let error = format!("Feishu 告警发送失败: {error}");
+            return model_ops_alert_delivery_failed_result(request_payload, error);
+        }
+    };
+    let status = response.status();
+    let response_payload = response.json::<Value>().await.unwrap_or_else(|_| json!({}));
+    if !status.is_success()
+        || model_ops_alert_feishu_response_code(&response_payload).is_some_and(|code| code != 0)
+    {
+        let error = format!(
+            "Feishu 告警发送失败: HTTP {status}, code {:?}",
+            model_ops_alert_feishu_response_code(&response_payload)
+        );
+        return ModelOpsAlertDeliveryResult {
+            status: "failed".to_owned(),
+            dry_run: false,
+            request_payload,
+            response_payload,
+            error_message: Some(error),
+        };
+    }
+
+    ModelOpsAlertDeliveryResult {
+        status: "sent".to_owned(),
+        dry_run: false,
+        request_payload,
+        response_payload: json!({
+            "status": "sent",
+            "channel": MODEL_ALERT_DELIVERY_CHANNEL_FEISHU,
+            "providerResponse": response_payload,
+        }),
+        error_message: None,
+    }
+}
+
+fn model_ops_alert_delivery_failed_result(
+    request_payload: Value,
+    error: String,
+) -> ModelOpsAlertDeliveryResult {
+    ModelOpsAlertDeliveryResult {
+        status: "failed".to_owned(),
+        dry_run: false,
+        request_payload,
+        response_payload: json!({
+            "status": "failed",
+            "channel": MODEL_ALERT_DELIVERY_CHANNEL_FEISHU,
+            "error": error,
+        }),
+        error_message: Some(error),
+    }
+}
+
+fn model_ops_alert_delivery_audit_status(result: &ModelOpsAlertDeliveryResult) -> String {
+    if result.status == "failed" {
+        "failed".to_owned()
+    } else {
+        "succeeded".to_owned()
+    }
+}
+
+async fn record_model_ops_alert_delivery_audit(
+    capability_repo: &AiCapabilityRepository,
+    candidate: &ModelOpsAlertDeliveryCandidateRow,
+    result: &ModelOpsAlertDeliveryResult,
+    now: NaiveDateTime,
+) -> Result<i64, AppError> {
+    let tool = capability_repo
+        .find_tool_by_code(candidate.tenant_id, MODEL_ALERT_DELIVERY_TOOL_CODE)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    let audit_id = next_id();
+    capability_repo
+        .create_tool_call_audit(&ToolAuditSaveRecord {
+            id: audit_id,
+            tenant_id: candidate.tenant_id,
+            tool_id: tool.id,
+            tool_code: tool.code,
+            caller_kind: "model_ops_alert_delivery".to_owned(),
+            caller_id: Some(candidate.alert_id),
+            request_payload: result.request_payload.clone(),
+            response_payload: result.response_payload.clone(),
+            status: model_ops_alert_delivery_audit_status(result),
+            dry_run: result.dry_run,
+            risk_level: tool.risk_level,
+            permission_code: tool.permission_code,
+            error_message: result.error_message.clone(),
+            user_id: 1,
+            now,
+        })
+        .await?;
+
+    Ok(audit_id)
+}
+
+async fn persist_model_ops_alert_delivery(
+    db: &PgPool,
+    record: &ModelOpsAlertDeliverySaveRecord,
+) -> Result<(), AppError> {
+    sqlx::query(
+        r#"
+INSERT INTO ai_model_ops_alert_delivery (
+    id, tenant_id, alert_id, alert_key, channel, status, dry_run,
+    tool_call_audit_id, request_payload, response_payload, error_message,
+    create_user, create_time
+)
+VALUES (
+    $1, $2, $3, $4, $5, $6, $7,
+    $8, $9, $10, $11,
+    $12, $13
+);
+"#,
+    )
+    .bind(record.id)
+    .bind(record.tenant_id)
+    .bind(record.alert_id)
+    .bind(&record.alert_key)
+    .bind(&record.channel)
+    .bind(&record.status)
+    .bind(record.dry_run)
+    .bind(record.tool_call_audit_id)
+    .bind(&record.request_payload)
+    .bind(&record.response_payload)
+    .bind(&record.error_message)
+    .bind(record.user_id)
+    .bind(record.now)
+    .execute(db)
+    .await?;
+
+    Ok(())
+}
+
+fn model_ops_alert_feishu_response_code(value: &Value) -> Option<i64> {
+    value
+        .get("code")
+        .or_else(|| value.get("StatusCode"))
+        .and_then(Value::as_i64)
 }
 
 async fn persist_model_health_check_record(
@@ -4119,6 +4448,21 @@ mod tests {
         assert_eq!(result.request_payload["toolCode"], "feishu.message.send");
         assert_eq!(result.response_payload["status"], "dry_run");
         assert!(result.error_message.is_none());
+    }
+
+    #[test]
+    fn model_ops_alert_delivery_source_contract_scans_audits_and_records_delivery() {
+        let source = include_str!("model_service.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+
+        assert!(source.contains("pub async fn deliver_active_model_ops_alerts"));
+        assert!(source.contains("FROM ai_model_ops_alert alert"));
+        assert!(source.contains("NOT EXISTS"));
+        assert!(source.contains("ai_model_ops_alert_delivery delivery"));
+        assert!(source.contains("create_tool_call_audit"));
+        assert!(source.contains("INSERT INTO ai_model_ops_alert_delivery"));
     }
 
     fn model_ops_route_row(
