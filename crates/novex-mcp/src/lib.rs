@@ -1,5 +1,5 @@
 use novex_ai_core::FoundationModule;
-use novex_tools::{ApprovalPolicy, ToolDefinition, ToolRiskLevel};
+use novex_tools::{ApprovalPolicy, ToolConcurrencyPolicy, ToolDefinition, ToolRiskLevel};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use url::Url;
@@ -78,6 +78,12 @@ impl McpDiscoveredTool {
             risk_level: self.risk_level,
             approval_policy: ApprovalPolicy::OnRisk,
             permission_code: Some(permission_code.into()),
+            concurrency: match self.risk_level {
+                ToolRiskLevel::Low => ToolConcurrencyPolicy::shared(),
+                ToolRiskLevel::Medium | ToolRiskLevel::High => {
+                    ToolConcurrencyPolicy::exclusive(format!("mcp:{}", self.server_code.trim()))
+                }
+            },
         }
     }
 }
