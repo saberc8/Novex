@@ -1897,6 +1897,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "novex-trace"
+version = "0.1.0"
+dependencies = [
+ "novex-agent-protocol",
+ "novex-ai-core",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "novex-trigger"
 version = "0.1.0"
 dependencies = [

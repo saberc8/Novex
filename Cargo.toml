@@ -15,6 +15,7 @@ members = [
     "crates/novex-trigger",
     "crates/novex-memory",
     "crates/novex-eval",
+    "crates/novex-trace",
 ]
 resolver = "2"
 
@@ -37,4 +38,5 @@ novex-rag = { path = "crates/novex-rag" }
 novex-skill = { path = "crates/novex-skill" }
 novex-tools = { path = "crates/novex-tools" }
 novex-trigger = { path = "crates/novex-trigger" }
+novex-trace = { path = "crates/novex-trace" }
 serde = { version = "1", features = ["derive"] }
