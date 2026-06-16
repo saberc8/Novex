@@ -696,6 +696,7 @@ impl ModelRuntimeService {
             ModelRoutePurpose::Rerank,
             ModelRoutePurpose::EvalJudge,
             ModelRoutePurpose::CodeAgent,
+            ModelRoutePurpose::GuardianReview,
             ModelRoutePurpose::MediaGeneration,
         ] {
             if let Some(route) = self.resolve_route_for_purpose(purpose).await? {
@@ -1983,7 +1984,8 @@ fn runtime_purpose_order(purpose: ModelRoutePurpose) -> usize {
         ModelRoutePurpose::Rerank => 4,
         ModelRoutePurpose::EvalJudge => 5,
         ModelRoutePurpose::CodeAgent => 6,
-        ModelRoutePurpose::MediaGeneration => 7,
+        ModelRoutePurpose::GuardianReview => 7,
+        ModelRoutePurpose::MediaGeneration => 8,
     }
 }
 
@@ -3401,7 +3403,8 @@ fn route_target_for_purpose(purpose: ModelRoutePurpose) -> ModelRuntimeTarget {
         | ModelRoutePurpose::RagAnswer
         | ModelRoutePurpose::QueryRewrite
         | ModelRoutePurpose::EvalJudge
-        | ModelRoutePurpose::CodeAgent => ModelRuntimeTarget::Llm,
+        | ModelRoutePurpose::CodeAgent
+        | ModelRoutePurpose::GuardianReview => ModelRuntimeTarget::Llm,
     }
 }
 
@@ -4034,6 +4037,10 @@ mod tests {
             ModelRuntimeTarget::Llm
         );
         assert_eq!(
+            route_target_for_purpose(ModelRoutePurpose::GuardianReview),
+            ModelRuntimeTarget::Llm
+        );
+        assert_eq!(
             route_target_for_purpose(ModelRoutePurpose::Embedding),
             ModelRuntimeTarget::Embedding
         );
@@ -4044,6 +4051,14 @@ mod tests {
         assert_eq!(
             route_target_for_purpose(ModelRoutePurpose::MediaGeneration),
             ModelRuntimeTarget::Draw
+        );
+    }
+
+    #[test]
+    fn guardian_review_model_route_maps_to_llm_runtime_target() {
+        assert_eq!(
+            route_target_for_purpose(ModelRoutePurpose::GuardianReview),
+            ModelRuntimeTarget::Llm
         );
     }
 

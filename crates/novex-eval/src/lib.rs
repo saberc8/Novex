@@ -126,6 +126,18 @@ impl EvalCaseCandidate {
                 json!(requires_human_approval),
             );
         }
+        if let Some(status) = guardian_review.review_status.as_deref() {
+            tags.insert("guardianReviewStatus".to_owned(), json!(status));
+        }
+        if let Some(failure_reason) = guardian_review.failure_reason.as_deref() {
+            tags.insert(
+                "guardianReviewFailureReason".to_owned(),
+                json!(failure_reason),
+            );
+        }
+        if let Some(route_id) = guardian_review.model_route_id.as_deref() {
+            tags.insert("guardianReviewModelRouteId".to_owned(), json!(route_id));
+        }
         if let Some(tool_code) = tool_code.as_deref() {
             tags.insert("toolCode".to_owned(), json!(tool_code));
         }
@@ -720,6 +732,9 @@ struct TraceGuardianReviewSummary {
     outcome: Option<String>,
     source: Option<String>,
     requires_human_approval: Option<bool>,
+    review_status: Option<String>,
+    failure_reason: Option<String>,
+    model_route_id: Option<String>,
 }
 
 fn trace_guardian_review_summary(bundle: &TraceBundle) -> TraceGuardianReviewSummary {
@@ -739,6 +754,21 @@ fn trace_guardian_review_summary(bundle: &TraceBundle) -> TraceGuardianReviewSum
             .get("requiresHumanApproval")
             .or_else(|| review.get("requires_human_approval"))
             .and_then(Value::as_bool),
+        review_status: trace_value_text(
+            review
+                .get("reviewStatus")
+                .or_else(|| review.get("review_status")),
+        ),
+        failure_reason: trace_value_text(
+            review
+                .get("failureReason")
+                .or_else(|| review.get("failure_reason")),
+        ),
+        model_route_id: trace_value_text(
+            review
+                .get("modelRouteId")
+                .or_else(|| review.get("model_route_id")),
+        ),
     }
 }
 
@@ -1152,6 +1182,38 @@ mod tests {
         assert_eq!(candidate.tags["guardianReviewOutcome"], "needs_human");
         assert_eq!(candidate.tags["guardianReviewSource"], "policy");
         assert_eq!(candidate.tags["guardianReviewRequiresHumanApproval"], true);
+    }
+
+    #[test]
+    fn guardian_model_review_trace_eval_candidate_tags_reviewer_metadata() {
+        let bundle = TraceBundle::new("trace-guardian-model")
+            .with_event(TraceEvent::user_message(1, "write an issue"))
+            .with_event(TraceEvent {
+                sequence_no: 2,
+                kind: TraceEventKind::ApprovalRequested,
+                payload: json!({
+                    "toolCode": "github.issue.write",
+                    "guardianReview": {
+                        "outcome": "needs_human",
+                        "source": "guardian",
+                        "requiresHumanApproval": true,
+                        "reviewStatus": "failed_closed",
+                        "failureReason": "timeout",
+                        "modelRouteId": "runtime.llm.guardian",
+                        "modelProvider": "deep-seek",
+                        "modelName": "deepseek-v4-flash"
+                    }
+                }),
+            });
+
+        let candidate = EvalCaseCandidate::from_trace_bundle(&bundle);
+
+        assert_eq!(candidate.tags["guardianReviewStatus"], "failed_closed");
+        assert_eq!(candidate.tags["guardianReviewFailureReason"], "timeout");
+        assert_eq!(
+            candidate.tags["guardianReviewModelRouteId"],
+            "runtime.llm.guardian"
+        );
     }
 
     #[test]

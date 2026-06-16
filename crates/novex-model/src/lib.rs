@@ -91,6 +91,7 @@ pub enum ModelRoutePurpose {
     Rerank,
     EvalJudge,
     CodeAgent,
+    GuardianReview,
     MediaGeneration,
 }
 
@@ -104,6 +105,7 @@ impl ModelRoutePurpose {
             Self::Rerank => "rerank",
             Self::EvalJudge => "eval_judge",
             Self::CodeAgent => "code_agent",
+            Self::GuardianReview => "guardian_review",
             Self::MediaGeneration => "media_generation",
         }
     }
@@ -117,6 +119,7 @@ impl ModelRoutePurpose {
             "rerank" | "reranker" => Some(Self::Rerank),
             "eval_judge" | "judge" => Some(Self::EvalJudge),
             "code_agent" => Some(Self::CodeAgent),
+            "guardian_review" | "guardian" => Some(Self::GuardianReview),
             "media_generation" | "image_generation" => Some(Self::MediaGeneration),
             _ => None,
         }
@@ -326,6 +329,7 @@ impl ModelRuntimeConfig {
                     ModelRoutePurpose::RagAnswer,
                     ModelRoutePurpose::EvalJudge,
                     ModelRoutePurpose::CodeAgent,
+                    ModelRoutePurpose::GuardianReview,
                 ],
             },
         );
@@ -937,6 +941,7 @@ mod tests {
                 ModelRoutePurpose::RagAnswer,
                 ModelRoutePurpose::EvalJudge,
                 ModelRoutePurpose::CodeAgent,
+                ModelRoutePurpose::GuardianReview,
             ]
         );
 
@@ -1024,10 +1029,18 @@ mod tests {
             Some(ModelRoutePurpose::RagAnswer)
         );
         assert_eq!(
+            ModelRoutePurpose::parse("guardian_review"),
+            Some(ModelRoutePurpose::GuardianReview)
+        );
+        assert_eq!(
             ModelRoutePurpose::parse("rerank"),
             Some(ModelRoutePurpose::Rerank)
         );
         assert_eq!(ModelRoutePurpose::Chat.as_str(), "chat");
+        assert_eq!(
+            ModelRoutePurpose::GuardianReview.as_str(),
+            "guardian_review"
+        );
         assert_eq!(
             ModelKind::parse("media_generation"),
             Some(ModelKind::MediaGeneration)
@@ -1039,6 +1052,29 @@ mod tests {
         assert_eq!(
             ModelProviderType::parse("deep-seek"),
             Some(ModelProviderType::DeepSeek)
+        );
+    }
+
+    #[test]
+    fn guardian_review_route_purpose_uses_default_llm_route() {
+        let env = [
+            ("LLM_API_KEY", "sk-fake-llm-secret-508d"),
+            ("LLM_BASE_URL", "https://api.deepseek.com"),
+            ("LLM_MODEL", "deepseek-v4-flash"),
+        ];
+        let config = ModelRuntimeConfig::from_env_map(|key| {
+            env.iter()
+                .find_map(|(env_key, value)| (*env_key == key).then(|| (*value).to_owned()))
+        });
+        let summary = config.summary();
+        let llm = summary.route(ModelRuntimeTarget::Llm).unwrap();
+
+        assert!(llm.purposes.contains(&ModelRoutePurpose::GuardianReview));
+        assert_eq!(
+            llm.purpose_route_ids
+                .get("guardian_review")
+                .map(String::as_str),
+            Some("runtime.llm")
         );
     }
 
