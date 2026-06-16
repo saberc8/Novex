@@ -63,6 +63,7 @@ describe("agent workspace api", () => {
 
     await createAgentRun({
       input: "send Feishu training reminder",
+      runtimeMode: "model_loop",
       autoApprove: false,
       budget: { maxSteps: 6, maxToolCalls: 1 }
     });
@@ -76,6 +77,7 @@ describe("agent workspace api", () => {
       }),
       body: JSON.stringify({
         input: "send Feishu training reminder",
+        runtimeMode: "model_loop",
         autoApprove: false,
         budget: { maxSteps: 6, maxToolCalls: 1 }
       })

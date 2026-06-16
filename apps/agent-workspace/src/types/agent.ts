@@ -9,6 +9,7 @@ export interface TaskBudget {
 
 export interface AgentRunCommand {
   input: string;
+  runtimeMode?: "model_loop";
   autoApprove?: boolean;
   budget?: TaskBudget;
 }
