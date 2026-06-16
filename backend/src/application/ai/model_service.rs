@@ -1,6 +1,7 @@
 use std::{
     collections::{BTreeMap, HashMap},
     env,
+    sync::{Mutex, OnceLock},
     time::{Duration, Instant},
 };
 
@@ -39,6 +40,8 @@ const DEFAULT_TENANT_ID: i64 = 1;
 const MODEL_CHAT_HISTORY_LIMIT: i64 = 30;
 const MODEL_CHAT_TITLE_CHARS: usize = 60;
 const MODEL_CHAT_PREVIEW_CHARS: usize = 160;
+
+static MODEL_ROUTE_CIRCUIT_BREAKERS: OnceLock<Mutex<HashMap<String, Instant>>> = OnceLock::new();
 
 #[derive(Debug, Clone)]
 pub struct ModelRuntimeService {
@@ -1093,6 +1096,29 @@ ORDER BY r.priority, r.id
         command: &ModelChatCommand,
         conversation_id: Option<i64>,
     ) -> Result<ModelChatResp, AppError> {
+        let fallback_plan = self
+            .fallback_plan_for_purpose_with_route_id(purpose, Some(primary_route.route_id()))
+            .await?;
+        if fallback_plan.as_ref().is_some_and(|plan| plan.decision.enabled) {
+            if let Some(primary_attempt) = model_circuit_breaker_open_attempt(primary_route) {
+                let Some(fallback_route_id) = fallback_plan
+                    .as_ref()
+                    .and_then(|plan| plan.decision.fallback_route_id.as_deref())
+                else {
+                    return Err(AppError::bad_request("模型 fallback 路由不可用"));
+                };
+                return self
+                    .execute_fallback_model_chat_completion(
+                        purpose,
+                        fallback_route_id,
+                        command,
+                        conversation_id,
+                        vec![primary_attempt],
+                    )
+                    .await;
+            }
+        }
+
         let primary_started = Instant::now();
         let primary_result =
             execute_normalized_chat_completion_with_route(primary_route, command, conversation_id)
@@ -1108,9 +1134,11 @@ ORDER BY r.priority, r.id
             &primary_error,
             primary_started.elapsed().as_millis(),
         );
-        let fallback_plan = self
-            .fallback_plan_for_purpose_with_route_id(purpose, Some(primary_route.route_id()))
-            .await?;
+        if let Some(cooldown_seconds) =
+            model_circuit_breaker_cooldown_seconds(fallback_plan.as_ref())
+        {
+            model_circuit_breaker_open(primary_route.route_id(), cooldown_seconds);
+        }
         let Some(fallback_route_id) = fallback_plan
             .as_ref()
             .and_then(|plan| plan.decision.enabled.then_some(&plan.decision))
@@ -1118,11 +1146,29 @@ ORDER BY r.priority, r.id
         else {
             return Err(primary_error);
         };
+        self.execute_fallback_model_chat_completion(
+            purpose,
+            fallback_route_id,
+            command,
+            conversation_id,
+            vec![primary_attempt],
+        )
+        .await
+    }
+
+    async fn execute_fallback_model_chat_completion(
+        &self,
+        purpose: ModelRoutePurpose,
+        fallback_route_id: &str,
+        command: &ModelChatCommand,
+        conversation_id: Option<i64>,
+        prior_attempts: Vec<ModelProviderAttempt>,
+    ) -> Result<ModelChatResp, AppError> {
         let Some(fallback_route) = self
             .resolve_route_for_purpose_with_route_id(purpose, Some(fallback_route_id))
             .await?
         else {
-            return Err(primary_error);
+            return Err(AppError::bad_request("模型 fallback 路由不可用"));
         };
         let attempt_kind = "fallback";
         let mut fallback_response = execute_normalized_chat_completion_with_route(
@@ -1136,7 +1182,7 @@ ORDER BY r.priority, r.id
         }
         fallback_response
             .provider_attempts
-            .insert(0, primary_attempt);
+            .splice(0..0, prior_attempts);
 
         Ok(fallback_response)
     }
@@ -1557,6 +1603,26 @@ fn model_provider_attempt_failed(
         error_kind: Some(class.kind.to_owned()),
         http_status: class.http_status,
         message: Some(model_provider_error_message(error)),
+    }
+}
+
+fn model_provider_attempt_circuit_open(
+    route: &ModelRuntimeRoute,
+    remaining: Duration,
+) -> ModelProviderAttempt {
+    ModelProviderAttempt {
+        attempt_kind: "primary".to_owned(),
+        route_id: route.route_id().to_owned(),
+        provider: route.provider().as_str().to_owned(),
+        model: route.model().map(str::to_owned),
+        status: "skipped".to_owned(),
+        latency_ms: 0,
+        error_kind: Some("circuit_open".to_owned()),
+        http_status: None,
+        message: Some(format!(
+            "model route circuit breaker open for {}ms",
+            remaining.as_millis().min(i64::MAX as u128)
+        )),
     }
 }
 
@@ -2094,6 +2160,54 @@ fn model_fallback_policy_decision_from_status(
         fallback_route_id,
         block_reason: None,
     }
+}
+
+fn model_circuit_breaker_cooldown_seconds(plan: Option<&ModelRouteFallbackPlan>) -> Option<u32> {
+    let plan = plan?;
+    (plan.decision.enabled && plan.policy_status.circuit_breaker_seconds > 0)
+        .then_some(plan.policy_status.circuit_breaker_seconds)
+}
+
+fn model_circuit_breaker_registry() -> &'static Mutex<HashMap<String, Instant>> {
+    MODEL_ROUTE_CIRCUIT_BREAKERS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn model_circuit_breaker_open(route_id: &str, cooldown_seconds: u32) {
+    if cooldown_seconds == 0 {
+        return;
+    }
+    let opened_until = Instant::now() + Duration::from_secs(cooldown_seconds as u64);
+    let mut registry = model_circuit_breaker_registry()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    registry.insert(route_id.to_owned(), opened_until);
+}
+
+#[allow(dead_code)]
+fn model_circuit_breaker_clear(route_id: &str) {
+    let mut registry = model_circuit_breaker_registry()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    registry.remove(route_id);
+}
+
+fn model_circuit_breaker_open_attempt(route: &ModelRuntimeRoute) -> Option<ModelProviderAttempt> {
+    let now = Instant::now();
+    let mut registry = model_circuit_breaker_registry()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let Some(opened_until) = registry.get(route.route_id()).copied() else {
+        return None;
+    };
+    if opened_until <= now {
+        registry.remove(route.route_id());
+        return None;
+    }
+
+    Some(model_provider_attempt_circuit_open(
+        route,
+        opened_until.duration_since(now),
+    ))
 }
 
 fn runtime_route_from_registry_row<F>(
@@ -2727,6 +2841,62 @@ mod tests {
         assert!(source.contains("pub async fn fallback_plan_for_purpose"));
         assert!(source.contains("fallback_route.code AS fallback_route_code"));
         assert!(source.contains("evaluate_model_route_policy(ModelRoutePolicyInput"));
+    }
+
+    #[test]
+    fn route_circuit_breaker_attempt_marks_open_route_as_skipped() {
+        let route = llm_test_config()
+            .route(ModelRuntimeTarget::Llm)
+            .unwrap()
+            .clone();
+        model_circuit_breaker_clear(route.route_id());
+        model_circuit_breaker_open(route.route_id(), 30);
+
+        let attempt = model_circuit_breaker_open_attempt(&route).unwrap();
+
+        assert_eq!(attempt.attempt_kind, "primary");
+        assert_eq!(attempt.status, "skipped");
+        assert_eq!(attempt.error_kind.as_deref(), Some("circuit_open"));
+        assert_eq!(attempt.latency_ms, 0);
+        model_circuit_breaker_clear(route.route_id());
+    }
+
+    #[test]
+    fn route_circuit_breaker_cooldown_requires_enabled_fallback_and_positive_policy() {
+        let disabled = ModelRouteFallbackPlan {
+            primary_route_id: "runtime.llm".to_owned(),
+            decision: ModelFallbackPolicyDecision {
+                enabled: false,
+                fallback_route_id: Some("runtime.llm.backup".to_owned()),
+                block_reason: Some("fallback_disabled".to_owned()),
+            },
+            policy_status: ModelRoutePolicyStatus {
+                network_zone: "public".to_owned(),
+                fallback_network_zone: Some("public".to_owned()),
+                fallback_enabled: false,
+                cross_zone_fallback_allowed: false,
+                max_retries: 0,
+                circuit_breaker_seconds: 30,
+                violations: vec![],
+            },
+        };
+
+        assert_eq!(
+            model_circuit_breaker_cooldown_seconds(Some(&disabled)),
+            None
+        );
+    }
+
+    #[test]
+    fn route_circuit_breaker_source_contract_bypasses_primary_and_opens_after_failure() {
+        let source = include_str!("model_service.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+
+        assert!(source.contains("model_circuit_breaker_open_attempt(primary_route)"));
+        assert!(source.contains("model_circuit_breaker_open(primary_route.route_id()"));
+        assert!(source.contains("model_circuit_breaker_cooldown_seconds(fallback_plan.as_ref())"));
     }
 
     #[test]
