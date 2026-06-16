@@ -31,9 +31,9 @@ use crate::{
     application::system::{ensure_max_chars, format_datetime},
     infrastructure::persistence::{
         ai_agent_repository::{
-            AgentRunFilter, AgentRunRecord, AgentRunSaveRecord, AgentRunStatusUpdate,
-            AgentTraceSaveRecord, AiAgentRepository, RunEventFilter, RunEventRecord,
-            RunEventSaveRecord, RunPauseSaveRecord, RunSaveRecord, RunStatusUpdate,
+            AgentRolloutSaveRecord, AgentRunFilter, AgentRunRecord, AgentRunSaveRecord,
+            AgentRunStatusUpdate, AgentTraceSaveRecord, AiAgentRepository, RunEventFilter,
+            RunEventRecord, RunEventSaveRecord, RunPauseSaveRecord, RunSaveRecord, RunStatusUpdate,
             RunStepSaveRecord,
         },
         ai_capability_repository::{AiCapabilityRepository, ToolAuditSaveRecord, ToolLookupRecord},
@@ -766,6 +766,15 @@ impl AgentService {
         let Some(run) = self.repo.find_run(self.tenant_id, run_id).await? else {
             return Err(AppError::NotFound);
         };
+        if let Some(rollout) = self
+            .repo
+            .find_rollout_by_run_id(self.tenant_id, run_id)
+            .await?
+        {
+            if let Ok(bundle) = serde_json::from_value::<TraceBundle>(rollout.event_bundle) {
+                return Ok(AgentTraceReplayResp::from(bundle));
+            }
+        }
         let filter = RunEventFilter {
             tenant_id: self.tenant_id,
             run_id,
@@ -1402,7 +1411,11 @@ impl AgentService {
             offset: 0,
         };
         let events = self.repo.list_events(&filter).await?;
-        let event_snapshot = agent_trace_snapshot_payload(&format!("agent-{run_id}"), &events);
+        let trace_id = format!("agent-{run_id}");
+        let bundle = agent_events_to_trace_bundle(&trace_id, events.clone());
+        let event_snapshot = agent_trace_snapshot_payload_for_bundle(&events, &bundle);
+        let summary = bundle.replay_summary();
+        let now = Utc::now().naive_utc();
         self.repo
             .update_trace_snapshot(
                 self.tenant_id,
@@ -1410,8 +1423,21 @@ impl AgentService {
                 &event_snapshot,
                 &tool_snapshot,
                 user_id,
-                Utc::now().naive_utc(),
+                now,
             )
+            .await?;
+        self.repo
+            .upsert_rollout_bundle(&AgentRolloutSaveRecord {
+                id: next_id(),
+                tenant_id: self.tenant_id,
+                run_id,
+                trace_id,
+                event_bundle: serde_json::to_value(&bundle).unwrap_or_else(|_| json!({})),
+                summary_payload: serde_json::to_value(&summary).unwrap_or_else(|_| json!({})),
+                source: "agent_run".to_owned(),
+                user_id,
+                now,
+            })
             .await
     }
 }
@@ -2705,18 +2731,26 @@ fn agent_events_to_trace_bundle(
     bundle
 }
 
+#[cfg(test)]
 fn agent_trace_snapshot_payload(trace_id: &str, events: &[RunEventRecord]) -> Value {
+    let bundle = agent_events_to_trace_bundle(trace_id, events.to_vec());
+    agent_trace_snapshot_payload_for_bundle(events, &bundle)
+}
+
+fn agent_trace_snapshot_payload_for_bundle(
+    events: &[RunEventRecord],
+    bundle: &TraceBundle,
+) -> Value {
     let event_snapshot = events
         .iter()
         .cloned()
         .map(AgentRunEventResp::from)
         .collect::<Vec<_>>();
-    let bundle = agent_events_to_trace_bundle(trace_id, events.to_vec());
     let summary = bundle.replay_summary();
 
     json!({
         "events": event_snapshot,
-        "traceEvents": bundle.events,
+        "traceEvents": bundle.events.clone(),
         "summary": summary,
     })
 }
@@ -3247,6 +3281,16 @@ mod tests {
         assert_eq!(snapshot["summary"]["finalStatus"], "succeeded");
     }
 
+    #[test]
+    fn agent_rollout_migration_defines_replay_bundle_table() {
+        let migration = include_str!("../../../migrations/202606160002_create_ai_rollout.sql");
+
+        assert!(migration.contains("CREATE TABLE IF NOT EXISTS ai_rollout"));
+        assert!(migration.contains("trace_id"));
+        assert!(migration.contains("event_bundle"));
+        assert!(migration.contains("summary_payload"));
+    }
+
     #[tokio::test]
     async fn mcp_tool_execution_uses_mock_response_without_exposing_secret() {
         let tool = McpToolExecutionRecord {
@@ -3359,6 +3403,8 @@ mod tests {
             "RunEventKind::ToolCalled",
             "RunEventKind::StatusChanged",
             "RunEventKind::FinalOutput",
+            "AgentRolloutSaveRecord",
+            "upsert_rollout_bundle",
         ] {
             assert!(
                 source.contains(needle),
