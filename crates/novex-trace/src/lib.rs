@@ -9,10 +9,14 @@ pub const CRATE_ID: &str = "novex-trace";
 pub enum TraceEventKind {
     UserMessage,
     AssistantMessage,
+    Retrieval,
+    ActionSelected,
     ToolCall,
     Observation,
+    ContextCompaction,
     ApprovalRequested,
     FinalAnswer,
+    Cancellation,
     Error,
 }
 
@@ -38,6 +42,22 @@ impl TraceEvent {
             sequence_no,
             kind: TraceEventKind::AssistantMessage,
             payload: json!({ "content": content.into() }),
+        }
+    }
+
+    pub fn retrieval(sequence_no: i32, payload: Value) -> Self {
+        Self {
+            sequence_no,
+            kind: TraceEventKind::Retrieval,
+            payload,
+        }
+    }
+
+    pub fn action_selected(sequence_no: i32, payload: Value) -> Self {
+        Self {
+            sequence_no,
+            kind: TraceEventKind::ActionSelected,
+            payload,
         }
     }
 
@@ -67,6 +87,14 @@ impl TraceEvent {
         }
     }
 
+    pub fn context_compaction(sequence_no: i32, payload: Value) -> Self {
+        Self {
+            sequence_no,
+            kind: TraceEventKind::ContextCompaction,
+            payload,
+        }
+    }
+
     pub fn approval_requested(sequence_no: i32, tool_code: impl Into<String>) -> Self {
         Self {
             sequence_no,
@@ -80,6 +108,14 @@ impl TraceEvent {
             sequence_no,
             kind: TraceEventKind::FinalAnswer,
             payload: json!({ "answer": answer.into() }),
+        }
+    }
+
+    pub fn cancellation(sequence_no: i32, payload: Value) -> Self {
+        Self {
+            sequence_no,
+            kind: TraceEventKind::Cancellation,
+            payload,
         }
     }
 
@@ -133,8 +169,14 @@ impl TraceBundle {
             .events
             .iter()
             .any(|event| matches!(event.kind, TraceEventKind::ApprovalRequested));
+        let has_cancellation = self
+            .events
+            .iter()
+            .any(|event| matches!(event.kind, TraceEventKind::Cancellation));
         let final_status = if has_error {
             "failed"
+        } else if has_cancellation && !has_final_answer {
+            "cancelled"
         } else if has_approval_pause && !has_final_answer {
             "waiting_approval"
         } else if has_final_answer {
@@ -186,5 +228,29 @@ mod tests {
         assert_eq!(bundle.trace_id, "agent-1");
         assert_eq!(bundle.tool_call_count(), 1);
         assert_eq!(bundle.events[0].sequence_no, 2);
+    }
+
+    #[test]
+    fn trace_bundle_preserves_runtime_span_events() {
+        let bundle = TraceBundle::new("agent-1")
+            .with_event(TraceEvent::retrieval(1, json!({"hitCount":2})))
+            .with_event(TraceEvent::action_selected(
+                2,
+                json!({"toolCallBatch":[{"toolCode":"rag.search"}]}),
+            ))
+            .with_event(TraceEvent::context_compaction(
+                3,
+                json!({"compactedItemCount":4}),
+            ))
+            .with_event(TraceEvent::cancellation(
+                4,
+                json!({"cancelReason":"external_cancel"}),
+            ));
+
+        assert_eq!(bundle.events[0].kind, TraceEventKind::Retrieval);
+        assert_eq!(bundle.events[1].kind, TraceEventKind::ActionSelected);
+        assert_eq!(bundle.events[2].kind, TraceEventKind::ContextCompaction);
+        assert_eq!(bundle.events[3].kind, TraceEventKind::Cancellation);
+        assert_eq!(bundle.replay_summary().final_status, "cancelled");
     }
 }
