@@ -1509,7 +1509,9 @@ fn model_chat_response_from_provider(
         latency_ms,
         usage: normalize_model_provider_usage(&body),
         cost_cents: None,
-        provider_attempts: vec![model_provider_attempt_succeeded("primary", route, latency_ms)],
+        provider_attempts: vec![model_provider_attempt_succeeded(
+            "primary", route, latency_ms,
+        )],
     })
 }
 

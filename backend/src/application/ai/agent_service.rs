@@ -4577,9 +4577,7 @@ mod tests {
         assert_eq!(payload["item"]["fallbackUsed"], true);
         assert_eq!(payload["item"]["fallbackRouteId"], "runtime.llm.backup");
         assert_eq!(
-            payload["item"]["providerAttempts"]
-                .as_array()
-                .map(Vec::len),
+            payload["item"]["providerAttempts"].as_array().map(Vec::len),
             Some(2)
         );
     }

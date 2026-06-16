@@ -1083,10 +1083,7 @@ mod tests {
 
         assert_eq!(candidate.tags["modelProviderAttemptCount"], 2);
         assert_eq!(candidate.tags["modelFallbackCount"], 1);
-        assert_eq!(
-            candidate.tags["modelFallbackRouteId"],
-            "runtime.llm.backup"
-        );
+        assert_eq!(candidate.tags["modelFallbackRouteId"], "runtime.llm.backup");
     }
 
     #[test]
