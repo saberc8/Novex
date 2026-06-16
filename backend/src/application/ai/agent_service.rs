@@ -627,6 +627,8 @@ impl AgentService {
                             return self.get_run(run_id).await;
                         }
                     };
+                    let concurrency_policy_payload =
+                        serde_json::to_value(&routed_call.tool.concurrency).unwrap_or(Value::Null);
                     let tool_code = routed_call.tool.code;
                     let arguments = routed_call.arguments;
                     runtime_state.push_item(AgentTurnItem::tool_call(
@@ -634,11 +636,16 @@ impl AgentService {
                         tool_code.clone(),
                         arguments.clone(),
                     ));
-                    let action_payload = agent_turn_item_event_payload(&AgentTurnItem::tool_call(
-                        call_id.clone(),
-                        tool_code.clone(),
-                        arguments.clone(),
-                    ));
+                    let mut action_payload =
+                        agent_turn_item_event_payload(&AgentTurnItem::tool_call(
+                            call_id.clone(),
+                            tool_code.clone(),
+                            arguments.clone(),
+                        ));
+                    if let Some(object) = action_payload.as_object_mut() {
+                        object.insert("runtimeMode".to_owned(), json!("model_loop"));
+                        object.insert("concurrencyPolicy".to_owned(), concurrency_policy_payload);
+                    }
                     self.append_event(
                         user_id,
                         run_id,
@@ -3341,6 +3348,17 @@ mod tests {
         assert!(source.contains("ToolRouter::from_definitions"));
         assert!(source.contains("agent_model_loop_tool_definitions"));
         assert!(source.contains("tool_router.route_tool_call"));
+    }
+
+    #[test]
+    fn agent_service_model_loop_records_tool_concurrency_policy() {
+        let source = include_str!("agent_service.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+
+        assert!(source.contains("\"concurrencyPolicy\""));
+        assert!(source.contains("serde_json::to_value(&routed_call.tool.concurrency"));
     }
 
     #[test]
