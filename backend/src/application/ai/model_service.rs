@@ -6,6 +6,7 @@ use std::{
 };
 
 use chrono::{NaiveDateTime, Utc};
+use novex_connectors::FeishuTextMessage;
 use novex_model::{
     estimate_model_cost_cents, estimate_model_text_tokens, evaluate_model_route_policy,
     mask_api_key, normalize_model_provider_usage, ModelKind, ModelProviderType,
@@ -24,6 +25,8 @@ use crate::{
 };
 
 const MODEL_HEALTH_TIMEOUT: Duration = Duration::from_secs(20);
+const MODEL_ALERT_DELIVERY_TOOL_CODE: &str = "feishu.message.send";
+const MODEL_ALERT_DELIVERY_CHANNEL_FEISHU: &str = "feishu";
 const MODEL_CHAT_TIMEOUT: Duration = Duration::from_secs(120);
 const MODEL_RERANK_TIMEOUT: Duration = Duration::from_secs(30);
 const MODEL_EMBEDDING_TIMEOUT: Duration = Duration::from_secs(30);
@@ -506,6 +509,32 @@ struct ModelOpsAlertSaveRecord {
     pub first_seen_at: NaiveDateTime,
     pub last_seen_at: NaiveDateTime,
     pub user_id: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, FromRow)]
+struct ModelOpsAlertDeliveryCandidateRow {
+    pub alert_id: i64,
+    pub tenant_id: i64,
+    pub alert_key: String,
+    pub alert_kind: String,
+    pub severity: String,
+    pub route_code: Option<String>,
+    pub route_purpose: Option<String>,
+    pub provider_code: Option<String>,
+    pub model_name: Option<String>,
+    pub source_ref: String,
+    pub event_payload: Value,
+    pub first_seen_at: NaiveDateTime,
+    pub last_seen_at: NaiveDateTime,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct ModelOpsAlertDeliveryResult {
+    pub status: String,
+    pub dry_run: bool,
+    pub request_payload: Value,
+    pub response_payload: Value,
+    pub error_message: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, FromRow)]
@@ -2489,6 +2518,62 @@ fn model_ops_alert_record_from_health_check(
     }
 }
 
+fn model_ops_alert_delivery_message(alert: &ModelOpsAlertDeliveryCandidateRow) -> String {
+    let message = alert
+        .event_payload
+        .get("message")
+        .and_then(Value::as_str)
+        .unwrap_or("model ops alert");
+    let route = alert.route_code.as_deref().unwrap_or("-");
+    let purpose = alert.route_purpose.as_deref().unwrap_or("-");
+    let provider = alert.provider_code.as_deref().unwrap_or("-");
+    let model = alert.model_name.as_deref().unwrap_or("-");
+
+    format!(
+        "Novex Model Alert\nseverity: {}\nkind: {}\nalertKey: {}\nroute: {}\npurpose: {}\nprovider: {}\nmodel: {}\nsource: {}\nmessage: {}\nfirstSeenAt: {}\nlastSeenAt: {}",
+        alert.severity,
+        alert.alert_kind,
+        alert.alert_key,
+        route,
+        purpose,
+        provider,
+        model,
+        alert.source_ref,
+        message,
+        format_datetime(alert.first_seen_at),
+        format_datetime(alert.last_seen_at),
+    )
+}
+
+fn model_ops_alert_delivery_request_payload(alert: &ModelOpsAlertDeliveryCandidateRow) -> Value {
+    let webhook_payload =
+        FeishuTextMessage::new(model_ops_alert_delivery_message(alert)).to_webhook_payload();
+
+    json!({
+        "toolCode": MODEL_ALERT_DELIVERY_TOOL_CODE,
+        "channel": MODEL_ALERT_DELIVERY_CHANNEL_FEISHU,
+        "alertId": alert.alert_id,
+        "alertKey": alert.alert_key,
+        "webhookPayload": webhook_payload,
+    })
+}
+
+fn model_ops_alert_delivery_dry_run_result(
+    alert: &ModelOpsAlertDeliveryCandidateRow,
+) -> ModelOpsAlertDeliveryResult {
+    ModelOpsAlertDeliveryResult {
+        status: "dry_run".to_owned(),
+        dry_run: true,
+        request_payload: model_ops_alert_delivery_request_payload(alert),
+        response_payload: json!({
+            "status": "dry_run",
+            "channel": MODEL_ALERT_DELIVERY_CHANNEL_FEISHU,
+            "message": "FEISHU_WEBHOOK_URL is not configured",
+        }),
+        error_message: None,
+    }
+}
+
 async fn persist_model_health_check_record(
     db: &PgPool,
     record: &ModelHealthCheckSaveRecord,
@@ -4007,6 +4092,35 @@ mod tests {
         assert_eq!(summary.degraded_route_count, 1);
     }
 
+    #[test]
+    fn model_ops_alert_delivery_message_contains_operational_context() {
+        let now =
+            NaiveDateTime::parse_from_str("2026-06-17 10:00:00", "%Y-%m-%d %H:%M:%S").unwrap();
+        let alert = model_ops_alert_delivery_candidate("model_health:llm:route:11", now);
+
+        let message = model_ops_alert_delivery_message(&alert);
+
+        assert!(message.contains("Novex Model Alert"));
+        assert!(message.contains("critical"));
+        assert!(message.contains("runtime.llm.chat"));
+        assert!(message.contains("provider unavailable"));
+    }
+
+    #[test]
+    fn model_ops_alert_delivery_dry_run_result_preserves_feishu_payload() {
+        let now =
+            NaiveDateTime::parse_from_str("2026-06-17 10:00:00", "%Y-%m-%d %H:%M:%S").unwrap();
+        let alert = model_ops_alert_delivery_candidate("model_health:llm:route:11", now);
+
+        let result = model_ops_alert_delivery_dry_run_result(&alert);
+
+        assert_eq!(result.status, "dry_run");
+        assert!(result.dry_run);
+        assert_eq!(result.request_payload["toolCode"], "feishu.message.send");
+        assert_eq!(result.response_payload["status"], "dry_run");
+        assert!(result.error_message.is_none());
+    }
+
     fn model_ops_route_row(
         route_code: &str,
         route_purpose: &str,
@@ -4053,6 +4167,27 @@ mod tests {
             model_name: Some("deepseek-v4".to_owned()),
             source_ref: "health_check:99".to_owned(),
             event_payload: json!({"message": message}),
+            first_seen_at: now,
+            last_seen_at: now,
+        }
+    }
+
+    fn model_ops_alert_delivery_candidate(
+        alert_key: &str,
+        now: NaiveDateTime,
+    ) -> ModelOpsAlertDeliveryCandidateRow {
+        ModelOpsAlertDeliveryCandidateRow {
+            alert_id: 42,
+            tenant_id: 1,
+            alert_key: alert_key.to_owned(),
+            alert_kind: "model_health".to_owned(),
+            severity: "critical".to_owned(),
+            route_code: Some("runtime.llm.chat".to_owned()),
+            route_purpose: Some("chat".to_owned()),
+            provider_code: Some("deepseek".to_owned()),
+            model_name: Some("deepseek-v4".to_owned()),
+            source_ref: "health_check:99".to_owned(),
+            event_payload: json!({"message":"provider unavailable"}),
             first_seen_at: now,
             last_seen_at: now,
         }
