@@ -544,6 +544,13 @@ impl AgentService {
             })?;
             let parsed_items = parsed.items.clone();
             let parsed_payload = agent_turn_item_event_payload(&parsed.item);
+            if self
+                .check_model_loop_cancelled(user_id, run_id, "after_model_call")
+                .await?
+                == ModelLoopCancelCheck::Cancelled
+            {
+                return self.get_run(run_id).await;
+            }
 
             match parsed.item {
                 novex_agent_protocol::AgentTurnItem::FinalAnswer { content } => {
@@ -866,6 +873,14 @@ impl AgentService {
                         .await?;
                     }
 
+                    if self
+                        .check_model_loop_cancelled(user_id, run_id, "before_tool_batch")
+                        .await?
+                        == ModelLoopCancelCheck::Cancelled
+                    {
+                        return self.get_run(run_id).await;
+                    }
+
                     let executed_calls =
                         execute_agent_tool_io_batch(
                             batch_execution_mode,
@@ -934,6 +949,14 @@ impl AgentService {
                         ));
                     }
 
+                    if self
+                        .check_model_loop_cancelled(user_id, run_id, "after_tool_batch")
+                        .await?
+                        == ModelLoopCancelCheck::Cancelled
+                    {
+                        return self.get_run(run_id).await;
+                    }
+
                     if runtime_state.should_compact_context() {
                         if let Some(compaction) = runtime_state.compact_context() {
                             let compaction_item = AgentTurnItem::ContextCompaction {
@@ -971,8 +994,23 @@ impl AgentService {
                                 summary,
                                 &tool_codes,
                             );
+                            if self
+                                .check_model_loop_cancelled(user_id, run_id, "before_next_turn")
+                                .await?
+                                == ModelLoopCancelCheck::Cancelled
+                            {
+                                return self.get_run(run_id).await;
+                            }
                             continue;
                         }
+                    }
+
+                    if self
+                        .check_model_loop_cancelled(user_id, run_id, "before_next_turn")
+                        .await?
+                        == ModelLoopCancelCheck::Cancelled
+                    {
+                        return self.get_run(run_id).await;
                     }
 
                     messages.push(ModelChatMessage {
@@ -3947,6 +3985,7 @@ mod tests {
             .unwrap();
 
         assert!(source.contains("before_model_call"));
+        assert!(source.contains("after_model_call"));
         assert!(source.contains("check_model_loop_cancelled"));
     }
 
@@ -3958,6 +3997,18 @@ mod tests {
         assert_eq!(payload["cancelReason"], "external_cancel");
         assert_eq!(payload["cancelStage"], "before_model_call");
         assert_eq!(payload["runtimeMode"], "model_loop");
+    }
+
+    #[test]
+    fn agent_service_model_loop_checks_external_cancel_around_tool_batches() {
+        let source = include_str!("agent_service.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+
+        assert!(source.contains("before_tool_batch"));
+        assert!(source.contains("after_tool_batch"));
+        assert!(source.contains("before_next_turn"));
     }
 
     #[test]
