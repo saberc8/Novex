@@ -137,6 +137,12 @@ impl EvalCaseCandidate {
                 json!(inference_summary.retryable_error_count),
             );
         }
+        if inference_summary.retry_count > 0 {
+            tags.insert(
+                "modelRetryCount".to_owned(),
+                json!(inference_summary.retry_count),
+            );
+        }
         if let Some(route_id) = inference_summary.route_id.as_deref() {
             tags.insert("modelRouteId".to_owned(), json!(route_id));
         }
@@ -610,6 +616,7 @@ struct TraceInferenceSummary {
     total_tokens: i64,
     cost_cents: Option<f64>,
     error_count: usize,
+    retry_count: usize,
     retryable_error_count: usize,
     error_kind: Option<String>,
     http_status: Option<i64>,
@@ -641,6 +648,13 @@ fn trace_inference_summary(bundle: &TraceBundle) -> TraceInferenceSummary {
                 .unwrap_or(false)
             {
                 summary.retryable_error_count += 1;
+            }
+            if payload
+                .get("willRetry")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+            {
+                summary.retry_count += 1;
             }
             if summary.error_kind.is_none() {
                 summary.error_kind = trace_value_text(payload.get("errorKind"));
@@ -971,6 +985,39 @@ mod tests {
         assert_eq!(candidate.tags["modelErrorKind"], "provider_http");
         assert_eq!(candidate.tags["modelHttpStatus"], 502);
         assert_eq!(candidate.tags["latencyMs"], 12);
+    }
+
+    #[test]
+    fn trace_eval_candidate_tags_provider_retry_spans() {
+        let bundle = TraceBundle::new("agent-1")
+            .with_event(TraceEvent::inference(
+                1,
+                json!({
+                    "item": {
+                        "type": "model_inference_error",
+                        "errorKind": "provider_http",
+                        "httpStatus": 502,
+                        "retryable": true,
+                        "willRetry": true,
+                        "latencyMs": 12
+                    }
+                }),
+            ))
+            .with_event(TraceEvent::inference(
+                2,
+                json!({
+                    "item": {
+                        "type": "model_inference",
+                        "latencyMs": 20
+                    }
+                }),
+            ));
+
+        let candidate = EvalCaseCandidate::from_trace_bundle(&bundle);
+
+        assert_eq!(candidate.tags["inferenceErrorCount"], 1);
+        assert_eq!(candidate.tags["modelRetryCount"], 1);
+        assert_eq!(candidate.tags["latencyMs"], 32);
     }
 
     #[test]
