@@ -9,6 +9,7 @@ pub const CRATE_ID: &str = "novex-trace";
 pub enum TraceEventKind {
     UserMessage,
     AssistantMessage,
+    Inference,
     Retrieval,
     ActionSelected,
     ToolCall,
@@ -42,6 +43,14 @@ impl TraceEvent {
             sequence_no,
             kind: TraceEventKind::AssistantMessage,
             payload: json!({ "content": content.into() }),
+        }
+    }
+
+    pub fn inference(sequence_no: i32, payload: Value) -> Self {
+        Self {
+            sequence_no,
+            kind: TraceEventKind::Inference,
+            payload,
         }
     }
 
@@ -252,5 +261,20 @@ mod tests {
         assert_eq!(bundle.events[2].kind, TraceEventKind::ContextCompaction);
         assert_eq!(bundle.events[3].kind, TraceEventKind::Cancellation);
         assert_eq!(bundle.replay_summary().final_status, "cancelled");
+    }
+
+    #[test]
+    fn trace_bundle_preserves_inference_span_events() {
+        let bundle = TraceBundle::new("agent-1").with_event(TraceEvent::inference(
+            1,
+            json!({
+                "routeId": "runtime.llm.code_agent",
+                "provider": "deep-seek",
+                "latencyMs": 42
+            }),
+        ));
+
+        assert_eq!(bundle.events[0].kind, TraceEventKind::Inference);
+        assert_eq!(bundle.events[0].payload["latencyMs"], 42);
     }
 }
