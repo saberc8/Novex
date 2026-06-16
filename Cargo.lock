@@ -1833,7 +1833,9 @@ name = "novex-mcp"
 version = "0.1.0"
 dependencies = [
  "novex-ai-core",
+ "novex-tools",
  "serde",
+ "serde_json",
  "url",
 ]
 
@@ -1889,7 +1891,6 @@ version = "0.1.0"
 dependencies = [
  "novex-ai-core",
  "novex-connectors",
- "novex-mcp",
  "novex-model",
  "serde",
  "serde_json",
