@@ -127,6 +127,16 @@ impl EvalCaseCandidate {
         }
         let inference_summary = trace_inference_summary(bundle);
         tags.insert("inferenceCount".to_owned(), json!(inference_summary.count));
+        if inference_summary.error_count > 0 {
+            tags.insert(
+                "inferenceErrorCount".to_owned(),
+                json!(inference_summary.error_count),
+            );
+            tags.insert(
+                "retryableInferenceErrorCount".to_owned(),
+                json!(inference_summary.retryable_error_count),
+            );
+        }
         if let Some(route_id) = inference_summary.route_id.as_deref() {
             tags.insert("modelRouteId".to_owned(), json!(route_id));
         }
@@ -135,6 +145,12 @@ impl EvalCaseCandidate {
         }
         if let Some(model) = inference_summary.model.as_deref() {
             tags.insert("modelName".to_owned(), json!(model));
+        }
+        if let Some(error_kind) = inference_summary.error_kind.as_deref() {
+            tags.insert("modelErrorKind".to_owned(), json!(error_kind));
+        }
+        if let Some(http_status) = inference_summary.http_status {
+            tags.insert("modelHttpStatus".to_owned(), json!(http_status));
         }
         if inference_summary.count > 0 {
             tags.insert(
@@ -593,6 +609,10 @@ struct TraceInferenceSummary {
     completion_tokens: i64,
     total_tokens: i64,
     cost_cents: Option<f64>,
+    error_count: usize,
+    retryable_error_count: usize,
+    error_kind: Option<String>,
+    http_status: Option<i64>,
 }
 
 fn trace_inference_summary(bundle: &TraceBundle) -> TraceInferenceSummary {
@@ -612,6 +632,22 @@ fn trace_inference_summary(bundle: &TraceBundle) -> TraceInferenceSummary {
         }
         if summary.model.is_none() {
             summary.model = trace_value_text(payload.get("model"));
+        }
+        if trace_value_text(payload.get("type")).as_deref() == Some("model_inference_error") {
+            summary.error_count += 1;
+            if payload
+                .get("retryable")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+            {
+                summary.retryable_error_count += 1;
+            }
+            if summary.error_kind.is_none() {
+                summary.error_kind = trace_value_text(payload.get("errorKind"));
+            }
+            if summary.http_status.is_none() {
+                summary.http_status = trace_value_i64(payload.get("httpStatus"));
+            }
         }
         summary.latency_ms += trace_value_i64(payload.get("latencyMs")).unwrap_or_default();
         if let Some(usage) = payload.get("usage") {
@@ -908,6 +944,33 @@ mod tests {
         assert_eq!(candidate.tags["completionTokens"], 9);
         assert_eq!(candidate.tags["totalTokens"], 23);
         assert_eq!(candidate.tags["costCents"], 0.65);
+    }
+
+    #[test]
+    fn trace_eval_candidate_tags_provider_error_spans() {
+        let bundle = TraceBundle::new("agent-1").with_event(TraceEvent::inference(
+            1,
+            json!({
+                "item": {
+                    "type": "model_inference_error",
+                    "routeId": "runtime.llm.code_agent",
+                    "provider": "deep-seek",
+                    "errorKind": "provider_http",
+                    "httpStatus": 502,
+                    "retryable": true,
+                    "latencyMs": 12
+                }
+            }),
+        ));
+
+        let candidate = EvalCaseCandidate::from_trace_bundle(&bundle);
+
+        assert_eq!(candidate.tags["inferenceCount"], 1);
+        assert_eq!(candidate.tags["inferenceErrorCount"], 1);
+        assert_eq!(candidate.tags["retryableInferenceErrorCount"], 1);
+        assert_eq!(candidate.tags["modelErrorKind"], "provider_http");
+        assert_eq!(candidate.tags["modelHttpStatus"], 502);
+        assert_eq!(candidate.tags["latencyMs"], 12);
     }
 
     #[test]
