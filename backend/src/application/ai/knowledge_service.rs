@@ -6406,6 +6406,7 @@ mod tests {
             latency_ms: 12,
             usage: ModelChatUsage::default(),
             cost_cents: None,
+            provider_attempts: vec![],
         };
 
         let answer = rag_answer_from_model_chat(chat, &hits, "llm_grounded");

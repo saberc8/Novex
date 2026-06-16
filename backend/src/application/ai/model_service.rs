@@ -111,6 +111,22 @@ pub struct ModelChatResp {
     pub latency_ms: u128,
     pub usage: ModelChatUsage,
     pub cost_cents: Option<f64>,
+    #[serde(default)]
+    pub provider_attempts: Vec<ModelProviderAttempt>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelProviderAttempt {
+    pub attempt_kind: String,
+    pub route_id: String,
+    pub provider: String,
+    pub model: Option<String>,
+    pub status: String,
+    pub latency_ms: i64,
+    pub error_kind: Option<String>,
+    pub http_status: Option<u16>,
+    pub message: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1057,15 +1073,72 @@ ORDER BY r.priority, r.id
             .resolve_route_for_purpose_with_route_id(purpose, command.route_id.as_deref())
             .await?
             .ok_or_else(|| AppError::bad_request("LLM 模型环境变量未配置完整"))?;
-        let mut response = execute_normalized_chat_completion_with_route(
-            &route,
-            &command,
-            command.conversation_id,
-        )
-        .await?;
+        let mut response = self
+            .execute_normalized_chat_completion_with_fallback(
+                purpose,
+                &route,
+                &command,
+                command.conversation_id,
+            )
+            .await?;
         response.cost_cents =
             estimate_model_chat_response_cost_cents(&self.db, self.tenant_id, &response).await?;
         Ok(response)
+    }
+
+    async fn execute_normalized_chat_completion_with_fallback(
+        &self,
+        purpose: ModelRoutePurpose,
+        primary_route: &ModelRuntimeRoute,
+        command: &ModelChatCommand,
+        conversation_id: Option<i64>,
+    ) -> Result<ModelChatResp, AppError> {
+        let primary_started = Instant::now();
+        let primary_result =
+            execute_normalized_chat_completion_with_route(primary_route, command, conversation_id)
+                .await;
+        let primary_error = match primary_result {
+            Ok(response) => return Ok(response),
+            Err(err) if model_provider_error_is_fallback_candidate(&err) => err,
+            Err(err) => return Err(err),
+        };
+        let primary_attempt = model_provider_attempt_failed(
+            "primary",
+            primary_route,
+            &primary_error,
+            primary_started.elapsed().as_millis(),
+        );
+        let fallback_plan = self
+            .fallback_plan_for_purpose_with_route_id(purpose, Some(primary_route.route_id()))
+            .await?;
+        let Some(fallback_route_id) = fallback_plan
+            .as_ref()
+            .and_then(|plan| plan.decision.enabled.then_some(&plan.decision))
+            .and_then(|decision| decision.fallback_route_id.as_deref())
+        else {
+            return Err(primary_error);
+        };
+        let Some(fallback_route) = self
+            .resolve_route_for_purpose_with_route_id(purpose, Some(fallback_route_id))
+            .await?
+        else {
+            return Err(primary_error);
+        };
+        let attempt_kind = "fallback";
+        let mut fallback_response = execute_normalized_chat_completion_with_route(
+            &fallback_route,
+            command,
+            conversation_id,
+        )
+        .await?;
+        for attempt in &mut fallback_response.provider_attempts {
+            attempt.attempt_kind = attempt_kind.to_owned();
+        }
+        fallback_response
+            .provider_attempts
+            .insert(0, primary_attempt);
+
+        Ok(fallback_response)
     }
 
     pub async fn list_chat_conversations(
@@ -1436,7 +1509,113 @@ fn model_chat_response_from_provider(
         latency_ms,
         usage: normalize_model_provider_usage(&body),
         cost_cents: None,
+        provider_attempts: vec![model_provider_attempt_succeeded("primary", route, latency_ms)],
     })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ModelProviderErrorClass {
+    kind: &'static str,
+    http_status: Option<u16>,
+    fallback_candidate: bool,
+}
+
+fn model_provider_attempt_succeeded(
+    attempt_kind: &str,
+    route: &ModelRuntimeRoute,
+    latency_ms: u128,
+) -> ModelProviderAttempt {
+    ModelProviderAttempt {
+        attempt_kind: attempt_kind.to_owned(),
+        route_id: route.route_id().to_owned(),
+        provider: route.provider().as_str().to_owned(),
+        model: route.model().map(str::to_owned),
+        status: "succeeded".to_owned(),
+        latency_ms: u128_to_i64(latency_ms),
+        error_kind: None,
+        http_status: None,
+        message: None,
+    }
+}
+
+fn model_provider_attempt_failed(
+    attempt_kind: &str,
+    route: &ModelRuntimeRoute,
+    error: &AppError,
+    latency_ms: u128,
+) -> ModelProviderAttempt {
+    let class = model_provider_error_class(error);
+    ModelProviderAttempt {
+        attempt_kind: attempt_kind.to_owned(),
+        route_id: route.route_id().to_owned(),
+        provider: route.provider().as_str().to_owned(),
+        model: route.model().map(str::to_owned),
+        status: "failed".to_owned(),
+        latency_ms: u128_to_i64(latency_ms),
+        error_kind: Some(class.kind.to_owned()),
+        http_status: class.http_status,
+        message: Some(model_provider_error_message(error)),
+    }
+}
+
+fn model_provider_error_is_fallback_candidate(error: &AppError) -> bool {
+    model_provider_error_class(error).fallback_candidate
+}
+
+fn model_provider_error_class(error: &AppError) -> ModelProviderErrorClass {
+    let message = model_provider_error_message(error);
+    let http_status = model_provider_error_http_status(&message);
+    let kind = match error {
+        AppError::BadRequest(_) if http_status.is_some() => "provider_http",
+        AppError::BadRequest(_) if model_provider_error_is_timeout(&message) => "provider_timeout",
+        AppError::BadRequest(_) => "invalid_model_request",
+        AppError::Unauthorized => "unauthorized",
+        AppError::Forbidden => "forbidden",
+        AppError::NotFound => "not_found",
+        AppError::Conflict(_) => "conflict",
+        AppError::Sqlx(_) | AppError::Io(_) | AppError::Anyhow(_) => "provider_transport",
+    };
+    let fallback_candidate = match kind {
+        "provider_http" => http_status.is_some_and(|status| status == 429 || status >= 500),
+        "provider_timeout" | "provider_transport" => true,
+        _ => false,
+    };
+
+    ModelProviderErrorClass {
+        kind,
+        http_status,
+        fallback_candidate,
+    }
+}
+
+fn model_provider_error_message(error: &AppError) -> String {
+    match error {
+        AppError::BadRequest(message) | AppError::Conflict(message) => message.clone(),
+        AppError::Unauthorized => "unauthorized model request".to_owned(),
+        AppError::Forbidden => "forbidden model request".to_owned(),
+        AppError::NotFound => "model route not found".to_owned(),
+        AppError::Sqlx(_) | AppError::Io(_) | AppError::Anyhow(_) => {
+            "model provider transport error".to_owned()
+        }
+    }
+}
+
+fn model_provider_error_http_status(message: &str) -> Option<u16> {
+    let marker_index = message.find("HTTP")?;
+    let digits = message[marker_index + "HTTP".len()..]
+        .trim_start()
+        .chars()
+        .take_while(|char| char.is_ascii_digit())
+        .collect::<String>();
+    if digits.is_empty() {
+        return None;
+    }
+    digits.parse::<u16>().ok()
+}
+
+fn model_provider_error_is_timeout(message: &str) -> bool {
+    let message = message.to_ascii_lowercase();
+    message.contains("timeout") || message.contains("timed out") || message.contains("超时")
 }
 
 fn model_chat_answer_from_provider_body(body: &Value) -> Option<String> {
@@ -2988,6 +3167,49 @@ mod tests {
     }
 
     #[test]
+    fn provider_lifecycle_attempt_records_success_metadata() {
+        let route = llm_test_config()
+            .route(ModelRuntimeTarget::Llm)
+            .unwrap()
+            .clone();
+        let attempt = model_provider_attempt_succeeded("fallback", &route, 42);
+
+        assert_eq!(attempt.attempt_kind, "fallback");
+        assert_eq!(attempt.route_id, "runtime.llm");
+        assert_eq!(attempt.provider, "deep-seek");
+        assert_eq!(attempt.status, "succeeded");
+        assert_eq!(attempt.latency_ms, 42);
+        assert!(attempt.message.is_none());
+    }
+
+    #[test]
+    fn provider_lifecycle_attempt_records_retryable_http_failure() {
+        let route = llm_test_config()
+            .route(ModelRuntimeTarget::Llm)
+            .unwrap()
+            .clone();
+        let err = AppError::bad_request("LLM 模型调用失败: HTTP 502");
+        let attempt = model_provider_attempt_failed("primary", &route, &err, 12);
+
+        assert_eq!(attempt.status, "failed");
+        assert_eq!(attempt.error_kind.as_deref(), Some("provider_http"));
+        assert_eq!(attempt.http_status, Some(502));
+        assert!(model_provider_error_is_fallback_candidate(&err));
+    }
+
+    #[test]
+    fn provider_lifecycle_source_contract_fallback_wraps_chat_completion() {
+        let source = include_str!("model_service.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+
+        assert!(source.contains("fallback_plan_for_purpose_with_route_id(purpose"));
+        assert!(source.contains("model_provider_error_is_fallback_candidate"));
+        assert!(source.contains("attempt_kind = \"fallback\""));
+    }
+
+    #[test]
     fn model_chat_history_records_capture_latest_turn_metadata() {
         let now = chrono::NaiveDateTime::parse_from_str("2026-06-05 10:00:00", "%Y-%m-%d %H:%M:%S")
             .unwrap();
@@ -3024,6 +3246,7 @@ mod tests {
                 total_tokens: Some(18),
             },
             cost_cents: None,
+            provider_attempts: vec![],
         };
 
         let records = model_chat_history_records(1, 9, &command, &response, now).unwrap();
@@ -3095,6 +3318,7 @@ mod tests {
                 total_tokens: Some(18),
             },
             cost_cents: None,
+            provider_attempts: vec![],
         };
 
         let record = model_chat_usage_record(1, 99, &response, now, "ai.models.chat");
@@ -3156,6 +3380,7 @@ mod tests {
                 total_tokens: Some(8),
             },
             cost_cents: None,
+            provider_attempts: vec![],
         };
 
         let record = model_chat_usage_record(42, 99, &response, now, "ai.chatFlow.model");
@@ -3225,6 +3450,7 @@ mod tests {
                 total_tokens: Some(3000),
             },
             cost_cents: None,
+            provider_attempts: vec![],
         }
     }
 }

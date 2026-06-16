@@ -4510,6 +4510,7 @@ mod tests {
                 total_tokens: Some(18),
             },
             cost_cents: Some(0.65),
+            provider_attempts: vec![],
         };
 
         let payload = model_inference_event_payload(&response);
