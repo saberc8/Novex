@@ -185,6 +185,13 @@ async fn execute_builtin_job(db: &PgPool, key: &str) -> Result<HttpOutput, AppEr
                 .to_string(),
             })
         }
+        "ai.model.alert_delivery" => {
+            let summary = ModelRuntimeService::deliver_active_model_ops_alerts(db).await?;
+            Ok(HttpOutput {
+                status: Some(200),
+                body: serde_json::to_string(&summary).unwrap_or_else(|_| "{}".to_owned()),
+            })
+        }
         _ => Err(AppError::bad_request(format!("未知内置任务: {key}"))),
     }
 }
@@ -229,5 +236,16 @@ mod tests {
         assert!(source.contains("ai.model.health_check"));
         assert!(source.contains("ModelRuntimeService::refresh_active_tenant_model_health"));
         assert!(source.contains("execute_builtin_job(&db, &job.builtin_key)"));
+    }
+
+    #[test]
+    fn model_alert_delivery_key_source_contract_routes_scheduler_builtin() {
+        let source = include_str!("executor.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+
+        assert!(source.contains("ai.model.alert_delivery"));
+        assert!(source.contains("ModelRuntimeService::deliver_active_model_ops_alerts"));
     }
 }
