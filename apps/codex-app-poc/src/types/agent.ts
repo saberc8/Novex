@@ -12,6 +12,13 @@ export type AgentRunCommand = {
   budget?: TaskBudget;
 };
 
+export type AgentRunEventStreamQuery = {
+  afterSequenceNo?: number;
+  batchSize?: number;
+  pollMs?: number;
+  maxIdleMs?: number;
+};
+
 export type AgentRunResp = {
   runId: number;
   traceId: string;

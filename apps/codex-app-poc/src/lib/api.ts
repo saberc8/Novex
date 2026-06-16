@@ -26,6 +26,17 @@ export async function apiRequest<T>(path: string, init: RequestInit = {}): Promi
   return body.data as T;
 }
 
+export function apiUrl(path: string, query?: Record<string, unknown>) {
+  const url = new URL(path, apiBaseUrl());
+  Object.entries(query ?? {}).forEach(([key, value]) => {
+    if (value === undefined || value === null || value === "") {
+      return;
+    }
+    url.searchParams.append(key, String(value));
+  });
+  return url.toString();
+}
+
 function apiBaseUrl() {
   return (process.env.NEXT_PUBLIC_API_BASE_URL ?? DEFAULT_API_BASE_URL).replace(/\/$/, "");
 }
