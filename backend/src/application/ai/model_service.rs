@@ -1346,6 +1346,15 @@ ORDER BY r.priority, r.id
                 Utc::now().naive_utc(),
             );
             persist_model_health_check_record(&self.db, &record).await?;
+            record_model_ops_alert_for_health_check(
+                &self.db,
+                self.tenant_id,
+                user_id,
+                route_ids,
+                result,
+                &record,
+            )
+            .await?;
             count += 1;
         }
         Ok(count)
@@ -2305,11 +2314,10 @@ fn model_ops_alert_key_from_health_check(
     result: &ModelHealthCheckResult,
 ) -> String {
     match route_ids {
-        Some((route_id, _, _)) => format!("model_health:{}:route:{route_id}", result.target.as_str()),
-        None => format!(
-            "model_health:{}:tenant:{tenant_id}",
-            result.target.as_str()
-        ),
+        Some((route_id, _, _)) => {
+            format!("model_health:{}:route:{route_id}", result.target.as_str())
+        }
+        None => format!("model_health:{}:tenant:{tenant_id}", result.target.as_str()),
     }
 }
 
@@ -2388,6 +2396,121 @@ VALUES (
     .bind(record.error_message.as_deref())
     .bind(&record.detail)
     .bind(record.user_id)
+    .execute(db)
+    .await?;
+
+    Ok(())
+}
+
+async fn record_model_ops_alert_for_health_check(
+    db: &PgPool,
+    tenant_id: i64,
+    user_id: i64,
+    route_ids: Option<(i64, i64, i64)>,
+    result: &ModelHealthCheckResult,
+    health_record: &ModelHealthCheckSaveRecord,
+) -> Result<(), AppError> {
+    let alert_key = model_ops_alert_key_from_health_check(tenant_id, route_ids, result);
+    if result.ok {
+        return resolve_model_ops_alert(
+            db,
+            tenant_id,
+            &alert_key,
+            user_id,
+            health_record.checked_at,
+            "model health check recovered",
+        )
+        .await;
+    }
+
+    let alert = model_ops_alert_record_from_health_check(
+        tenant_id,
+        user_id,
+        route_ids,
+        result,
+        health_record.id,
+        health_record.checked_at,
+    );
+    upsert_model_ops_alert(db, &alert).await
+}
+
+async fn upsert_model_ops_alert(
+    db: &PgPool,
+    record: &ModelOpsAlertSaveRecord,
+) -> Result<(), AppError> {
+    sqlx::query(
+        r#"
+INSERT INTO ai_model_ops_alert (
+    id, tenant_id, alert_key, alert_kind, severity, status, route_id,
+    provider_id, model_profile_id, source_ref, event_payload, first_seen_at,
+    last_seen_at, create_user, create_time
+)
+VALUES (
+    $1, $2, $3, $4, $5, $6, $7,
+    $8, $9, $10, $11, $12,
+    $13, $14, $12
+)
+ON CONFLICT (tenant_id, alert_key) WHERE resolved_at IS NULL
+DO UPDATE SET
+    alert_kind = EXCLUDED.alert_kind,
+    severity = EXCLUDED.severity,
+    status = EXCLUDED.status,
+    route_id = EXCLUDED.route_id,
+    provider_id = EXCLUDED.provider_id,
+    model_profile_id = EXCLUDED.model_profile_id,
+    source_ref = EXCLUDED.source_ref,
+    event_payload = EXCLUDED.event_payload,
+    last_seen_at = EXCLUDED.last_seen_at,
+    update_user = EXCLUDED.create_user,
+    update_time = EXCLUDED.last_seen_at;
+"#,
+    )
+    .bind(record.id)
+    .bind(record.tenant_id)
+    .bind(&record.alert_key)
+    .bind(&record.alert_kind)
+    .bind(&record.severity)
+    .bind(&record.status)
+    .bind(record.route_id)
+    .bind(record.provider_id)
+    .bind(record.model_profile_id)
+    .bind(&record.source_ref)
+    .bind(&record.event_payload)
+    .bind(record.first_seen_at)
+    .bind(record.last_seen_at)
+    .bind(record.user_id)
+    .execute(db)
+    .await?;
+
+    Ok(())
+}
+
+async fn resolve_model_ops_alert(
+    db: &PgPool,
+    tenant_id: i64,
+    alert_key: &str,
+    user_id: i64,
+    resolved_at: NaiveDateTime,
+    resolve_message: &str,
+) -> Result<(), AppError> {
+    sqlx::query(
+        r#"
+UPDATE ai_model_ops_alert
+SET status = 'resolved',
+    resolved_at = $4,
+    resolve_message = $5,
+    update_user = $3,
+    update_time = $4
+WHERE tenant_id = $1
+  AND alert_key = $2
+  AND resolved_at IS NULL;
+"#,
+    )
+    .bind(tenant_id)
+    .bind(alert_key)
+    .bind(user_id)
+    .bind(resolved_at)
+    .bind(resolve_message)
     .execute(db)
     .await?;
 
@@ -3800,6 +3923,21 @@ mod tests {
             model_ops_alert_key_from_health_check(1, None, &result),
             "model_health:embedding:tenant:1"
         );
+    }
+
+    #[test]
+    fn model_health_alert_persistence_source_contract_upserts_and_resolves_active_alerts() {
+        let source = include_str!("model_service.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+
+        assert!(source.contains("record_model_ops_alert_for_health_check"));
+        assert!(source.contains("upsert_model_ops_alert"));
+        assert!(source.contains("resolve_model_ops_alert"));
+        assert!(source.contains("ON CONFLICT (tenant_id, alert_key) WHERE resolved_at IS NULL"));
+        assert!(source.contains("resolved_at = $4"));
+        assert!(source.contains("persist_model_health_check_record(&self.db, &record).await?"));
     }
 
     #[test]
