@@ -125,9 +125,47 @@ impl EvalCaseCandidate {
         if let Some(cancel_reason) = trace_first_cancellation_reason(bundle) {
             tags.insert("cancelReason".to_owned(), json!(cancel_reason));
         }
+        let inference_summary = trace_inference_summary(bundle);
+        tags.insert("inferenceCount".to_owned(), json!(inference_summary.count));
+        if let Some(route_id) = inference_summary.route_id.as_deref() {
+            tags.insert("modelRouteId".to_owned(), json!(route_id));
+        }
+        if let Some(provider) = inference_summary.provider.as_deref() {
+            tags.insert("modelProvider".to_owned(), json!(provider));
+        }
+        if let Some(model) = inference_summary.model.as_deref() {
+            tags.insert("modelName".to_owned(), json!(model));
+        }
+        if inference_summary.count > 0 {
+            tags.insert(
+                "promptTokens".to_owned(),
+                json!(inference_summary.prompt_tokens),
+            );
+            tags.insert(
+                "completionTokens".to_owned(),
+                json!(inference_summary.completion_tokens),
+            );
+            tags.insert(
+                "totalTokens".to_owned(),
+                json!(inference_summary.total_tokens),
+            );
+        }
         if policy.include_latency_cost_tags {
-            tags.insert("latencyMs".to_owned(), Value::Null);
-            tags.insert("costCents".to_owned(), Value::Null);
+            tags.insert(
+                "latencyMs".to_owned(),
+                if inference_summary.count > 0 {
+                    json!(inference_summary.latency_ms)
+                } else {
+                    Value::Null
+                },
+            );
+            tags.insert(
+                "costCents".to_owned(),
+                inference_summary
+                    .cost_cents
+                    .map(|cost_cents| json!(cost_cents))
+                    .unwrap_or(Value::Null),
+            );
         }
 
         Self {
@@ -544,6 +582,90 @@ fn trace_first_cancellation_reason(bundle: &TraceBundle) -> Option<String> {
         .map(ToOwned::to_owned)
 }
 
+#[derive(Debug, Default)]
+struct TraceInferenceSummary {
+    count: usize,
+    route_id: Option<String>,
+    provider: Option<String>,
+    model: Option<String>,
+    latency_ms: i64,
+    prompt_tokens: i64,
+    completion_tokens: i64,
+    total_tokens: i64,
+    cost_cents: Option<f64>,
+}
+
+fn trace_inference_summary(bundle: &TraceBundle) -> TraceInferenceSummary {
+    let mut summary = TraceInferenceSummary::default();
+    for event in bundle
+        .events
+        .iter()
+        .filter(|event| event.kind == TraceEventKind::Inference)
+    {
+        let payload = trace_inference_payload(&event.payload);
+        summary.count += 1;
+        if summary.route_id.is_none() {
+            summary.route_id = trace_value_text(payload.get("routeId"));
+        }
+        if summary.provider.is_none() {
+            summary.provider = trace_value_text(payload.get("provider"));
+        }
+        if summary.model.is_none() {
+            summary.model = trace_value_text(payload.get("model"));
+        }
+        summary.latency_ms += trace_value_i64(payload.get("latencyMs")).unwrap_or_default();
+        if let Some(usage) = payload.get("usage") {
+            summary.prompt_tokens += trace_value_i64(
+                usage
+                    .get("promptTokens")
+                    .or_else(|| usage.get("prompt_tokens")),
+            )
+            .unwrap_or_default();
+            summary.completion_tokens += trace_value_i64(
+                usage
+                    .get("completionTokens")
+                    .or_else(|| usage.get("completion_tokens")),
+            )
+            .unwrap_or_default();
+            summary.total_tokens += trace_value_i64(
+                usage
+                    .get("totalTokens")
+                    .or_else(|| usage.get("total_tokens")),
+            )
+            .unwrap_or_default();
+        }
+        if let Some(cost_cents) = trace_value_f64(payload.get("costCents")) {
+            summary.cost_cents = Some(summary.cost_cents.unwrap_or_default() + cost_cents);
+        }
+    }
+    summary
+}
+
+fn trace_inference_payload(payload: &Value) -> &Value {
+    payload.get("item").unwrap_or(payload)
+}
+
+fn trace_value_i64(value: Option<&Value>) -> Option<i64> {
+    match value? {
+        Value::Number(number) => number
+            .as_i64()
+            .or_else(|| {
+                number
+                    .as_u64()
+                    .map(|value| value.min(i64::MAX as u64) as i64)
+            })
+            .or_else(|| number.as_f64().map(|value| value.round() as i64)),
+        _ => None,
+    }
+}
+
+fn trace_value_f64(value: Option<&Value>) -> Option<f64> {
+    match value? {
+        Value::Number(number) => number.as_f64().filter(|value| value.is_finite()),
+        _ => None,
+    }
+}
+
 fn trace_value_text(value: Option<&Value>) -> Option<String> {
     match value? {
         Value::String(value) => {
@@ -737,6 +859,55 @@ mod tests {
         assert_eq!(candidate.tags["compactionCount"], 1);
         assert_eq!(candidate.tags["cancelled"], true);
         assert_eq!(candidate.tags["cancelReason"], "external_cancel");
+    }
+
+    #[test]
+    fn trace_eval_candidate_tags_inference_spans() {
+        let bundle = TraceBundle::new("agent-1")
+            .with_event(TraceEvent::inference(
+                1,
+                json!({
+                    "item": {
+                        "type": "model_inference",
+                        "routeId": "runtime.llm.code_agent",
+                        "provider": "deep-seek",
+                        "model": "deepseek-v4-flash",
+                        "latencyMs": 42,
+                        "usage": {
+                            "promptTokens": 11,
+                            "completionTokens": 7,
+                            "totalTokens": 18
+                        },
+                        "costCents": 0.65
+                    }
+                }),
+            ))
+            .with_event(TraceEvent::inference(
+                2,
+                json!({
+                    "item": {
+                        "type": "model_inference",
+                        "latencyMs": 8,
+                        "usage": {
+                            "promptTokens": 3,
+                            "completionTokens": 2,
+                            "totalTokens": 5
+                        }
+                    }
+                }),
+            ));
+
+        let candidate = EvalCaseCandidate::from_trace_bundle(&bundle);
+
+        assert_eq!(candidate.tags["inferenceCount"], 2);
+        assert_eq!(candidate.tags["modelProvider"], "deep-seek");
+        assert_eq!(candidate.tags["modelRouteId"], "runtime.llm.code_agent");
+        assert_eq!(candidate.tags["modelName"], "deepseek-v4-flash");
+        assert_eq!(candidate.tags["latencyMs"], 50);
+        assert_eq!(candidate.tags["promptTokens"], 14);
+        assert_eq!(candidate.tags["completionTokens"], 9);
+        assert_eq!(candidate.tags["totalTokens"], 23);
+        assert_eq!(candidate.tags["costCents"], 0.65);
     }
 
     #[test]
