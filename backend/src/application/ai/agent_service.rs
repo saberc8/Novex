@@ -1,6 +1,7 @@
-use std::{env, time::Duration};
+use std::{env, future::Future, time::Duration};
 
 use chrono::{NaiveDateTime, Utc};
+use futures_util::future::join_all;
 use novex_agent::{plan_react_run_with_memory, AgentIntent, AgentLoopKind};
 use novex_agent_protocol::{AgentTurnItem, ToolObservationStatus};
 use novex_agent_runtime::{parse_model_turn_output, AgentRuntimeBudget, AgentRuntimeState};
@@ -19,8 +20,8 @@ use novex_model::ModelRoutePurpose;
 use novex_tools::{
     agent_model_loop_tool_definitions, evaluate_tool_execution_policy,
     parse_media_image_generation_response, ApprovalPolicy, MediaImageGenerationRequest,
-    ToolBatchPlan, ToolExecutionPolicyDecision, ToolExecutionPolicyInput, ToolKind, ToolRiskLevel,
-    ToolRouteError, ToolRouteErrorKind, ToolRouter,
+    ToolBatchExecutionMode, ToolBatchPlan, ToolExecutionPolicyDecision, ToolExecutionPolicyInput,
+    ToolKind, ToolRiskLevel, ToolRouteError, ToolRouteErrorKind, ToolRouter,
 };
 use novex_trace::{TraceBundle, TraceEvent, TraceReplaySummary};
 use serde::{Deserialize, Serialize};
@@ -100,6 +101,22 @@ struct AgentToolExecution {
 struct RecordedToolExecution {
     audit_id: i64,
     step_id: i64,
+    execution: AgentToolExecution,
+    terminal_status: RunStatus,
+}
+
+#[derive(Debug, Clone)]
+struct PreparedAgentToolCall {
+    batch_index: usize,
+    call_id: String,
+    tool: ToolLookupRecord,
+    arguments: Value,
+    concurrency_policy: Value,
+}
+
+#[derive(Debug, Clone)]
+struct ExecutedAgentToolCall {
+    prepared: PreparedAgentToolCall,
     execution: AgentToolExecution,
     terminal_status: RunStatus,
 }
@@ -658,8 +675,9 @@ impl AgentService {
                     }
 
                     let batch_plan = ToolBatchPlan::from_routed_calls(routed_calls);
+                    let batch_execution_mode = batch_plan.mode;
                     let batch_execution_mode_payload =
-                        serde_json::to_value(batch_plan.mode).unwrap_or(Value::Null);
+                        serde_json::to_value(batch_execution_mode).unwrap_or(Value::Null);
                     let serial_reason = batch_plan.serial_reason.clone();
                     let tool_call_batch_payload = batch_plan
                         .calls
@@ -674,8 +692,7 @@ impl AgentService {
                         })
                         .collect::<Vec<_>>();
                     let batch_size = batch_plan.calls.len();
-                    let mut batch_observations = Vec::new();
-                    let mut last_recorded_step_id = None;
+                    let mut prepared_calls = Vec::with_capacity(batch_size);
 
                     for (batch_index, routed_call) in batch_plan.calls.into_iter().enumerate() {
                         let call_id = routed_call.call_id;
@@ -684,31 +701,127 @@ impl AgentService {
                                 .unwrap_or(Value::Null);
                         let tool_code = routed_call.tool.code;
                         let arguments = routed_call.arguments;
-                        runtime_state.push_item(AgentTurnItem::tool_call(
-                            call_id.clone(),
-                            tool_code.clone(),
-                            arguments.clone(),
-                        ));
-                        let mut action_payload =
-                            agent_turn_item_event_payload(&AgentTurnItem::tool_call(
+                        let Some(tool) = self
+                            .capability_repo
+                            .find_tool_by_code(self.tenant_id, &tool_code)
+                            .await?
+                        else {
+                            return Err(AppError::NotFound);
+                        };
+                        let batch_policy = agent_tool_policy_decision(&tool, command.auto_approve);
+                        let prepared_call = PreparedAgentToolCall {
+                            batch_index,
+                            call_id: call_id.clone(),
+                            tool,
+                            arguments: arguments.clone(),
+                            concurrency_policy: concurrency_policy_payload.clone(),
+                        };
+                        if batch_policy.requires_approval {
+                            runtime_state.push_item(AgentTurnItem::tool_call(
                                 call_id.clone(),
                                 tool_code.clone(),
                                 arguments.clone(),
                             ));
+                            let mut action_payload = agent_turn_item_event_payload(
+                                &AgentTurnItem::tool_call(call_id, tool_code.clone(), arguments),
+                            );
+                            if let Some(object) = action_payload.as_object_mut() {
+                                object.insert("runtimeMode".to_owned(), json!("model_loop"));
+                                object.insert(
+                                    "concurrencyPolicy".to_owned(),
+                                    concurrency_policy_payload,
+                                );
+                                object.insert(
+                                    "batchExecutionMode".to_owned(),
+                                    batch_execution_mode_payload.clone(),
+                                );
+                                object.insert(
+                                    "serialReason".to_owned(),
+                                    json!(serial_reason.clone()),
+                                );
+                                object.insert(
+                                    "toolCallBatch".to_owned(),
+                                    Value::Array(tool_call_batch_payload.clone()),
+                                );
+                                object.insert("toolCallBatchIndex".to_owned(), json!(batch_index));
+                                object.insert("toolCallBatchSize".to_owned(), json!(batch_size));
+                            }
+                            self.append_event(
+                                user_id,
+                                run_id,
+                                None,
+                                RunEventKind::ActionSelected,
+                                run_status_code(RunStatus::Running),
+                                action_payload,
+                            )
+                            .await?;
+                            ensure_agent_run_transition(
+                                &run_status_code(RunStatus::Running),
+                                RunStatus::WaitingApproval,
+                            )?;
+                            self.update_status(AgentStatusUpdate {
+                                user_id,
+                                run_id,
+                                status: run_status_code(RunStatus::WaitingApproval),
+                                output_payload: json!({ "toolCode": prepared_call.tool.code }),
+                                final_output: None,
+                                pause_reason: batch_policy.pause_reason.as_deref(),
+                                finished: false,
+                            })
+                            .await?;
+                            self.pause_for_approval(
+                                user_id,
+                                run_id,
+                                &prepared_call.tool,
+                                &command.input,
+                                now,
+                            )
+                            .await?;
+                            self.refresh_trace_snapshot(
+                                user_id,
+                                run_id,
+                                json!({ "runtimeMode": "model_loop", "pauseReason": "approval" }),
+                            )
+                            .await?;
+                            return self.get_run(run_id).await;
+                        }
+                        prepared_calls.push(prepared_call);
+                    }
+
+                    let mut batch_observations = Vec::new();
+                    let mut last_recorded_step_id = None;
+
+                    for prepared_call in &prepared_calls {
+                        runtime_state.push_item(AgentTurnItem::tool_call(
+                            prepared_call.call_id.clone(),
+                            prepared_call.tool.code.clone(),
+                            prepared_call.arguments.clone(),
+                        ));
+                        let mut action_payload =
+                            agent_turn_item_event_payload(&AgentTurnItem::tool_call(
+                                prepared_call.call_id.clone(),
+                                prepared_call.tool.code.clone(),
+                                prepared_call.arguments.clone(),
+                            ));
                         if let Some(object) = action_payload.as_object_mut() {
                             object.insert("runtimeMode".to_owned(), json!("model_loop"));
-                            object
-                                .insert("concurrencyPolicy".to_owned(), concurrency_policy_payload);
+                            object.insert(
+                                "concurrencyPolicy".to_owned(),
+                                prepared_call.concurrency_policy.clone(),
+                            );
                             object.insert(
                                 "batchExecutionMode".to_owned(),
                                 batch_execution_mode_payload.clone(),
                             );
-                            object.insert("serialReason".to_owned(), json!(serial_reason));
+                            object.insert("serialReason".to_owned(), json!(serial_reason.clone()));
                             object.insert(
                                 "toolCallBatch".to_owned(),
                                 Value::Array(tool_call_batch_payload.clone()),
                             );
-                            object.insert("toolCallBatchIndex".to_owned(), json!(batch_index));
+                            object.insert(
+                                "toolCallBatchIndex".to_owned(),
+                                json!(prepared_call.batch_index),
+                            );
                             object.insert("toolCallBatchSize".to_owned(), json!(batch_size));
                         }
                         self.append_event(
@@ -720,44 +833,29 @@ impl AgentService {
                             action_payload,
                         )
                         .await?;
-                        let Some(tool) = self
-                            .capability_repo
-                            .find_tool_by_code(self.tenant_id, &tool_code)
-                            .await?
-                        else {
-                            return Err(AppError::NotFound);
-                        };
-                        let policy = agent_tool_policy_decision(&tool, command.auto_approve);
-                        if policy.requires_approval {
-                            ensure_agent_run_transition(
-                                &run_status_code(RunStatus::Running),
-                                RunStatus::WaitingApproval,
-                            )?;
-                            self.update_status(AgentStatusUpdate {
+                    }
+
+                    let executed_calls =
+                        execute_agent_tool_io_batch(
+                            batch_execution_mode,
+                            prepared_calls,
+                            |prepared| async move {
+                                self.execute_agent_tool_io(user_id, prepared).await
+                            },
+                        )
+                        .await?;
+                    for executed_call in executed_calls {
+                        let prepared = executed_call.prepared.clone();
+                        let executed_terminal_status = executed_call.terminal_status;
+                        let recorded = self
+                            .record_agent_tool_execution(
                                 user_id,
                                 run_id,
-                                status: run_status_code(RunStatus::WaitingApproval),
-                                output_payload: json!({ "toolCode": tool.code }),
-                                final_output: None,
-                                pause_reason: policy.pause_reason.as_deref(),
-                                finished: false,
-                            })
-                            .await?;
-                            self.pause_for_approval(user_id, run_id, &tool, &command.input, now)
-                                .await?;
-                            self.refresh_trace_snapshot(
-                                user_id,
-                                run_id,
-                                json!({ "runtimeMode": "model_loop", "pauseReason": "approval" }),
+                                &prepared,
+                                executed_call.execution,
                             )
                             .await?;
-                            return self.get_run(run_id).await;
-                        }
-
-                        let recorded = self
-                            .execute_and_record_tool_call(user_id, run_id, &tool, arguments.clone())
-                            .await?;
-                        last_tool_terminal_status = recorded.terminal_status;
+                        last_tool_terminal_status = executed_terminal_status;
                         last_recorded_step_id = Some(recorded.step_id);
                         let observation_status = if recorded.execution.succeeded_status() {
                             ToolObservationStatus::Succeeded
@@ -765,7 +863,7 @@ impl AgentService {
                             ToolObservationStatus::Failed
                         };
                         let observation_item = AgentTurnItem::tool_observation(
-                            &call_id,
+                            &prepared.call_id,
                             observation_status,
                             recorded.execution.response_payload.clone(),
                         );
@@ -773,7 +871,7 @@ impl AgentService {
                         let mut observation_payload =
                             agent_turn_item_event_payload(&observation_item);
                         if let Some(object) = observation_payload.as_object_mut() {
-                            object.insert("toolCode".to_owned(), json!(&tool.code));
+                            object.insert("toolCode".to_owned(), json!(&prepared.tool.code));
                             object.insert("auditId".to_owned(), json!(recorded.audit_id));
                             object.insert("dryRun".to_owned(), json!(recorded.execution.dry_run));
                             object.insert("runtimeMode".to_owned(), json!("model_loop"));
@@ -785,8 +883,8 @@ impl AgentService {
                             RunEventKind::ToolCalled,
                             run_status_code(RunStatus::Running),
                             json!({
-                                "toolCode": tool.code,
-                                "arguments": arguments.clone(),
+                                "toolCode": prepared.tool.code,
+                                "arguments": prepared.arguments.clone(),
                                 "auditId": recorded.audit_id,
                                 "dryRun": recorded.execution.dry_run,
                                 "runtimeMode": "model_loop"
@@ -803,7 +901,7 @@ impl AgentService {
                         )
                         .await?;
                         batch_observations.push((
-                            tool.code.clone(),
+                            prepared.tool.code.clone(),
                             recorded.execution.response_payload.clone(),
                         ));
                     }
@@ -1330,8 +1428,24 @@ impl AgentService {
         tool: &ToolLookupRecord,
         input: Value,
     ) -> Result<RecordedToolExecution, AppError> {
-        let now = Utc::now().naive_utc();
-        let audit_id = next_id();
+        let prepared = PreparedAgentToolCall {
+            batch_index: 0,
+            call_id: "single-tool-call".to_owned(),
+            tool: tool.clone(),
+            arguments: input,
+            concurrency_policy: Value::Null,
+        };
+        let executed = self.execute_agent_tool_io(user_id, prepared).await?;
+        self.record_agent_tool_execution(user_id, run_id, &executed.prepared, executed.execution)
+            .await
+    }
+
+    async fn execute_agent_tool_io(
+        &self,
+        user_id: i64,
+        prepared: PreparedAgentToolCall,
+    ) -> Result<ExecutedAgentToolCall, AppError> {
+        let tool = &prepared.tool;
         let connector_credential = if is_github_connector_tool(&tool.code) {
             self.capability_repo
                 .find_connector_credential(self.tenant_id, GITHUB_CONNECTOR_CODE, user_id)
@@ -1348,12 +1462,35 @@ impl AgentService {
         };
         let execution = execute_agent_tool(
             tool,
-            &input,
+            &prepared.arguments,
             connector_credential.as_ref(),
             mcp_tool.as_ref(),
             Some(&self.model_runtime),
         )
         .await;
+        let terminal_status = if execution.succeeded_status() {
+            RunStatus::Succeeded
+        } else {
+            RunStatus::Failed
+        };
+        Ok(ExecutedAgentToolCall {
+            prepared,
+            execution,
+            terminal_status,
+        })
+    }
+
+    async fn record_agent_tool_execution(
+        &self,
+        user_id: i64,
+        run_id: i64,
+        prepared: &PreparedAgentToolCall,
+        execution: AgentToolExecution,
+    ) -> Result<RecordedToolExecution, AppError> {
+        let now = Utc::now().naive_utc();
+        let audit_id = next_id();
+        let tool = &prepared.tool;
+        let input = prepared.arguments.clone();
         let terminal_status = if execution.succeeded_status() {
             RunStatus::Succeeded
         } else {
@@ -1723,6 +1860,30 @@ async fn execute_agent_tool(
         true,
         format!("Agent dry-run executed {tool_code}."),
     )
+}
+
+async fn execute_agent_tool_io_batch<F, Fut>(
+    mode: ToolBatchExecutionMode,
+    prepared_calls: Vec<PreparedAgentToolCall>,
+    execute: F,
+) -> Result<Vec<ExecutedAgentToolCall>, AppError>
+where
+    F: Fn(PreparedAgentToolCall) -> Fut,
+    Fut: Future<Output = Result<ExecutedAgentToolCall, AppError>>,
+{
+    match mode {
+        ToolBatchExecutionMode::Parallel => {
+            let results = join_all(prepared_calls.into_iter().map(execute)).await;
+            results.into_iter().collect()
+        }
+        ToolBatchExecutionMode::Serial => {
+            let mut executions = Vec::with_capacity(prepared_calls.len());
+            for prepared in prepared_calls {
+                executions.push(execute(prepared).await?);
+            }
+            Ok(executions)
+        }
+    }
 }
 
 async fn execute_mcp_tool(
@@ -3337,6 +3498,40 @@ mod tests {
     use novex_ai_core::TaskBudget;
     use sqlx::postgres::PgPoolOptions;
 
+    fn test_prepared_tool_call(
+        batch_index: usize,
+        call_id: &str,
+        tool_code: &str,
+    ) -> PreparedAgentToolCall {
+        PreparedAgentToolCall {
+            batch_index,
+            call_id: call_id.to_owned(),
+            tool: ToolLookupRecord {
+                id: batch_index as i64 + 1,
+                code: tool_code.to_owned(),
+                tool_kind: "function".to_owned(),
+                executor_kind: "agent".to_owned(),
+                risk_level: 1,
+                approval_policy: 1,
+                permission_code: Some("ai:tool:dryRun".to_owned()),
+            },
+            arguments: json!({ "batchIndex": batch_index }),
+            concurrency_policy: Value::Null,
+        }
+    }
+
+    fn test_executed_tool_call(prepared: PreparedAgentToolCall) -> ExecutedAgentToolCall {
+        ExecutedAgentToolCall {
+            prepared,
+            execution: AgentToolExecution::succeeded(
+                json!({ "status": "succeeded" }),
+                true,
+                "ok".to_owned(),
+            ),
+            terminal_status: RunStatus::Succeeded,
+        }
+    }
+
     #[tokio::test]
     async fn agent_service_can_be_bound_to_request_tenant() {
         let db = PgPoolOptions::new()
@@ -3473,6 +3668,104 @@ mod tests {
         assert!(source.contains("ToolBatchPlan::from_routed_calls"));
         assert!(source.contains("\"batchExecutionMode\""));
         assert!(source.contains("\"toolCallBatch\""));
+    }
+
+    #[tokio::test]
+    async fn parallel_tool_io_batch_polls_calls_concurrently_and_preserves_order() {
+        use std::sync::Arc;
+        use tokio::sync::Barrier;
+
+        let barrier = Arc::new(Barrier::new(2));
+        let calls = vec![
+            test_prepared_tool_call(0, "call-1", "rag.search"),
+            test_prepared_tool_call(1, "call-2", "github.repo.read"),
+        ];
+
+        let result = tokio::time::timeout(
+            std::time::Duration::from_millis(250),
+            execute_agent_tool_io_batch(ToolBatchExecutionMode::Parallel, calls, {
+                let barrier = barrier.clone();
+                move |prepared| {
+                    let barrier = barrier.clone();
+                    async move {
+                        barrier.wait().await;
+                        Ok(test_executed_tool_call(prepared))
+                    }
+                }
+            }),
+        )
+        .await
+        .expect("parallel execution should not deadlock")
+        .unwrap();
+
+        assert_eq!(result[0].prepared.call_id, "call-1");
+        assert_eq!(result[1].prepared.call_id, "call-2");
+    }
+
+    #[tokio::test]
+    async fn serial_tool_io_batch_runs_calls_in_sequence() {
+        use std::sync::{Arc, Mutex};
+
+        let order = Arc::new(Mutex::new(Vec::new()));
+        let calls = vec![
+            test_prepared_tool_call(0, "call-1", "media.image.generate"),
+            test_prepared_tool_call(1, "call-2", "feishu.message.send"),
+        ];
+
+        let result = execute_agent_tool_io_batch(ToolBatchExecutionMode::Serial, calls, {
+            let order = order.clone();
+            move |prepared| {
+                let order = order.clone();
+                async move {
+                    order.lock().unwrap().push(prepared.call_id.clone());
+                    Ok(test_executed_tool_call(prepared))
+                }
+            }
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(result.len(), 2);
+        assert_eq!(
+            *order.lock().unwrap(),
+            vec!["call-1".to_owned(), "call-2".to_owned()]
+        );
+    }
+
+    #[test]
+    fn agent_service_parallel_tool_execution_separates_io_from_persistence() {
+        let source = include_str!("agent_service.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+
+        assert!(source.contains("execute_agent_tool_io_batch"));
+        assert!(source.contains("execute_agent_tool_io"));
+        assert!(source.contains("record_agent_tool_execution"));
+    }
+
+    #[test]
+    fn agent_service_model_loop_evaluates_batch_approval_before_execution() {
+        let source = include_str!("agent_service.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+
+        let approval_index = source.find("batch_policy.requires_approval").unwrap();
+        let execution_index = source.find("execute_agent_tool_io_batch").unwrap();
+        assert!(approval_index < execution_index);
+    }
+
+    #[test]
+    fn agent_service_model_loop_executes_parallel_batches_via_io_executor() {
+        let source = include_str!("agent_service.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+
+        assert!(source.contains("execute_agent_tool_io_batch("));
+        assert!(source.contains("batch_execution_mode"));
+        assert!(source.contains("for executed_call in executed_calls"));
     }
 
     #[test]
