@@ -639,6 +639,26 @@ LIMIT 1;
         .await?)
     }
 
+    pub async fn find_rollout_by_trace_id(
+        &self,
+        tenant_id: i64,
+        trace_id: &str,
+    ) -> Result<Option<AgentRolloutRecord>, AppError> {
+        Ok(sqlx::query_as::<_, AgentRolloutRecord>(
+            r#"
+SELECT id, run_id, trace_id, event_bundle, summary_payload, source, create_time, update_time
+FROM ai_rollout
+WHERE tenant_id = $1 AND trace_id = $2
+ORDER BY COALESCE(update_time, create_time) DESC, id DESC
+LIMIT 1;
+"#,
+        )
+        .bind(tenant_id)
+        .bind(trace_id)
+        .fetch_optional(&self.db)
+        .await?)
+    }
+
     pub async fn next_event_sequence(&self, tenant_id: i64, run_id: i64) -> Result<i64, AppError> {
         Ok(sqlx::query_scalar::<_, i64>(
             r#"

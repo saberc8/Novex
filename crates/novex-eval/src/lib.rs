@@ -137,6 +137,17 @@ impl EvalCaseCandidate {
     }
 }
 
+pub fn actual_from_trace_bundle(bundle: &TraceBundle) -> EvalCaseActual {
+    EvalCaseActual {
+        answer: trace_last_event_payload_text(bundle, TraceEventKind::FinalAnswer, "answer"),
+        citations: trace_bundle_citations(bundle),
+        intent: None,
+        tool_code: trace_event_payload_text(bundle, TraceEventKind::ToolCall, "toolCode"),
+        cost_cents: 0,
+        latency_ms: 0,
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EvalCaseScore {
@@ -696,6 +707,17 @@ mod tests {
         assert_eq!(
             report.metric_breakdown.get(&EvalMetricKind::IntentAccuracy),
             Some(&0.0)
+        );
+    }
+
+    #[test]
+    fn trace_eval_actual_extracts_tool_and_final_answer() {
+        let actual = actual_from_trace_bundle(&bundle_with_tool_and_final());
+
+        assert_eq!(actual.tool_code.as_deref(), Some("rag.search"));
+        assert_eq!(
+            actual.answer.as_deref(),
+            Some("Customer data must stay in approved systems.")
         );
     }
 
