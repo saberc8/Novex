@@ -301,9 +301,12 @@ pub fn parse_guardian_model_assessment(
         }
     })?;
     let assessment = GuardianModelAssessment {
-        risk_level: parse_guardian_risk(value.get("risk_level").or_else(|| value.get("riskLevel")))?,
+        risk_level: parse_guardian_risk(
+            value.get("risk_level").or_else(|| value.get("riskLevel")),
+        )?,
         user_authorization: parse_guardian_authorization(
-            value.get("user_authorization")
+            value
+                .get("user_authorization")
                 .or_else(|| value.get("userAuthorization")),
         )?,
         outcome: parse_guardian_outcome(value.get("outcome"))?,
@@ -403,7 +406,9 @@ fn parse_guardian_risk(
         "low" => Ok(GuardianRiskLevel::Low),
         "medium" => Ok(GuardianRiskLevel::Medium),
         "high" | "critical" => Ok(GuardianRiskLevel::High),
-        value => Err(parse_error(format!("unsupported guardian risk level: {value}"))),
+        value => Err(parse_error(format!(
+            "unsupported guardian risk level: {value}"
+        ))),
     }
 }
 
@@ -429,7 +434,9 @@ fn parse_guardian_outcome(
             Ok(GuardianReviewOutcome::NeedsHuman)
         }
         "rejected" | "reject" | "denied" | "deny" => Ok(GuardianReviewOutcome::Rejected),
-        value => Err(parse_error(format!("unsupported guardian outcome: {value}"))),
+        value => Err(parse_error(format!(
+            "unsupported guardian outcome: {value}"
+        ))),
     }
 }
 
@@ -590,9 +597,13 @@ mod tests {
         assert!(messages[0].content.contains("Novex Guardian"));
         assert!(messages[0].content.contains("risk_level"));
         assert!(messages[1].content.contains(">>> TRANSCRIPT START"));
-        assert!(messages[1].content.contains("Please create the GitHub issue"));
+        assert!(messages[1]
+            .content
+            .contains("Please create the GitHub issue"));
         assert!(messages[1].content.contains("previous parse failure"));
-        assert!(messages[1].content.contains("\"toolCode\": \"github.issue.write\""));
+        assert!(messages[1]
+            .content
+            .contains("\"toolCode\": \"github.issue.write\""));
         assert!(messages[1].content.contains(">>> APPROVAL REQUEST END"));
     }
 
@@ -608,7 +619,10 @@ mod tests {
         .unwrap();
 
         assert_eq!(plain.outcome, GuardianReviewOutcome::Approved);
-        assert_eq!(plain.user_authorization, GuardianUserAuthorization::Explicit);
+        assert_eq!(
+            plain.user_authorization,
+            GuardianUserAuthorization::Explicit
+        );
         assert_eq!(fenced.outcome, GuardianReviewOutcome::Rejected);
         assert_eq!(fenced.risk_level, GuardianRiskLevel::High);
     }
@@ -645,7 +659,10 @@ mod tests {
         assert_eq!(decision.review_status, GuardianReviewStatus::Reviewed);
         assert_eq!(decision.outcome, GuardianReviewOutcome::Approved);
         assert!(decision.can_execute);
-        assert_eq!(decision.reviewer_name.as_deref(), Some(GUARDIAN_REVIEWER_NAME));
+        assert_eq!(
+            decision.reviewer_name.as_deref(),
+            Some(GUARDIAN_REVIEWER_NAME)
+        );
     }
 
     #[test]
@@ -662,7 +679,10 @@ mod tests {
 
         assert_eq!(decision.source, GuardianDecisionSource::Guardian);
         assert_eq!(decision.review_status, GuardianReviewStatus::FailedClosed);
-        assert_eq!(decision.failure_reason, Some(GuardianReviewFailureReason::Timeout));
+        assert_eq!(
+            decision.failure_reason,
+            Some(GuardianReviewFailureReason::Timeout)
+        );
         assert_eq!(decision.outcome, GuardianReviewOutcome::NeedsHuman);
         assert!(decision.requires_human_approval);
         assert!(!decision.can_execute);

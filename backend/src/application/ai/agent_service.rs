@@ -17,10 +17,10 @@ use novex_ai_core::{validate_run_transition, RunEventKind, RunStatus, RunStepTyp
 use novex_approval_review::{
     build_guardian_model_review_prompt, guardian_review_failure_decision,
     parse_guardian_model_assessment, review_tool_approval,
-    review_tool_approval_with_model_assessment, GuardianApprovalPolicy,
-    GuardianModelReviewRequest, GuardianReviewDecision, GuardianReviewFailureReason,
-    GuardianReviewInput, GuardianReviewedAction, GuardianRiskLevel, GuardianTranscriptEntry,
-    GuardianTranscriptRole, GuardianUserAuthorization,
+    review_tool_approval_with_model_assessment, GuardianApprovalPolicy, GuardianModelReviewRequest,
+    GuardianReviewDecision, GuardianReviewFailureReason, GuardianReviewInput,
+    GuardianReviewedAction, GuardianRiskLevel, GuardianTranscriptEntry, GuardianTranscriptRole,
+    GuardianUserAuthorization,
 };
 use novex_connectors::{
     parse_credential_scope, parse_github_code_search_response, resolve_env_secret_ref,
@@ -2032,13 +2032,13 @@ impl AgentService {
         arguments: Value,
         auto_approved: bool,
     ) -> GuardianReviewDecision {
-        let review_input = guardian_review_input_for_tool_policy(tool, auto_approved, auto_approved);
+        let review_input =
+            guardian_review_input_for_tool_policy(tool, auto_approved, auto_approved);
         if !auto_approved {
             return review_tool_approval(review_input);
         }
 
-        let request =
-            guardian_model_review_request_for_tool(input, runtime_items, tool, arguments);
+        let request = guardian_model_review_request_for_tool(input, runtime_items, tool, arguments);
         let prompt_messages = match build_guardian_model_review_prompt(&request) {
             Ok(messages) => messages,
             Err(err) => {
@@ -5960,7 +5960,10 @@ mod tests {
 
         let decision = guardian_review_decision_with_model_metadata(decision, &response, 19);
 
-        assert_eq!(decision.model_route_id.as_deref(), Some("runtime.llm.guardian"));
+        assert_eq!(
+            decision.model_route_id.as_deref(),
+            Some("runtime.llm.guardian")
+        );
         assert_eq!(decision.model_provider.as_deref(), Some("deep-seek"));
         assert_eq!(decision.model_name.as_deref(), Some("deepseek-v4-flash"));
         assert_eq!(decision.review_latency_ms, Some(19));

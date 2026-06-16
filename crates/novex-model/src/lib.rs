@@ -1037,7 +1037,10 @@ mod tests {
             Some(ModelRoutePurpose::Rerank)
         );
         assert_eq!(ModelRoutePurpose::Chat.as_str(), "chat");
-        assert_eq!(ModelRoutePurpose::GuardianReview.as_str(), "guardian_review");
+        assert_eq!(
+            ModelRoutePurpose::GuardianReview.as_str(),
+            "guardian_review"
+        );
         assert_eq!(
             ModelKind::parse("media_generation"),
             Some(ModelKind::MediaGeneration)
@@ -1068,7 +1071,9 @@ mod tests {
 
         assert!(llm.purposes.contains(&ModelRoutePurpose::GuardianReview));
         assert_eq!(
-            llm.purpose_route_ids.get("guardian_review").map(String::as_str),
+            llm.purpose_route_ids
+                .get("guardian_review")
+                .map(String::as_str),
             Some("runtime.llm")
         );
     }
