@@ -83,6 +83,23 @@ pub struct EvalResultSaveRecord {
     pub now: NaiveDateTime,
 }
 
+#[derive(Debug, Clone)]
+pub struct EvalCaseSaveRecord {
+    pub id: i64,
+    pub tenant_id: i64,
+    pub dataset_id: i64,
+    pub case_code: String,
+    pub target_kind: String,
+    pub metric_kind: String,
+    pub prompt: String,
+    pub expected_payload: Value,
+    pub tags: Value,
+    pub status: i16,
+    pub sort: i32,
+    pub user_id: i64,
+    pub now: NaiveDateTime,
+}
+
 #[derive(Debug, Clone, FromRow)]
 pub struct EvalDatasetRecord {
     pub id: i64,
@@ -301,6 +318,45 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
         .execute(&self.db)
         .await?;
         Ok(())
+    }
+
+    pub async fn upsert_case(&self, record: &EvalCaseSaveRecord) -> Result<i64, AppError> {
+        Ok(sqlx::query_scalar::<_, i64>(
+            r#"
+INSERT INTO ai_eval_case (
+    id, tenant_id, dataset_id, case_code, target_kind, metric_kind, prompt,
+    expected_payload, tags, status, sort, create_user, create_time, update_user, update_time
+)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $12, $13)
+ON CONFLICT (dataset_id, case_code)
+DO UPDATE SET
+    target_kind = EXCLUDED.target_kind,
+    metric_kind = EXCLUDED.metric_kind,
+    prompt = EXCLUDED.prompt,
+    expected_payload = EXCLUDED.expected_payload,
+    tags = EXCLUDED.tags,
+    status = EXCLUDED.status,
+    sort = EXCLUDED.sort,
+    update_user = EXCLUDED.update_user,
+    update_time = EXCLUDED.update_time
+RETURNING id;
+"#,
+        )
+        .bind(record.id)
+        .bind(record.tenant_id)
+        .bind(record.dataset_id)
+        .bind(&record.case_code)
+        .bind(&record.target_kind)
+        .bind(&record.metric_kind)
+        .bind(&record.prompt)
+        .bind(&record.expected_payload)
+        .bind(&record.tags)
+        .bind(record.status)
+        .bind(record.sort)
+        .bind(record.user_id)
+        .bind(record.now)
+        .fetch_one(&self.db)
+        .await?)
     }
 
     pub async fn count_runs(&self, filter: &EvalRunFilter<'_>) -> Result<i64, AppError> {

@@ -3,9 +3,10 @@ use std::time::Instant;
 use chrono::Utc;
 use novex_eval::{
     build_regression_report, score_case, score_cost_case, score_latency_case,
-    score_retrieval_recall_case, EvalCaseActual, EvalCaseExpected, EvalCaseScore, EvalMetricKind,
-    EvalTargetKind,
+    score_retrieval_recall_case, EvalCaseActual, EvalCaseCandidate, EvalCaseExpected,
+    EvalCaseScore, EvalMetricKind, EvalTargetKind,
 };
+use novex_trace::TraceBundle;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sqlx::PgPool;
@@ -13,10 +14,11 @@ use sqlx::PgPool;
 use crate::{
     application::ai::knowledge_service::{KnowledgeService, RagAskCommand},
     application::system::{ensure_max_chars, format_datetime},
+    infrastructure::persistence::ai_agent_repository::AiAgentRepository,
     infrastructure::persistence::ai_eval_repository::{
-        AiEvalRepository, EvalCaseFilter, EvalCaseRecord, EvalDatasetFilter, EvalDatasetRecord,
-        EvalResultFilter, EvalResultRecord, EvalResultSaveRecord, EvalRunFilter, EvalRunRecord,
-        EvalRunSaveRecord,
+        AiEvalRepository, EvalCaseFilter, EvalCaseRecord, EvalCaseSaveRecord, EvalDatasetFilter,
+        EvalDatasetRecord, EvalResultFilter, EvalResultRecord, EvalResultSaveRecord, EvalRunFilter,
+        EvalRunRecord, EvalRunSaveRecord,
     },
     shared::{
         error::AppError,
@@ -29,6 +31,7 @@ const DEFAULT_TENANT_ID: i64 = 1;
 const DEFAULT_EVAL_PAGE_SIZE: u64 = 20;
 const DEFAULT_CASE_PAGE_SIZE: u64 = 100;
 const ENABLED_STATUS: i16 = 1;
+const DISABLED_STATUS: i16 = 0;
 const EVAL_RUN_MODE_DETERMINISTIC: &str = "deterministic";
 const EVAL_RUN_MODE_LIVE_RAG: &str = "live_rag";
 
@@ -170,6 +173,17 @@ pub struct EvalRunCommand {
     pub run_mode: String,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EvalCaseCaptureCommand {
+    #[serde(default)]
+    pub dataset_id: Option<i64>,
+    #[serde(default)]
+    pub dataset_code: String,
+    #[serde(default = "default_capture_dry_run")]
+    pub dry_run: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EvalDatasetResp {
@@ -236,11 +250,21 @@ pub struct EvalResultResp {
     pub create_time: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EvalCaseCaptureResp {
+    pub dry_run: bool,
+    pub case_id: Option<i64>,
+    pub case_code: String,
+    pub candidate: EvalCaseCandidate,
+}
+
 #[derive(Debug, Clone)]
 pub struct EvalService {
     tenant_id: i64,
     db: PgPool,
     repo: AiEvalRepository,
+    agent_repo: AiAgentRepository,
 }
 
 impl EvalService {
@@ -252,7 +276,8 @@ impl EvalService {
         Self {
             tenant_id,
             db: db.clone(),
-            repo: AiEvalRepository::new(db),
+            repo: AiEvalRepository::new(db.clone()),
+            agent_repo: AiAgentRepository::new(db),
         }
     }
 
@@ -302,6 +327,73 @@ impl EvalService {
             .map(EvalCaseResp::from)
             .collect();
         Ok(PageResult::new(list, total))
+    }
+
+    pub async fn capture_case_from_agent_run(
+        &self,
+        user_id: i64,
+        run_id: i64,
+        command: EvalCaseCaptureCommand,
+    ) -> Result<EvalCaseCaptureResp, AppError> {
+        let command = normalize_eval_case_capture_command(command)?;
+        let Some(rollout) = self
+            .agent_repo
+            .find_rollout_by_run_id(self.tenant_id, run_id)
+            .await?
+        else {
+            return Err(AppError::NotFound);
+        };
+        let bundle = serde_json::from_value::<TraceBundle>(rollout.event_bundle)
+            .map_err(|err| AppError::bad_request(format!("Agent trace bundle 格式错误: {err}")))?;
+        let candidate = EvalCaseCandidate::from_trace_bundle(&bundle);
+        let case_code = eval_case_code_from_agent_run(run_id);
+        if command.dry_run {
+            return Ok(EvalCaseCaptureResp {
+                dry_run: true,
+                case_id: None,
+                case_code,
+                candidate,
+            });
+        }
+
+        let Some(dataset) = self
+            .repo
+            .find_dataset_by_selector(
+                self.tenant_id,
+                command.dataset_id,
+                Some(&command.dataset_code),
+            )
+            .await?
+        else {
+            return Err(AppError::NotFound);
+        };
+        let now = Utc::now().naive_utc();
+        let case_id = self
+            .repo
+            .upsert_case(&EvalCaseSaveRecord {
+                id: next_id(),
+                tenant_id: self.tenant_id,
+                dataset_id: dataset.id,
+                case_code: case_code.clone(),
+                target_kind: target_kind_code(candidate.target_kind),
+                metric_kind: metric_code(candidate.metric_kind),
+                prompt: candidate.prompt.clone(),
+                expected_payload: serde_json::to_value(&candidate.expected)
+                    .unwrap_or_else(|_| json!({})),
+                tags: candidate.tags.clone(),
+                status: DISABLED_STATUS,
+                sort: 0,
+                user_id,
+                now,
+            })
+            .await?;
+
+        Ok(EvalCaseCaptureResp {
+            dry_run: false,
+            case_id: Some(case_id),
+            case_code,
+            candidate,
+        })
     }
 
     pub async fn run_eval(
@@ -517,6 +609,19 @@ pub fn normalize_eval_run_command(mut command: EvalRunCommand) -> Result<EvalRun
         EVAL_RUN_MODE_DETERMINISTIC | EVAL_RUN_MODE_LIVE_RAG
     ) {
         return Err(AppError::bad_request("评测运行模式不合法"));
+    }
+    Ok(command)
+}
+
+pub fn normalize_eval_case_capture_command(
+    mut command: EvalCaseCaptureCommand,
+) -> Result<EvalCaseCaptureCommand, AppError> {
+    command.dataset_code = command.dataset_code.trim().to_owned();
+    if !command.dry_run && command.dataset_id.is_none() && command.dataset_code.is_empty() {
+        return Err(AppError::bad_request("评测集不能为空"));
+    }
+    if !command.dataset_code.is_empty() {
+        ensure_max_chars("评测集编码", &command.dataset_code, 128)?;
     }
     Ok(command)
 }
@@ -864,6 +969,17 @@ fn metric_kind_from_code(code: &str) -> EvalMetricKind {
     }
 }
 
+fn target_kind_code(target: EvalTargetKind) -> String {
+    match target {
+        EvalTargetKind::Rag => "rag",
+        EvalTargetKind::Intent => "intent",
+        EvalTargetKind::Tool => "tool",
+        EvalTargetKind::ReAct => "react",
+        EvalTargetKind::Safety => "safety",
+    }
+    .to_owned()
+}
+
 fn expected_u32(payload: &Value, key: &str, fallback: u32) -> u32 {
     payload
         .get(key)
@@ -899,6 +1015,14 @@ fn default_case_size() -> u64 {
 
 fn default_enabled_status() -> Option<i16> {
     Some(ENABLED_STATUS)
+}
+
+fn default_capture_dry_run() -> bool {
+    true
+}
+
+fn eval_case_code_from_agent_run(run_id: i64) -> String {
+    format!("agent-trace-{run_id}")
 }
 
 #[cfg(test)]
@@ -942,6 +1066,18 @@ mod tests {
         assert_eq!(command.dataset_code, "knowledge_base_regression");
         assert_eq!(command.run_mode, "live_rag");
         assert!(eval_run_uses_live_rag(&command));
+    }
+
+    #[test]
+    fn eval_case_capture_command_requires_dataset_when_persisting() {
+        let err = normalize_eval_case_capture_command(EvalCaseCaptureCommand {
+            dataset_id: None,
+            dataset_code: " ".to_owned(),
+            dry_run: false,
+        })
+        .unwrap_err();
+
+        assert!(err.to_string().contains("评测集不能为空"));
     }
 
     #[test]

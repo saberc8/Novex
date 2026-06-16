@@ -1825,6 +1825,7 @@ name = "novex-eval"
 version = "0.1.0"
 dependencies = [
  "novex-ai-core",
+ "novex-trace",
  "serde",
  "serde_json",
 ]

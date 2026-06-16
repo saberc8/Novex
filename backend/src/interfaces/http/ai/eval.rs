@@ -6,8 +6,9 @@ use axum::{
 
 use crate::{
     application::ai::eval_service::{
-        EvalCaseQuery, EvalCaseResp, EvalDatasetQuery, EvalDatasetResp, EvalResultQuery,
-        EvalResultResp, EvalRunCommand, EvalRunQuery, EvalRunResp, EvalService,
+        EvalCaseCaptureCommand, EvalCaseCaptureResp, EvalCaseQuery, EvalCaseResp, EvalDatasetQuery,
+        EvalDatasetResp, EvalResultQuery, EvalResultResp, EvalRunCommand, EvalRunQuery,
+        EvalRunResp, EvalService,
     },
     domain::auth::model::CurrentUser,
     interfaces::http::{middleware::permission::require_permission, AppState},
@@ -23,6 +24,10 @@ pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/ai/evals/datasets", get(list_datasets))
         .route("/ai/evals/datasets/:dataset_id/cases", get(list_cases))
+        .route(
+            "/ai/evals/cases/from-agent-run/:run_id",
+            post(capture_case_from_agent_run),
+        )
         .route("/ai/evals/runs", post(run_eval).get(list_runs))
         .route("/ai/evals/runs/:run_id", get(get_run))
         .route("/ai/evals/runs/:run_id/results", get(list_results))
@@ -50,6 +55,22 @@ async fn list_cases(
 
     Ok(Json(ApiResponse::ok(
         service.list_cases(dataset_id, query).await?,
+    )))
+}
+
+async fn capture_case_from_agent_run(
+    State(state): State<AppState>,
+    current_user: CurrentUser,
+    Path(run_id): Path<i64>,
+    Json(command): Json<EvalCaseCaptureCommand>,
+) -> Result<Json<ApiResponse<EvalCaseCaptureResp>>, AppError> {
+    require_permission(&current_user, EVAL_RUN_PERMISSION)?;
+    let service = EvalService::for_tenant(state.db, current_user.tenant_id);
+
+    Ok(Json(ApiResponse::ok(
+        service
+            .capture_case_from_agent_run(current_user.id, run_id, command)
+            .await?,
     )))
 }
 
@@ -118,7 +139,8 @@ mod tests {
     use super::*;
     use crate::{
         application::ai::eval_service::{
-            EvalCaseQuery, EvalDatasetQuery, EvalResultQuery, EvalRunCommand, EvalRunQuery,
+            EvalCaseCaptureCommand, EvalCaseQuery, EvalDatasetQuery, EvalResultQuery,
+            EvalRunCommand, EvalRunQuery,
         },
         domain::auth::model::{CurrentUser, RoleContext},
         infrastructure::security::jwt::JwtService,
@@ -251,6 +273,24 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn eval_case_capture_handler_rejects_missing_permission() {
+        let err = capture_case_from_agent_run(
+            State(test_state()),
+            user_with_permissions(vec![]),
+            Path(42),
+            Json(EvalCaseCaptureCommand {
+                dataset_id: Some(1),
+                dataset_code: String::new(),
+                dry_run: false,
+            }),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(matches!(err, AppError::Forbidden));
+    }
+
+    #[tokio::test]
     async fn eval_run_route_is_registered_and_requires_auth() {
         let db = PgPoolOptions::new()
             .connect_lazy("postgres://postgres:postgres@localhost:5432/avalon_admin")
@@ -266,6 +306,33 @@ mod tests {
                     .header(header::ACCEPT, "application/json")
                     .header(header::CONTENT_TYPE, "application/json")
                     .body(Body::from(r#"{"datasetCode":"training_regression"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let body = serde_json::from_slice::<Value>(&body).unwrap();
+        assert_eq!(body["code"], "401");
+    }
+
+    #[tokio::test]
+    async fn eval_case_capture_route_is_registered_and_requires_auth() {
+        let db = PgPoolOptions::new()
+            .connect_lazy("postgres://postgres:postgres@localhost:5432/avalon_admin")
+            .unwrap();
+        let jwt = JwtService::new("test-secret".to_owned(), 24);
+        let app = build_router(db, &["http://localhost:4399".to_owned()], jwt).unwrap();
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/ai/evals/cases/from-agent-run/42")
+                    .method("POST")
+                    .header(header::ACCEPT, "application/json")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"dryRun":true}"#))
                     .unwrap(),
             )
             .await
