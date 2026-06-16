@@ -7,6 +7,7 @@ pub mod integration_service;
 pub mod knowledge_service;
 pub mod memory_service;
 pub mod model_service;
+pub mod notebook_service;
 pub mod parser_queue_runtime;
 pub mod studio_service;
 pub mod template_service;
