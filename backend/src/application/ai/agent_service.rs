@@ -52,10 +52,10 @@ use crate::{
     application::system::{ensure_max_chars, format_datetime},
     infrastructure::persistence::{
         ai_agent_repository::{
-            AgentRolloutSaveRecord, AgentRunFilter, AgentRunRecord, AgentRunSaveRecord,
-            AgentRunStatusUpdate, AgentTraceSaveRecord, AiAgentRepository, RunEventCursorFilter,
-            RunEventFilter, RunEventRecord, RunEventSaveRecord, RunPauseSaveRecord, RunSaveRecord,
-            RunStatusUpdate, RunStepSaveRecord,
+            AgentRolloutSaveRecord, AgentRunFilter, AgentRunQueueSaveRecord, AgentRunRecord,
+            AgentRunSaveRecord, AgentRunStatusUpdate, AgentTraceSaveRecord, AiAgentRepository,
+            RunEventCursorFilter, RunEventFilter, RunEventRecord, RunEventSaveRecord,
+            RunPauseSaveRecord, RunSaveRecord, RunStatusUpdate, RunStepSaveRecord,
         },
         ai_capability_repository::{AiCapabilityRepository, ToolAuditSaveRecord, ToolLookupRecord},
         ai_capability_repository::{ConnectorCredentialLookupRecord, McpToolExecutionRecord},
@@ -94,6 +94,9 @@ const MAX_AGENT_MEMORY_SNIPPETS: usize = 6;
 const MAX_AGENT_MEMORY_CANDIDATES: i64 = 32;
 const CODE_AGENT_MODEL_ROUTE_ID: &str = "runtime.llm.code_agent";
 const CODE_AGENT_ROUTE_PURPOSE: &str = "code_agent";
+const AGENT_RUN_EXECUTION_MODE_INLINE: &str = "inline";
+const AGENT_RUN_EXECUTION_MODE_QUEUED: &str = "queued";
+const DEFAULT_AGENT_QUEUE_MAX_ATTEMPTS: i32 = 3;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct FeishuWebhookConfig {
@@ -412,6 +415,8 @@ pub struct AgentRunCommand {
     #[serde(default)]
     pub runtime_mode: Option<String>,
     #[serde(default)]
+    pub execution_mode: Option<String>,
+    #[serde(default)]
     pub auto_approve: bool,
     #[serde(default)]
     pub budget: TaskBudget,
@@ -635,6 +640,9 @@ impl AgentService {
         command: AgentRunCommand,
     ) -> Result<AgentRunResp, AppError> {
         let command = normalize_agent_run_command(command)?;
+        if command.execution_mode.as_deref() == Some(AGENT_RUN_EXECUTION_MODE_QUEUED) {
+            return self.create_queued_run(user_id, command).await;
+        }
         if command.runtime_mode.as_deref() == Some("model_loop") {
             return self.create_model_loop_run(user_id, command).await;
         }
@@ -789,6 +797,105 @@ impl AgentService {
             self.refresh_trace_snapshot(user_id, run_id, Value::Null)
                 .await?;
         }
+
+        self.get_run(run_id).await
+    }
+
+    async fn create_queued_run(
+        &self,
+        user_id: i64,
+        command: AgentRunCommand,
+    ) -> Result<AgentRunResp, AppError> {
+        let memory_context = self.load_agent_memory_context(user_id).await?;
+        let mut plan = build_agent_plan(&command, memory_context)?;
+        if command.runtime_mode.as_deref() == Some("model_loop") {
+            plan.loop_kind = "model_loop".to_owned();
+            plan.selected_tool_code = None;
+            plan.requires_approval = false;
+            plan.pause_reason = None;
+        } else if let Some(tool_code) = plan.selected_tool_code.as_deref() {
+            let Some(tool) = self
+                .capability_repo
+                .find_tool_by_code(self.tenant_id, tool_code)
+                .await?
+            else {
+                return Err(AppError::NotFound);
+            };
+            let policy = agent_tool_policy_decision(&tool, command.auto_approve);
+            plan.requires_approval = policy.requires_approval;
+            plan.pause_reason = policy.pause_reason;
+        }
+
+        let run_id = next_id();
+        let trace_id = format!("agent-{run_id}");
+        let now = Utc::now().naive_utc();
+        self.create_run_records_with_status(
+            user_id,
+            run_id,
+            &trace_id,
+            &command,
+            &plan,
+            RunStatus::Queued,
+            now,
+        )
+        .await?;
+
+        let input_item = novex_agent_protocol::AgentTurnItem::user_message(command.input.as_str());
+        let mut input_payload = agent_turn_item_event_payload(&input_item);
+        if let Some(object) = input_payload.as_object_mut() {
+            object.insert("input".to_owned(), json!(&command.input));
+            object.insert("executionMode".to_owned(), json!("queued"));
+            if let Some(runtime_mode) = command.runtime_mode.as_deref() {
+                object.insert("runtimeMode".to_owned(), json!(runtime_mode));
+            }
+        }
+        self.append_event(
+            user_id,
+            run_id,
+            None,
+            RunEventKind::InputReceived,
+            run_status_code(RunStatus::Queued),
+            input_payload,
+        )
+        .await?;
+        self.append_event(
+            user_id,
+            run_id,
+            None,
+            RunEventKind::StatusChanged,
+            run_status_code(RunStatus::Queued),
+            json!({
+                "status": run_status_code(RunStatus::Queued),
+                "executionMode": "queued",
+                "runtimeMode": command.runtime_mode
+            }),
+        )
+        .await?;
+        self.repo
+            .enqueue_agent_run(&AgentRunQueueSaveRecord {
+                id: next_id(),
+                tenant_id: self.tenant_id,
+                run_id,
+                priority: 0,
+                max_attempts: DEFAULT_AGENT_QUEUE_MAX_ATTEMPTS,
+                payload: json!({
+                    "command": agent_run_command_payload(&command),
+                    "executionMode": "queued",
+                    "source": "agent.create_run"
+                }),
+                user_id,
+                now,
+            })
+            .await?;
+        self.refresh_trace_snapshot(
+            user_id,
+            run_id,
+            json!({
+                "executionMode": "queued",
+                "runtimeMode": command.runtime_mode
+            }),
+        )
+        .await?;
 
         self.get_run(run_id).await
     }
@@ -1997,19 +2104,43 @@ impl AgentService {
         plan: &AgentPlanSummary,
         now: NaiveDateTime,
     ) -> Result<(), AppError> {
+        self.create_run_records_with_status(
+            user_id,
+            run_id,
+            trace_id,
+            command,
+            plan,
+            RunStatus::Running,
+            now,
+        )
+        .await
+    }
+
+    async fn create_run_records_with_status(
+        &self,
+        user_id: i64,
+        run_id: i64,
+        trace_id: &str,
+        command: &AgentRunCommand,
+        plan: &AgentPlanSummary,
+        initial_status: RunStatus,
+        now: NaiveDateTime,
+    ) -> Result<(), AppError> {
+        let status = run_status_code(initial_status);
         self.repo
             .create_run(&RunSaveRecord {
                 id: run_id,
                 tenant_id: self.tenant_id,
                 run_type: "agent".to_owned(),
-                status: run_status_code(RunStatus::Running),
+                status: status.clone(),
                 source_type: "admin".to_owned(),
                 source_id: Some(user_id.to_string()),
                 trace_id: trace_id.to_owned(),
-                input_payload: json!({ "input": command.input }),
+                input_payload: agent_run_command_payload(command),
                 output_payload: Value::Null,
                 budget_policy: serde_json::to_value(plan.task_budget).unwrap_or(Value::Null),
                 created_by: user_id,
+                started_at: (initial_status != RunStatus::Queued).then_some(now),
                 user_id,
                 now,
             })
@@ -2022,7 +2153,7 @@ impl AgentService {
                 intent: plan.intent.clone(),
                 loop_kind: plan.loop_kind.clone(),
                 selected_tool_code: plan.selected_tool_code.clone(),
-                status: run_status_code(RunStatus::Running),
+                status,
                 pause_reason: None,
                 task_budget: serde_json::to_value(plan.task_budget).unwrap_or(Value::Null),
                 metadata: json!({
@@ -4070,6 +4201,7 @@ pub fn normalize_agent_run_command(
     }
     ensure_max_chars("Agent 输入", &command.input, 4000)?;
     command.runtime_mode = normalize_agent_runtime_mode(command.runtime_mode)?;
+    command.execution_mode = Some(normalize_agent_execution_mode(command.execution_mode)?);
     command.budget = novex_ai_core::normalize_task_budget(command.budget)
         .map_err(|err| AppError::bad_request(format!("任务预算超出限制: {}", err.field)))?;
     Ok(command)
@@ -4086,6 +4218,32 @@ fn normalize_agent_runtime_mode(runtime_mode: Option<String>) -> Result<Option<S
         return Ok(Some(runtime_mode));
     }
     Err(AppError::bad_request("Agent runtimeMode 不支持"))
+}
+
+fn normalize_agent_execution_mode(execution_mode: Option<String>) -> Result<String, AppError> {
+    let Some(execution_mode) = execution_mode
+        .map(|value| value.trim().to_ascii_lowercase())
+        .filter(|value| !value.is_empty())
+    else {
+        return Ok(AGENT_RUN_EXECUTION_MODE_INLINE.to_owned());
+    };
+    if matches!(
+        execution_mode.as_str(),
+        AGENT_RUN_EXECUTION_MODE_INLINE | AGENT_RUN_EXECUTION_MODE_QUEUED
+    ) {
+        return Ok(execution_mode);
+    }
+    Err(AppError::bad_request("Agent executionMode 不支持"))
+}
+
+fn agent_run_command_payload(command: &AgentRunCommand) -> Value {
+    json!({
+        "input": command.input,
+        "runtimeMode": command.runtime_mode,
+        "executionMode": command.execution_mode,
+        "autoApprove": command.auto_approve,
+        "budget": command.budget
+    })
 }
 
 fn build_model_loop_tool_router() -> Result<ToolRouter, ToolRouteError> {
@@ -5135,12 +5293,69 @@ mod tests {
         let err = normalize_agent_run_command(AgentRunCommand {
             input: "   ".to_owned(),
             runtime_mode: None,
+            execution_mode: None,
             auto_approve: false,
             budget: TaskBudget::default(),
         })
         .unwrap_err();
 
         assert!(err.to_string().contains("Agent 输入不能为空"));
+    }
+
+    #[test]
+    fn agent_run_command_accepts_queued_execution_mode() {
+        let command: AgentRunCommand = serde_json::from_value(serde_json::json!({
+            "input": "search policy",
+            "executionMode": "queued"
+        }))
+        .unwrap();
+        let command = normalize_agent_run_command(command).unwrap();
+
+        assert_eq!(command.execution_mode.as_deref(), Some("queued"));
+    }
+
+    #[test]
+    fn agent_run_command_defaults_to_inline_execution_mode() {
+        let command = normalize_agent_run_command(AgentRunCommand {
+            input: "search policy".to_owned(),
+            runtime_mode: None,
+            execution_mode: None,
+            auto_approve: false,
+            budget: TaskBudget::default(),
+        })
+        .unwrap();
+
+        assert_eq!(command.execution_mode.as_deref(), Some("inline"));
+    }
+
+    #[test]
+    fn agent_run_command_rejects_unknown_execution_mode() {
+        let err = normalize_agent_run_command(AgentRunCommand {
+            input: "search policy".to_owned(),
+            runtime_mode: None,
+            execution_mode: Some("fire_and_forget".to_owned()),
+            auto_approve: false,
+            budget: TaskBudget::default(),
+        })
+        .unwrap_err();
+
+        assert!(err.to_string().contains("Agent executionMode 不支持"));
+    }
+
+    #[test]
+    fn agent_service_queued_run_creation_enqueues_and_returns_queued_status() {
+        let source = include_str!("agent_service.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+
+        assert!(source.contains("create_queued_run"));
+        assert!(source.contains("create_run_records_with_status"));
+        assert!(source.contains("RunStatus::Queued"));
+        assert!(source.contains("enqueue_agent_run"));
+        assert!(source.contains("AgentRunQueueSaveRecord"));
+        assert!(source.contains("\"executionMode\""));
+        assert!(source.contains("RunEventKind::StatusChanged"));
     }
 
     #[test]
@@ -5859,6 +6074,7 @@ mod tests {
         let command = normalize_agent_run_command(AgentRunCommand {
             input: "search the training handbook".to_owned(),
             runtime_mode: None,
+            execution_mode: None,
             auto_approve: false,
             budget: TaskBudget {
                 max_steps: Some(6),
@@ -5880,6 +6096,7 @@ mod tests {
         let command = normalize_agent_run_command(AgentRunCommand {
             input: "send a Feishu reminder".to_owned(),
             runtime_mode: None,
+            execution_mode: None,
             auto_approve: false,
             budget: TaskBudget {
                 max_steps: Some(6),
@@ -5914,6 +6131,7 @@ mod tests {
         let command = normalize_agent_run_command(AgentRunCommand {
             input: "answer in my preferred language".to_owned(),
             runtime_mode: None,
+            execution_mode: None,
             auto_approve: false,
             budget: TaskBudget::default(),
         })
@@ -6832,6 +7050,7 @@ mod tests {
         let err = normalize_agent_run_command(AgentRunCommand {
             input: "search the training handbook".to_owned(),
             runtime_mode: None,
+            execution_mode: None,
             auto_approve: false,
             budget: TaskBudget {
                 max_steps: Some(6),

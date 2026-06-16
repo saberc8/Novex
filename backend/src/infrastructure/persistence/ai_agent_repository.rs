@@ -29,6 +29,7 @@ pub struct RunSaveRecord {
     pub output_payload: Value,
     pub budget_policy: Value,
     pub created_by: i64,
+    pub started_at: Option<NaiveDateTime>,
     pub user_id: i64,
     pub now: NaiveDateTime,
 }
@@ -260,7 +261,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $13, $14);
         .bind(&record.output_payload)
         .bind(&record.budget_policy)
         .bind(record.created_by)
-        .bind(record.now)
+        .bind(record.started_at)
         .bind(record.user_id)
         .bind(record.now)
         .execute(&self.db)
