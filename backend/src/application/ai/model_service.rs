@@ -129,6 +129,22 @@ impl ModelRetryPolicy {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelFallbackPolicyDecision {
+    pub enabled: bool,
+    pub fallback_route_id: Option<String>,
+    pub block_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelRouteFallbackPlan {
+    pub primary_route_id: String,
+    pub decision: ModelFallbackPolicyDecision,
+    pub policy_status: ModelRoutePolicyStatus,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelChatConversationResp {
@@ -296,6 +312,16 @@ struct ModelRouteRetryPolicyRow {
     pub route_policy: Value,
     pub fallback_policy: Value,
     pub network_zone: String,
+    pub fallback_network_zone: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, FromRow)]
+struct ModelRouteFallbackPolicyRow {
+    pub route_code: String,
+    pub route_policy: Value,
+    pub fallback_policy: Value,
+    pub network_zone: String,
+    pub fallback_route_code: Option<String>,
     pub fallback_network_zone: Option<String>,
 }
 
@@ -469,6 +495,84 @@ LIMIT 1;
         });
 
         Ok(model_retry_policy_from_route_policy_status(&status))
+    }
+
+    pub async fn fallback_plan_for_purpose(
+        &self,
+        purpose: ModelRoutePurpose,
+    ) -> Result<Option<ModelRouteFallbackPlan>, AppError> {
+        self.fallback_plan_for_purpose_with_route_id(purpose, None)
+            .await
+    }
+
+    async fn fallback_plan_for_purpose_with_route_id(
+        &self,
+        purpose: ModelRoutePurpose,
+        route_id: Option<&str>,
+    ) -> Result<Option<ModelRouteFallbackPlan>, AppError> {
+        let row = sqlx::query_as::<_, ModelRouteFallbackPolicyRow>(
+            r#"
+SELECT
+    r.code AS route_code,
+    r.policy AS route_policy,
+    profile.fallback_policy AS fallback_policy,
+    deployment.network_zone AS network_zone,
+    fallback_route.code AS fallback_route_code,
+    fallback_deployment.network_zone AS fallback_network_zone
+FROM ai_model_route r
+JOIN ai_model_profile profile
+  ON profile.tenant_id = r.tenant_id
+ AND profile.id = r.model_profile_id
+ AND profile.status = 1
+JOIN ai_model_deployment deployment
+  ON deployment.tenant_id = profile.tenant_id
+ AND deployment.id = profile.deployment_id
+ AND deployment.status = 1
+LEFT JOIN ai_model_route fallback_route
+  ON fallback_route.tenant_id = r.tenant_id
+ AND fallback_route.id = r.fallback_route_id
+ AND fallback_route.status = 1
+LEFT JOIN ai_model_profile fallback_profile
+  ON fallback_profile.tenant_id = fallback_route.tenant_id
+ AND fallback_profile.id = fallback_route.model_profile_id
+ AND fallback_profile.status = 1
+LEFT JOIN ai_model_deployment fallback_deployment
+  ON fallback_deployment.tenant_id = fallback_profile.tenant_id
+ AND fallback_deployment.id = fallback_profile.deployment_id
+ AND fallback_deployment.status = 1
+WHERE r.tenant_id = $1
+  AND r.route_purpose = $2
+  AND ($3::text IS NULL OR r.code = $3)
+  AND r.status = 1
+ORDER BY r.priority ASC, r.id ASC
+LIMIT 1;
+"#,
+        )
+        .bind(self.tenant_id)
+        .bind(purpose.as_str())
+        .bind(route_id)
+        .fetch_optional(&self.db)
+        .await?;
+
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        let policy_status = evaluate_model_route_policy(ModelRoutePolicyInput {
+            network_zone: &row.network_zone,
+            fallback_network_zone: row.fallback_network_zone.as_deref(),
+            fallback_policy: &row.fallback_policy,
+            route_policy: &row.route_policy,
+        });
+        let decision = model_fallback_policy_decision_from_status(
+            &policy_status,
+            row.fallback_route_code.as_deref(),
+        );
+
+        Ok(Some(ModelRouteFallbackPlan {
+            primary_route_id: row.route_code,
+            decision,
+            policy_status,
+        }))
     }
 
     pub async fn resolve_route_for_purpose_with_route_id(
@@ -1774,6 +1878,43 @@ fn model_retry_policy_from_route_policy_status(
     }
 }
 
+fn model_fallback_policy_decision_from_status(
+    status: &ModelRoutePolicyStatus,
+    fallback_route_id: Option<&str>,
+) -> ModelFallbackPolicyDecision {
+    let fallback_route_id = fallback_route_id
+        .map(str::trim)
+        .filter(|route_id| !route_id.is_empty())
+        .map(str::to_owned);
+    if !status.fallback_enabled {
+        return ModelFallbackPolicyDecision {
+            enabled: false,
+            fallback_route_id,
+            block_reason: Some("fallback_disabled".to_owned()),
+        };
+    }
+    if !status.violations.is_empty() {
+        return ModelFallbackPolicyDecision {
+            enabled: false,
+            fallback_route_id,
+            block_reason: Some("policy_violation".to_owned()),
+        };
+    }
+    if fallback_route_id.is_none() {
+        return ModelFallbackPolicyDecision {
+            enabled: false,
+            fallback_route_id,
+            block_reason: Some("missing_fallback_route".to_owned()),
+        };
+    }
+
+    ModelFallbackPolicyDecision {
+        enabled: true,
+        fallback_route_id,
+        block_reason: None,
+    }
+}
+
 fn runtime_route_from_registry_row<F>(
     row: &ModelRuntimeRouteRow,
     mut get_env: F,
@@ -2358,6 +2499,53 @@ mod tests {
         assert!(source.contains("pub async fn retry_policy_for_purpose"));
         assert!(source.contains("profile.fallback_policy"));
         assert!(source.contains("evaluate_model_route_policy"));
+    }
+
+    #[test]
+    fn model_route_fallback_policy_enables_valid_fallback_route() {
+        let status = evaluate_model_route_policy(ModelRoutePolicyInput {
+            network_zone: "private",
+            fallback_network_zone: Some("private"),
+            fallback_policy: &json!({ "enabled": true }),
+            route_policy: &Value::Null,
+        });
+
+        let decision =
+            model_fallback_policy_decision_from_status(&status, Some("runtime.llm.backup"));
+
+        assert!(decision.enabled);
+        assert_eq!(
+            decision.fallback_route_id.as_deref(),
+            Some("runtime.llm.backup")
+        );
+    }
+
+    #[test]
+    fn model_route_fallback_policy_blocks_policy_violations() {
+        let status = evaluate_model_route_policy(ModelRoutePolicyInput {
+            network_zone: "private",
+            fallback_network_zone: Some("public"),
+            fallback_policy: &json!({ "enabled": true }),
+            route_policy: &Value::Null,
+        });
+
+        let decision =
+            model_fallback_policy_decision_from_status(&status, Some("runtime.llm.backup"));
+
+        assert!(!decision.enabled);
+        assert_eq!(decision.block_reason.as_deref(), Some("policy_violation"));
+    }
+
+    #[test]
+    fn model_route_fallback_source_contract_reads_configured_fallback_route() {
+        let source = include_str!("model_service.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+
+        assert!(source.contains("pub async fn fallback_plan_for_purpose"));
+        assert!(source.contains("fallback_route.code AS fallback_route_code"));
+        assert!(source.contains("evaluate_model_route_policy(ModelRoutePolicyInput"));
     }
 
     #[test]
