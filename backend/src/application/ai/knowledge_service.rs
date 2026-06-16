@@ -6401,6 +6401,7 @@ mod tests {
             conversation_id: None,
             answer: "Training starts on Monday.".to_owned(),
             route_id: "runtime.llm".to_owned(),
+            provider: "deep-seek".to_owned(),
             model: Some("deepseek-test".to_owned()),
             latency_ms: 12,
             usage: ModelChatUsage::default(),

@@ -1779,6 +1779,7 @@ mod tests {
                 conversation_id: None,
                 answer: "Novex can answer with the configured chat model.".to_owned(),
                 route_id: "runtime.llm".to_owned(),
+                provider: "deep-seek".to_owned(),
                 model: Some("deepseek-v4-flash".to_owned()),
                 latency_ms: 42,
                 usage: ModelChatUsage {

@@ -105,6 +105,7 @@ pub struct ModelChatResp {
     pub conversation_id: Option<i64>,
     pub answer: String,
     pub route_id: String,
+    pub provider: String,
     pub model: Option<String>,
     pub latency_ms: u128,
     pub usage: ModelChatUsage,
@@ -1232,6 +1233,7 @@ fn model_chat_response_from_provider(
         conversation_id,
         answer,
         route_id: route.summary().route_id,
+        provider: route.provider().as_str().to_owned(),
         model: route.model().map(str::to_owned),
         latency_ms,
         usage: normalize_model_provider_usage(&body),
@@ -2556,6 +2558,7 @@ mod tests {
         assert_eq!(response.answer, "Novex can run pure model chat.");
         assert_eq!(response.conversation_id, Some(77));
         assert_eq!(response.route_id, "runtime.llm");
+        assert_eq!(response.provider, "deep-seek");
         assert_eq!(response.model.as_deref(), Some("deepseek-v4-flash"));
         assert_eq!(response.latency_ms, 42);
         assert_eq!(response.usage.prompt_tokens, Some(11));
@@ -2635,6 +2638,7 @@ mod tests {
             conversation_id: Some(42),
             answer: "Novex records chat turns.".to_owned(),
             route_id: "runtime.llm".to_owned(),
+            provider: "deep-seek".to_owned(),
             model: Some("deepseek-v4-flash".to_owned()),
             latency_ms: 42,
             usage: ModelChatUsage {
@@ -2704,6 +2708,7 @@ mod tests {
             conversation_id: Some(42),
             answer: "Do not persist this answer".to_owned(),
             route_id: "runtime.llm".to_owned(),
+            provider: "deep-seek".to_owned(),
             model: Some("deepseek-v4-flash".to_owned()),
             latency_ms: 42,
             usage: ModelChatUsage {
@@ -2738,6 +2743,7 @@ mod tests {
             conversation_id: None,
             answer: "Tenant scoped answer".to_owned(),
             route_id: "runtime.llm".to_owned(),
+            provider: "deep-seek".to_owned(),
             model: Some("deepseek-v4-flash".to_owned()),
             latency_ms: 24,
             usage: ModelChatUsage {
