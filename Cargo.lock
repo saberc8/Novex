@@ -1791,6 +1791,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "novex-agent-runtime"
+version = "0.1.0"
+dependencies = [
+ "novex-agent-protocol",
+ "novex-tools",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "novex-ai-core"
 version = "0.1.0"
 dependencies = [
