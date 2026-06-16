@@ -453,6 +453,24 @@ struct ModelHealthCheckSaveRecord {
     pub user_id: i64,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+struct ModelOpsAlertSaveRecord {
+    pub id: i64,
+    pub tenant_id: i64,
+    pub alert_key: String,
+    pub alert_kind: String,
+    pub severity: String,
+    pub status: String,
+    pub route_id: Option<i64>,
+    pub provider_id: Option<i64>,
+    pub model_profile_id: Option<i64>,
+    pub source_ref: String,
+    pub event_payload: Value,
+    pub first_seen_at: NaiveDateTime,
+    pub last_seen_at: NaiveDateTime,
+    pub user_id: i64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, FromRow)]
 pub struct ModelChatConversationRow {
     pub id: i64,
@@ -2281,6 +2299,67 @@ fn model_health_check_record_from_result(
     }
 }
 
+fn model_ops_alert_key_from_health_check(
+    tenant_id: i64,
+    route_ids: Option<(i64, i64, i64)>,
+    result: &ModelHealthCheckResult,
+) -> String {
+    match route_ids {
+        Some((route_id, _, _)) => format!("model_health:{}:route:{route_id}", result.target.as_str()),
+        None => format!(
+            "model_health:{}:tenant:{tenant_id}",
+            result.target.as_str()
+        ),
+    }
+}
+
+fn model_ops_alert_record_from_health_check(
+    tenant_id: i64,
+    user_id: i64,
+    route_ids: Option<(i64, i64, i64)>,
+    result: &ModelHealthCheckResult,
+    health_check_id: i64,
+    now: NaiveDateTime,
+) -> ModelOpsAlertSaveRecord {
+    let (route_id, provider_id, model_profile_id) = route_ids
+        .map(|(route_id, provider_id, model_profile_id)| {
+            (Some(route_id), Some(provider_id), Some(model_profile_id))
+        })
+        .unwrap_or((None, None, None));
+    let source_ref = format!("health_check:{health_check_id}");
+    let event_payload = json!({
+        "healthCheckId": health_check_id,
+        "target": result.target.as_str(),
+        "configured": result.configured,
+        "routeId": route_id,
+        "providerId": provider_id,
+        "modelProfileId": model_profile_id,
+        "endpoint": result.endpoint,
+        "maskedApiKey": result.masked_api_key,
+        "httpStatus": result.http_status,
+        "latencyMs": result.latency_ms,
+        "message": result.message,
+        "detail": result.detail,
+    });
+
+    ModelOpsAlertSaveRecord {
+        id: next_id(),
+        tenant_id,
+        alert_key: model_ops_alert_key_from_health_check(tenant_id, route_ids, result),
+        alert_kind: "model_health".to_owned(),
+        severity: "critical".to_owned(),
+        status: "active".to_owned(),
+        route_id,
+        provider_id,
+        model_profile_id,
+        source_ref,
+        event_payload,
+        first_seen_at: now,
+        last_seen_at: now,
+        user_id,
+    }
+}
+
 async fn persist_model_health_check_record(
     db: &PgPool,
     record: &ModelHealthCheckSaveRecord,
@@ -3669,6 +3748,58 @@ mod tests {
         assert_eq!(record.route_id, Some(11));
         assert_eq!(record.provider_id, Some(22));
         assert_eq!(record.model_profile_id, Some(33));
+    }
+
+    #[test]
+    fn model_health_alert_record_from_failure_uses_stable_key_and_payload() {
+        let now =
+            NaiveDateTime::parse_from_str("2026-06-17 10:00:00", "%Y-%m-%d %H:%M:%S").unwrap();
+        let result = ModelHealthCheckResult {
+            target: ModelRuntimeTarget::Llm,
+            configured: true,
+            ok: false,
+            endpoint: Some("https://api.example.test".to_owned()),
+            masked_api_key: Some("sk-***1234".to_owned()),
+            http_status: Some(503),
+            latency_ms: 123,
+            message: "provider unavailable".to_owned(),
+            detail: Some(json!({"provider":"example"})),
+        };
+
+        let record =
+            model_ops_alert_record_from_health_check(1, 7, Some((11, 22, 33)), &result, 99, now);
+
+        assert_eq!(record.tenant_id, 1);
+        assert_eq!(record.alert_key, "model_health:llm:route:11");
+        assert_eq!(record.alert_kind, "model_health");
+        assert_eq!(record.severity, "critical");
+        assert_eq!(record.status, "active");
+        assert_eq!(record.route_id, Some(11));
+        assert_eq!(record.provider_id, Some(22));
+        assert_eq!(record.model_profile_id, Some(33));
+        assert_eq!(record.source_ref, "health_check:99");
+        assert_eq!(record.event_payload["message"], "provider unavailable");
+        assert_eq!(record.event_payload["maskedApiKey"], "sk-***1234");
+    }
+
+    #[test]
+    fn model_health_alert_key_uses_target_when_route_is_missing() {
+        let result = ModelHealthCheckResult {
+            target: ModelRuntimeTarget::Embedding,
+            configured: false,
+            ok: false,
+            endpoint: None,
+            masked_api_key: None,
+            http_status: None,
+            latency_ms: 0,
+            message: "missing route".to_owned(),
+            detail: None,
+        };
+
+        assert_eq!(
+            model_ops_alert_key_from_health_check(1, None, &result),
+            "model_health:embedding:tenant:1"
+        );
     }
 
     #[test]
