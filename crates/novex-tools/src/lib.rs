@@ -54,6 +54,62 @@ pub struct ToolExecutionPolicyDecision {
     pub policy_reason: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolDefinition {
+    pub code: String,
+    pub name: String,
+    pub description: String,
+    pub input_schema: Value,
+    pub output_schema: Option<Value>,
+    pub risk_level: ToolRiskLevel,
+    pub approval_policy: ApprovalPolicy,
+    pub permission_code: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelToolSpec {
+    pub name: String,
+    pub description: String,
+    pub parameters: Value,
+    pub output_schema: Option<Value>,
+    pub metadata: Value,
+}
+
+impl ToolDefinition {
+    pub fn to_model_tool_spec(&self) -> ModelToolSpec {
+        ModelToolSpec {
+            name: self.code.clone(),
+            description: self.description.clone(),
+            parameters: self.input_schema.clone(),
+            output_schema: self.output_schema.clone(),
+            metadata: serde_json::json!({
+                "displayName": self.name,
+                "riskLevel": tool_risk_code(self.risk_level),
+                "approvalPolicy": approval_policy_code(self.approval_policy),
+                "permissionCode": self.permission_code,
+            }),
+        }
+    }
+}
+
+pub fn tool_risk_code(risk: ToolRiskLevel) -> &'static str {
+    match risk {
+        ToolRiskLevel::Low => "low",
+        ToolRiskLevel::Medium => "medium",
+        ToolRiskLevel::High => "high",
+    }
+}
+
+pub fn approval_policy_code(policy: ApprovalPolicy) -> &'static str {
+    match policy {
+        ApprovalPolicy::Never => "never",
+        ApprovalPolicy::OnRisk => "on_risk",
+        ApprovalPolicy::Always => "always",
+    }
+}
+
 pub fn evaluate_tool_execution_policy(
     input: ToolExecutionPolicyInput,
 ) -> ToolExecutionPolicyDecision {
@@ -264,5 +320,36 @@ mod tests {
         });
         assert!(high.requires_approval);
         assert_eq!(high.policy_reason, "high_risk_requires_manual_approval");
+    }
+
+    #[test]
+    fn tool_definition_converts_to_model_visible_spec() {
+        let tool = ToolDefinition {
+            code: "rag.search".to_owned(),
+            name: "Search knowledge".to_owned(),
+            description: "Search tenant-scoped knowledge base.".to_owned(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "required": ["query"],
+                "properties": {
+                    "query": { "type": "string" }
+                }
+            }),
+            output_schema: Some(serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "hits": { "type": "array" }
+                }
+            })),
+            risk_level: ToolRiskLevel::Low,
+            approval_policy: ApprovalPolicy::OnRisk,
+            permission_code: Some("ai:knowledge:ask".to_owned()),
+        };
+
+        let spec = tool.to_model_tool_spec();
+
+        assert_eq!(spec.name, "rag.search");
+        assert_eq!(spec.parameters["required"][0], "query");
+        assert_eq!(spec.metadata["riskLevel"], "low");
     }
 }
