@@ -109,6 +109,7 @@ pub struct ModelChatResp {
     pub model: Option<String>,
     pub latency_ms: u128,
     pub usage: ModelChatUsage,
+    pub cost_cents: Option<f64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -798,9 +799,11 @@ ORDER BY r.priority, r.id
             )
             .await?
             .ok_or_else(|| AppError::bad_request("LLM 模型环境变量未配置完整"))?;
-        let response =
+        let mut response =
             execute_normalized_chat_completion_with_route(&route, &command, Some(conversation_id))
                 .await?;
+        response.cost_cents =
+            estimate_model_chat_response_cost_cents(&self.db, self.tenant_id, &response).await?;
         let now = Utc::now().naive_utc();
         let history =
             model_chat_history_records(self.tenant_id, user_id, &command, &response, now)?;
@@ -839,12 +842,14 @@ ORDER BY r.priority, r.id
             )
             .await?
             .ok_or_else(|| AppError::bad_request("LLM 模型环境变量未配置完整"))?;
-        let response = execute_normalized_chat_completion_with_route(
+        let mut response = execute_normalized_chat_completion_with_route(
             &route,
             &command,
             command.conversation_id,
         )
         .await?;
+        response.cost_cents =
+            estimate_model_chat_response_cost_cents(&self.db, self.tenant_id, &response).await?;
         let record = model_chat_usage_record(
             self.tenant_id,
             user_id,
@@ -866,8 +871,15 @@ ORDER BY r.priority, r.id
             .resolve_route_for_purpose_with_route_id(purpose, command.route_id.as_deref())
             .await?
             .ok_or_else(|| AppError::bad_request("LLM 模型环境变量未配置完整"))?;
-        execute_normalized_chat_completion_with_route(&route, &command, command.conversation_id)
-            .await
+        let mut response = execute_normalized_chat_completion_with_route(
+            &route,
+            &command,
+            command.conversation_id,
+        )
+        .await?;
+        response.cost_cents =
+            estimate_model_chat_response_cost_cents(&self.db, self.tenant_id, &response).await?;
+        Ok(response)
     }
 
     pub async fn list_chat_conversations(
@@ -1237,6 +1249,7 @@ fn model_chat_response_from_provider(
         model: route.model().map(str::to_owned),
         latency_ms,
         usage: normalize_model_provider_usage(&body),
+        cost_cents: None,
     })
 }
 
@@ -1511,6 +1524,50 @@ fn model_chat_usage_record(
         user_id,
         now,
     }
+}
+
+fn model_chat_cost_cents_from_spec(cost_spec: &Value, response: &ModelChatResp) -> Option<f64> {
+    if cost_spec.is_null() || cost_spec.as_object().is_some_and(serde_json::Map::is_empty) {
+        return None;
+    }
+    let counts = response.usage.accounting_counts();
+    Some(estimate_model_cost_cents(
+        cost_spec,
+        &ModelUsageCostInput {
+            prompt_tokens: counts.prompt_tokens,
+            completion_tokens: counts.completion_tokens,
+            total_tokens: counts.total_tokens,
+            request_count: 1,
+            vector_count: 0,
+        },
+    ))
+}
+
+async fn estimate_model_chat_response_cost_cents(
+    db: &PgPool,
+    tenant_id: i64,
+    response: &ModelChatResp,
+) -> Result<Option<f64>, AppError> {
+    let cost_spec = sqlx::query_scalar::<_, Value>(
+        r#"
+SELECT p.cost_spec
+FROM ai_model_route r
+JOIN ai_model_profile p
+  ON p.tenant_id = r.tenant_id
+ AND p.id = r.model_profile_id
+WHERE r.tenant_id = $1
+  AND r.code = $2
+  AND r.status = 1
+ORDER BY r.priority ASC, r.id ASC
+LIMIT 1;
+"#,
+    )
+    .bind(tenant_id)
+    .bind(&response.route_id)
+    .fetch_optional(db)
+    .await?;
+
+    Ok(cost_spec.and_then(|cost_spec| model_chat_cost_cents_from_spec(&cost_spec, response)))
 }
 
 async fn record_model_chat_usage(
@@ -2172,6 +2229,18 @@ mod tests {
     }
 
     #[test]
+    fn model_chat_response_cost_runtime_attaches_route_cost() {
+        let source = include_str!("model_service.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+
+        assert!(source.contains("estimate_model_chat_response_cost_cents(&self.db"));
+        assert!(source.contains("response.cost_cents ="));
+        assert!(source.contains("chat_completion_for_purpose"));
+    }
+
+    #[test]
     fn model_registry_summary_does_not_expose_raw_secret_references() {
         let summary = ModelRuntimeService::registry_summary_from_rows(
             vec![ModelProviderRegistryRow {
@@ -2646,6 +2715,7 @@ mod tests {
                 completion_tokens: Some(7),
                 total_tokens: Some(18),
             },
+            cost_cents: None,
         };
 
         let records = model_chat_history_records(1, 9, &command, &response, now).unwrap();
@@ -2716,6 +2786,7 @@ mod tests {
                 completion_tokens: Some(7),
                 total_tokens: Some(18),
             },
+            cost_cents: None,
         };
 
         let record = model_chat_usage_record(1, 99, &response, now, "ai.models.chat");
@@ -2736,6 +2807,31 @@ mod tests {
     }
 
     #[test]
+    fn model_chat_cost_cents_from_spec_uses_response_usage() {
+        let response = test_model_chat_response();
+        let cost_spec = json!({
+            "unit": "tokens",
+            "promptCentsPer1kTokens": 0.1,
+            "completionCentsPer1kTokens": 0.2
+        });
+
+        let cost_cents = model_chat_cost_cents_from_spec(&cost_spec, &response).unwrap();
+
+        assert!((cost_cents - 0.5).abs() < 0.000_001);
+    }
+
+    #[test]
+    fn model_chat_cost_cents_from_spec_ignores_missing_spec() {
+        let response = test_model_chat_response();
+
+        assert_eq!(
+            model_chat_cost_cents_from_spec(&Value::Null, &response),
+            None
+        );
+        assert_eq!(model_chat_cost_cents_from_spec(&json!({}), &response), None);
+    }
+
+    #[test]
     fn model_chat_usage_record_binds_request_tenant_and_source() {
         let now = chrono::NaiveDateTime::parse_from_str("2026-06-05 10:00:00", "%Y-%m-%d %H:%M:%S")
             .unwrap();
@@ -2751,6 +2847,7 @@ mod tests {
                 completion_tokens: Some(5),
                 total_tokens: Some(8),
             },
+            cost_cents: None,
         };
 
         let record = model_chat_usage_record(42, 99, &response, now, "ai.chatFlow.model");
@@ -2803,6 +2900,23 @@ mod tests {
             deployment_endpoint: "https://llm.internal/v1".to_owned(),
             api_path: api_path.map(str::to_owned),
             credential_ref: credential_ref.map(str::to_owned),
+        }
+    }
+
+    fn test_model_chat_response() -> ModelChatResp {
+        ModelChatResp {
+            conversation_id: None,
+            answer: "ok".to_owned(),
+            route_id: "runtime.llm".to_owned(),
+            provider: "deep-seek".to_owned(),
+            model: Some("deepseek-v4-flash".to_owned()),
+            latency_ms: 42,
+            usage: ModelChatUsage {
+                prompt_tokens: Some(1000),
+                completion_tokens: Some(2000),
+                total_tokens: Some(3000),
+            },
+            cost_cents: None,
         }
     }
 }

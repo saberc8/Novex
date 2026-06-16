@@ -3405,7 +3405,7 @@ fn model_inference_event_payload(response: &ModelChatResp) -> Value {
             "model": &response.model,
             "latencyMs": u128_to_i64(response.latency_ms),
             "usage": &response.usage,
-            "costCents": Value::Null,
+            "costCents": response.cost_cents,
         }
     })
 }
@@ -3909,6 +3909,7 @@ fn default_event_size() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::application::ai::model_service::ModelChatUsage;
     use novex_ai_core::TaskBudget;
     use novex_trace::TraceEventKind;
     use sqlx::postgres::PgPoolOptions;
@@ -4293,6 +4294,28 @@ mod tests {
         assert!(source.contains("\"type\": \"model_inference\""));
         assert!(source.contains("\"latencyMs\""));
         assert!(source.contains("\"usage\""));
+    }
+
+    #[test]
+    fn model_inference_cost_event_payload_preserves_response_cost() {
+        let response = ModelChatResp {
+            conversation_id: None,
+            answer: "ok".to_owned(),
+            route_id: "runtime.llm.code_agent".to_owned(),
+            provider: "deep-seek".to_owned(),
+            model: Some("deepseek-v4-flash".to_owned()),
+            latency_ms: 42,
+            usage: ModelChatUsage {
+                prompt_tokens: Some(11),
+                completion_tokens: Some(7),
+                total_tokens: Some(18),
+            },
+            cost_cents: Some(0.65),
+        };
+
+        let payload = model_inference_event_payload(&response);
+
+        assert_eq!(payload["item"]["costCents"], 0.65);
     }
 
     #[test]
