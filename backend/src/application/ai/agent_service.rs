@@ -3,7 +3,7 @@ use std::{
     env,
     future::Future,
     sync::{Arc, Mutex},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use chrono::{NaiveDateTime, Utc};
@@ -74,6 +74,8 @@ const GITHUB_CONNECTOR_TIMEOUT: Duration = Duration::from_secs(15);
 const AGENT_TOOL_IO_TIMEOUT: Duration = Duration::from_secs(45);
 const MAX_AGENT_MEMORY_SNIPPETS: usize = 6;
 const MAX_AGENT_MEMORY_CANDIDATES: i64 = 32;
+const CODE_AGENT_MODEL_ROUTE_ID: &str = "runtime.llm.code_agent";
+const CODE_AGENT_ROUTE_PURPOSE: &str = "code_agent";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct FeishuWebhookConfig {
@@ -631,7 +633,8 @@ impl AgentService {
                 return self.get_run(run_id).await;
             }
 
-            let model_response = match await_model_loop_future_or_cancelled(
+            let model_call_started = Instant::now();
+            let model_call_result = await_model_loop_future_or_cancelled(
                 cancel_token.clone(),
                 "model_call",
                 self.model_runtime.chat_completion_for_purpose(
@@ -644,10 +647,10 @@ impl AgentService {
                     },
                 ),
             )
-            .await?
-            {
-                ModelLoopFutureAwait::Completed(model_response) => model_response,
-                ModelLoopFutureAwait::Cancelled => {
+            .await;
+            let model_response = match model_call_result {
+                Ok(ModelLoopFutureAwait::Completed(model_response)) => model_response,
+                Ok(ModelLoopFutureAwait::Cancelled) => {
                     if self
                         .check_model_loop_cancelled(user_id, run_id, "model_call")
                         .await?
@@ -661,6 +664,59 @@ impl AgentService {
                         )
                         .await?;
                     }
+                    return self.get_run(run_id).await;
+                }
+                Err(err) => {
+                    let latency_ms = model_call_started.elapsed().as_millis();
+                    let error_message = model_inference_error_message(&err);
+                    let error_payload = model_inference_error_event_payload(&err, latency_ms);
+                    self.append_event(
+                        user_id,
+                        run_id,
+                        None,
+                        RunEventKind::Thought,
+                        run_status_code(RunStatus::Failed),
+                        error_payload,
+                    )
+                    .await?;
+                    self.append_event(
+                        user_id,
+                        run_id,
+                        None,
+                        RunEventKind::Error,
+                        run_status_code(RunStatus::Failed),
+                        json!({
+                            "runtimeMode": "model_loop",
+                            "stopReason": "model_call_failed",
+                            "message": error_message.clone()
+                        }),
+                    )
+                    .await?;
+                    self.finish_model_loop_run(
+                        user_id,
+                        run_id,
+                        None,
+                        RunStatus::Failed,
+                        &error_message,
+                        json!({
+                            "answer": error_message.clone(),
+                            "runtimeMode": "model_loop",
+                            "stopReason": "model_call_failed"
+                        }),
+                        agent_turn_item_event_payload(&AgentTurnItem::FinalAnswer {
+                            content: error_message.clone(),
+                        }),
+                    )
+                    .await?;
+                    self.refresh_trace_snapshot(
+                        user_id,
+                        run_id,
+                        json!({
+                            "runtimeMode": "model_loop",
+                            "stopReason": "model_call_failed"
+                        }),
+                    )
+                    .await?;
                     return self.get_run(run_id).await;
                 }
             };
@@ -3410,6 +3466,94 @@ fn model_inference_event_payload(response: &ModelChatResp) -> Value {
     })
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ModelInferenceErrorClass {
+    kind: &'static str,
+    http_status: Option<u16>,
+    retryable: bool,
+}
+
+fn model_inference_error_event_payload(error: &AppError, latency_ms: u128) -> Value {
+    let class = classify_model_inference_error(error);
+    let mut item = json!({
+        "type": "model_inference_error",
+        "routeId": CODE_AGENT_MODEL_ROUTE_ID,
+        "routePurpose": CODE_AGENT_ROUTE_PURPOSE,
+        "attempt": 1,
+        "maxAttempts": 1,
+        "retryable": class.retryable,
+        "errorKind": class.kind,
+        "message": model_inference_error_message(error),
+        "latencyMs": u128_to_i64(latency_ms),
+    });
+    if let Some(http_status) = class.http_status {
+        if let Some(object) = item.as_object_mut() {
+            object.insert("httpStatus".to_owned(), json!(http_status));
+        }
+    }
+
+    json!({
+        "runtimeMode": "model_loop",
+        "item": item
+    })
+}
+
+fn classify_model_inference_error(error: &AppError) -> ModelInferenceErrorClass {
+    let message = model_inference_error_message(error);
+    let http_status = model_inference_http_status(&message);
+    let kind = match error {
+        AppError::BadRequest(_) if http_status.is_some() => "provider_http",
+        AppError::BadRequest(_) if model_inference_error_is_timeout(&message) => "provider_timeout",
+        AppError::BadRequest(_) => "invalid_model_request",
+        AppError::Unauthorized => "unauthorized",
+        AppError::Forbidden => "forbidden",
+        AppError::NotFound => "not_found",
+        AppError::Conflict(_) => "conflict",
+        AppError::Sqlx(_) | AppError::Io(_) | AppError::Anyhow(_) => "provider_transport",
+    };
+    let retryable = match kind {
+        "provider_http" => http_status.is_some_and(|status| status == 429 || status >= 500),
+        "provider_timeout" | "provider_transport" => true,
+        _ => false,
+    };
+
+    ModelInferenceErrorClass {
+        kind,
+        http_status,
+        retryable,
+    }
+}
+
+fn model_inference_error_message(error: &AppError) -> String {
+    match error {
+        AppError::BadRequest(message) | AppError::Conflict(message) => message.clone(),
+        AppError::Unauthorized => "unauthorized model request".to_owned(),
+        AppError::Forbidden => "forbidden model request".to_owned(),
+        AppError::NotFound => "model route not found".to_owned(),
+        AppError::Sqlx(_) | AppError::Io(_) | AppError::Anyhow(_) => {
+            "model provider transport error".to_owned()
+        }
+    }
+}
+
+fn model_inference_http_status(message: &str) -> Option<u16> {
+    let marker_index = message.find("HTTP")?;
+    let digits = message[marker_index + "HTTP".len()..]
+        .trim_start()
+        .chars()
+        .take_while(|char| char.is_ascii_digit())
+        .collect::<String>();
+    if digits.is_empty() {
+        return None;
+    }
+    digits.parse::<u16>().ok()
+}
+
+fn model_inference_error_is_timeout(message: &str) -> bool {
+    let message = message.to_ascii_lowercase();
+    message.contains("timeout") || message.contains("timed out") || message.contains("超时")
+}
+
 fn u128_to_i64(value: u128) -> i64 {
     value.min(i64::MAX as u128) as i64
 }
@@ -4322,6 +4466,34 @@ mod tests {
         let payload = model_inference_event_payload(&response);
 
         assert_eq!(payload["item"]["costCents"], 0.65);
+    }
+
+    #[test]
+    fn model_inference_error_event_payload_classifies_retryable_http_errors() {
+        let payload = model_inference_error_event_payload(
+            &AppError::bad_request("LLM 模型调用失败: HTTP 502"),
+            12,
+        );
+
+        assert_eq!(payload["item"]["type"], "model_inference_error");
+        assert_eq!(payload["item"]["routeId"], "runtime.llm.code_agent");
+        assert_eq!(payload["item"]["errorKind"], "provider_http");
+        assert_eq!(payload["item"]["httpStatus"], 502);
+        assert_eq!(payload["item"]["retryable"], true);
+        assert_eq!(payload["item"]["latencyMs"], 12);
+    }
+
+    #[test]
+    fn agent_service_model_loop_records_provider_error_spans() {
+        let source = include_str!("agent_service.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+
+        assert!(source.contains("model_inference_error_event_payload(&err"));
+        assert!(source.contains("RunEventKind::Error"));
+        assert!(source.contains("\"model_inference_error\""));
+        assert!(source.contains("\"stopReason\": \"model_call_failed\""));
     }
 
     #[test]
