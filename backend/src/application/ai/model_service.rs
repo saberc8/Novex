@@ -34,6 +34,7 @@ const MAX_MODEL_CHAT_MESSAGES: usize = 30;
 const MAX_MODEL_CHAT_CONTENT_CHARS: usize = 12_000;
 const MAX_MODEL_CHAT_FILE_CONTEXTS: usize = 3;
 const MAX_MODEL_CHAT_FILE_CONTEXT_CHARS: usize = 20_000;
+const MAX_MODEL_RUNTIME_RETRIES: usize = 3;
 const DEFAULT_TENANT_ID: i64 = 1;
 const MODEL_CHAT_HISTORY_LIMIT: i64 = 30;
 const MODEL_CHAT_TITLE_CHARS: usize = 60;
@@ -110,6 +111,22 @@ pub struct ModelChatResp {
     pub latency_ms: u128,
     pub usage: ModelChatUsage,
     pub cost_cents: Option<f64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelRetryPolicy {
+    pub max_retries: usize,
+}
+
+impl ModelRetryPolicy {
+    pub const fn disabled() -> Self {
+        Self { max_retries: 0 }
+    }
+
+    pub const fn max_attempts(&self) -> usize {
+        self.max_retries + 1
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -274,6 +291,14 @@ struct ModelRuntimeRouteRow {
     pub credential_ref: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, FromRow)]
+struct ModelRouteRetryPolicyRow {
+    pub route_policy: Value,
+    pub fallback_policy: Value,
+    pub network_zone: String,
+    pub fallback_network_zone: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, FromRow)]
 pub struct ModelChatConversationRow {
     pub id: i64,
@@ -387,6 +412,63 @@ impl ModelRuntimeService {
     ) -> Result<Option<ModelRuntimeRoute>, AppError> {
         self.resolve_route_for_purpose_with_route_id(purpose, None)
             .await
+    }
+
+    pub async fn retry_policy_for_purpose(
+        &self,
+        purpose: ModelRoutePurpose,
+    ) -> Result<ModelRetryPolicy, AppError> {
+        let row = sqlx::query_as::<_, ModelRouteRetryPolicyRow>(
+            r#"
+SELECT
+    r.policy AS route_policy,
+    profile.fallback_policy AS fallback_policy,
+    deployment.network_zone AS network_zone,
+    fallback_deployment.network_zone AS fallback_network_zone
+FROM ai_model_route r
+JOIN ai_model_profile profile
+  ON profile.tenant_id = r.tenant_id
+ AND profile.id = r.model_profile_id
+ AND profile.status = 1
+JOIN ai_model_deployment deployment
+  ON deployment.tenant_id = profile.tenant_id
+ AND deployment.id = profile.deployment_id
+ AND deployment.status = 1
+LEFT JOIN ai_model_route fallback_route
+  ON fallback_route.tenant_id = r.tenant_id
+ AND fallback_route.id = r.fallback_route_id
+ AND fallback_route.status = 1
+LEFT JOIN ai_model_profile fallback_profile
+  ON fallback_profile.tenant_id = fallback_route.tenant_id
+ AND fallback_profile.id = fallback_route.model_profile_id
+ AND fallback_profile.status = 1
+LEFT JOIN ai_model_deployment fallback_deployment
+  ON fallback_deployment.tenant_id = fallback_profile.tenant_id
+ AND fallback_deployment.id = fallback_profile.deployment_id
+ AND fallback_deployment.status = 1
+WHERE r.tenant_id = $1
+  AND r.route_purpose = $2
+  AND r.status = 1
+ORDER BY r.priority ASC, r.id ASC
+LIMIT 1;
+"#,
+        )
+        .bind(self.tenant_id)
+        .bind(purpose.as_str())
+        .fetch_optional(&self.db)
+        .await?;
+
+        let Some(row) = row else {
+            return Ok(ModelRetryPolicy::disabled());
+        };
+        let status = evaluate_model_route_policy(ModelRoutePolicyInput {
+            network_zone: &row.network_zone,
+            fallback_network_zone: row.fallback_network_zone.as_deref(),
+            fallback_policy: &row.fallback_policy,
+            route_policy: &row.route_policy,
+        });
+
+        Ok(model_retry_policy_from_route_policy_status(&status))
     }
 
     pub async fn resolve_route_for_purpose_with_route_id(
@@ -1684,6 +1766,14 @@ fn env_fallback_route_for_purpose(
     route.purposes().contains(&purpose).then(|| route.clone())
 }
 
+fn model_retry_policy_from_route_policy_status(
+    status: &ModelRoutePolicyStatus,
+) -> ModelRetryPolicy {
+    ModelRetryPolicy {
+        max_retries: (status.max_retries as usize).min(MAX_MODEL_RUNTIME_RETRIES),
+    }
+}
+
 fn runtime_route_from_registry_row<F>(
     row: &ModelRuntimeRouteRow,
     mut get_env: F,
@@ -2238,6 +2328,36 @@ mod tests {
         assert!(source.contains("estimate_model_chat_response_cost_cents(&self.db"));
         assert!(source.contains("response.cost_cents ="));
         assert!(source.contains("chat_completion_for_purpose"));
+    }
+
+    #[test]
+    fn model_route_retry_policy_caps_policy_max_retries() {
+        let status = ModelRoutePolicyStatus {
+            network_zone: "public".to_owned(),
+            fallback_network_zone: None,
+            fallback_enabled: false,
+            cross_zone_fallback_allowed: false,
+            max_retries: 10,
+            circuit_breaker_seconds: 0,
+            violations: vec![],
+        };
+
+        let policy = model_retry_policy_from_route_policy_status(&status);
+
+        assert_eq!(policy.max_retries, 3);
+        assert_eq!(policy.max_attempts(), 4);
+    }
+
+    #[test]
+    fn model_runtime_retry_policy_reads_route_policy_source_contract() {
+        let source = include_str!("model_service.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+
+        assert!(source.contains("pub async fn retry_policy_for_purpose"));
+        assert!(source.contains("profile.fallback_policy"));
+        assert!(source.contains("evaluate_model_route_policy"));
     }
 
     #[test]
