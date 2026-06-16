@@ -96,6 +96,26 @@ pub struct ToolLookupRecord {
     pub permission_code: Option<String>,
 }
 
+#[derive(Debug, Clone)]
+pub struct ToolSaveRecord {
+    pub id: i64,
+    pub tenant_id: i64,
+    pub code: String,
+    pub name: String,
+    pub description: String,
+    pub tool_kind: String,
+    pub risk_level: i16,
+    pub approval_policy: i16,
+    pub permission_code: Option<String>,
+    pub executor_kind: String,
+    pub input_schema: Value,
+    pub output_schema: Value,
+    pub status: i16,
+    pub metadata: Value,
+    pub user_id: i64,
+    pub now: NaiveDateTime,
+}
+
 #[derive(Debug, Clone, FromRow)]
 pub struct ConnectorCredentialLookupRecord {
     pub id: i64,
@@ -419,6 +439,66 @@ WHERE tenant_id = $1 AND code = $2 AND status = 1;
         .bind(tenant_id)
         .bind(tool_code)
         .fetch_optional(&self.db)
+        .await?)
+    }
+
+    pub async fn upsert_tool(&self, record: &ToolSaveRecord) -> Result<CapabilityRecord, AppError> {
+        Ok(sqlx::query_as::<_, CapabilityRecord>(
+            r#"
+INSERT INTO ai_tool (
+    id, tenant_id, code, name, description, tool_kind, risk_level,
+    approval_policy, permission_code, executor_kind, input_schema, output_schema,
+    status, metadata, create_user, create_time
+)
+VALUES (
+    $1, $2, $3, $4, $5, $6, $7,
+    $8, $9, $10, $11, $12,
+    $13, $14, $15, $16
+)
+ON CONFLICT (tenant_id, code)
+DO UPDATE SET
+    name = EXCLUDED.name,
+    description = EXCLUDED.description,
+    tool_kind = EXCLUDED.tool_kind,
+    risk_level = EXCLUDED.risk_level,
+    approval_policy = EXCLUDED.approval_policy,
+    permission_code = EXCLUDED.permission_code,
+    executor_kind = EXCLUDED.executor_kind,
+    input_schema = EXCLUDED.input_schema,
+    output_schema = EXCLUDED.output_schema,
+    status = EXCLUDED.status,
+    metadata = EXCLUDED.metadata,
+    update_user = $15,
+    update_time = $16
+RETURNING
+    id,
+    code,
+    name,
+    COALESCE(description, '') AS description,
+    tool_kind AS kind,
+    status,
+    risk_level,
+    metadata,
+    create_time;
+"#,
+        )
+        .bind(record.id)
+        .bind(record.tenant_id)
+        .bind(&record.code)
+        .bind(&record.name)
+        .bind(&record.description)
+        .bind(&record.tool_kind)
+        .bind(record.risk_level)
+        .bind(record.approval_policy)
+        .bind(&record.permission_code)
+        .bind(&record.executor_kind)
+        .bind(&record.input_schema)
+        .bind(&record.output_schema)
+        .bind(record.status)
+        .bind(&record.metadata)
+        .bind(record.user_id)
+        .bind(record.now)
+        .fetch_one(&self.db)
         .await?)
     }
 
@@ -971,6 +1051,70 @@ RETURNING
         .bind(record.now)
         .fetch_one(&self.db)
         .await?)
+    }
+
+    pub async fn find_mcp_server_by_id(
+        &self,
+        tenant_id: i64,
+        server_id: i64,
+    ) -> Result<Option<McpServerRecord>, AppError> {
+        Ok(sqlx::query_as::<_, McpServerRecord>(
+            r#"
+SELECT
+    id,
+    code,
+    name,
+    endpoint_url,
+    transport_kind,
+    auth_scope,
+    auth_type,
+    secret_ref,
+    network_allowlist,
+    tool_allowlist,
+    discovered_tools,
+    status,
+    create_time,
+    update_time
+FROM ai_mcp_server
+WHERE tenant_id = $1
+  AND id = $2
+  AND status = 1
+LIMIT 1;
+"#,
+        )
+        .bind(tenant_id)
+        .bind(server_id)
+        .fetch_optional(&self.db)
+        .await?)
+    }
+
+    pub async fn update_mcp_server_discovered_tools(
+        &self,
+        tenant_id: i64,
+        server_id: i64,
+        discovered_tools: &Value,
+        user_id: i64,
+        now: NaiveDateTime,
+    ) -> Result<(), AppError> {
+        sqlx::query(
+            r#"
+UPDATE ai_mcp_server
+SET
+    discovered_tools = $3,
+    update_user = $4,
+    update_time = $5
+WHERE tenant_id = $1
+  AND id = $2;
+"#,
+        )
+        .bind(tenant_id)
+        .bind(server_id)
+        .bind(discovered_tools)
+        .bind(user_id)
+        .bind(now)
+        .execute(&self.db)
+        .await?;
+        Ok(())
     }
 
     pub async fn save_discovered_mcp_tools(
