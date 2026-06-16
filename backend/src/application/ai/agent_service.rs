@@ -171,9 +171,72 @@ struct AgentRunKey {
     run_id: i64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentRuntimeTaskKind {
+    ModelLoop,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentRuntimeRunStatus {
+    Running,
+    Cancelling,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentRuntimeRunSnapshot {
+    pub tenant_id: i64,
+    pub run_id: i64,
+    pub task_kind: AgentRuntimeTaskKind,
+    pub status: AgentRuntimeRunStatus,
+    pub cancel_requested: bool,
+    pub elapsed_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentRuntimeCancelSignal {
+    pub sent: bool,
+    pub active_before_cancel: bool,
+    pub snapshot: Option<AgentRuntimeRunSnapshot>,
+}
+
+#[derive(Debug)]
+struct AgentRuntimeRunState {
+    sender: watch::Sender<bool>,
+    task_kind: AgentRuntimeTaskKind,
+    status: AgentRuntimeRunStatus,
+    started_at: Instant,
+    cancel_requested: bool,
+}
+
+impl AgentRuntimeRunState {
+    fn new(sender: watch::Sender<bool>, task_kind: AgentRuntimeTaskKind) -> Self {
+        Self {
+            sender,
+            task_kind,
+            status: AgentRuntimeRunStatus::Running,
+            started_at: Instant::now(),
+            cancel_requested: false,
+        }
+    }
+
+    fn snapshot(&self, key: AgentRunKey) -> AgentRuntimeRunSnapshot {
+        AgentRuntimeRunSnapshot {
+            tenant_id: key.tenant_id,
+            run_id: key.run_id,
+            task_kind: self.task_kind,
+            status: self.status,
+            cancel_requested: self.cancel_requested,
+            elapsed_ms: self.started_at.elapsed().as_millis() as u64,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct AgentRuntimeRegistry {
-    inner: Arc<Mutex<HashMap<AgentRunKey, watch::Sender<bool>>>>,
+    inner: Arc<Mutex<HashMap<AgentRunKey, AgentRuntimeRunState>>>,
 }
 
 #[derive(Debug)]
@@ -193,9 +256,21 @@ impl AgentRuntimeRegistry {
         tenant_id: i64,
         run_id: i64,
     ) -> (ActiveAgentRunGuard, AgentRunCancellationToken) {
+        self.register_run_with_kind(tenant_id, run_id, AgentRuntimeTaskKind::ModelLoop)
+    }
+
+    pub fn register_run_with_kind(
+        &self,
+        tenant_id: i64,
+        run_id: i64,
+        task_kind: AgentRuntimeTaskKind,
+    ) -> (ActiveAgentRunGuard, AgentRunCancellationToken) {
         let key = AgentRunKey { tenant_id, run_id };
         let (sender, receiver) = watch::channel(false);
-        self.inner.lock().unwrap().insert(key, sender);
+        let mut inner = self.inner.lock().unwrap();
+        if let Some(previous) = inner.insert(key, AgentRuntimeRunState::new(sender, task_kind)) {
+            let _ = previous.sender.send(true);
+        }
         (
             ActiveAgentRunGuard {
                 key,
@@ -206,12 +281,40 @@ impl AgentRuntimeRegistry {
     }
 
     pub fn cancel_run(&self, tenant_id: i64, run_id: i64) -> bool {
+        self.cancel_run_signal(tenant_id, run_id).sent
+    }
+
+    pub fn cancel_run_signal(&self, tenant_id: i64, run_id: i64) -> AgentRuntimeCancelSignal {
         let key = AgentRunKey { tenant_id, run_id };
-        let Some(sender) = self.inner.lock().unwrap().get(&key).cloned() else {
-            return false;
+        let mut inner = self.inner.lock().unwrap();
+        let Some(state) = inner.get_mut(&key) else {
+            return AgentRuntimeCancelSignal {
+                sent: false,
+                active_before_cancel: false,
+                snapshot: None,
+            };
         };
-        let _ = sender.send(true);
-        true
+
+        state.status = AgentRuntimeRunStatus::Cancelling;
+        state.cancel_requested = true;
+        let sent = state.sender.send(true).is_ok();
+        AgentRuntimeCancelSignal {
+            sent,
+            active_before_cancel: true,
+            snapshot: Some(state.snapshot(key)),
+        }
+    }
+
+    pub fn active_run_snapshots(&self) -> Vec<AgentRuntimeRunSnapshot> {
+        let mut snapshots = self
+            .inner
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(key, state)| state.snapshot(*key))
+            .collect::<Vec<_>>();
+        snapshots.sort_by_key(|snapshot| (snapshot.tenant_id, snapshot.run_id));
+        snapshots
     }
 
     fn unregister_run(&self, key: AgentRunKey) {
@@ -1617,7 +1720,8 @@ impl AgentService {
             json!({ "requestedBy": user_id }),
         )
         .await?;
-        let runtime_signal_sent = self.agent_runtime.cancel_run(self.tenant_id, run_id);
+        let runtime_cancel_signal = self.agent_runtime.cancel_run_signal(self.tenant_id, run_id);
+        let runtime_cancel_payload = runtime_cancelled_event_payload(runtime_cancel_signal);
         let now = Utc::now().naive_utc();
         self.repo
             .cancel_active_pauses(self.tenant_id, run_id, user_id, now)
@@ -1642,7 +1746,7 @@ impl AgentService {
             None,
             RunEventKind::Cancelled,
             run_status_code(RunStatus::Cancelled),
-            json!({ "cancelled": true, "runtimeSignalSent": runtime_signal_sent }),
+            runtime_cancel_payload,
         )
         .await?;
         self.refresh_trace_snapshot(user_id, run_id, json!({ "cancelled": true }))
@@ -3617,6 +3721,32 @@ fn model_loop_external_cancel_payload(stage: &str) -> Value {
     })
 }
 
+fn runtime_cancelled_event_payload(signal: AgentRuntimeCancelSignal) -> Value {
+    let supervisor = signal
+        .snapshot
+        .map(|snapshot| {
+            let mut value = serde_json::to_value(snapshot).unwrap_or_else(|_| json!({}));
+            if let Some(object) = value.as_object_mut() {
+                object.insert(
+                    "activeBeforeCancel".to_owned(),
+                    json!(signal.active_before_cancel),
+                );
+            }
+            value
+        })
+        .unwrap_or_else(|| {
+            json!({
+                "activeBeforeCancel": signal.active_before_cancel,
+            })
+        });
+
+    json!({
+        "cancelled": true,
+        "runtimeSignalSent": signal.sent,
+        "runtimeSupervisor": supervisor,
+    })
+}
+
 fn model_inference_event_payload(response: &ModelChatResp) -> Value {
     let fallback_route_id = response
         .provider_attempts
@@ -4404,6 +4534,77 @@ mod tests {
         assert!(registry.cancel_run(42, 1001));
         token.clone().cancelled().await;
         assert!(token.is_cancelled());
+    }
+
+    #[test]
+    fn runtime_supervisor_snapshots_active_model_loop_runs() {
+        let registry = AgentRuntimeRegistry::default();
+        let (_guard, _token) =
+            registry.register_run_with_kind(42, 1001, AgentRuntimeTaskKind::ModelLoop);
+
+        let snapshots = registry.active_run_snapshots();
+
+        assert_eq!(snapshots.len(), 1);
+        assert_eq!(snapshots[0].tenant_id, 42);
+        assert_eq!(snapshots[0].run_id, 1001);
+        assert_eq!(snapshots[0].task_kind, AgentRuntimeTaskKind::ModelLoop);
+        assert_eq!(snapshots[0].status, AgentRuntimeRunStatus::Running);
+        assert!(!snapshots[0].cancel_requested);
+    }
+
+    #[test]
+    fn runtime_supervisor_guard_unregisters_runtime_snapshot_on_drop() {
+        let registry = AgentRuntimeRegistry::default();
+        let (guard, _token) = registry.register_run(42, 1001);
+        assert_eq!(registry.active_run_snapshots().len(), 1);
+
+        drop(guard);
+
+        assert!(registry.active_run_snapshots().is_empty());
+    }
+
+    #[tokio::test]
+    async fn runtime_supervisor_cancel_signal_marks_snapshot_cancelling() {
+        let registry = AgentRuntimeRegistry::default();
+        let (_guard, token) = registry.register_run(42, 1001);
+
+        let signal = registry.cancel_run_signal(42, 1001);
+
+        assert!(signal.sent);
+        assert!(signal.active_before_cancel);
+        assert_eq!(
+            signal.snapshot.unwrap().status,
+            AgentRuntimeRunStatus::Cancelling
+        );
+        token.clone().cancelled().await;
+        assert!(token.is_cancelled());
+    }
+
+    #[test]
+    fn runtime_supervisor_cancel_payload_includes_snapshot() {
+        let registry = AgentRuntimeRegistry::default();
+        let (_guard, _token) = registry.register_run(42, 1001);
+        let signal = registry.cancel_run_signal(42, 1001);
+
+        let payload = runtime_cancelled_event_payload(signal);
+
+        assert_eq!(payload["cancelled"], true);
+        assert_eq!(payload["runtimeSignalSent"], true);
+        assert_eq!(payload["runtimeSupervisor"]["activeBeforeCancel"], true);
+        assert_eq!(payload["runtimeSupervisor"]["taskKind"], "model_loop");
+        assert_eq!(payload["runtimeSupervisor"]["status"], "cancelling");
+        assert_eq!(payload["runtimeSupervisor"]["cancelRequested"], true);
+    }
+
+    #[test]
+    fn runtime_supervisor_cancel_run_uses_signal_payload() {
+        let source = include_str!("agent_service.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+
+        assert!(source.contains("cancel_run_signal"));
+        assert!(source.contains("runtime_cancelled_event_payload"));
     }
 
     #[test]
