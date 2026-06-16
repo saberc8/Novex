@@ -16,6 +16,7 @@ use tower_http::{
 };
 
 use crate::{
+    application::ai::agent_service::AgentRuntimeRegistry,
     application::scheduler::http_safety::HttpSafetyConfig,
     infrastructure::security::jwt::JwtService,
     shared::{error::AppError, response::ApiResponse},
@@ -40,6 +41,7 @@ pub struct AppState {
     pub db: PgPool,
     pub jwt: JwtService,
     pub captcha: captcha::CaptchaStore,
+    pub agent_runtime: AgentRuntimeRegistry,
     pub scheduler_http_safety: HttpSafetyConfig,
     pub parser_callback_token: Option<String>,
     pub parser_callback_user_id: i64,
@@ -104,6 +106,7 @@ fn build_router_inner(
         db,
         jwt,
         captcha: captcha::CaptchaStore::default(),
+        agent_runtime: AgentRuntimeRegistry::default(),
         scheduler_http_safety,
         parser_callback_token,
         parser_callback_user_id,

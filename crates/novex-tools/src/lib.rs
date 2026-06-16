@@ -1,3 +1,5 @@
+use std::collections::{BTreeMap, BTreeSet};
+
 use novex_ai_core::FoundationModule;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -54,6 +56,421 @@ pub struct ToolExecutionPolicyDecision {
     pub policy_reason: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolDefinition {
+    pub code: String,
+    pub name: String,
+    pub description: String,
+    pub input_schema: Value,
+    pub output_schema: Option<Value>,
+    pub risk_level: ToolRiskLevel,
+    pub approval_policy: ApprovalPolicy,
+    pub permission_code: Option<String>,
+    #[serde(default)]
+    pub concurrency: ToolConcurrencyPolicy,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelToolSpec {
+    pub name: String,
+    pub description: String,
+    pub parameters: Value,
+    pub output_schema: Option<Value>,
+    pub metadata: Value,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolExecutionLock {
+    Shared,
+    Exclusive,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolConcurrencyPolicy {
+    pub lock: ToolExecutionLock,
+    pub supports_parallel_calls: bool,
+    pub waits_for_runtime_cancellation: bool,
+    pub exclusive_group: Option<String>,
+}
+
+impl ToolConcurrencyPolicy {
+    pub fn shared() -> Self {
+        Self {
+            lock: ToolExecutionLock::Shared,
+            supports_parallel_calls: true,
+            waits_for_runtime_cancellation: false,
+            exclusive_group: None,
+        }
+    }
+
+    pub fn exclusive(group: impl Into<String>) -> Self {
+        let group = group.into().trim().to_owned();
+        Self {
+            lock: ToolExecutionLock::Exclusive,
+            supports_parallel_calls: false,
+            waits_for_runtime_cancellation: false,
+            exclusive_group: (!group.is_empty()).then_some(group),
+        }
+    }
+
+    pub fn exclusive_waits_for_runtime_cancellation(group: impl Into<String>) -> Self {
+        Self {
+            waits_for_runtime_cancellation: true,
+            ..Self::exclusive(group)
+        }
+    }
+}
+
+impl Default for ToolConcurrencyPolicy {
+    fn default() -> Self {
+        Self {
+            lock: ToolExecutionLock::Exclusive,
+            supports_parallel_calls: false,
+            waits_for_runtime_cancellation: false,
+            exclusive_group: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolBatchExecutionMode {
+    Parallel,
+    Serial,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolBatchPlan {
+    pub mode: ToolBatchExecutionMode,
+    pub calls: Vec<RoutedToolCall>,
+    pub serial_reason: Option<String>,
+}
+
+impl ToolBatchPlan {
+    pub fn from_routed_calls(calls: Vec<RoutedToolCall>) -> Self {
+        let mut exclusive_groups = BTreeSet::new();
+        for call in &calls {
+            let policy = &call.tool.concurrency;
+            if let Some(group) = policy.exclusive_group.as_deref() {
+                if !exclusive_groups.insert(group.to_owned()) {
+                    return Self {
+                        mode: ToolBatchExecutionMode::Serial,
+                        serial_reason: Some(format!("exclusive_group:{group}")),
+                        calls,
+                    };
+                }
+            }
+        }
+
+        for call in &calls {
+            let policy = &call.tool.concurrency;
+            if policy.lock == ToolExecutionLock::Exclusive || !policy.supports_parallel_calls {
+                return Self {
+                    mode: ToolBatchExecutionMode::Serial,
+                    serial_reason: Some(format!("exclusive_tool:{}", call.tool.code)),
+                    calls,
+                };
+            }
+        }
+
+        Self {
+            mode: ToolBatchExecutionMode::Parallel,
+            calls,
+            serial_reason: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolRouteErrorKind {
+    EmptyToolCode,
+    DuplicateToolCode,
+    UnknownTool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolRouteError {
+    pub kind: ToolRouteErrorKind,
+    pub tool_code: Option<String>,
+    pub message: String,
+}
+
+impl ToolRouteError {
+    fn empty_tool_code() -> Self {
+        Self {
+            kind: ToolRouteErrorKind::EmptyToolCode,
+            tool_code: None,
+            message: "tool code is empty".to_owned(),
+        }
+    }
+
+    fn duplicate_tool_code(code: impl Into<String>) -> Self {
+        let code = code.into();
+        Self {
+            kind: ToolRouteErrorKind::DuplicateToolCode,
+            tool_code: Some(code.clone()),
+            message: format!("duplicate tool code `{code}`"),
+        }
+    }
+
+    fn unknown_tool(code: impl Into<String>) -> Self {
+        let code = code.into();
+        Self {
+            kind: ToolRouteErrorKind::UnknownTool,
+            tool_code: Some(code.clone()),
+            message: format!("model requested unregistered tool `{code}`"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RoutedToolCall {
+    pub call_id: String,
+    pub tool: ToolDefinition,
+    pub arguments: Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolRouter {
+    tools: BTreeMap<String, ToolDefinition>,
+}
+
+impl ToolRouter {
+    pub fn from_definitions(
+        definitions: impl IntoIterator<Item = ToolDefinition>,
+    ) -> Result<Self, ToolRouteError> {
+        let mut tools = BTreeMap::new();
+        for mut definition in definitions {
+            let code = definition.code.trim().to_owned();
+            if code.is_empty() {
+                return Err(ToolRouteError::empty_tool_code());
+            }
+            if tools.contains_key(&code) {
+                return Err(ToolRouteError::duplicate_tool_code(code));
+            }
+            definition.code = code.clone();
+            tools.insert(code, definition);
+        }
+        Ok(Self { tools })
+    }
+
+    pub fn tool_codes(&self) -> Vec<String> {
+        self.tools.keys().cloned().collect()
+    }
+
+    pub fn model_tool_specs(&self) -> Vec<ModelToolSpec> {
+        self.tools
+            .values()
+            .map(ToolDefinition::to_model_tool_spec)
+            .collect()
+    }
+
+    pub fn tool_concurrency_policy(&self, tool_code: &str) -> Option<&ToolConcurrencyPolicy> {
+        self.tools
+            .get(tool_code.trim())
+            .map(|tool| &tool.concurrency)
+    }
+
+    pub fn route_tool_call(
+        &self,
+        call_id: impl Into<String>,
+        tool_code: impl AsRef<str>,
+        arguments: Value,
+    ) -> Result<RoutedToolCall, ToolRouteError> {
+        let tool_code = tool_code.as_ref().trim();
+        if tool_code.is_empty() {
+            return Err(ToolRouteError::empty_tool_code());
+        }
+        let Some(tool) = self.tools.get(tool_code) else {
+            return Err(ToolRouteError::unknown_tool(tool_code));
+        };
+        Ok(RoutedToolCall {
+            call_id: call_id.into(),
+            tool: tool.clone(),
+            arguments,
+        })
+    }
+}
+
+impl ToolDefinition {
+    pub fn to_model_tool_spec(&self) -> ModelToolSpec {
+        ModelToolSpec {
+            name: self.code.clone(),
+            description: self.description.clone(),
+            parameters: self.input_schema.clone(),
+            output_schema: self.output_schema.clone(),
+            metadata: serde_json::json!({
+                "displayName": self.name,
+                "riskLevel": tool_risk_code(self.risk_level),
+                "approvalPolicy": approval_policy_code(self.approval_policy),
+                "permissionCode": self.permission_code,
+                "concurrencyPolicy": self.concurrency,
+            }),
+        }
+    }
+}
+
+pub fn agent_model_loop_tool_definitions() -> Vec<ToolDefinition> {
+    vec![
+        ToolDefinition {
+            code: "rag.search".to_owned(),
+            name: "Search knowledge".to_owned(),
+            description: "Search tenant-scoped knowledge base chunks and return grounded hits."
+                .to_owned(),
+            input_schema: json!({
+                "type": "object",
+                "required": ["query"],
+                "properties": {
+                    "query": {"type": "string"},
+                    "datasetId": {"type": "integer"},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 20}
+                }
+            }),
+            output_schema: Some(json!({
+                "type": "object",
+                "properties": {
+                    "hits": {"type": "array"},
+                    "citations": {"type": "array"},
+                    "answer": {"type": "string"}
+                }
+            })),
+            risk_level: ToolRiskLevel::Low,
+            approval_policy: ApprovalPolicy::OnRisk,
+            permission_code: Some("ai:knowledge:ask".to_owned()),
+            concurrency: ToolConcurrencyPolicy::shared(),
+        },
+        ToolDefinition {
+            code: "github.repo.search".to_owned(),
+            name: "Search GitHub repository".to_owned(),
+            description: "Search code in an authorized GitHub repository or organization."
+                .to_owned(),
+            input_schema: json!({
+                "type": "object",
+                "required": ["query"],
+                "properties": {
+                    "query": {"type": "string"},
+                    "repository": {"type": "string"},
+                    "path": {"type": "string"}
+                }
+            }),
+            output_schema: Some(json!({
+                "type": "object",
+                "properties": {
+                    "items": {"type": "array"},
+                    "toolCode": {"type": "string"}
+                }
+            })),
+            risk_level: ToolRiskLevel::Low,
+            approval_policy: ApprovalPolicy::OnRisk,
+            permission_code: Some("ai:tool:dryRun".to_owned()),
+            concurrency: ToolConcurrencyPolicy::shared(),
+        },
+        ToolDefinition {
+            code: "github.repo.read".to_owned(),
+            name: "Read GitHub file".to_owned(),
+            description: "Read a file from an authorized GitHub repository.".to_owned(),
+            input_schema: json!({
+                "type": "object",
+                "required": ["repository", "path"],
+                "properties": {
+                    "repository": {"type": "string"},
+                    "path": {"type": "string"},
+                    "ref": {"type": "string"}
+                }
+            }),
+            output_schema: Some(json!({
+                "type": "object",
+                "properties": {
+                    "content": {"type": "string"},
+                    "path": {"type": "string"},
+                    "sha": {"type": "string"}
+                }
+            })),
+            risk_level: ToolRiskLevel::Low,
+            approval_policy: ApprovalPolicy::OnRisk,
+            permission_code: Some("ai:tool:dryRun".to_owned()),
+            concurrency: ToolConcurrencyPolicy::shared(),
+        },
+        ToolDefinition {
+            code: "media.image.generate".to_owned(),
+            name: "Generate image".to_owned(),
+            description: "Generate an image asset through the tenant-bound image model route."
+                .to_owned(),
+            input_schema: json!({
+                "type": "object",
+                "required": ["prompt"],
+                "properties": {
+                    "prompt": {"type": "string"},
+                    "size": {"type": "string"},
+                    "count": {"type": "integer", "minimum": 1, "maximum": 4}
+                }
+            }),
+            output_schema: Some(json!({
+                "type": "object",
+                "properties": {
+                    "assetUrl": {"type": "string"},
+                    "jobId": {"type": "integer"},
+                    "assetId": {"type": "integer"}
+                }
+            })),
+            risk_level: ToolRiskLevel::Medium,
+            approval_policy: ApprovalPolicy::OnRisk,
+            permission_code: Some("ai:tool:dryRun".to_owned()),
+            concurrency: ToolConcurrencyPolicy::exclusive("media:image"),
+        },
+        ToolDefinition {
+            code: "feishu.message.send".to_owned(),
+            name: "Send Feishu message".to_owned(),
+            description: "Send an audited Feishu message through a tenant connector.".to_owned(),
+            input_schema: json!({
+                "type": "object",
+                "required": ["message"],
+                "properties": {
+                    "message": {"type": "string"},
+                    "recipient": {"type": "string"}
+                }
+            }),
+            output_schema: Some(json!({
+                "type": "object",
+                "properties": {
+                    "status": {"type": "string"},
+                    "dryRun": {"type": "boolean"},
+                    "toolCode": {"type": "string"}
+                }
+            })),
+            risk_level: ToolRiskLevel::Medium,
+            approval_policy: ApprovalPolicy::OnRisk,
+            permission_code: Some("ai:agent:run".to_owned()),
+            concurrency: ToolConcurrencyPolicy::exclusive("connector:feishu"),
+        },
+    ]
+}
+
+pub fn tool_risk_code(risk: ToolRiskLevel) -> &'static str {
+    match risk {
+        ToolRiskLevel::Low => "low",
+        ToolRiskLevel::Medium => "medium",
+        ToolRiskLevel::High => "high",
+    }
+}
+
+pub fn approval_policy_code(policy: ApprovalPolicy) -> &'static str {
+    match policy {
+        ApprovalPolicy::Never => "never",
+        ApprovalPolicy::OnRisk => "on_risk",
+        ApprovalPolicy::Always => "always",
+    }
+}
+
 pub fn evaluate_tool_execution_policy(
     input: ToolExecutionPolicyInput,
 ) -> ToolExecutionPolicyDecision {
@@ -87,6 +504,123 @@ pub fn evaluate_tool_execution_policy(
         pause_reason: requires_approval.then(|| "approval".to_owned()),
         policy_reason,
     }
+}
+
+pub fn customer_service_tool_definitions() -> Vec<ToolDefinition> {
+    vec![
+        ToolDefinition {
+            code: "faq.search".to_owned(),
+            name: "FAQ Search".to_owned(),
+            description:
+                "Search tenant-scoped customer service FAQ or policy knowledge with citations."
+                    .to_owned(),
+            input_schema: json!({
+                "type": "object",
+                "required": ["query", "datasetId"],
+                "properties": {
+                    "query": {"type": "string"},
+                    "datasetId": {"type": "integer"},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 10}
+                }
+            }),
+            output_schema: Some(json!({
+                "type": "object",
+                "properties": {
+                    "answer": {"type": "string"},
+                    "hits": {"type": "array"},
+                    "citations": {"type": "array"}
+                }
+            })),
+            risk_level: ToolRiskLevel::Low,
+            approval_policy: ApprovalPolicy::OnRisk,
+            permission_code: Some("ai:customer-service:read".to_owned()),
+            concurrency: ToolConcurrencyPolicy::shared(),
+        },
+        ToolDefinition {
+            code: "customer.lookup".to_owned(),
+            name: "Customer Lookup".to_owned(),
+            description: "Read tenant-scoped customer context needed to answer a support request."
+                .to_owned(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "customerId": {"type": "string"},
+                    "externalKey": {"type": "string"}
+                },
+                "anyOf": [
+                    {"required": ["customerId"]},
+                    {"required": ["externalKey"]}
+                ]
+            }),
+            output_schema: Some(json!({
+                "type": "object",
+                "properties": {
+                    "customerId": {"type": "string"},
+                    "profile": {"type": "object"},
+                    "entitlements": {"type": "array"}
+                }
+            })),
+            risk_level: ToolRiskLevel::Medium,
+            approval_policy: ApprovalPolicy::OnRisk,
+            permission_code: Some("ai:customer-service:read".to_owned()),
+            concurrency: ToolConcurrencyPolicy::exclusive("customer:lookup"),
+        },
+        ToolDefinition {
+            code: "ticket.create".to_owned(),
+            name: "Create Support Ticket".to_owned(),
+            description: "Create an audited support ticket for a customer after policy approval."
+                .to_owned(),
+            input_schema: json!({
+                "type": "object",
+                "required": ["customerId", "title", "description", "priority"],
+                "properties": {
+                    "customerId": {"type": "string"},
+                    "title": {"type": "string"},
+                    "description": {"type": "string"},
+                    "priority": {"type": "string", "enum": ["low", "normal", "high", "urgent"]}
+                }
+            }),
+            output_schema: Some(json!({
+                "type": "object",
+                "properties": {
+                    "ticketId": {"type": "string"},
+                    "status": {"type": "string"},
+                    "auditId": {"type": "string"}
+                }
+            })),
+            risk_level: ToolRiskLevel::High,
+            approval_policy: ApprovalPolicy::Always,
+            permission_code: Some("ai:customer-service:ticket".to_owned()),
+            concurrency: ToolConcurrencyPolicy::exclusive("customer:write"),
+        },
+        ToolDefinition {
+            code: "handoff.request".to_owned(),
+            name: "Request Human Handoff".to_owned(),
+            description: "Request a human support handoff with conversation summary and reason."
+                .to_owned(),
+            input_schema: json!({
+                "type": "object",
+                "required": ["conversationId", "reason", "summary"],
+                "properties": {
+                    "conversationId": {"type": "string"},
+                    "reason": {"type": "string"},
+                    "summary": {"type": "string"}
+                }
+            }),
+            output_schema: Some(json!({
+                "type": "object",
+                "properties": {
+                    "handoffId": {"type": "string"},
+                    "status": {"type": "string"},
+                    "auditId": {"type": "string"}
+                }
+            })),
+            risk_level: ToolRiskLevel::High,
+            approval_policy: ApprovalPolicy::Always,
+            permission_code: Some("ai:customer-service:handoff".to_owned()),
+            concurrency: ToolConcurrencyPolicy::exclusive("customer:write"),
+        },
+    ]
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -264,5 +798,228 @@ mod tests {
         });
         assert!(high.requires_approval);
         assert_eq!(high.policy_reason, "high_risk_requires_manual_approval");
+    }
+
+    #[test]
+    fn tool_definition_converts_to_model_visible_spec() {
+        let tool = ToolDefinition {
+            code: "rag.search".to_owned(),
+            name: "Search knowledge".to_owned(),
+            description: "Search tenant-scoped knowledge base.".to_owned(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "required": ["query"],
+                "properties": {
+                    "query": { "type": "string" }
+                }
+            }),
+            output_schema: Some(serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "hits": { "type": "array" }
+                }
+            })),
+            risk_level: ToolRiskLevel::Low,
+            approval_policy: ApprovalPolicy::OnRisk,
+            permission_code: Some("ai:knowledge:ask".to_owned()),
+            concurrency: ToolConcurrencyPolicy::shared(),
+        };
+
+        let spec = tool.to_model_tool_spec();
+
+        assert_eq!(spec.name, "rag.search");
+        assert_eq!(spec.parameters["required"][0], "query");
+        assert_eq!(spec.metadata["riskLevel"], "low");
+    }
+
+    #[test]
+    fn customer_service_tools_have_risk_and_schema_contracts() {
+        let tools = customer_service_tool_definitions();
+
+        assert!(tools.iter().any(|tool| tool.code == "faq.search"));
+        assert!(tools.iter().any(|tool| tool.code == "customer.lookup"));
+        assert!(tools.iter().any(|tool| tool.code == "ticket.create"));
+        assert!(tools.iter().any(|tool| tool.code == "handoff.request"));
+
+        let ticket = tools
+            .iter()
+            .find(|tool| tool.code == "ticket.create")
+            .expect("ticket.create tool should exist");
+        assert_eq!(ticket.risk_level, ToolRiskLevel::High);
+        assert_eq!(ticket.approval_policy, ApprovalPolicy::Always);
+        assert_eq!(
+            ticket.permission_code.as_deref(),
+            Some("ai:customer-service:ticket")
+        );
+        assert_eq!(ticket.input_schema["required"][0], "customerId");
+    }
+
+    #[test]
+    fn tool_router_exposes_sorted_model_visible_specs() {
+        let router = ToolRouter::from_definitions(vec![
+            test_tool_definition("media.image.generate"),
+            test_tool_definition("rag.search"),
+        ])
+        .unwrap();
+
+        assert_eq!(
+            router.tool_codes(),
+            vec!["media.image.generate".to_owned(), "rag.search".to_owned()]
+        );
+        assert_eq!(router.model_tool_specs()[0].name, "media.image.generate");
+    }
+
+    #[test]
+    fn tool_router_rejects_duplicate_tool_codes() {
+        let err = ToolRouter::from_definitions(vec![
+            test_tool_definition("rag.search"),
+            test_tool_definition("rag.search"),
+        ])
+        .unwrap_err();
+
+        assert_eq!(err.kind, ToolRouteErrorKind::DuplicateToolCode);
+        assert_eq!(err.tool_code.as_deref(), Some("rag.search"));
+    }
+
+    #[test]
+    fn tool_router_rejects_unknown_model_tool_call() {
+        let router = ToolRouter::from_definitions(vec![test_tool_definition("rag.search")])
+            .expect("router should build from one definition");
+
+        let err = router
+            .route_tool_call("call-1", "sandbox.exec", serde_json::json!({}))
+            .unwrap_err();
+
+        assert_eq!(err.kind, ToolRouteErrorKind::UnknownTool);
+        assert_eq!(err.tool_code.as_deref(), Some("sandbox.exec"));
+    }
+
+    #[test]
+    fn agent_model_loop_tool_definitions_cover_builtin_agent_tools() {
+        let router = ToolRouter::from_definitions(agent_model_loop_tool_definitions())
+            .expect("agent model loop tools should build a router");
+        let codes = router.tool_codes();
+
+        assert!(codes.contains(&"rag.search".to_owned()));
+        assert!(codes.contains(&"github.repo.search".to_owned()));
+        assert!(codes.contains(&"github.repo.read".to_owned()));
+        assert!(codes.contains(&"media.image.generate".to_owned()));
+        assert!(codes.contains(&"feishu.message.send".to_owned()));
+    }
+
+    #[test]
+    fn tool_router_reports_parallel_policy_for_read_only_tools() {
+        let router = ToolRouter::from_definitions(agent_model_loop_tool_definitions())
+            .expect("agent model loop tools should build a router");
+
+        let rag = router.tool_concurrency_policy("rag.search").unwrap();
+        assert_eq!(rag.lock, ToolExecutionLock::Shared);
+        assert!(rag.supports_parallel_calls);
+
+        let media = router
+            .tool_concurrency_policy("media.image.generate")
+            .unwrap();
+        assert_eq!(media.lock, ToolExecutionLock::Exclusive);
+        assert!(!media.supports_parallel_calls);
+    }
+
+    #[test]
+    fn tool_batch_plan_allows_parallel_read_only_calls() {
+        let router = ToolRouter::from_definitions(agent_model_loop_tool_definitions())
+            .expect("agent model loop tools should build a router");
+        let calls = vec![
+            router
+                .route_tool_call(
+                    "call-1",
+                    "rag.search",
+                    serde_json::json!({"query":"policy"}),
+                )
+                .unwrap(),
+            router
+                .route_tool_call(
+                    "call-2",
+                    "github.repo.read",
+                    serde_json::json!({"repository":"org/repo","path":"README.md"}),
+                )
+                .unwrap(),
+        ];
+
+        let plan = ToolBatchPlan::from_routed_calls(calls);
+
+        assert_eq!(plan.mode, ToolBatchExecutionMode::Parallel);
+        assert_eq!(plan.serial_reason, None);
+    }
+
+    #[test]
+    fn tool_batch_plan_serializes_non_parallel_calls() {
+        let router = ToolRouter::from_definitions(agent_model_loop_tool_definitions())
+            .expect("agent model loop tools should build a router");
+        let calls = vec![
+            router
+                .route_tool_call(
+                    "call-1",
+                    "rag.search",
+                    serde_json::json!({"query":"policy"}),
+                )
+                .unwrap(),
+            router
+                .route_tool_call(
+                    "call-2",
+                    "media.image.generate",
+                    serde_json::json!({"prompt":"poster"}),
+                )
+                .unwrap(),
+        ];
+
+        let plan = ToolBatchPlan::from_routed_calls(calls);
+
+        assert_eq!(plan.mode, ToolBatchExecutionMode::Serial);
+        assert_eq!(
+            plan.serial_reason.as_deref(),
+            Some("exclusive_tool:media.image.generate")
+        );
+    }
+
+    #[test]
+    fn tool_batch_plan_serializes_duplicate_exclusive_groups() {
+        let mut first = test_tool_definition("connector.write.one");
+        first.concurrency = ToolConcurrencyPolicy::exclusive("connector:crm");
+        let mut second = test_tool_definition("connector.write.two");
+        second.concurrency = ToolConcurrencyPolicy::exclusive("connector:crm");
+        let router = ToolRouter::from_definitions(vec![first, second])
+            .expect("router should build from exclusive test tools");
+        let calls = vec![
+            router
+                .route_tool_call("call-1", "connector.write.one", serde_json::json!({}))
+                .unwrap(),
+            router
+                .route_tool_call("call-2", "connector.write.two", serde_json::json!({}))
+                .unwrap(),
+        ];
+
+        let plan = ToolBatchPlan::from_routed_calls(calls);
+
+        assert_eq!(plan.mode, ToolBatchExecutionMode::Serial);
+        assert_eq!(
+            plan.serial_reason.as_deref(),
+            Some("exclusive_group:connector:crm")
+        );
+    }
+
+    fn test_tool_definition(code: &str) -> ToolDefinition {
+        ToolDefinition {
+            code: code.to_owned(),
+            name: code.to_owned(),
+            description: format!("Tool {code}"),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {}
+            }),
+            output_schema: None,
+            risk_level: ToolRiskLevel::Low,
+            approval_policy: ApprovalPolicy::OnRisk,
+            permission_code: Some("ai:tool:dryRun".to_owned()),
+            concurrency: ToolConcurrencyPolicy::shared(),
+        }
     }
 }

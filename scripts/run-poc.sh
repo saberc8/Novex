@@ -384,6 +384,9 @@ Commands:
 Single local env entry:
   infra/.env.poc
 
+Agent model-loop smoke:
+  TOKEN="\$ADMIN_TOKEN" ./scripts/smoke-agent-model-loop.sh
+
 Default URLs:
   Backend          http://localhost:4398
   Admin            http://localhost:4399

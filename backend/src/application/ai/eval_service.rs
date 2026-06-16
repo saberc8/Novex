@@ -2,10 +2,13 @@ use std::time::Instant;
 
 use chrono::Utc;
 use novex_eval::{
-    build_regression_report, score_case, score_cost_case, score_latency_case,
-    score_retrieval_recall_case, EvalCaseActual, EvalCaseExpected, EvalCaseScore, EvalMetricKind,
-    EvalTargetKind,
+    actual_from_trace_bundle, build_regression_report, score_case, score_cost_case,
+    score_customer_service_grounded_resolution_case, score_customer_service_handoff_accuracy_case,
+    score_intent_case, score_latency_case, score_rag_case, score_retrieval_recall_case,
+    score_tool_case, EvalCaseActual, EvalCaseCandidate, EvalCaseExpected, EvalCaseScore,
+    EvalMetricKind, EvalTargetKind,
 };
+use novex_trace::TraceBundle;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sqlx::PgPool;
@@ -13,10 +16,11 @@ use sqlx::PgPool;
 use crate::{
     application::ai::knowledge_service::{KnowledgeService, RagAskCommand},
     application::system::{ensure_max_chars, format_datetime},
+    infrastructure::persistence::ai_agent_repository::AiAgentRepository,
     infrastructure::persistence::ai_eval_repository::{
-        AiEvalRepository, EvalCaseFilter, EvalCaseRecord, EvalDatasetFilter, EvalDatasetRecord,
-        EvalResultFilter, EvalResultRecord, EvalResultSaveRecord, EvalRunFilter, EvalRunRecord,
-        EvalRunSaveRecord,
+        AiEvalRepository, EvalCaseFilter, EvalCaseRecord, EvalCaseSaveRecord, EvalDatasetFilter,
+        EvalDatasetRecord, EvalResultFilter, EvalResultRecord, EvalResultSaveRecord, EvalRunFilter,
+        EvalRunRecord, EvalRunSaveRecord,
     },
     shared::{
         error::AppError,
@@ -29,8 +33,10 @@ const DEFAULT_TENANT_ID: i64 = 1;
 const DEFAULT_EVAL_PAGE_SIZE: u64 = 20;
 const DEFAULT_CASE_PAGE_SIZE: u64 = 100;
 const ENABLED_STATUS: i16 = 1;
+const DISABLED_STATUS: i16 = 0;
 const EVAL_RUN_MODE_DETERMINISTIC: &str = "deterministic";
 const EVAL_RUN_MODE_LIVE_RAG: &str = "live_rag";
+const EVAL_RUN_MODE_TRACE_REPLAY: &str = "trace_replay";
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -170,6 +176,17 @@ pub struct EvalRunCommand {
     pub run_mode: String,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EvalCaseCaptureCommand {
+    #[serde(default)]
+    pub dataset_id: Option<i64>,
+    #[serde(default)]
+    pub dataset_code: String,
+    #[serde(default = "default_capture_dry_run")]
+    pub dry_run: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EvalDatasetResp {
@@ -236,11 +253,21 @@ pub struct EvalResultResp {
     pub create_time: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EvalCaseCaptureResp {
+    pub dry_run: bool,
+    pub case_id: Option<i64>,
+    pub case_code: String,
+    pub candidate: EvalCaseCandidate,
+}
+
 #[derive(Debug, Clone)]
 pub struct EvalService {
     tenant_id: i64,
     db: PgPool,
     repo: AiEvalRepository,
+    agent_repo: AiAgentRepository,
 }
 
 impl EvalService {
@@ -252,7 +279,8 @@ impl EvalService {
         Self {
             tenant_id,
             db: db.clone(),
-            repo: AiEvalRepository::new(db),
+            repo: AiEvalRepository::new(db.clone()),
+            agent_repo: AiAgentRepository::new(db),
         }
     }
 
@@ -304,6 +332,73 @@ impl EvalService {
         Ok(PageResult::new(list, total))
     }
 
+    pub async fn capture_case_from_agent_run(
+        &self,
+        user_id: i64,
+        run_id: i64,
+        command: EvalCaseCaptureCommand,
+    ) -> Result<EvalCaseCaptureResp, AppError> {
+        let command = normalize_eval_case_capture_command(command)?;
+        let Some(rollout) = self
+            .agent_repo
+            .find_rollout_by_run_id(self.tenant_id, run_id)
+            .await?
+        else {
+            return Err(AppError::NotFound);
+        };
+        let bundle = serde_json::from_value::<TraceBundle>(rollout.event_bundle)
+            .map_err(|err| AppError::bad_request(format!("Agent trace bundle 格式错误: {err}")))?;
+        let candidate = EvalCaseCandidate::from_trace_bundle(&bundle);
+        let case_code = eval_case_code_from_agent_run(run_id);
+        if command.dry_run {
+            return Ok(EvalCaseCaptureResp {
+                dry_run: true,
+                case_id: None,
+                case_code,
+                candidate,
+            });
+        }
+
+        let Some(dataset) = self
+            .repo
+            .find_dataset_by_selector(
+                self.tenant_id,
+                command.dataset_id,
+                Some(&command.dataset_code),
+            )
+            .await?
+        else {
+            return Err(AppError::NotFound);
+        };
+        let now = Utc::now().naive_utc();
+        let case_id = self
+            .repo
+            .upsert_case(&EvalCaseSaveRecord {
+                id: next_id(),
+                tenant_id: self.tenant_id,
+                dataset_id: dataset.id,
+                case_code: case_code.clone(),
+                target_kind: target_kind_code(candidate.target_kind),
+                metric_kind: metric_code(candidate.metric_kind),
+                prompt: candidate.prompt.clone(),
+                expected_payload: serde_json::to_value(&candidate.expected)
+                    .unwrap_or_else(|_| json!({})),
+                tags: candidate.tags.clone(),
+                status: DISABLED_STATUS,
+                sort: 0,
+                user_id,
+                now,
+            })
+            .await?;
+
+        Ok(EvalCaseCaptureResp {
+            dry_run: false,
+            case_id: Some(case_id),
+            case_code,
+            candidate,
+        })
+    }
+
     pub async fn run_eval(
         &self,
         user_id: i64,
@@ -351,13 +446,14 @@ impl EvalService {
         let run_id = next_id();
         let now = Utc::now().naive_utc();
         let metric_breakdown = metric_breakdown_payload(&report);
-        let report_payload = eval_report_payload(
+        let mut report_payload = eval_report_payload(
             report.total_cases as i32,
             report.passed_cases as i32,
             report.failed_cases as i32,
             report.average_score,
             metric_breakdown.clone(),
         );
+        attach_trace_gate_summary(&mut report_payload, &command, cases.len());
         self.repo
             .create_run(&EvalRunSaveRecord {
                 id: run_id,
@@ -412,6 +508,10 @@ impl EvalService {
         expected: &EvalCaseExpected,
         command: &EvalRunCommand,
     ) -> Result<EvalCaseActual, AppError> {
+        if eval_run_uses_trace_replay(command) {
+            let bundle = self.trace_bundle_for_eval_case(case).await?;
+            return Ok(actual_from_trace_bundle(&bundle));
+        }
         if eval_run_uses_live_rag(command) && case.target_kind == "rag" {
             let knowledge_dataset_id = live_rag_knowledge_dataset_id(
                 &dataset.metadata,
@@ -445,6 +545,33 @@ impl EvalService {
         }
 
         Ok(build_eval_actual(&case.target_kind, expected, &case.prompt))
+    }
+
+    async fn trace_bundle_for_eval_case(
+        &self,
+        case: &EvalCaseRecord,
+    ) -> Result<TraceBundle, AppError> {
+        let rollout = if let Some(agent_run_id) =
+            trace_replay_agent_run_id(&case.tags, &case.expected_payload)
+        {
+            self.agent_repo
+                .find_rollout_by_run_id(self.tenant_id, agent_run_id)
+                .await?
+        } else if let Some(trace_id) = trace_replay_trace_id(&case.tags, &case.expected_payload) {
+            self.agent_repo
+                .find_rollout_by_trace_id(self.tenant_id, &trace_id)
+                .await?
+        } else {
+            return Err(AppError::bad_request(
+                "trace_replay 评测缺少 agentRunId 或 traceId",
+            ));
+        };
+        let Some(rollout) = rollout else {
+            return Err(AppError::NotFound);
+        };
+
+        serde_json::from_value::<TraceBundle>(rollout.event_bundle)
+            .map_err(|err| AppError::bad_request(format!("Agent trace bundle 格式错误: {err}")))
     }
 
     pub async fn list_runs(
@@ -514,15 +641,32 @@ pub fn normalize_eval_run_command(mut command: EvalRunCommand) -> Result<EvalRun
     }
     if !matches!(
         command.run_mode.as_str(),
-        EVAL_RUN_MODE_DETERMINISTIC | EVAL_RUN_MODE_LIVE_RAG
+        EVAL_RUN_MODE_DETERMINISTIC | EVAL_RUN_MODE_LIVE_RAG | EVAL_RUN_MODE_TRACE_REPLAY
     ) {
         return Err(AppError::bad_request("评测运行模式不合法"));
     }
     Ok(command)
 }
 
+pub fn normalize_eval_case_capture_command(
+    mut command: EvalCaseCaptureCommand,
+) -> Result<EvalCaseCaptureCommand, AppError> {
+    command.dataset_code = command.dataset_code.trim().to_owned();
+    if !command.dry_run && command.dataset_id.is_none() && command.dataset_code.is_empty() {
+        return Err(AppError::bad_request("评测集不能为空"));
+    }
+    if !command.dataset_code.is_empty() {
+        ensure_max_chars("评测集编码", &command.dataset_code, 128)?;
+    }
+    Ok(command)
+}
+
 fn eval_run_uses_live_rag(command: &EvalRunCommand) -> bool {
     command.run_mode == EVAL_RUN_MODE_LIVE_RAG
+}
+
+fn eval_run_uses_trace_replay(command: &EvalRunCommand) -> bool {
+    command.run_mode == EVAL_RUN_MODE_TRACE_REPLAY
 }
 
 fn live_rag_knowledge_dataset_id(
@@ -538,11 +682,34 @@ fn live_rag_knowledge_dataset_id(
         .or_else(|| json_positive_i64(expected_payload, "knowledge_dataset_id"))
 }
 
+fn trace_replay_agent_run_id(case_tags: &Value, expected_payload: &Value) -> Option<i64> {
+    json_positive_i64(case_tags, "agentRunId")
+        .or_else(|| json_positive_i64(case_tags, "agent_run_id"))
+        .or_else(|| json_positive_i64(expected_payload, "agentRunId"))
+        .or_else(|| json_positive_i64(expected_payload, "agent_run_id"))
+}
+
+fn trace_replay_trace_id(case_tags: &Value, expected_payload: &Value) -> Option<String> {
+    json_non_empty_string(case_tags, "traceId")
+        .or_else(|| json_non_empty_string(case_tags, "trace_id"))
+        .or_else(|| json_non_empty_string(expected_payload, "traceId"))
+        .or_else(|| json_non_empty_string(expected_payload, "trace_id"))
+}
+
 fn json_positive_i64(value: &Value, key: &str) -> Option<i64> {
     value
         .get(key)
         .and_then(Value::as_i64)
         .filter(|value| *value > 0)
+}
+
+fn json_non_empty_string(value: &Value, key: &str) -> Option<String> {
+    value
+        .get(key)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
 }
 
 pub fn build_eval_actual(
@@ -552,6 +719,7 @@ pub fn build_eval_actual(
 ) -> EvalCaseActual {
     match target_kind {
         "rag" => build_rag_eval_actual(prompt),
+        "customer_service" => build_customer_service_eval_actual(prompt),
         "intent" => EvalCaseActual {
             intent: Some(classify_eval_intent(prompt)),
             latency_ms: 3,
@@ -567,6 +735,51 @@ pub fn build_eval_actual(
             latency_ms: 5,
             ..Default::default()
         },
+    }
+}
+
+fn build_customer_service_eval_actual(prompt: &str) -> EvalCaseActual {
+    let lower = prompt.to_ascii_lowercase();
+    if lower.contains("refund window") || lower.contains("refunds") {
+        return EvalCaseActual {
+            answer: Some("Refunds are available within 30 days.".to_owned()),
+            citations: vec!["cs-faq:refunds".to_owned()],
+            latency_ms: 18,
+            ..Default::default()
+        };
+    }
+    if lower.contains("custom warranty") || lower.contains("guarantee") {
+        return EvalCaseActual {
+            answer: Some("insufficient evidence".to_owned()),
+            citations: Vec::new(),
+            latency_ms: 17,
+            ..Default::default()
+        };
+    }
+    if lower.contains("human") || lower.contains("handoff") || lower.contains("angry") {
+        return EvalCaseActual {
+            answer: Some("I will request a human handoff.".to_owned()),
+            intent: Some("human_handoff".to_owned()),
+            tool_code: Some("handoff.request".to_owned()),
+            latency_ms: 22,
+            ..Default::default()
+        };
+    }
+    if lower.contains("ticket") {
+        return EvalCaseActual {
+            answer: Some("Ticket creation requires approval before I can create it.".to_owned()),
+            citations: vec!["cs-policy:approval".to_owned()],
+            tool_code: Some("ticket.create".to_owned()),
+            latency_ms: 21,
+            ..Default::default()
+        };
+    }
+
+    EvalCaseActual {
+        answer: Some("insufficient evidence".to_owned()),
+        citations: Vec::new(),
+        latency_ms: 17,
+        ..Default::default()
     }
 }
 
@@ -650,6 +863,12 @@ fn classify_eval_intent(prompt: &str) -> String {
         "training_quiz"
     } else if lower.contains("approval") || lower.contains("approve") || lower.contains("human") {
         "human_handoff"
+    } else if lower.contains("refund")
+        || lower.contains("ticket")
+        || lower.contains("warranty")
+        || lower.contains("customer")
+    {
+        "customer_service"
     } else if lower.contains("github")
         || lower.contains("repository")
         || lower.contains("repo")
@@ -679,6 +898,14 @@ fn select_eval_tool(prompt: &str) -> String {
     let lower = prompt.to_ascii_lowercase();
     if lower.contains("audit") {
         "tool.audit.record"
+    } else if lower.contains("handoff") || lower.contains("human") || lower.contains("angry") {
+        "handoff.request"
+    } else if lower.contains("ticket") {
+        "ticket.create"
+    } else if lower.contains("customer") {
+        "customer.lookup"
+    } else if lower.contains("refund") || lower.contains("faq") {
+        "faq.search"
     } else if lower.contains("github") || lower.contains("repository") || lower.contains("repo") {
         "github.repo.search"
     } else if lower.contains("feishu")
@@ -716,6 +943,25 @@ pub fn eval_report_payload(
     })
 }
 
+fn attach_trace_gate_summary(
+    report_payload: &mut Value,
+    command: &EvalRunCommand,
+    case_count: usize,
+) {
+    if !eval_run_uses_trace_replay(command) {
+        return;
+    }
+    if let Some(object) = report_payload.as_object_mut() {
+        object.insert(
+            "traceGate".to_owned(),
+            json!({
+                "runMode": command.run_mode.as_str(),
+                "caseCount": case_count,
+            }),
+        );
+    }
+}
+
 #[cfg(test)]
 fn score_eval_case(case: &EvalCaseRecord) -> Result<EvalCaseScore, AppError> {
     let expected = expected_from_case(case)?;
@@ -744,6 +990,32 @@ fn score_eval_case_with_actual(
         ),
         EvalMetricKind::RetrievalRecall => {
             score_retrieval_recall_case(case.case_code.clone(), target_kind, expected, actual)
+        }
+        EvalMetricKind::CitationAccuracy => {
+            let mut score = score_rag_case(expected, actual);
+            score.case_id = case.case_code.clone();
+            score.target_kind = target_kind;
+            score
+        }
+        EvalMetricKind::IntentAccuracy => {
+            let mut score = score_intent_case(expected, actual);
+            score.case_id = case.case_code.clone();
+            score.target_kind = target_kind;
+            score
+        }
+        EvalMetricKind::ToolAccuracy => {
+            let mut score = score_tool_case(expected, actual);
+            score.case_id = case.case_code.clone();
+            score.target_kind = target_kind;
+            score
+        }
+        EvalMetricKind::GroundedResolution => score_customer_service_grounded_resolution_case(
+            case.case_code.clone(),
+            expected,
+            actual,
+        ),
+        EvalMetricKind::HandoffAccuracy => {
+            score_customer_service_handoff_accuracy_case(case.case_code.clone(), expected, actual)
         }
         metric => {
             let mut score = score_case(case.case_code.clone(), target_kind, expected, actual);
@@ -847,6 +1119,7 @@ fn target_kind_from_code(code: &str) -> EvalTargetKind {
         "tool" => EvalTargetKind::Tool,
         "react" => EvalTargetKind::ReAct,
         "safety" => EvalTargetKind::Safety,
+        "customer_service" => EvalTargetKind::CustomerService,
         _ => EvalTargetKind::Rag,
     }
 }
@@ -860,8 +1133,22 @@ fn metric_kind_from_code(code: &str) -> EvalMetricKind {
         "tool_accuracy" => EvalMetricKind::ToolAccuracy,
         "cost" => EvalMetricKind::Cost,
         "latency" => EvalMetricKind::Latency,
+        "grounded_resolution" => EvalMetricKind::GroundedResolution,
+        "handoff_accuracy" => EvalMetricKind::HandoffAccuracy,
         _ => EvalMetricKind::Faithfulness,
     }
+}
+
+fn target_kind_code(target: EvalTargetKind) -> String {
+    match target {
+        EvalTargetKind::Rag => "rag",
+        EvalTargetKind::Intent => "intent",
+        EvalTargetKind::Tool => "tool",
+        EvalTargetKind::ReAct => "react",
+        EvalTargetKind::Safety => "safety",
+        EvalTargetKind::CustomerService => "customer_service",
+    }
+    .to_owned()
 }
 
 fn expected_u32(payload: &Value, key: &str, fallback: u32) -> u32 {
@@ -881,6 +1168,8 @@ fn metric_code(metric: EvalMetricKind) -> String {
         EvalMetricKind::ToolAccuracy => "tool_accuracy",
         EvalMetricKind::Cost => "cost",
         EvalMetricKind::Latency => "latency",
+        EvalMetricKind::GroundedResolution => "grounded_resolution",
+        EvalMetricKind::HandoffAccuracy => "handoff_accuracy",
     }
     .to_owned()
 }
@@ -901,10 +1190,19 @@ fn default_enabled_status() -> Option<i16> {
     Some(ENABLED_STATUS)
 }
 
+fn default_capture_dry_run() -> bool {
+    true
+}
+
+fn eval_case_code_from_agent_run(run_id: i64) -> String {
+    format!("agent-trace-{run_id}")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use novex_eval::EvalCaseExpected;
+    use novex_eval::{actual_from_trace_bundle, EvalCaseExpected};
+    use novex_trace::{TraceBundle, TraceEvent};
     use serde_json::json;
     use sqlx::postgres::PgPoolOptions;
 
@@ -942,6 +1240,32 @@ mod tests {
         assert_eq!(command.dataset_code, "knowledge_base_regression");
         assert_eq!(command.run_mode, "live_rag");
         assert!(eval_run_uses_live_rag(&command));
+    }
+
+    #[test]
+    fn eval_runtime_normalizes_trace_replay_run_mode() {
+        let command = normalize_eval_run_command(EvalRunCommand {
+            dataset_id: Some(10),
+            dataset_code: "  agent_workspace_regression  ".to_owned(),
+            run_mode: " TRACE_REPLAY ".to_owned(),
+        })
+        .unwrap();
+
+        assert_eq!(command.dataset_code, "agent_workspace_regression");
+        assert_eq!(command.run_mode, EVAL_RUN_MODE_TRACE_REPLAY);
+        assert!(eval_run_uses_trace_replay(&command));
+    }
+
+    #[test]
+    fn eval_case_capture_command_requires_dataset_when_persisting() {
+        let err = normalize_eval_case_capture_command(EvalCaseCaptureCommand {
+            dataset_id: None,
+            dataset_code: " ".to_owned(),
+            dry_run: false,
+        })
+        .unwrap_err();
+
+        assert!(err.to_string().contains("评测集不能为空"));
     }
 
     #[test]
@@ -1018,8 +1342,27 @@ mod tests {
     }
 
     #[test]
+    fn eval_runtime_report_response_exposes_trace_gate_summary() {
+        let command = EvalRunCommand {
+            dataset_id: Some(10),
+            dataset_code: "agent_workspace_regression".to_owned(),
+            run_mode: EVAL_RUN_MODE_TRACE_REPLAY.to_owned(),
+        };
+        let mut report = eval_report_payload(2, 2, 0, 1.0, json!({ "tool_accuracy": 1.0 }));
+
+        attach_trace_gate_summary(&mut report, &command, 2);
+
+        assert_eq!(report["traceGate"]["runMode"], "trace_replay");
+        assert_eq!(report["traceGate"]["caseCount"], 2);
+    }
+
+    #[test]
     fn eval_runtime_seed_contains_every_template_default_eval_set() {
-        let seed = include_str!("../../../migrations/202606050010_create_ai_eval_runtime.sql");
+        let seed = format!(
+            "{}\n{}",
+            include_str!("../../../migrations/202606050010_create_ai_eval_runtime.sql"),
+            include_str!("../../../migrations/202606160007_seed_customer_service_eval.sql")
+        );
         let templates = crate::application::ai::template_service::delivery_templates().unwrap();
 
         for template in templates {
@@ -1031,6 +1374,29 @@ mod tests {
                     template.code
                 );
             }
+        }
+    }
+
+    #[test]
+    fn customer_service_eval_seed_contains_resolution_and_handoff_cases() {
+        let seed_path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/migrations/202606160007_seed_customer_service_eval.sql"
+        );
+        let seed = std::fs::read_to_string(seed_path)
+            .expect("missing customer service eval seed migration");
+
+        for needle in [
+            "'customer-service-agent-regression'",
+            "'customer_service'",
+            "'grounded_resolution'",
+            "'handoff_accuracy'",
+            "'cs-refund-with-citation'",
+            "'cs-insufficient-evidence'",
+            "'cs-human-handoff'",
+            "'cs-ticket-approval'",
+        ] {
+            assert!(seed.contains(needle), "{needle} missing");
         }
     }
 
@@ -1073,5 +1439,99 @@ mod tests {
         assert!(latency_score.passed);
         assert_eq!(metric_code(cost_score.metric), "cost");
         assert!(cost_score.passed);
+    }
+
+    #[test]
+    fn eval_runtime_scores_agent_trace_tool_and_answer() {
+        let bundle = TraceBundle::new("agent-1")
+            .with_event(TraceEvent::user_message(
+                1,
+                "How should we handle customer data?",
+            ))
+            .with_event(TraceEvent::tool_call(2, "call-1", "rag.search"))
+            .with_event(TraceEvent::final_answer(
+                3,
+                "Customer data must stay in approved systems.",
+            ));
+        let actual = actual_from_trace_bundle(&bundle);
+        let expected = EvalCaseExpected {
+            answer_contains: vec!["approved systems".to_owned()],
+            citations: vec![],
+            intent: None,
+            tool_code: Some("rag.search".to_owned()),
+        };
+        let tool_case = fake_eval_case(
+            "trace-tool",
+            "react",
+            "tool_accuracy",
+            json!({"toolCode":"rag.search"}),
+        );
+        let answer_case = fake_eval_case(
+            "trace-answer",
+            "react",
+            "faithfulness",
+            json!({"answerContains":["approved systems"]}),
+        );
+
+        let tool_score = score_eval_case_with_actual(&tool_case, &expected, &actual);
+        let answer_score = score_eval_case_with_actual(&answer_case, &expected, &actual);
+
+        assert!(tool_score.passed);
+        assert_eq!(tool_score.metric, EvalMetricKind::ToolAccuracy);
+        assert!(answer_score.passed);
+        assert_eq!(answer_score.metric, EvalMetricKind::Faithfulness);
+    }
+
+    #[test]
+    fn customer_service_eval_scores_missing_evidence_gate() {
+        let case = EvalCaseRecord {
+            id: 1,
+            dataset_id: 10,
+            case_code: "cs-missing-citation".to_owned(),
+            target_kind: "customer_service".to_owned(),
+            metric_kind: "grounded_resolution".to_owned(),
+            prompt: "What is the refund window?".to_owned(),
+            expected_payload: json!({
+                "answerContains": ["30 days"],
+                "citations": ["wrong-source:99"]
+            }),
+            tags: json!(["customer-service", "citation"]),
+            status: 1,
+            sort: 1,
+            create_time: chrono::NaiveDate::from_ymd_opt(2026, 6, 16)
+                .unwrap()
+                .and_hms_opt(10, 0, 0)
+                .unwrap(),
+        };
+
+        let score = score_eval_case(&case).unwrap();
+
+        assert_eq!(score.metric, EvalMetricKind::GroundedResolution);
+        assert!(!score.passed);
+        assert!(score.reason.contains("missing evidence"));
+    }
+
+    fn fake_eval_case(
+        case_code: &str,
+        target_kind: &str,
+        metric_kind: &str,
+        expected_payload: Value,
+    ) -> EvalCaseRecord {
+        EvalCaseRecord {
+            id: 1,
+            dataset_id: 10,
+            case_code: case_code.to_owned(),
+            target_kind: target_kind.to_owned(),
+            metric_kind: metric_kind.to_owned(),
+            prompt: "trace replay".to_owned(),
+            expected_payload,
+            tags: json!({ "agentRunId": 42 }),
+            status: 1,
+            sort: 1,
+            create_time: chrono::NaiveDate::from_ymd_opt(2026, 6, 16)
+                .unwrap()
+                .and_hms_opt(10, 0, 0)
+                .unwrap(),
+        }
     }
 }

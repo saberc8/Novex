@@ -1,8 +1,12 @@
 import { fireEvent, render, screen } from "@testing-library/react";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import Page from "./page";
 
 describe("Codex app POC page", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
   it("renders the desktop workbench home state", () => {
     render(<Page />);
 
@@ -35,5 +39,30 @@ describe("Codex app POC page", () => {
 
     fireEvent.keyDown(input, { key: "Escape" });
     expect(screen.queryByRole("listbox", { name: "命令菜单" })).toBeNull();
+  });
+
+  it("submits composer input as model loop agent run", async () => {
+    const fetchMock = vi.fn(async () => ({
+      ok: true,
+      json: async () => ({
+        code: "200",
+        data: {
+          runId: 42,
+          traceId: "agent-42",
+          status: "succeeded",
+          finalOutput: "Done"
+        }
+      })
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<Page />);
+    fireEvent.change(screen.getByLabelText("任务输入"), {
+      target: { value: "search policy" }
+    });
+    fireEvent.click(screen.getByLabelText("发送"));
+
+    expect(fetchMock).toHaveBeenCalled();
+    expect(await screen.findByText("Done")).toBeTruthy();
   });
 });

@@ -2,6 +2,8 @@
 members = [
     "backend",
     "crates/novex-ai-core",
+    "crates/novex-agent-protocol",
+    "crates/novex-agent-runtime",
     "crates/novex-model",
     "crates/novex-rag",
     "crates/novex-agent",
@@ -13,6 +15,7 @@ members = [
     "crates/novex-trigger",
     "crates/novex-memory",
     "crates/novex-eval",
+    "crates/novex-trace",
 ]
 resolver = "2"
 
@@ -23,6 +26,8 @@ edition = "2021"
 [workspace.dependencies]
 novex-ai-core = { path = "crates/novex-ai-core" }
 novex-agent = { path = "crates/novex-agent" }
+novex-agent-protocol = { path = "crates/novex-agent-protocol" }
+novex-agent-runtime = { path = "crates/novex-agent-runtime" }
 novex-connectors = { path = "crates/novex-connectors" }
 novex-eval = { path = "crates/novex-eval" }
 novex-mcp = { path = "crates/novex-mcp" }
@@ -33,4 +38,5 @@ novex-rag = { path = "crates/novex-rag" }
 novex-skill = { path = "crates/novex-skill" }
 novex-tools = { path = "crates/novex-tools" }
 novex-trigger = { path = "crates/novex-trigger" }
+novex-trace = { path = "crates/novex-trace" }
 serde = { version = "1", features = ["derive"] }

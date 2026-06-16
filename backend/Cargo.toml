@@ -18,6 +18,8 @@ jsonwebtoken = "9"
 lapin = "2"
 mime_guess = "2"
 novex-agent.workspace = true
+novex-agent-protocol.workspace = true
+novex-agent-runtime.workspace = true
 novex-ai-core.workspace = true
 novex-connectors.workspace = true
 novex-eval.workspace = true
@@ -28,6 +30,7 @@ novex-plugin.workspace = true
 novex-rag.workspace = true
 novex-skill.workspace = true
 novex-tools.workspace = true
+novex-trace.workspace = true
 novex-trigger.workspace = true
 rand = "0.8"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }

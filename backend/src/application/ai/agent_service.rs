@@ -1,39 +1,54 @@
-use std::{env, time::Duration};
+use std::{
+    collections::HashMap,
+    env,
+    future::Future,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 
 use chrono::{NaiveDateTime, Utc};
+use futures_util::future::join_all;
 use novex_agent::{plan_react_run_with_memory, AgentIntent, AgentLoopKind};
+use novex_agent_protocol::{AgentTurnItem, ToolObservationStatus};
+use novex_agent_runtime::{parse_model_turn_output, AgentRuntimeBudget, AgentRuntimeState};
 use novex_ai_core::{validate_run_transition, RunEventKind, RunStatus, RunStepType, TaskBudget};
 use novex_connectors::{
-    parse_credential_scope, parse_github_code_search_response, select_connector_credential,
-    ConnectorCredentialBinding, FeishuTextMessage, GitHubCodeSearchRequest, GitHubFileReadRequest,
-    ResolvedConnectorCredential,
+    parse_credential_scope, parse_github_code_search_response, resolve_env_secret_ref,
+    select_connector_credential, ConnectorCredentialBinding, FeishuTextMessage,
+    GitHubCodeSearchRequest, GitHubFileReadRequest, ResolvedConnectorCredential,
 };
+use novex_mcp::{McpToolInvocationRequest, McpToolInvocationResult};
 use novex_memory::{
     build_memory_context, MemoryAccessContext, MemoryContext, MemoryScope, MemoryScopeRef,
     MemorySnippet, MemoryWritePolicy,
 };
 use novex_model::ModelRoutePurpose;
 use novex_tools::{
-    evaluate_tool_execution_policy, parse_media_image_generation_response, ApprovalPolicy,
-    MediaImageGenerationRequest, ToolExecutionPolicyDecision, ToolExecutionPolicyInput,
-    ToolRiskLevel,
+    agent_model_loop_tool_definitions, evaluate_tool_execution_policy,
+    parse_media_image_generation_response, ApprovalPolicy, MediaImageGenerationRequest,
+    ToolBatchExecutionMode, ToolBatchPlan, ToolExecutionPolicyDecision, ToolExecutionPolicyInput,
+    ToolKind, ToolRiskLevel, ToolRouteError, ToolRouteErrorKind, ToolRouter,
 };
+use novex_trace::{TraceBundle, TraceEvent, TraceReplaySummary};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sqlx::PgPool;
+use tokio::sync::watch;
 
 use crate::{
-    application::ai::model_service::ModelRuntimeService,
+    application::ai::model_service::{
+        ModelChatCommand, ModelChatMessage, ModelChatResp, ModelRuntimeService,
+    },
     application::system::{ensure_max_chars, format_datetime},
     infrastructure::persistence::{
         ai_agent_repository::{
-            AgentRunFilter, AgentRunRecord, AgentRunSaveRecord, AgentRunStatusUpdate,
-            AgentTraceSaveRecord, AiAgentRepository, RunEventFilter, RunEventRecord,
-            RunEventSaveRecord, RunPauseSaveRecord, RunSaveRecord, RunStatusUpdate,
+            AgentRolloutSaveRecord, AgentRunFilter, AgentRunRecord, AgentRunSaveRecord,
+            AgentRunStatusUpdate, AgentTraceSaveRecord, AiAgentRepository, RunEventFilter,
+            RunEventRecord, RunEventSaveRecord, RunPauseSaveRecord, RunSaveRecord, RunStatusUpdate,
             RunStepSaveRecord,
         },
-        ai_capability_repository::ConnectorCredentialLookupRecord,
         ai_capability_repository::{AiCapabilityRepository, ToolAuditSaveRecord, ToolLookupRecord},
+        ai_capability_repository::{ConnectorCredentialLookupRecord, McpToolExecutionRecord},
         ai_media_repository::{AiMediaRepository, MediaAssetSaveRecord, MediaJobSaveRecord},
         ai_memory_repository::{AiMemoryRepository, MemoryFilter, MemoryRecord},
     },
@@ -47,6 +62,7 @@ use crate::{
 const DEFAULT_TENANT_ID: i64 = 1;
 const DEFAULT_AGENT_PAGE_SIZE: u64 = 20;
 const DEFAULT_EVENT_PAGE_SIZE: u64 = 100;
+const MAX_TRACE_REPLAY_EVENTS: i64 = 1000;
 const FEISHU_TOOL_CODE: &str = "feishu.message.send";
 const MEDIA_IMAGE_TOOL_CODE: &str = "media.image.generate";
 const GITHUB_REPO_SEARCH_TOOL_CODE: &str = "github.repo.search";
@@ -55,6 +71,7 @@ const GITHUB_CONNECTOR_CODE: &str = "github.default";
 const FEISHU_WEBHOOK_TIMEOUT: Duration = Duration::from_secs(10);
 const MEDIA_IMAGE_TIMEOUT: Duration = Duration::from_secs(30);
 const GITHUB_CONNECTOR_TIMEOUT: Duration = Duration::from_secs(15);
+const AGENT_TOOL_IO_TIMEOUT: Duration = Duration::from_secs(45);
 const MAX_AGENT_MEMORY_SNIPPETS: usize = 6;
 const MAX_AGENT_MEMORY_CANDIDATES: i64 = 32;
 
@@ -91,12 +108,127 @@ struct AgentToolExecution {
 }
 
 #[derive(Debug, Clone)]
+struct RecordedToolExecution {
+    audit_id: i64,
+    step_id: i64,
+    execution: AgentToolExecution,
+    terminal_status: RunStatus,
+}
+
+#[derive(Debug, Clone)]
+struct PreparedAgentToolCall {
+    batch_index: usize,
+    call_id: String,
+    tool: ToolLookupRecord,
+    arguments: Value,
+    concurrency_policy: Value,
+    timeout: Duration,
+}
+
+#[derive(Debug, Clone)]
+struct ExecutedAgentToolCall {
+    prepared: PreparedAgentToolCall,
+    execution: AgentToolExecution,
+    terminal_status: RunStatus,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ModelLoopCancelCheck {
+    Continue,
+    Cancelled,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ModelLoopFutureAwait<T> {
+    Completed(T),
+    Cancelled,
+}
+
+#[derive(Debug, Clone)]
 struct MediaPersistenceRecords {
     asset: Option<MediaAssetSaveRecord>,
     job: MediaJobSaveRecord,
 }
 
 type GitHubConnectorAuth = ResolvedConnectorCredential;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct AgentRunKey {
+    tenant_id: i64,
+    run_id: i64,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct AgentRuntimeRegistry {
+    inner: Arc<Mutex<HashMap<AgentRunKey, watch::Sender<bool>>>>,
+}
+
+#[derive(Debug)]
+pub struct ActiveAgentRunGuard {
+    key: AgentRunKey,
+    registry: AgentRuntimeRegistry,
+}
+
+#[derive(Debug, Clone)]
+pub struct AgentRunCancellationToken {
+    receiver: watch::Receiver<bool>,
+}
+
+impl AgentRuntimeRegistry {
+    pub fn register_run(
+        &self,
+        tenant_id: i64,
+        run_id: i64,
+    ) -> (ActiveAgentRunGuard, AgentRunCancellationToken) {
+        let key = AgentRunKey { tenant_id, run_id };
+        let (sender, receiver) = watch::channel(false);
+        self.inner.lock().unwrap().insert(key, sender);
+        (
+            ActiveAgentRunGuard {
+                key,
+                registry: self.clone(),
+            },
+            AgentRunCancellationToken { receiver },
+        )
+    }
+
+    pub fn cancel_run(&self, tenant_id: i64, run_id: i64) -> bool {
+        let key = AgentRunKey { tenant_id, run_id };
+        let Some(sender) = self.inner.lock().unwrap().get(&key).cloned() else {
+            return false;
+        };
+        let _ = sender.send(true);
+        true
+    }
+
+    fn unregister_run(&self, key: AgentRunKey) {
+        self.inner.lock().unwrap().remove(&key);
+    }
+}
+
+impl Drop for ActiveAgentRunGuard {
+    fn drop(&mut self) {
+        self.registry.unregister_run(self.key);
+    }
+}
+
+impl AgentRunCancellationToken {
+    pub fn is_cancelled(&self) -> bool {
+        *self.receiver.borrow()
+    }
+
+    pub async fn cancelled(mut self) {
+        if self.is_cancelled() {
+            return;
+        }
+        while self.receiver.changed().await.is_ok() {
+            if self.is_cancelled() {
+                return;
+            }
+        }
+        std::future::pending::<()>().await;
+    }
+}
 
 impl AgentToolExecution {
     fn succeeded(response_payload: Value, dry_run: bool, final_output: String) -> Self {
@@ -119,8 +251,22 @@ impl AgentToolExecution {
         }
     }
 
+    fn cancelled(response_payload: Value, final_output: String) -> Self {
+        Self {
+            response_payload,
+            status: "cancelled".to_owned(),
+            dry_run: false,
+            error_message: Some(final_output.clone()),
+            final_output,
+        }
+    }
+
     fn succeeded_status(&self) -> bool {
         self.status == "succeeded"
+    }
+
+    fn cancelled_status(&self) -> bool {
+        self.status == "cancelled"
     }
 }
 
@@ -129,6 +275,8 @@ impl AgentToolExecution {
 pub struct AgentRunCommand {
     #[serde(default)]
     pub input: String,
+    #[serde(default)]
+    pub runtime_mode: Option<String>,
     #[serde(default)]
     pub auto_approve: bool,
     #[serde(default)]
@@ -242,6 +390,14 @@ pub struct AgentRunEventResp {
     pub create_time: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentTraceReplayResp {
+    pub trace_id: String,
+    pub events: Vec<TraceEvent>,
+    pub summary: TraceReplaySummary,
+}
+
 #[derive(Debug, Clone)]
 pub struct AgentService {
     tenant_id: i64,
@@ -250,6 +406,7 @@ pub struct AgentService {
     media_repo: AiMediaRepository,
     memory_repo: AiMemoryRepository,
     model_runtime: ModelRuntimeService,
+    agent_runtime: AgentRuntimeRegistry,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -270,6 +427,14 @@ impl AgentService {
     }
 
     pub fn for_tenant(db: PgPool, tenant_id: i64) -> Self {
+        Self::for_tenant_with_runtime(db, tenant_id, AgentRuntimeRegistry::default())
+    }
+
+    pub fn for_tenant_with_runtime(
+        db: PgPool,
+        tenant_id: i64,
+        agent_runtime: AgentRuntimeRegistry,
+    ) -> Self {
         Self {
             tenant_id,
             repo: AiAgentRepository::new(db.clone()),
@@ -277,6 +442,7 @@ impl AgentService {
             media_repo: AiMediaRepository::new(db.clone()),
             memory_repo: AiMemoryRepository::new(db.clone()),
             model_runtime: ModelRuntimeService::for_tenant(db.clone(), tenant_id),
+            agent_runtime,
         }
     }
 
@@ -286,6 +452,9 @@ impl AgentService {
         command: AgentRunCommand,
     ) -> Result<AgentRunResp, AppError> {
         let command = normalize_agent_run_command(command)?;
+        if command.runtime_mode.as_deref() == Some("model_loop") {
+            return self.create_model_loop_run(user_id, command).await;
+        }
         let memory_context = self.load_agent_memory_context(user_id).await?;
         let mut plan = build_agent_plan(&command, memory_context)?;
         let selected_tool = if let Some(tool_code) = plan.selected_tool_code.as_deref() {
@@ -314,13 +483,18 @@ impl AgentService {
 
         self.create_run_records(user_id, run_id, &trace_id, &command, &plan, now)
             .await?;
+        let input_item = novex_agent_protocol::AgentTurnItem::user_message(command.input.as_str());
+        let mut input_payload = agent_turn_item_event_payload(&input_item);
+        if let Some(object) = input_payload.as_object_mut() {
+            object.insert("input".to_owned(), json!(&command.input));
+        }
         self.append_event(
             user_id,
             run_id,
             None,
             RunEventKind::InputReceived,
             run_status_code(RunStatus::Running),
-            json!({ "input": command.input }),
+            input_payload,
         )
         .await?;
         self.append_event(
@@ -393,6 +567,651 @@ impl AgentService {
         self.get_run(run_id).await
     }
 
+    async fn create_model_loop_run(
+        &self,
+        user_id: i64,
+        command: AgentRunCommand,
+    ) -> Result<AgentRunResp, AppError> {
+        let memory_context = self.load_agent_memory_context(user_id).await?;
+        let mut plan = build_agent_plan(&command, memory_context)?;
+        plan.loop_kind = "model_loop".to_owned();
+        plan.selected_tool_code = None;
+        plan.requires_approval = false;
+        plan.pause_reason = None;
+
+        let run_id = next_id();
+        let trace_id = format!("agent-{run_id}");
+        let now = Utc::now().naive_utc();
+        self.create_run_records(user_id, run_id, &trace_id, &command, &plan, now)
+            .await?;
+        let (_active_run_guard, cancel_token) =
+            self.agent_runtime.register_run(self.tenant_id, run_id);
+
+        let input_item = novex_agent_protocol::AgentTurnItem::user_message(command.input.as_str());
+        let mut runtime_state = AgentRuntimeState::with_budget(
+            run_id.to_string(),
+            agent_runtime_budget_from_task_budget(command.budget),
+        );
+        runtime_state.push_item(input_item.clone());
+        let mut input_payload = agent_turn_item_event_payload(&input_item);
+        if let Some(object) = input_payload.as_object_mut() {
+            object.insert("input".to_owned(), json!(&command.input));
+            object.insert("runtimeMode".to_owned(), json!("model_loop"));
+        }
+        self.append_event(
+            user_id,
+            run_id,
+            None,
+            RunEventKind::InputReceived,
+            run_status_code(RunStatus::Running),
+            input_payload,
+        )
+        .await?;
+
+        let tool_router = build_model_loop_tool_router().map_err(tool_route_error_to_app_error)?;
+        let tool_codes = tool_router.tool_codes();
+        let mut messages = vec![
+            ModelChatMessage {
+                role: "system".to_owned(),
+                content: build_model_loop_system_prompt(&tool_codes),
+            },
+            ModelChatMessage {
+                role: "user".to_owned(),
+                content: command.input.clone(),
+            },
+        ];
+        let mut last_tool_terminal_status = RunStatus::Succeeded;
+
+        for _turn_index in 0..runtime_state.budget.max_turns {
+            if self
+                .check_model_loop_cancelled(user_id, run_id, "before_model_call")
+                .await?
+                == ModelLoopCancelCheck::Cancelled
+            {
+                return self.get_run(run_id).await;
+            }
+
+            let model_response = match await_model_loop_future_or_cancelled(
+                cancel_token.clone(),
+                "model_call",
+                self.model_runtime.chat_completion_for_purpose(
+                    ModelRoutePurpose::CodeAgent,
+                    ModelChatCommand {
+                        messages: messages.clone(),
+                        temperature: Some(0.2),
+                        max_tokens: Some(1024),
+                        ..ModelChatCommand::default()
+                    },
+                ),
+            )
+            .await?
+            {
+                ModelLoopFutureAwait::Completed(model_response) => model_response,
+                ModelLoopFutureAwait::Cancelled => {
+                    if self
+                        .check_model_loop_cancelled(user_id, run_id, "model_call")
+                        .await?
+                        == ModelLoopCancelCheck::Continue
+                    {
+                        self.finish_model_loop_cancelled(
+                            user_id,
+                            run_id,
+                            &run_status_code(RunStatus::Cancelling),
+                            "model_call",
+                        )
+                        .await?;
+                    }
+                    return self.get_run(run_id).await;
+                }
+            };
+
+            self.append_event(
+                user_id,
+                run_id,
+                None,
+                RunEventKind::Thought,
+                run_status_code(RunStatus::Running),
+                model_inference_event_payload(&model_response),
+            )
+            .await?;
+
+            let parsed = parse_model_turn_output(&model_response.answer).map_err(|err| {
+                AppError::bad_request(format!("Agent 模型输出解析失败: {}", err.message))
+            })?;
+            let parsed_items = parsed.items.clone();
+            let parsed_payload = agent_turn_item_event_payload(&parsed.item);
+            if self
+                .check_model_loop_cancelled(user_id, run_id, "after_model_call")
+                .await?
+                == ModelLoopCancelCheck::Cancelled
+            {
+                return self.get_run(run_id).await;
+            }
+
+            match parsed.item {
+                novex_agent_protocol::AgentTurnItem::FinalAnswer { content } => {
+                    runtime_state.push_item(AgentTurnItem::FinalAnswer {
+                        content: content.clone(),
+                    });
+                    self.finish_model_loop_run(
+                        user_id,
+                        run_id,
+                        None,
+                        last_tool_terminal_status,
+                        &content,
+                        json!({ "answer": content.clone(), "runtimeMode": "model_loop" }),
+                        parsed_payload,
+                    )
+                    .await?;
+                    self.refresh_trace_snapshot(
+                        user_id,
+                        run_id,
+                        json!({ "runtimeMode": "model_loop" }),
+                    )
+                    .await?;
+                    return self.get_run(run_id).await;
+                }
+                AgentTurnItem::ToolCall {
+                    call_id: _,
+                    tool_code: _,
+                    arguments: _,
+                } => {
+                    let tool_call_items = parsed_items
+                        .into_iter()
+                        .filter_map(|item| match item {
+                            AgentTurnItem::ToolCall {
+                                call_id,
+                                tool_code,
+                                arguments,
+                            } => Some((call_id, tool_code, arguments)),
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>();
+                    let tool_call_count = tool_call_items.len();
+                    let requested_batch_payload = tool_call_items
+                        .iter()
+                        .map(|(call_id, tool_code, arguments)| {
+                            json!({
+                                "callId": call_id,
+                                "toolCode": tool_code,
+                                "arguments": arguments,
+                            })
+                        })
+                        .collect::<Vec<_>>();
+                    let can_execute_requested_tool_calls = if tool_call_count == 1 {
+                        runtime_state.can_execute_tool_call()
+                    } else {
+                        runtime_state.can_execute_tool_calls(tool_call_count)
+                    };
+                    if !can_execute_requested_tool_calls {
+                        let final_output = format!(
+                            "Tool call budget exhausted before executing requested batch of {tool_call_count} tool calls."
+                        );
+                        let final_payload =
+                            agent_turn_item_event_payload(&AgentTurnItem::FinalAnswer {
+                                content: final_output.clone(),
+                            });
+                        self.append_event(
+                            user_id,
+                            run_id,
+                                None,
+                                RunEventKind::ActionSelected,
+                                run_status_code(RunStatus::Failed),
+                                json!({
+                                    "requestedToolCallCount": tool_call_count,
+                                    "remainingToolCallBudget": runtime_state.remaining_tool_call_budget(),
+                                    "toolCallBatch": requested_batch_payload,
+                                    "runtimeMode": "model_loop",
+                                    "stopReason": "tool_call_budget_exhausted"
+                                }),
+                            )
+                            .await?;
+                        self.finish_model_loop_run(
+                            user_id,
+                            run_id,
+                            None,
+                            RunStatus::Failed,
+                            &final_output,
+                            json!({
+                                "answer": final_output.clone(),
+                                "runtimeMode": "model_loop",
+                                "stopReason": "tool_call_budget_exhausted"
+                            }),
+                            final_payload,
+                        )
+                        .await?;
+                        self.refresh_trace_snapshot(
+                            user_id,
+                            run_id,
+                            json!({
+                                "runtimeMode": "model_loop",
+                                "stopReason": "tool_call_budget_exhausted"
+                            }),
+                        )
+                        .await?;
+                        return self.get_run(run_id).await;
+                    }
+
+                    let mut routed_calls = Vec::with_capacity(tool_call_count);
+                    for (call_id, tool_code, arguments) in tool_call_items {
+                        match tool_router.route_tool_call(&call_id, &tool_code, arguments.clone()) {
+                            Ok(routed_call) => routed_calls.push(routed_call),
+                            Err(err) => {
+                                let stop_reason = tool_route_stop_reason(err.kind);
+                                let final_output = tool_route_failure_message(&err);
+                                let final_payload =
+                                    agent_turn_item_event_payload(&AgentTurnItem::FinalAnswer {
+                                        content: final_output.clone(),
+                                    });
+                                self.append_event(
+                                    user_id,
+                                    run_id,
+                                    None,
+                                    RunEventKind::ActionSelected,
+                                    run_status_code(RunStatus::Failed),
+                                    json!({
+                                        "toolCode": tool_code,
+                                        "arguments": arguments,
+                                        "toolCallBatch": requested_batch_payload,
+                                        "runtimeMode": "model_loop",
+                                        "stopReason": stop_reason,
+                                        "toolRouteError": err
+                                    }),
+                                )
+                                .await?;
+                                self.finish_model_loop_run(
+                                    user_id,
+                                    run_id,
+                                    None,
+                                    RunStatus::Failed,
+                                    &final_output,
+                                    json!({
+                                        "answer": final_output.clone(),
+                                        "runtimeMode": "model_loop",
+                                        "stopReason": stop_reason
+                                    }),
+                                    final_payload,
+                                )
+                                .await?;
+                                self.refresh_trace_snapshot(
+                                    user_id,
+                                    run_id,
+                                    json!({
+                                        "runtimeMode": "model_loop",
+                                        "stopReason": stop_reason
+                                    }),
+                                )
+                                .await?;
+                                return self.get_run(run_id).await;
+                            }
+                        }
+                    }
+
+                    let batch_plan = ToolBatchPlan::from_routed_calls(routed_calls);
+                    let batch_execution_mode = batch_plan.mode;
+                    let batch_execution_mode_payload =
+                        serde_json::to_value(batch_execution_mode).unwrap_or(Value::Null);
+                    let serial_reason = batch_plan.serial_reason.clone();
+                    let tool_call_batch_payload = batch_plan
+                        .calls
+                        .iter()
+                        .map(|call| {
+                            json!({
+                                "callId": call.call_id,
+                                "toolCode": call.tool.code,
+                                "arguments": call.arguments,
+                                "concurrencyPolicy": call.tool.concurrency,
+                            })
+                        })
+                        .collect::<Vec<_>>();
+                    let batch_size = batch_plan.calls.len();
+                    let mut prepared_calls = Vec::with_capacity(batch_size);
+
+                    for (batch_index, routed_call) in batch_plan.calls.into_iter().enumerate() {
+                        let call_id = routed_call.call_id;
+                        let concurrency_policy_payload =
+                            serde_json::to_value(&routed_call.tool.concurrency)
+                                .unwrap_or(Value::Null);
+                        let tool_code = routed_call.tool.code;
+                        let arguments = routed_call.arguments;
+                        let Some(tool) = self
+                            .capability_repo
+                            .find_tool_by_code(self.tenant_id, &tool_code)
+                            .await?
+                        else {
+                            return Err(AppError::NotFound);
+                        };
+                        let batch_policy = agent_tool_policy_decision(&tool, command.auto_approve);
+                        let prepared_call = PreparedAgentToolCall {
+                            batch_index,
+                            call_id: call_id.clone(),
+                            tool,
+                            arguments: arguments.clone(),
+                            concurrency_policy: concurrency_policy_payload.clone(),
+                            timeout: AGENT_TOOL_IO_TIMEOUT,
+                        };
+                        if batch_policy.requires_approval {
+                            runtime_state.push_item(AgentTurnItem::tool_call(
+                                call_id.clone(),
+                                tool_code.clone(),
+                                arguments.clone(),
+                            ));
+                            let mut action_payload = agent_turn_item_event_payload(
+                                &AgentTurnItem::tool_call(call_id, tool_code.clone(), arguments),
+                            );
+                            if let Some(object) = action_payload.as_object_mut() {
+                                object.insert("runtimeMode".to_owned(), json!("model_loop"));
+                                object.insert(
+                                    "concurrencyPolicy".to_owned(),
+                                    concurrency_policy_payload,
+                                );
+                                object.insert(
+                                    "batchExecutionMode".to_owned(),
+                                    batch_execution_mode_payload.clone(),
+                                );
+                                object.insert(
+                                    "serialReason".to_owned(),
+                                    json!(serial_reason.clone()),
+                                );
+                                object.insert(
+                                    "toolCallBatch".to_owned(),
+                                    Value::Array(tool_call_batch_payload.clone()),
+                                );
+                                object.insert("toolCallBatchIndex".to_owned(), json!(batch_index));
+                                object.insert("toolCallBatchSize".to_owned(), json!(batch_size));
+                            }
+                            self.append_event(
+                                user_id,
+                                run_id,
+                                None,
+                                RunEventKind::ActionSelected,
+                                run_status_code(RunStatus::Running),
+                                action_payload,
+                            )
+                            .await?;
+                            ensure_agent_run_transition(
+                                &run_status_code(RunStatus::Running),
+                                RunStatus::WaitingApproval,
+                            )?;
+                            self.update_status(AgentStatusUpdate {
+                                user_id,
+                                run_id,
+                                status: run_status_code(RunStatus::WaitingApproval),
+                                output_payload: json!({ "toolCode": prepared_call.tool.code }),
+                                final_output: None,
+                                pause_reason: batch_policy.pause_reason.as_deref(),
+                                finished: false,
+                            })
+                            .await?;
+                            self.pause_for_approval(
+                                user_id,
+                                run_id,
+                                &prepared_call.tool,
+                                &command.input,
+                                now,
+                            )
+                            .await?;
+                            self.refresh_trace_snapshot(
+                                user_id,
+                                run_id,
+                                json!({ "runtimeMode": "model_loop", "pauseReason": "approval" }),
+                            )
+                            .await?;
+                            return self.get_run(run_id).await;
+                        }
+                        prepared_calls.push(prepared_call);
+                    }
+
+                    let mut batch_observations = Vec::new();
+                    let mut last_recorded_step_id = None;
+
+                    for prepared_call in &prepared_calls {
+                        runtime_state.push_item(AgentTurnItem::tool_call(
+                            prepared_call.call_id.clone(),
+                            prepared_call.tool.code.clone(),
+                            prepared_call.arguments.clone(),
+                        ));
+                        let mut action_payload =
+                            agent_turn_item_event_payload(&AgentTurnItem::tool_call(
+                                prepared_call.call_id.clone(),
+                                prepared_call.tool.code.clone(),
+                                prepared_call.arguments.clone(),
+                            ));
+                        if let Some(object) = action_payload.as_object_mut() {
+                            object.insert("runtimeMode".to_owned(), json!("model_loop"));
+                            object.insert(
+                                "concurrencyPolicy".to_owned(),
+                                prepared_call.concurrency_policy.clone(),
+                            );
+                            object.insert(
+                                "batchExecutionMode".to_owned(),
+                                batch_execution_mode_payload.clone(),
+                            );
+                            object.insert("serialReason".to_owned(), json!(serial_reason.clone()));
+                            object.insert(
+                                "toolCallBatch".to_owned(),
+                                Value::Array(tool_call_batch_payload.clone()),
+                            );
+                            object.insert(
+                                "toolCallBatchIndex".to_owned(),
+                                json!(prepared_call.batch_index),
+                            );
+                            object.insert("toolCallBatchSize".to_owned(), json!(batch_size));
+                        }
+                        self.append_event(
+                            user_id,
+                            run_id,
+                            None,
+                            RunEventKind::ActionSelected,
+                            run_status_code(RunStatus::Running),
+                            action_payload,
+                        )
+                        .await?;
+                    }
+
+                    if self
+                        .check_model_loop_cancelled(user_id, run_id, "before_tool_batch")
+                        .await?
+                        == ModelLoopCancelCheck::Cancelled
+                    {
+                        return self.get_run(run_id).await;
+                    }
+
+                    let executed_calls =
+                        execute_agent_tool_io_batch(
+                            batch_execution_mode,
+                            prepared_calls,
+                            cancel_token.clone(),
+                            |prepared| async move {
+                                self.execute_agent_tool_io(user_id, prepared).await
+                            },
+                        )
+                        .await?;
+                    for executed_call in executed_calls {
+                        let prepared = executed_call.prepared.clone();
+                        let executed_terminal_status = executed_call.terminal_status;
+                        let recorded = self
+                            .record_agent_tool_execution(
+                                user_id,
+                                run_id,
+                                &prepared,
+                                executed_call.execution,
+                            )
+                            .await?;
+                        last_tool_terminal_status = executed_terminal_status;
+                        last_recorded_step_id = Some(recorded.step_id);
+                        let observation_status =
+                            tool_observation_status_for_execution(&recorded.execution);
+                        let observation_item = AgentTurnItem::tool_observation(
+                            &prepared.call_id,
+                            observation_status,
+                            recorded.execution.response_payload.clone(),
+                        );
+                        runtime_state.push_item(observation_item.clone());
+                        let mut observation_payload =
+                            agent_turn_item_event_payload(&observation_item);
+                        if let Some(object) = observation_payload.as_object_mut() {
+                            object.insert("toolCode".to_owned(), json!(&prepared.tool.code));
+                            object.insert("auditId".to_owned(), json!(recorded.audit_id));
+                            object.insert("dryRun".to_owned(), json!(recorded.execution.dry_run));
+                            object.insert("runtimeMode".to_owned(), json!("model_loop"));
+                        }
+                        self.append_event(
+                            user_id,
+                            run_id,
+                            Some(recorded.step_id),
+                            RunEventKind::ToolCalled,
+                            run_status_code(RunStatus::Running),
+                            json!({
+                                "toolCode": prepared.tool.code,
+                                "arguments": prepared.arguments.clone(),
+                                "auditId": recorded.audit_id,
+                                "dryRun": recorded.execution.dry_run,
+                                "runtimeMode": "model_loop"
+                            }),
+                        )
+                        .await?;
+                        self.append_event(
+                            user_id,
+                            run_id,
+                            Some(recorded.step_id),
+                            RunEventKind::Observation,
+                            run_status_code(RunStatus::Running),
+                            observation_payload,
+                        )
+                        .await?;
+                        batch_observations.push((
+                            prepared.tool.code.clone(),
+                            recorded.execution.response_payload.clone(),
+                        ));
+                    }
+
+                    if self
+                        .check_model_loop_cancelled(user_id, run_id, "after_tool_batch")
+                        .await?
+                        == ModelLoopCancelCheck::Cancelled
+                    {
+                        return self.get_run(run_id).await;
+                    }
+
+                    if runtime_state.should_compact_context() {
+                        if let Some(compaction) = runtime_state.compact_context() {
+                            let compaction_item = AgentTurnItem::ContextCompaction {
+                                summary: compaction.summary.clone(),
+                            };
+                            let mut compaction_payload =
+                                agent_turn_item_event_payload(&compaction_item);
+                            if let Some(object) = compaction_payload.as_object_mut() {
+                                object.insert("runtimeMode".to_owned(), json!("model_loop"));
+                                object.insert(
+                                    "compactionWindowId".to_owned(),
+                                    json!(compaction.window_id),
+                                );
+                                object.insert(
+                                    "retainedItemCount".to_owned(),
+                                    json!(compaction.retained_item_count),
+                                );
+                                object.insert(
+                                    "compactedItemCount".to_owned(),
+                                    json!(compaction.compacted_item_count),
+                                );
+                            }
+                            self.append_event(
+                                user_id,
+                                run_id,
+                                last_recorded_step_id,
+                                RunEventKind::Observation,
+                                run_status_code(RunStatus::Running),
+                                compaction_payload,
+                            )
+                            .await?;
+                            let summary = compaction.summary.as_str();
+                            messages = build_compacted_model_loop_messages(
+                                &command.input,
+                                summary,
+                                &tool_codes,
+                            );
+                            if self
+                                .check_model_loop_cancelled(user_id, run_id, "before_next_turn")
+                                .await?
+                                == ModelLoopCancelCheck::Cancelled
+                            {
+                                return self.get_run(run_id).await;
+                            }
+                            continue;
+                        }
+                    }
+
+                    if self
+                        .check_model_loop_cancelled(user_id, run_id, "before_next_turn")
+                        .await?
+                        == ModelLoopCancelCheck::Cancelled
+                    {
+                        return self.get_run(run_id).await;
+                    }
+
+                    messages.push(ModelChatMessage {
+                        role: "assistant".to_owned(),
+                        content: model_response.answer.clone(),
+                    });
+                    messages.push(ModelChatMessage {
+                        role: "user".to_owned(),
+                        content: build_observation_batch_follow_up_prompt(&batch_observations),
+                    });
+                    continue;
+                }
+                _ => {
+                    runtime_state.push_item(parsed.item);
+                    self.finish_model_loop_run(
+                        user_id,
+                        run_id,
+                        None,
+                        last_tool_terminal_status,
+                        &model_response.answer,
+                        json!({ "answer": model_response.answer.clone(), "runtimeMode": "model_loop" }),
+                        parsed_payload,
+                    )
+                    .await?;
+                    self.refresh_trace_snapshot(
+                        user_id,
+                        run_id,
+                        json!({ "runtimeMode": "model_loop" }),
+                    )
+                    .await?;
+                    return self.get_run(run_id).await;
+                }
+            }
+        }
+
+        let final_output = "Agent model loop stopped because the turn budget was exhausted.";
+        self.finish_model_loop_run(
+            user_id,
+            run_id,
+            None,
+            RunStatus::Failed,
+            final_output,
+            json!({
+                "answer": final_output,
+                "runtimeMode": "model_loop",
+                "stopReason": "turn_budget_exhausted"
+            }),
+            agent_turn_item_event_payload(&AgentTurnItem::FinalAnswer {
+                content: final_output.to_owned(),
+            }),
+        )
+        .await?;
+        self.refresh_trace_snapshot(
+            user_id,
+            run_id,
+            json!({
+                "runtimeMode": "model_loop",
+                "stopReason": "turn_budget_exhausted"
+            }),
+        )
+        .await?;
+        self.get_run(run_id).await
+    }
+
     pub async fn list_runs(
         &self,
         query: AgentRunQuery,
@@ -443,6 +1262,33 @@ impl AgentService {
             .map(AgentRunEventResp::from)
             .collect();
         Ok(PageResult::new(list, total))
+    }
+
+    pub async fn get_run_trace(&self, run_id: i64) -> Result<AgentTraceReplayResp, AppError> {
+        let Some(run) = self.repo.find_run(self.tenant_id, run_id).await? else {
+            return Err(AppError::NotFound);
+        };
+        if let Some(rollout) = self
+            .repo
+            .find_rollout_by_run_id(self.tenant_id, run_id)
+            .await?
+        {
+            if let Ok(bundle) = serde_json::from_value::<TraceBundle>(rollout.event_bundle) {
+                return Ok(AgentTraceReplayResp::from(bundle));
+            }
+        }
+        let filter = RunEventFilter {
+            tenant_id: self.tenant_id,
+            run_id,
+            limit: MAX_TRACE_REPLAY_EVENTS,
+            offset: 0,
+        };
+        let events = self.repo.list_events(&filter).await?;
+
+        Ok(AgentTraceReplayResp::from(agent_events_to_trace_bundle(
+            run.trace_id,
+            events,
+        )))
     }
 
     pub async fn resume_run(
@@ -549,6 +1395,7 @@ impl AgentService {
             json!({ "requestedBy": user_id }),
         )
         .await?;
+        let runtime_signal_sent = self.agent_runtime.cancel_run(self.tenant_id, run_id);
         let now = Utc::now().naive_utc();
         self.repo
             .cancel_active_pauses(self.tenant_id, run_id, user_id, now)
@@ -573,12 +1420,65 @@ impl AgentService {
             None,
             RunEventKind::Cancelled,
             run_status_code(RunStatus::Cancelled),
-            json!({ "cancelled": true }),
+            json!({ "cancelled": true, "runtimeSignalSent": runtime_signal_sent }),
         )
         .await?;
         self.refresh_trace_snapshot(user_id, run_id, json!({ "cancelled": true }))
             .await?;
         self.get_run(run_id).await
+    }
+
+    async fn check_model_loop_cancelled(
+        &self,
+        user_id: i64,
+        run_id: i64,
+        stage: &str,
+    ) -> Result<ModelLoopCancelCheck, AppError> {
+        let Some(run) = self.repo.find_run(self.tenant_id, run_id).await? else {
+            return Err(AppError::NotFound);
+        };
+        if !model_loop_cancel_requested(&run.status) {
+            return Ok(ModelLoopCancelCheck::Continue);
+        }
+
+        self.finish_model_loop_cancelled(user_id, run_id, &run.status, stage)
+            .await?;
+        Ok(ModelLoopCancelCheck::Cancelled)
+    }
+
+    async fn finish_model_loop_cancelled(
+        &self,
+        user_id: i64,
+        run_id: i64,
+        current_status: &str,
+        stage: &str,
+    ) -> Result<(), AppError> {
+        let payload = model_loop_external_cancel_payload(stage);
+        if parse_run_status_code(current_status) == Some(RunStatus::Cancelling) {
+            ensure_agent_run_transition(current_status, RunStatus::Cancelled)?;
+            self.update_status(AgentStatusUpdate {
+                user_id,
+                run_id,
+                status: run_status_code(RunStatus::Cancelled),
+                output_payload: payload.clone(),
+                final_output: None,
+                pause_reason: None,
+                finished: true,
+            })
+            .await?;
+            self.append_event(
+                user_id,
+                run_id,
+                None,
+                RunEventKind::Cancelled,
+                run_status_code(RunStatus::Cancelled),
+                payload.clone(),
+            )
+            .await?;
+        }
+        self.refresh_trace_snapshot(user_id, run_id, payload)
+            .await?;
+        Ok(())
     }
 
     async fn create_run_records(
@@ -778,15 +1678,32 @@ impl AgentService {
         ))
     }
 
-    async fn execute_tool_and_finish(
+    async fn execute_and_record_tool_call(
         &self,
         user_id: i64,
         run_id: i64,
         tool: &ToolLookupRecord,
         input: Value,
-    ) -> Result<(), AppError> {
-        let now = Utc::now().naive_utc();
-        let audit_id = next_id();
+    ) -> Result<RecordedToolExecution, AppError> {
+        let prepared = PreparedAgentToolCall {
+            batch_index: 0,
+            call_id: "single-tool-call".to_owned(),
+            tool: tool.clone(),
+            arguments: input,
+            concurrency_policy: Value::Null,
+            timeout: AGENT_TOOL_IO_TIMEOUT,
+        };
+        let executed = self.execute_agent_tool_io(user_id, prepared).await?;
+        self.record_agent_tool_execution(user_id, run_id, &executed.prepared, executed.execution)
+            .await
+    }
+
+    async fn execute_agent_tool_io(
+        &self,
+        user_id: i64,
+        prepared: PreparedAgentToolCall,
+    ) -> Result<ExecutedAgentToolCall, AppError> {
+        let tool = &prepared.tool;
         let connector_credential = if is_github_connector_tool(&tool.code) {
             self.capability_repo
                 .find_connector_credential(self.tenant_id, GITHUB_CONNECTOR_CODE, user_id)
@@ -794,19 +1711,51 @@ impl AgentService {
         } else {
             None
         };
+        let mcp_tool = if matches!(agent_tool_kind(tool), ToolKind::Mcp) {
+            self.capability_repo
+                .find_mcp_tool_for_execution(self.tenant_id, &tool.code)
+                .await?
+        } else {
+            None
+        };
         let execution = execute_agent_tool(
-            &tool.code,
-            &input,
+            tool,
+            &prepared.arguments,
             connector_credential.as_ref(),
+            mcp_tool.as_ref(),
             Some(&self.model_runtime),
         )
         .await;
+        let terminal_status = if execution.cancelled_status() {
+            RunStatus::Cancelled
+        } else if execution.succeeded_status() {
+            RunStatus::Succeeded
+        } else {
+            RunStatus::Failed
+        };
+        Ok(ExecutedAgentToolCall {
+            prepared,
+            execution,
+            terminal_status,
+        })
+    }
+
+    async fn record_agent_tool_execution(
+        &self,
+        user_id: i64,
+        run_id: i64,
+        prepared: &PreparedAgentToolCall,
+        execution: AgentToolExecution,
+    ) -> Result<RecordedToolExecution, AppError> {
+        let now = Utc::now().naive_utc();
+        let audit_id = next_id();
+        let tool = &prepared.tool;
+        let input = prepared.arguments.clone();
         let terminal_status = if execution.succeeded_status() {
             RunStatus::Succeeded
         } else {
             RunStatus::Failed
         };
-        ensure_agent_run_transition(&run_status_code(RunStatus::Running), terminal_status)?;
         let step_status = run_status_code(terminal_status);
         self.capability_repo
             .create_tool_call_audit(&ToolAuditSaveRecord {
@@ -855,30 +1804,54 @@ impl AgentService {
                 now,
             })
             .await?;
+        Ok(RecordedToolExecution {
+            audit_id,
+            step_id,
+            execution,
+            terminal_status,
+        })
+    }
+
+    async fn execute_tool_and_finish(
+        &self,
+        user_id: i64,
+        run_id: i64,
+        tool: &ToolLookupRecord,
+        input: Value,
+    ) -> Result<(), AppError> {
+        let recorded = self
+            .execute_and_record_tool_call(user_id, run_id, tool, input)
+            .await?;
+        ensure_agent_run_transition(
+            &run_status_code(RunStatus::Running),
+            recorded.terminal_status,
+        )?;
+        let step_status = run_status_code(recorded.terminal_status);
+        let final_output = recorded.execution.final_output.clone();
         self.append_event(
             user_id,
             run_id,
-            Some(step_id),
+            Some(recorded.step_id),
             RunEventKind::ToolCalled,
             run_status_code(RunStatus::Running),
-            json!({ "toolCode": tool.code, "auditId": audit_id }),
+            json!({ "toolCode": tool.code, "auditId": recorded.audit_id }),
         )
         .await?;
         self.append_event(
             user_id,
             run_id,
-            Some(step_id),
+            Some(recorded.step_id),
             RunEventKind::Observation,
             run_status_code(RunStatus::Running),
-            execution.response_payload.clone(),
+            recorded.execution.response_payload.clone(),
         )
         .await?;
         self.update_status(AgentStatusUpdate {
             user_id,
             run_id,
             status: step_status.clone(),
-            output_payload: json!({ "answer": execution.final_output, "auditId": audit_id }),
-            final_output: Some(&execution.final_output),
+            output_payload: json!({ "answer": final_output.clone(), "auditId": recorded.audit_id }),
+            final_output: Some(&final_output),
             pause_reason: None,
             finished: true,
         })
@@ -886,7 +1859,7 @@ impl AgentService {
         self.append_event(
             user_id,
             run_id,
-            Some(step_id),
+            Some(recorded.step_id),
             RunEventKind::StatusChanged,
             step_status.clone(),
             json!({ "status": step_status, "toolCode": tool.code }),
@@ -895,16 +1868,16 @@ impl AgentService {
         self.append_event(
             user_id,
             run_id,
-            Some(step_id),
+            Some(recorded.step_id),
             RunEventKind::FinalOutput,
             step_status,
-            json!({ "answer": execution.final_output }),
+            json!({ "answer": final_output }),
         )
         .await?;
         self.refresh_trace_snapshot(
             user_id,
             run_id,
-            json!({ "toolCode": tool.code, "auditId": audit_id }),
+            json!({ "toolCode": tool.code, "auditId": recorded.audit_id }),
         )
         .await
     }
@@ -930,6 +1903,51 @@ impl AgentService {
         self.media_repo
             .create_media_result(records.asset.as_ref(), &records.job)
             .await
+    }
+
+    async fn finish_model_loop_run(
+        &self,
+        user_id: i64,
+        run_id: i64,
+        step_id: Option<i64>,
+        final_status: RunStatus,
+        final_output: &str,
+        output_payload: Value,
+        final_payload: Value,
+    ) -> Result<(), AppError> {
+        ensure_agent_run_transition(&run_status_code(RunStatus::Running), final_status)?;
+        let final_status_code = run_status_code(final_status);
+        self.update_status(AgentStatusUpdate {
+            user_id,
+            run_id,
+            status: final_status_code.clone(),
+            output_payload,
+            final_output: Some(final_output),
+            pause_reason: None,
+            finished: true,
+        })
+        .await?;
+        self.append_event(
+            user_id,
+            run_id,
+            step_id,
+            RunEventKind::StatusChanged,
+            final_status_code.clone(),
+            json!({
+                "status": final_status_code.clone(),
+                "runtimeMode": "model_loop"
+            }),
+        )
+        .await?;
+        self.append_event(
+            user_id,
+            run_id,
+            step_id,
+            RunEventKind::FinalOutput,
+            final_status_code,
+            final_payload,
+        )
+        .await
     }
 
     async fn finish_without_tool(
@@ -1035,32 +2053,49 @@ impl AgentService {
             limit: DEFAULT_EVENT_PAGE_SIZE as i64,
             offset: 0,
         };
-        let events: Vec<AgentRunEventResp> = self
-            .repo
-            .list_events(&filter)
-            .await?
-            .into_iter()
-            .map(AgentRunEventResp::from)
-            .collect();
+        let events = self.repo.list_events(&filter).await?;
+        let trace_id = format!("agent-{run_id}");
+        let bundle = agent_events_to_trace_bundle(&trace_id, events.clone());
+        let event_snapshot = agent_trace_snapshot_payload_for_bundle(&events, &bundle);
+        let summary = bundle.replay_summary();
+        let now = Utc::now().naive_utc();
         self.repo
             .update_trace_snapshot(
                 self.tenant_id,
                 run_id,
-                &serde_json::to_value(events).unwrap_or_else(|_| json!([])),
+                &event_snapshot,
                 &tool_snapshot,
                 user_id,
-                Utc::now().naive_utc(),
+                now,
             )
+            .await?;
+        self.repo
+            .upsert_rollout_bundle(&AgentRolloutSaveRecord {
+                id: next_id(),
+                tenant_id: self.tenant_id,
+                run_id,
+                trace_id,
+                event_bundle: serde_json::to_value(&bundle).unwrap_or_else(|_| json!({})),
+                summary_payload: serde_json::to_value(&summary).unwrap_or_else(|_| json!({})),
+                source: "agent_run".to_owned(),
+                user_id,
+                now,
+            })
             .await
     }
 }
 
 async fn execute_agent_tool(
-    tool_code: &str,
+    tool: &ToolLookupRecord,
     input: &Value,
     connector_credential: Option<&ConnectorCredentialLookupRecord>,
+    mcp_tool: Option<&McpToolExecutionRecord>,
     model_runtime: Option<&ModelRuntimeService>,
 ) -> AgentToolExecution {
+    if matches!(agent_tool_kind(tool), ToolKind::Mcp) {
+        return execute_mcp_tool(&tool.code, input, mcp_tool).await;
+    }
+    let tool_code = tool.code.as_str();
     if tool_code == FEISHU_TOOL_CODE {
         return execute_feishu_message_tool(input).await;
     }
@@ -1085,6 +2120,224 @@ async fn execute_agent_tool(
         true,
         format!("Agent dry-run executed {tool_code}."),
     )
+}
+
+async fn await_model_loop_future_or_cancelled<F, T>(
+    cancel_token: AgentRunCancellationToken,
+    _stage: &str,
+    future: F,
+) -> Result<ModelLoopFutureAwait<T>, AppError>
+where
+    F: Future<Output = Result<T, AppError>>,
+{
+    tokio::select! {
+        biased;
+        _ = cancel_token.cancelled() => Ok(ModelLoopFutureAwait::Cancelled),
+        result = future => result.map(ModelLoopFutureAwait::Completed),
+    }
+}
+
+async fn execute_agent_tool_io_batch<F, Fut>(
+    mode: ToolBatchExecutionMode,
+    prepared_calls: Vec<PreparedAgentToolCall>,
+    cancel_token: AgentRunCancellationToken,
+    execute: F,
+) -> Result<Vec<ExecutedAgentToolCall>, AppError>
+where
+    F: Fn(PreparedAgentToolCall) -> Fut,
+    Fut: Future<Output = Result<ExecutedAgentToolCall, AppError>>,
+{
+    match mode {
+        ToolBatchExecutionMode::Parallel => {
+            let results = join_all(prepared_calls.into_iter().map(|prepared| {
+                execute_agent_tool_io_with_timeout_and_cancel(
+                    prepared,
+                    cancel_token.clone(),
+                    &execute,
+                )
+            }))
+            .await;
+            results.into_iter().collect()
+        }
+        ToolBatchExecutionMode::Serial => {
+            let mut executions = Vec::with_capacity(prepared_calls.len());
+            for prepared in prepared_calls {
+                executions.push(
+                    execute_agent_tool_io_with_timeout_and_cancel(
+                        prepared,
+                        cancel_token.clone(),
+                        &execute,
+                    )
+                    .await?,
+                );
+            }
+            Ok(executions)
+        }
+    }
+}
+
+async fn execute_agent_tool_io_with_timeout_and_cancel<F, Fut>(
+    prepared: PreparedAgentToolCall,
+    cancel_token: AgentRunCancellationToken,
+    execute: &F,
+) -> Result<ExecutedAgentToolCall, AppError>
+where
+    F: Fn(PreparedAgentToolCall) -> Fut,
+    Fut: Future<Output = Result<ExecutedAgentToolCall, AppError>>,
+{
+    let timeout = prepared.timeout;
+    tokio::select! {
+        biased;
+        _ = cancel_token.cancelled() => Ok(ExecutedAgentToolCall {
+            execution: AgentToolExecution::cancelled(
+                json!({
+                    "status": "cancelled",
+                    "cancelReason": "external_cancel",
+                    "cancelStage": "tool_io",
+                    "toolCode": prepared.tool.code,
+                    "callId": prepared.call_id,
+                }),
+                format!("Tool `{}` was cancelled by run cancellation.", prepared.tool.code),
+            ),
+            prepared,
+            terminal_status: RunStatus::Cancelled,
+        }),
+        result = tokio::time::timeout(timeout, execute(prepared.clone())) => match result {
+            Ok(result) => result,
+            Err(_) => Ok(ExecutedAgentToolCall {
+            execution: AgentToolExecution::cancelled(
+                json!({
+                    "status": "cancelled",
+                    "cancelReason": "tool_io_timeout",
+                    "toolCode": prepared.tool.code,
+                    "callId": prepared.call_id,
+                    "timeoutMs": timeout.as_millis() as u64,
+                }),
+                format!(
+                    "Tool `{}` was cancelled after {} ms.",
+                    prepared.tool.code,
+                    timeout.as_millis()
+                ),
+            ),
+            prepared,
+            terminal_status: RunStatus::Cancelled,
+            }),
+        },
+    }
+}
+
+async fn execute_mcp_tool(
+    tool_code: &str,
+    input: &Value,
+    mcp_tool: Option<&McpToolExecutionRecord>,
+) -> AgentToolExecution {
+    let Some(tool) = mcp_tool else {
+        return AgentToolExecution::failed(
+            json!({
+                "dryRun": false,
+                "toolCode": tool_code,
+                "status": "failed",
+                "provider": "mcp",
+                "error": "MCP tool registration not found",
+            }),
+            "MCP tool registration not found".to_owned(),
+            "Agent failed to execute MCP tool.".to_owned(),
+        );
+    };
+
+    let request = McpToolInvocationRequest {
+        server_code: tool.server_code.clone(),
+        tool_name: tool.tool_name.clone(),
+        arguments: input.clone(),
+    };
+    let auth = mcp_auth_payload(tool.secret_ref.as_deref(), &tool.auth_type);
+    if let Some(mock_response) = tool.metadata.get("mockResponse").cloned() {
+        let result = McpToolInvocationResult {
+            tool_code: tool.tool_code.clone(),
+            status: "succeeded".to_owned(),
+            output: mock_response,
+            dry_run: false,
+        };
+        return AgentToolExecution::succeeded(
+            json!({
+                "dryRun": result.dry_run,
+                "toolCode": result.tool_code,
+                "status": result.status,
+                "provider": "mcp",
+                "server": mcp_server_payload(tool),
+                "request": request,
+                "response": result.output,
+                "auth": auth,
+                "mocked": true,
+            }),
+            result.dry_run,
+            format!(
+                "Agent executed MCP tool {} via configured mock response.",
+                tool.tool_code
+            ),
+        );
+    }
+
+    let result = McpToolInvocationResult {
+        tool_code: tool.tool_code.clone(),
+        status: "succeeded".to_owned(),
+        output: json!({
+            "message": "MCP live client is not configured; dry-run only",
+            "endpointUrl": tool.endpoint_url,
+            "serverCode": tool.server_code,
+            "toolName": tool.tool_name,
+            "arguments": input,
+        }),
+        dry_run: true,
+    };
+    AgentToolExecution::succeeded(
+        json!({
+            "dryRun": result.dry_run,
+            "toolCode": result.tool_code,
+            "status": result.status,
+            "provider": "mcp",
+            "server": mcp_server_payload(tool),
+            "request": request,
+            "response": result.output,
+            "auth": auth,
+            "mocked": false,
+        }),
+        result.dry_run,
+        format!("Agent dry-run prepared MCP tool {}.", tool.tool_code),
+    )
+}
+
+fn mcp_server_payload(tool: &McpToolExecutionRecord) -> Value {
+    json!({
+        "serverId": tool.server_id,
+        "serverCode": tool.server_code,
+        "serverName": tool.server_name,
+        "endpointUrl": tool.endpoint_url,
+        "transportKind": tool.transport_kind,
+        "authType": tool.auth_type,
+    })
+}
+
+fn mcp_auth_payload(secret_ref: Option<&str>, auth_type: &str) -> Value {
+    mcp_auth_payload_from_sources(secret_ref, auth_type, |key| env::var(key).ok())
+}
+
+fn mcp_auth_payload_from_sources<F>(
+    secret_ref: Option<&str>,
+    auth_type: &str,
+    mut env_get: F,
+) -> Value
+where
+    F: FnMut(&str) -> Option<String>,
+{
+    let resolved = secret_ref
+        .and_then(|secret_ref| resolve_env_secret_ref(secret_ref, &mut env_get))
+        .is_some();
+    json!({
+        "type": auth_type,
+        "secretRef": secret_ref,
+        "resolved": resolved,
+    })
 }
 
 async fn execute_github_repo_search_tool(
@@ -2002,6 +3255,27 @@ fn agent_tool_policy_decision(
     })
 }
 
+fn agent_tool_kind(tool: &ToolLookupRecord) -> ToolKind {
+    let executor = tool.executor_kind.trim().to_ascii_lowercase();
+    let kind = tool.tool_kind.trim().to_ascii_lowercase();
+    match executor.as_str() {
+        "mcp" => ToolKind::Mcp,
+        "connector" => ToolKind::Connector,
+        "model" => ToolKind::Model,
+        "media" => ToolKind::Media,
+        "sandbox" => ToolKind::Sandbox,
+        "http" => ToolKind::Http,
+        _ => match kind.as_str() {
+            "mcp" => ToolKind::Mcp,
+            "connector" => ToolKind::Connector,
+            "media" => ToolKind::Media,
+            "model" => ToolKind::Model,
+            "http" => ToolKind::Http,
+            _ => ToolKind::Function,
+        },
+    }
+}
+
 fn tool_risk_level(value: i16) -> ToolRiskLevel {
     match value {
         value if value <= 1 => ToolRiskLevel::Low,
@@ -2026,9 +3300,166 @@ pub fn normalize_agent_run_command(
         return Err(AppError::bad_request("Agent 输入不能为空"));
     }
     ensure_max_chars("Agent 输入", &command.input, 4000)?;
+    command.runtime_mode = normalize_agent_runtime_mode(command.runtime_mode)?;
     command.budget = novex_ai_core::normalize_task_budget(command.budget)
         .map_err(|err| AppError::bad_request(format!("任务预算超出限制: {}", err.field)))?;
     Ok(command)
+}
+
+fn normalize_agent_runtime_mode(runtime_mode: Option<String>) -> Result<Option<String>, AppError> {
+    let Some(runtime_mode) = runtime_mode
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+    else {
+        return Ok(None);
+    };
+    if runtime_mode == "model_loop" {
+        return Ok(Some(runtime_mode));
+    }
+    Err(AppError::bad_request("Agent runtimeMode 不支持"))
+}
+
+fn build_model_loop_tool_router() -> Result<ToolRouter, ToolRouteError> {
+    ToolRouter::from_definitions(agent_model_loop_tool_definitions())
+}
+
+fn build_model_loop_system_prompt(tool_codes: &[String]) -> String {
+    format!(
+        "You are Novex Agent Runtime. You may answer directly or request tool calls while staying within the run budget. Available tools: {}. After each tool observation, decide whether another tool call is necessary or produce the final answer. To call one tool, reply with compact JSON exactly like {{\"type\":\"tool_call\",\"callId\":\"call-1\",\"toolCode\":\"rag.search\",\"arguments\":{{\"query\":\"...\"}}}}. To call multiple independent tools in the same turn, reply with compact JSON exactly like {{\"type\":\"tool_calls\",\"calls\":[{{\"callId\":\"call-1\",\"toolCode\":\"rag.search\",\"arguments\":{{\"query\":\"...\"}}}},{{\"callId\":\"call-2\",\"toolCode\":\"github.repo.read\",\"arguments\":{{\"repository\":\"org/repo\",\"path\":\"README.md\"}}}}]}}. Otherwise reply with the final answer. Never request a tool outside the available tools or after the tool-call budget is exhausted.",
+        tool_codes.join(", ")
+    )
+}
+
+fn agent_runtime_budget_from_task_budget(budget: TaskBudget) -> AgentRuntimeBudget {
+    AgentRuntimeBudget {
+        max_turns: budget.max_steps.unwrap_or(novex_ai_core::DEFAULT_MAX_STEPS) as usize,
+        max_tool_calls: budget
+            .max_tool_calls
+            .unwrap_or(novex_ai_core::DEFAULT_MAX_TOOL_CALLS) as usize,
+        compact_after_observations: Some(2),
+    }
+}
+
+fn build_observation_follow_up_prompt(tool_code: &str, observation: &Value) -> String {
+    format!(
+        "Tool `{tool_code}` returned this observation:\n{}\nUse it to produce the final answer. If the observation is insufficient, say what is missing.",
+        serde_json::to_string_pretty(observation).unwrap_or_else(|_| "{}".to_owned())
+    )
+}
+
+fn build_observation_batch_follow_up_prompt(observations: &[(String, Value)]) -> String {
+    if observations.len() == 1 {
+        if let Some((tool_code, observation)) = observations.first() {
+            return build_observation_follow_up_prompt(tool_code, observation);
+        }
+    }
+
+    let payload = observations
+        .iter()
+        .map(|(tool_code, observation)| {
+            json!({
+                "toolCode": tool_code,
+                "observation": observation,
+            })
+        })
+        .collect::<Vec<_>>();
+    format!(
+        "The requested tool batch returned these observations:\n{}\nUse them to produce the final answer. If the observations are insufficient, say what is missing.",
+        serde_json::to_string_pretty(&payload).unwrap_or_else(|_| "[]".to_owned())
+    )
+}
+
+fn tool_observation_status_for_execution(execution: &AgentToolExecution) -> ToolObservationStatus {
+    if execution.succeeded_status() {
+        return ToolObservationStatus::Succeeded;
+    }
+    if execution.cancelled_status() {
+        return ToolObservationStatus::Cancelled;
+    }
+    ToolObservationStatus::Failed
+}
+
+fn model_loop_cancel_requested(status: &str) -> bool {
+    matches!(
+        parse_run_status_code(status),
+        Some(RunStatus::Cancelling | RunStatus::Cancelled)
+    )
+}
+
+fn model_loop_external_cancel_payload(stage: &str) -> Value {
+    json!({
+        "cancelled": true,
+        "cancelReason": "external_cancel",
+        "cancelStage": stage,
+        "runtimeMode": "model_loop",
+    })
+}
+
+fn model_inference_event_payload(response: &ModelChatResp) -> Value {
+    json!({
+        "runtimeMode": "model_loop",
+        "item": {
+            "type": "model_inference",
+            "routeId": &response.route_id,
+            "provider": &response.provider,
+            "model": &response.model,
+            "latencyMs": u128_to_i64(response.latency_ms),
+            "usage": &response.usage,
+            "costCents": Value::Null,
+        }
+    })
+}
+
+fn u128_to_i64(value: u128) -> i64 {
+    value.min(i64::MAX as u128) as i64
+}
+
+fn build_compacted_model_loop_messages(
+    original_input: &str,
+    summary: &str,
+    tool_codes: &[String],
+) -> Vec<ModelChatMessage> {
+    vec![
+        ModelChatMessage {
+            role: "system".to_owned(),
+            content: build_model_loop_system_prompt(tool_codes),
+        },
+        ModelChatMessage {
+            role: "user".to_owned(),
+            content: original_input.to_owned(),
+        },
+        ModelChatMessage {
+            role: "user".to_owned(),
+            content: format!(
+                "Prior agent context was compacted to keep the run inside the model context window:\n{summary}\nContinue from this compacted context. You may call another available tool if needed, otherwise produce the final answer."
+            ),
+        },
+    ]
+}
+
+fn tool_route_error_to_app_error(err: ToolRouteError) -> AppError {
+    AppError::bad_request(format!("Agent 工具路由初始化失败: {}", err.message))
+}
+
+fn tool_route_stop_reason(kind: ToolRouteErrorKind) -> &'static str {
+    match kind {
+        ToolRouteErrorKind::UnknownTool => "unknown_tool",
+        ToolRouteErrorKind::EmptyToolCode => "invalid_tool",
+        ToolRouteErrorKind::DuplicateToolCode => "tool_router_error",
+    }
+}
+
+fn tool_route_failure_message(err: &ToolRouteError) -> String {
+    match err.kind {
+        ToolRouteErrorKind::UnknownTool => format!(
+            "Model requested unavailable tool `{}`.",
+            err.tool_code.as_deref().unwrap_or("unknown")
+        ),
+        ToolRouteErrorKind::EmptyToolCode => "Model requested an empty tool code.".to_owned(),
+        ToolRouteErrorKind::DuplicateToolCode => {
+            format!("Tool router configuration error: {}", err.message)
+        }
+    }
 }
 
 fn build_agent_plan(
@@ -2143,6 +3574,166 @@ fn agent_context_retrieval_payload(input: &str, memory_context: &MemoryContext) 
     })
 }
 
+fn agent_turn_item_event_payload(item: &novex_agent_protocol::AgentTurnItem) -> Value {
+    json!({
+        "eventSource": "novex-agent-runtime",
+        "item": serde_json::to_value(item).unwrap_or(Value::Null),
+    })
+}
+
+fn agent_events_to_trace_bundle(
+    trace_id: impl Into<String>,
+    events: Vec<RunEventRecord>,
+) -> TraceBundle {
+    let mut bundle = TraceBundle::new(trace_id);
+    for event in events {
+        if let Some(trace_event) = trace_event_from_run_event(&event) {
+            bundle = bundle.with_event(trace_event);
+        }
+    }
+    bundle
+}
+
+#[cfg(test)]
+fn agent_trace_snapshot_payload(trace_id: &str, events: &[RunEventRecord]) -> Value {
+    let bundle = agent_events_to_trace_bundle(trace_id, events.to_vec());
+    agent_trace_snapshot_payload_for_bundle(events, &bundle)
+}
+
+fn agent_trace_snapshot_payload_for_bundle(
+    events: &[RunEventRecord],
+    bundle: &TraceBundle,
+) -> Value {
+    let event_snapshot = events
+        .iter()
+        .cloned()
+        .map(AgentRunEventResp::from)
+        .collect::<Vec<_>>();
+    let summary = bundle.replay_summary();
+
+    json!({
+        "events": event_snapshot,
+        "traceEvents": bundle.events.clone(),
+        "summary": summary,
+    })
+}
+
+fn trace_event_from_run_event(event: &RunEventRecord) -> Option<TraceEvent> {
+    let sequence_no = trace_sequence_no(event.sequence_no);
+    match event.event_type.as_str() {
+        "input_received" => Some(TraceEvent::user_message(
+            sequence_no,
+            trace_payload_text(&event.payload, &["input", "content", "query"])
+                .unwrap_or_else(|| trace_payload_fallback(&event.payload)),
+        )),
+        "thought"
+            if trace_payload_item_type(&event.payload).as_deref() == Some("model_inference") =>
+        {
+            Some(TraceEvent::inference(sequence_no, event.payload.clone()))
+        }
+        "thought" => Some(TraceEvent::assistant_message(
+            sequence_no,
+            trace_payload_text(&event.payload, &["message", "content", "summary"])
+                .unwrap_or_else(|| trace_payload_fallback(&event.payload)),
+        )),
+        "tool_called" => Some(TraceEvent::tool_call(
+            sequence_no,
+            trace_call_id(event),
+            trace_payload_text(&event.payload, &["toolCode", "tool_code"])
+                .unwrap_or_else(|| "unknown".to_owned()),
+        )),
+        "retrieval" => Some(TraceEvent::retrieval(sequence_no, event.payload.clone())),
+        "action_selected" => Some(TraceEvent::action_selected(
+            sequence_no,
+            event.payload.clone(),
+        )),
+        "observation"
+            if trace_payload_item_type(&event.payload).as_deref() == Some("context_compaction") =>
+        {
+            Some(TraceEvent::context_compaction(
+                sequence_no,
+                event.payload.clone(),
+            ))
+        }
+        "observation" => Some(TraceEvent::observation(
+            sequence_no,
+            trace_call_id(event),
+            trace_observation_output(&event.payload),
+        )),
+        "approval_requested" => Some(TraceEvent::approval_requested(
+            sequence_no,
+            trace_payload_text(&event.payload, &["toolCode", "tool_code"])
+                .unwrap_or_else(|| "unknown".to_owned()),
+        )),
+        "final_output" => Some(TraceEvent::final_answer(
+            sequence_no,
+            trace_payload_text(&event.payload, &["answer", "content"])
+                .unwrap_or_else(|| trace_payload_fallback(&event.payload)),
+        )),
+        "cancel_requested" | "cancelled" => {
+            Some(TraceEvent::cancellation(sequence_no, event.payload.clone()))
+        }
+        "error" => Some(TraceEvent::error(
+            sequence_no,
+            trace_payload_text(&event.payload, &["message", "error"])
+                .unwrap_or_else(|| trace_payload_fallback(&event.payload)),
+        )),
+        _ => None,
+    }
+}
+
+fn trace_payload_item_type(payload: &Value) -> Option<String> {
+    payload
+        .get("item")
+        .and_then(|item| item.get("type"))
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned)
+}
+
+fn trace_sequence_no(sequence_no: i64) -> i32 {
+    sequence_no.clamp(i32::MIN as i64, i32::MAX as i64) as i32
+}
+
+fn trace_call_id(event: &RunEventRecord) -> String {
+    trace_payload_text(&event.payload, &["callId", "call_id"])
+        .or_else(|| event.step_id.map(|step_id| format!("step-{step_id}")))
+        .unwrap_or_else(|| format!("call-{}", event.sequence_no))
+}
+
+fn trace_payload_text(payload: &Value, keys: &[&str]) -> Option<String> {
+    keys.iter().find_map(|key| {
+        trace_value_text(payload.get(*key)).or_else(|| {
+            payload
+                .get("item")
+                .and_then(|item| trace_value_text(item.get(*key)))
+        })
+    })
+}
+
+fn trace_value_text(value: Option<&Value>) -> Option<String> {
+    match value? {
+        Value::String(value) => {
+            let value = value.trim();
+            (!value.is_empty()).then(|| value.to_owned())
+        }
+        Value::Null => None,
+        value => Some(value.to_string()),
+    }
+}
+
+fn trace_observation_output(payload: &Value) -> Value {
+    payload
+        .get("item")
+        .and_then(|item| item.get("output"))
+        .cloned()
+        .or_else(|| payload.get("output").cloned())
+        .unwrap_or_else(|| payload.clone())
+}
+
+fn trace_payload_fallback(payload: &Value) -> String {
+    payload.to_string()
+}
+
 impl From<AgentRunRecord> for AgentRunResp {
     fn from(record: AgentRunRecord) -> Self {
         Self {
@@ -2172,6 +3763,17 @@ impl From<RunEventRecord> for AgentRunEventResp {
             status: record.status,
             payload: record.payload,
             create_time: format_datetime(record.create_time),
+        }
+    }
+}
+
+impl From<TraceBundle> for AgentTraceReplayResp {
+    fn from(bundle: TraceBundle) -> Self {
+        let summary = bundle.replay_summary();
+        Self {
+            trace_id: bundle.trace_id,
+            events: bundle.events,
+            summary,
         }
     }
 }
@@ -2308,7 +3910,47 @@ fn default_event_size() -> u64 {
 mod tests {
     use super::*;
     use novex_ai_core::TaskBudget;
+    use novex_trace::TraceEventKind;
     use sqlx::postgres::PgPoolOptions;
+
+    fn test_prepared_tool_call(
+        batch_index: usize,
+        call_id: &str,
+        tool_code: &str,
+    ) -> PreparedAgentToolCall {
+        PreparedAgentToolCall {
+            batch_index,
+            call_id: call_id.to_owned(),
+            tool: ToolLookupRecord {
+                id: batch_index as i64 + 1,
+                code: tool_code.to_owned(),
+                tool_kind: "function".to_owned(),
+                executor_kind: "agent".to_owned(),
+                risk_level: 1,
+                approval_policy: 1,
+                permission_code: Some("ai:tool:dryRun".to_owned()),
+            },
+            arguments: json!({ "batchIndex": batch_index }),
+            concurrency_policy: Value::Null,
+            timeout: AGENT_TOOL_IO_TIMEOUT,
+        }
+    }
+
+    fn test_executed_tool_call(prepared: PreparedAgentToolCall) -> ExecutedAgentToolCall {
+        ExecutedAgentToolCall {
+            prepared,
+            execution: AgentToolExecution::succeeded(
+                json!({ "status": "succeeded" }),
+                true,
+                "ok".to_owned(),
+            ),
+            terminal_status: RunStatus::Succeeded,
+        }
+    }
+
+    fn test_cancel_token() -> (ActiveAgentRunGuard, AgentRunCancellationToken) {
+        AgentRuntimeRegistry::default().register_run(1, 1)
+    }
 
     #[tokio::test]
     async fn agent_service_can_be_bound_to_request_tenant() {
@@ -2320,10 +3962,32 @@ mod tests {
         assert_eq!(service.tenant_id, 42);
     }
 
+    #[tokio::test]
+    async fn agent_runtime_registry_signals_registered_run_cancellation() {
+        let registry = AgentRuntimeRegistry::default();
+        let (_guard, token) = registry.register_run(42, 1001);
+
+        assert!(!token.is_cancelled());
+        assert!(registry.cancel_run(42, 1001));
+        token.clone().cancelled().await;
+        assert!(token.is_cancelled());
+    }
+
+    #[test]
+    fn agent_runtime_registry_is_signalled_by_cancel_run() {
+        let source = include_str!("agent_service.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+
+        assert!(source.contains("self.agent_runtime.cancel_run"));
+    }
+
     #[test]
     fn agent_runtime_rejects_blank_run_input() {
         let err = normalize_agent_run_command(AgentRunCommand {
             input: "   ".to_owned(),
+            runtime_mode: None,
             auto_approve: false,
             budget: TaskBudget::default(),
         })
@@ -2333,9 +3997,499 @@ mod tests {
     }
 
     #[test]
+    fn agent_runtime_event_payload_preserves_turn_item_shape() {
+        let item = novex_agent_protocol::AgentTurnItem::tool_call(
+            "call-1",
+            "rag.search",
+            serde_json::json!({"query":"policy"}),
+        );
+        let payload = agent_turn_item_event_payload(&item);
+
+        assert_eq!(payload["item"]["type"], "tool_call");
+        assert_eq!(payload["item"]["callId"], "call-1");
+        assert_eq!(payload["eventSource"], "novex-agent-runtime");
+    }
+
+    #[test]
+    fn agent_run_command_accepts_model_runtime_mode() {
+        let command: AgentRunCommand = serde_json::from_value(serde_json::json!({
+            "input": "search policy",
+            "runtimeMode": "model_loop"
+        }))
+        .unwrap();
+
+        assert_eq!(command.runtime_mode.as_deref(), Some("model_loop"));
+    }
+
+    #[test]
+    fn model_loop_prompt_mentions_available_tool_schema() {
+        let prompt = build_model_loop_system_prompt(&["rag.search".to_owned()]);
+
+        assert!(prompt.contains("You are Novex Agent Runtime"));
+        assert!(prompt.contains("rag.search"));
+        assert!(prompt.contains("\"type\":\"tool_call\""));
+    }
+
+    #[test]
+    fn model_loop_prompt_allows_budget_bounded_multiple_tool_calls() {
+        let prompt = build_model_loop_system_prompt(&["rag.search".to_owned()]);
+
+        assert!(prompt.contains("budget"));
+        assert!(prompt.contains("observation"));
+        assert!(prompt.contains("tool calls"));
+        assert!(!prompt.contains("one tool call"));
+    }
+
+    #[test]
+    fn model_loop_prompt_advertises_tool_call_batches() {
+        let prompt = build_model_loop_system_prompt(&[
+            "rag.search".to_owned(),
+            "github.repo.read".to_owned(),
+        ]);
+
+        assert!(prompt.contains("\"type\":\"tool_calls\""));
+        assert!(prompt.contains("\"calls\""));
+    }
+
+    #[test]
+    fn agent_service_model_loop_uses_runtime_state_budget_gate() {
+        let source = include_str!("agent_service.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+
+        assert!(source.contains("AgentRuntimeState::with_budget"));
+        assert!(source.contains("runtime_state.can_execute_tool_call()"));
+        assert!(source.contains("runtime_state.push_item"));
+    }
+
+    #[test]
+    fn agent_service_model_loop_records_budget_stop_when_tool_call_budget_exhausted() {
+        let source = include_str!("agent_service.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+
+        assert!(source.contains("tool_call_budget_exhausted"));
+        assert!(source.contains("RunStatus::Failed"));
+        assert!(source.contains("Tool call budget exhausted"));
+    }
+
+    #[test]
+    fn agent_service_model_loop_uses_novex_tool_router() {
+        let source = include_str!("agent_service.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+
+        assert!(source.contains("ToolRouter::from_definitions"));
+        assert!(source.contains("agent_model_loop_tool_definitions"));
+        assert!(source.contains("tool_router.route_tool_call"));
+    }
+
+    #[test]
+    fn agent_service_model_loop_records_tool_concurrency_policy() {
+        let source = include_str!("agent_service.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+
+        assert!(source.contains("\"concurrencyPolicy\""));
+        assert!(source.contains("serde_json::to_value(&routed_call.tool.concurrency"));
+    }
+
+    #[test]
+    fn agent_service_model_loop_plans_parsed_tool_call_batches() {
+        let source = include_str!("agent_service.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+
+        assert!(source.contains("parsed.items"));
+        assert!(source.contains("ToolBatchPlan::from_routed_calls"));
+        assert!(source.contains("\"batchExecutionMode\""));
+        assert!(source.contains("\"toolCallBatch\""));
+    }
+
+    #[tokio::test]
+    async fn parallel_tool_io_batch_polls_calls_concurrently_and_preserves_order() {
+        use std::sync::Arc;
+        use tokio::sync::Barrier;
+
+        let barrier = Arc::new(Barrier::new(2));
+        let calls = vec![
+            test_prepared_tool_call(0, "call-1", "rag.search"),
+            test_prepared_tool_call(1, "call-2", "github.repo.read"),
+        ];
+        let (_guard, cancel_token) = test_cancel_token();
+
+        let result = tokio::time::timeout(
+            std::time::Duration::from_millis(250),
+            execute_agent_tool_io_batch(ToolBatchExecutionMode::Parallel, calls, cancel_token, {
+                let barrier = barrier.clone();
+                move |prepared| {
+                    let barrier = barrier.clone();
+                    async move {
+                        barrier.wait().await;
+                        Ok(test_executed_tool_call(prepared))
+                    }
+                }
+            }),
+        )
+        .await
+        .expect("parallel execution should not deadlock")
+        .unwrap();
+
+        assert_eq!(result[0].prepared.call_id, "call-1");
+        assert_eq!(result[1].prepared.call_id, "call-2");
+    }
+
+    #[tokio::test]
+    async fn serial_tool_io_batch_runs_calls_in_sequence() {
+        use std::sync::{Arc, Mutex};
+
+        let order = Arc::new(Mutex::new(Vec::new()));
+        let calls = vec![
+            test_prepared_tool_call(0, "call-1", "media.image.generate"),
+            test_prepared_tool_call(1, "call-2", "feishu.message.send"),
+        ];
+        let (_guard, cancel_token) = test_cancel_token();
+
+        let result =
+            execute_agent_tool_io_batch(ToolBatchExecutionMode::Serial, calls, cancel_token, {
+                let order = order.clone();
+                move |prepared| {
+                    let order = order.clone();
+                    async move {
+                        order.lock().unwrap().push(prepared.call_id.clone());
+                        Ok(test_executed_tool_call(prepared))
+                    }
+                }
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(result.len(), 2);
+        assert_eq!(
+            *order.lock().unwrap(),
+            vec!["call-1".to_owned(), "call-2".to_owned()]
+        );
+    }
+
+    #[tokio::test]
+    async fn tool_io_timeout_returns_cancelled_execution() {
+        let mut call = test_prepared_tool_call(0, "call-1", "rag.search");
+        call.timeout = std::time::Duration::from_millis(10);
+        let calls = vec![call];
+        let (_guard, cancel_token) = test_cancel_token();
+
+        let result = execute_agent_tool_io_batch(
+            ToolBatchExecutionMode::Serial,
+            calls,
+            cancel_token,
+            |prepared| async move {
+                tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                Ok(test_executed_tool_call(prepared))
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result[0].execution.status, "cancelled");
+        assert_eq!(result[0].terminal_status, RunStatus::Cancelled);
+        assert_eq!(
+            result[0].execution.response_payload["cancelReason"],
+            "tool_io_timeout"
+        );
+    }
+
+    #[test]
+    fn cancelled_tool_execution_maps_to_cancelled_observation_status() {
+        let execution = AgentToolExecution::cancelled(
+            serde_json::json!({"cancelReason":"tool_io_timeout"}),
+            "timeout".to_owned(),
+        );
+
+        assert_eq!(
+            tool_observation_status_for_execution(&execution),
+            ToolObservationStatus::Cancelled
+        );
+    }
+
+    #[test]
+    fn agent_service_model_loop_maps_cancelled_tool_observations() {
+        let source = include_str!("agent_service.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+
+        assert!(source.contains("tool_observation_status_for_execution"));
+    }
+
+    #[test]
+    fn agent_service_model_loop_records_tool_timeout_cancel_reason() {
+        let source = include_str!("agent_service.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+
+        assert!(source.contains("\"cancelReason\""));
+        assert!(source.contains("tool_io_timeout"));
+    }
+
+    #[test]
+    fn agent_service_model_loop_checks_external_cancel_before_model_call() {
+        let source = include_str!("agent_service.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+
+        assert!(source.contains("before_model_call"));
+        assert!(source.contains("after_model_call"));
+        assert!(source.contains("check_model_loop_cancelled"));
+    }
+
+    #[test]
+    fn agent_service_model_loop_records_external_cancel_reason() {
+        let payload = model_loop_external_cancel_payload("before_model_call");
+
+        assert_eq!(payload["cancelled"], true);
+        assert_eq!(payload["cancelReason"], "external_cancel");
+        assert_eq!(payload["cancelStage"], "before_model_call");
+        assert_eq!(payload["runtimeMode"], "model_loop");
+    }
+
+    #[test]
+    fn agent_service_model_loop_checks_external_cancel_around_tool_batches() {
+        let source = include_str!("agent_service.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+
+        assert!(source.contains("before_tool_batch"));
+        assert!(source.contains("after_tool_batch"));
+        assert!(source.contains("before_next_turn"));
+    }
+
+    #[test]
+    fn agent_service_model_loop_awaits_model_with_runtime_registry_token() {
+        let source = include_str!("agent_service.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+
+        assert!(source.contains("await_model_loop_future_or_cancelled"));
+        assert!(source.contains("model_call"));
+    }
+
+    #[test]
+    fn agent_service_model_loop_records_model_inference_spans() {
+        let source = include_str!("agent_service.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+
+        assert!(source.contains("model_inference_event_payload(&model_response)"));
+        assert!(source.contains("\"type\": \"model_inference\""));
+        assert!(source.contains("\"latencyMs\""));
+        assert!(source.contains("\"usage\""));
+    }
+
+    #[test]
+    fn agent_service_tool_io_awaits_runtime_registry_cancel_token() {
+        let source = include_str!("agent_service.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+
+        assert!(source.contains("execute_agent_tool_io_with_timeout_and_cancel"));
+        assert!(source.contains("\"cancelReason\": \"external_cancel\""));
+    }
+
+    #[tokio::test]
+    async fn model_loop_future_runtime_registry_cancel_returns_cancelled_await() {
+        let registry = AgentRuntimeRegistry::default();
+        let (_guard, token) = registry.register_run(1, 42);
+        assert!(registry.cancel_run(1, 42));
+
+        let result = await_model_loop_future_or_cancelled(token, "model_call", async {
+            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+            Ok::<_, AppError>("finished")
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(result, ModelLoopFutureAwait::Cancelled);
+    }
+
+    #[tokio::test]
+    async fn tool_io_runtime_registry_cancel_returns_external_cancel_execution() {
+        let registry = AgentRuntimeRegistry::default();
+        let (_guard, token) = registry.register_run(1, 42);
+        assert!(registry.cancel_run(1, 42));
+        let calls = vec![test_prepared_tool_call(0, "call-1", "rag.search")];
+
+        let result = execute_agent_tool_io_batch(
+            ToolBatchExecutionMode::Serial,
+            calls,
+            token,
+            |prepared| async move {
+                tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                Ok(test_executed_tool_call(prepared))
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result[0].execution.status, "cancelled");
+        assert_eq!(result[0].terminal_status, RunStatus::Cancelled);
+        assert_eq!(
+            result[0].execution.response_payload["cancelReason"],
+            "external_cancel"
+        );
+        assert_eq!(
+            result[0].execution.response_payload["cancelStage"],
+            "tool_io"
+        );
+    }
+
+    #[test]
+    fn agent_service_parallel_tool_execution_separates_io_from_persistence() {
+        let source = include_str!("agent_service.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+
+        assert!(source.contains("execute_agent_tool_io_batch"));
+        assert!(source.contains("execute_agent_tool_io"));
+        assert!(source.contains("record_agent_tool_execution"));
+    }
+
+    #[test]
+    fn agent_service_model_loop_evaluates_batch_approval_before_execution() {
+        let source = include_str!("agent_service.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+
+        let approval_index = source.find("batch_policy.requires_approval").unwrap();
+        let execution_index = source.find("execute_agent_tool_io_batch").unwrap();
+        assert!(approval_index < execution_index);
+    }
+
+    #[test]
+    fn agent_service_model_loop_executes_parallel_batches_via_io_executor() {
+        let source = include_str!("agent_service.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+
+        assert!(source.contains("execute_agent_tool_io_batch("));
+        assert!(source.contains("batch_execution_mode"));
+        assert!(source.contains("for executed_call in executed_calls"));
+    }
+
+    #[test]
+    fn model_loop_tool_router_exposes_prompt_codes() {
+        let router = build_model_loop_tool_router().unwrap();
+
+        assert!(router.tool_codes().contains(&"rag.search".to_owned()));
+        assert!(router.tool_codes().contains(&"github.repo.read".to_owned()));
+    }
+
+    #[test]
+    fn agent_service_model_loop_records_unknown_tool_stop_reason() {
+        let source = include_str!("agent_service.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+
+        assert!(source.contains("\"stopReason\": stop_reason"));
+        assert!(source.contains("\"toolRouteError\": err"));
+        assert_eq!(
+            tool_route_stop_reason(ToolRouteErrorKind::UnknownTool),
+            "unknown_tool"
+        );
+    }
+
+    #[test]
+    fn agent_service_model_loop_records_context_compaction_event() {
+        let source = include_str!("agent_service.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+
+        assert!(source.contains("runtime_state.should_compact_context()"));
+        assert!(source.contains("runtime_state.compact_context()"));
+        assert!(source.contains("AgentTurnItem::ContextCompaction"));
+        assert!(source.contains("\"compactionWindowId\""));
+    }
+
+    #[test]
+    fn agent_service_model_loop_uses_compacted_messages_for_next_sample() {
+        let source = include_str!("agent_service.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+        let normalized_source = source.split_whitespace().collect::<Vec<_>>().join(" ");
+
+        assert!(source.contains("build_compacted_model_loop_messages"));
+        assert!(normalized_source.contains("messages = build_compacted_model_loop_messages"));
+    }
+
+    #[test]
+    fn model_loop_budget_enables_context_compaction_threshold() {
+        let budget = agent_runtime_budget_from_task_budget(TaskBudget {
+            max_steps: Some(6),
+            max_tool_calls: Some(3),
+            max_seconds: Some(30),
+            max_cost_cents: Some(0),
+        });
+
+        assert_eq!(budget.max_turns, 6);
+        assert_eq!(budget.max_tool_calls, 3);
+        assert_eq!(budget.compact_after_observations, Some(2));
+    }
+
+    #[test]
+    fn compacted_model_loop_messages_preserve_prompt_input_and_summary() {
+        let tool_codes = build_model_loop_tool_router().unwrap().tool_codes();
+        let messages = build_compacted_model_loop_messages(
+            "Find refund policy",
+            "Observation for call-1: refund within 7 days",
+            &tool_codes,
+        );
+
+        assert_eq!(messages.len(), 3);
+        assert_eq!(messages[0].role, "system");
+        assert!(messages[0].content.contains("Novex Agent Runtime"));
+        assert!(messages[0].content.contains("github.repo.read"));
+        assert_eq!(messages[1].role, "user");
+        assert_eq!(messages[1].content, "Find refund policy");
+        assert_eq!(messages[2].role, "user");
+        assert!(messages[2].content.contains("refund within 7 days"));
+        assert!(messages[2]
+            .content
+            .contains("Continue from this compacted context"));
+    }
+
+    #[test]
+    fn observation_prompt_includes_tool_result_and_final_answer_instruction() {
+        let prompt = build_observation_follow_up_prompt(
+            "rag.search",
+            &serde_json::json!({"hits":[{"title":"Policy"}]}),
+        );
+
+        assert!(prompt.contains("rag.search"));
+        assert!(prompt.contains("Policy"));
+        assert!(prompt.contains("final answer"));
+    }
+
+    #[test]
     fn agent_runtime_low_risk_tool_can_finish_without_approval() {
         let command = normalize_agent_run_command(AgentRunCommand {
             input: "search the training handbook".to_owned(),
+            runtime_mode: None,
             auto_approve: false,
             budget: TaskBudget {
                 max_steps: Some(6),
@@ -2356,6 +4510,7 @@ mod tests {
     fn agent_runtime_medium_risk_tool_pauses_without_auto_approval() {
         let command = normalize_agent_run_command(AgentRunCommand {
             input: "send a Feishu reminder".to_owned(),
+            runtime_mode: None,
             auto_approve: false,
             budget: TaskBudget {
                 max_steps: Some(6),
@@ -2389,6 +4544,7 @@ mod tests {
         };
         let command = normalize_agent_run_command(AgentRunCommand {
             input: "answer in my preferred language".to_owned(),
+            runtime_mode: None,
             auto_approve: false,
             budget: TaskBudget::default(),
         })
@@ -2463,6 +4619,8 @@ mod tests {
             &ToolLookupRecord {
                 id: 1,
                 code: "github.issue.write".to_owned(),
+                tool_kind: "connector".to_owned(),
+                executor_kind: "connector".to_owned(),
                 risk_level: 3,
                 approval_policy: 1,
                 permission_code: Some("ai:agent:run".to_owned()),
@@ -2473,6 +4631,201 @@ mod tests {
         assert!(decision.requires_approval);
         assert_eq!(decision.pause_reason.as_deref(), Some("approval"));
         assert_eq!(decision.policy_reason, "high_risk_requires_manual_approval");
+    }
+
+    #[test]
+    fn agent_runtime_routes_mcp_tools_through_audited_observation_path() {
+        let source = include_str!("agent_service.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+
+        assert!(source.contains("execute_mcp_tool"));
+        assert!(source.contains("ToolKind::Mcp"));
+        assert!(source.contains("RunEventKind::Observation"));
+    }
+
+    #[test]
+    fn agent_run_events_convert_to_trace_bundle() {
+        let events = vec![
+            fake_agent_event(
+                "input_received",
+                1,
+                json!({"item":{"type":"user_message","content":"hi"}}),
+            ),
+            fake_agent_event("tool_called", 2, json!({"toolCode":"rag.search"})),
+            fake_agent_event("final_output", 3, json!({"answer":"done"})),
+        ];
+
+        let bundle = agent_events_to_trace_bundle("agent-1", events);
+
+        assert_eq!(bundle.trace_id, "agent-1");
+        assert_eq!(bundle.tool_call_count(), 1);
+        assert_eq!(bundle.replay_summary().final_status, "succeeded");
+    }
+
+    #[test]
+    fn agent_run_events_convert_runtime_spans_to_trace_bundle() {
+        let events = vec![
+            fake_agent_event("retrieval", 1, json!({"hitCount":2,"source":"ai_memory"})),
+            fake_agent_event(
+                "action_selected",
+                2,
+                json!({"toolCallBatch":[{"toolCode":"rag.search"}]}),
+            ),
+            fake_agent_event(
+                "observation",
+                3,
+                json!({
+                    "item":{"type":"context_compaction","summary":"older tool results compacted"},
+                    "compactedItemCount":4
+                }),
+            ),
+            fake_agent_event("cancelled", 4, json!({"cancelReason":"external_cancel"})),
+        ];
+
+        let bundle = agent_events_to_trace_bundle("agent-1", events);
+
+        assert!(bundle
+            .events
+            .iter()
+            .any(|event| event.kind == TraceEventKind::Retrieval));
+        assert!(bundle
+            .events
+            .iter()
+            .any(|event| event.kind == TraceEventKind::ActionSelected));
+        assert!(bundle
+            .events
+            .iter()
+            .any(|event| event.kind == TraceEventKind::ContextCompaction));
+        assert!(bundle
+            .events
+            .iter()
+            .any(|event| event.kind == TraceEventKind::Cancellation));
+        assert_eq!(bundle.replay_summary().final_status, "cancelled");
+    }
+
+    #[test]
+    fn agent_run_events_convert_inference_spans_to_trace_bundle() {
+        let events = vec![fake_agent_event(
+            "thought",
+            1,
+            json!({
+                "runtimeMode": "model_loop",
+                "item": {
+                    "type": "model_inference",
+                    "routeId": "runtime.llm.code_agent",
+                    "provider": "deep-seek",
+                    "model": "deepseek-v4-flash",
+                    "latencyMs": 42,
+                    "usage": {
+                        "promptTokens": 11,
+                        "completionTokens": 7,
+                        "totalTokens": 18
+                    },
+                    "costCents": null
+                }
+            }),
+        )];
+
+        let bundle = agent_events_to_trace_bundle("agent-1", events);
+
+        assert_eq!(bundle.events[0].kind, TraceEventKind::Inference);
+        assert_eq!(
+            bundle.events[0].payload["item"]["routeId"],
+            "runtime.llm.code_agent"
+        );
+    }
+
+    #[test]
+    fn agent_trace_snapshot_contains_replay_summary() {
+        let events = vec![
+            fake_agent_event("tool_called", 2, json!({"toolCode":"rag.search"})),
+            fake_agent_event("final_output", 3, json!({"answer":"done"})),
+        ];
+
+        let snapshot = agent_trace_snapshot_payload("agent-1", &events);
+
+        assert_eq!(snapshot["summary"]["toolCallCount"], 1);
+        assert_eq!(snapshot["summary"]["finalStatus"], "succeeded");
+    }
+
+    #[test]
+    fn agent_rollout_migration_defines_replay_bundle_table() {
+        let migration = include_str!("../../../migrations/202606160002_create_ai_rollout.sql");
+
+        assert!(migration.contains("CREATE TABLE IF NOT EXISTS ai_rollout"));
+        assert!(migration.contains("trace_id"));
+        assert!(migration.contains("event_bundle"));
+        assert!(migration.contains("summary_payload"));
+    }
+
+    #[tokio::test]
+    async fn mcp_tool_execution_uses_mock_response_without_exposing_secret() {
+        let tool = McpToolExecutionRecord {
+            id: 11,
+            server_id: 42,
+            server_code: "docs".to_owned(),
+            server_name: "Docs".to_owned(),
+            endpoint_url: Some("https://mcp.example.com/mcp".to_owned()),
+            transport_kind: "streamable_http".to_owned(),
+            auth_type: "bearer_env".to_owned(),
+            secret_ref: Some("env:DOCS_MCP_TOKEN".to_owned()),
+            tool_name: "search".to_owned(),
+            tool_code: "mcp.docs.search".to_owned(),
+            description: "Search docs".to_owned(),
+            input_schema: json!({"type":"object"}),
+            output_schema: json!({"type":"object"}),
+            risk_level: 1,
+            permission_code: Some("ai:mcp:docs:search".to_owned()),
+            metadata: json!({
+                "mockResponse": {
+                    "hits": [
+                        {
+                            "title": "Codex migration",
+                            "score": 0.98
+                        }
+                    ]
+                }
+            }),
+        };
+
+        let execution =
+            execute_mcp_tool("mcp.docs.search", &json!({"query": "codex"}), Some(&tool)).await;
+
+        assert!(execution.succeeded_status());
+        assert!(!execution.dry_run);
+        assert_eq!(execution.response_payload["provider"], "mcp");
+        assert_eq!(
+            execution.response_payload["response"]["hits"][0]["title"],
+            "Codex migration"
+        );
+        assert_eq!(
+            execution.response_payload["auth"]["secretRef"],
+            "env:DOCS_MCP_TOKEN"
+        );
+        assert!(execution
+            .response_payload
+            .to_string()
+            .contains("DOCS_MCP_TOKEN"));
+        let auth = mcp_auth_payload_from_sources(Some("env:DOCS_MCP_TOKEN"), "bearer_env", |key| {
+            (key == "DOCS_MCP_TOKEN").then(|| "test-token".to_owned())
+        });
+        assert_eq!(auth["resolved"], true);
+        assert!(!auth.to_string().contains("test-token"));
+    }
+
+    fn fake_agent_event(event_type: &str, sequence_no: i64, payload: Value) -> RunEventRecord {
+        RunEventRecord {
+            id: sequence_no,
+            run_id: 42,
+            step_id: None,
+            event_type: event_type.to_owned(),
+            sequence_no,
+            status: "running".to_owned(),
+            payload,
+            create_time: Utc::now().naive_utc(),
+        }
     }
 
     #[test]
@@ -2506,6 +4859,10 @@ mod tests {
 
         for needle in [
             "RunEventKind::IntentRouted",
+            "agent_turn_item_event_payload(&input_item)",
+            "command.runtime_mode.as_deref() == Some(\"model_loop\")",
+            "create_model_loop_run",
+            "chat_completion_for_purpose",
             "record_retrieval_context",
             "RunEventKind::Retrieval",
             "step_type_code(RunStepType::Retrieval)",
@@ -2515,6 +4872,8 @@ mod tests {
             "RunEventKind::ToolCalled",
             "RunEventKind::StatusChanged",
             "RunEventKind::FinalOutput",
+            "AgentRolloutSaveRecord",
+            "upsert_rollout_bundle",
         ] {
             assert!(
                 source.contains(needle),
@@ -2801,6 +5160,7 @@ mod tests {
     fn agent_runtime_tool_budget_rejects_tool_plan_when_zero_tool_calls_allowed() {
         let err = normalize_agent_run_command(AgentRunCommand {
             input: "search the training handbook".to_owned(),
+            runtime_mode: None,
             auto_approve: false,
             budget: TaskBudget {
                 max_steps: Some(6),

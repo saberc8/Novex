@@ -57,8 +57,8 @@ Create `docs/plans/2026-06-16-codex-migration-matrix.md` with this content:
 | Tool schema | `codex-rs/tools/src/*` | `crates/novex-tools` | direct/adapt | planned | ToolDefinition and model-visible tool schema |
 | Tool router | `codex-rs/core/src/tools/router.rs` | `crates/novex-tools` | adapt | planned | Parse model tool calls and dispatch executors |
 | Parallel tools | `codex-rs/core/src/tools/parallel.rs` | `crates/novex-tools` | adapt | planned | Cancellation and non-parallel lock semantics |
-| Rollout trace | `codex-rs/rollout*` | `crates/novex-trace` | adapt | deferred | Replay/eval foundation |
-| MCP | `codex-rs/codex-mcp`, `rmcp-client` | `crates/novex-mcp` | adapt | deferred | MCP server/tool discovery |
+| Rollout trace | `codex-rs/rollout*` | `crates/novex-trace` | adapt | slice-1 implemented | Trace bundle, replay API, `ai_rollout`, eval capture, and trace-backed eval gate exist; richer inference/compaction spans remain follow-up |
+| MCP | `codex-rs/codex-mcp`, `rmcp-client` | `crates/novex-mcp` | adapt | slice-1 implemented | Tenant-governed registration, discovery, model-visible tool mapping, audit path, and mock/dry-run invocation exist; live streaming client remains follow-up |
 | Guardian | `codex-rs/core/src/guardian` | `crates/novex-approval-review` | adapt | deferred | Automatic approval review |
 | Exec policy | `codex-rs/execpolicy`, `sandboxing`, `exec-server` | `services/sandbox-runner` | service adapt | deferred | No backend shell execution |
 ```
@@ -1414,4 +1414,3 @@ After this first slice passes, create separate implementation plans:
 - `2026-06-16-notebook-workspace.md`
 - `2026-06-16-customer-service-agent.md`
 - `2026-06-16-sandbox-runner.md`
-

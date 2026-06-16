@@ -1,5 +1,7 @@
 use novex_ai_core::FoundationModule;
+use novex_tools::{ApprovalPolicy, ToolConcurrencyPolicy, ToolDefinition, ToolRiskLevel};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use url::Url;
 
 pub const CRATE_ID: &str = "novex-mcp";
@@ -52,6 +54,86 @@ pub struct McpToolDescriptor {
     pub server_id: String,
     pub tool_name: String,
     pub permission_code: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpDiscoveredTool {
+    pub server_code: String,
+    pub tool_name: String,
+    pub description: String,
+    pub input_schema: Value,
+    pub output_schema: Option<Value>,
+    pub risk_level: ToolRiskLevel,
+}
+
+impl McpDiscoveredTool {
+    pub fn to_tool_definition(&self, permission_code: impl Into<String>) -> ToolDefinition {
+        ToolDefinition {
+            code: mcp_tool_code(&self.server_code, &self.tool_name),
+            name: format!("{}.{}", self.server_code.trim(), self.tool_name.trim()),
+            description: self.description.clone(),
+            input_schema: self.input_schema.clone(),
+            output_schema: self.output_schema.clone(),
+            risk_level: self.risk_level,
+            approval_policy: ApprovalPolicy::OnRisk,
+            permission_code: Some(permission_code.into()),
+            concurrency: match self.risk_level {
+                ToolRiskLevel::Low => ToolConcurrencyPolicy::shared(),
+                ToolRiskLevel::Medium | ToolRiskLevel::High => {
+                    ToolConcurrencyPolicy::exclusive(format!("mcp:{}", self.server_code.trim()))
+                }
+            },
+        }
+    }
+}
+
+pub fn mcp_tool_code(server_code: &str, tool_name: &str) -> String {
+    format!(
+        "mcp.{}.{}",
+        normalize_mcp_code_segment(server_code),
+        normalize_mcp_code_segment(tool_name)
+    )
+}
+
+fn normalize_mcp_code_segment(value: &str) -> String {
+    let normalized: String = value
+        .trim()
+        .chars()
+        .map(|ch| match ch {
+            ch if ch.is_ascii_alphanumeric() => ch.to_ascii_lowercase(),
+            '.' | '_' => ch,
+            '-' | '/' | ':' | ' ' => '_',
+            _ => '_',
+        })
+        .collect();
+    let collapsed = normalized
+        .split('_')
+        .filter(|segment| !segment.is_empty())
+        .collect::<Vec<_>>()
+        .join("_");
+    if collapsed.is_empty() {
+        "unknown".to_owned()
+    } else {
+        collapsed
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpToolInvocationRequest {
+    pub server_code: String,
+    pub tool_name: String,
+    pub arguments: Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpToolInvocationResult {
+    pub tool_code: String,
+    pub status: String,
+    pub output: Value,
+    pub dry_run: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -220,6 +302,7 @@ pub fn module() -> FoundationModule {
 mod tests {
     use super::*;
     use novex_ai_core::FoundationStatus;
+    use novex_tools::ToolRiskLevel;
 
     #[test]
     fn module_describes_mcp_boundary() {
@@ -265,5 +348,38 @@ mod tests {
         .unwrap_err();
 
         assert_eq!(err.field, "network_allowlist");
+    }
+
+    #[test]
+    fn mcp_discovered_tool_converts_to_tenant_tool_definition() {
+        let tool = McpDiscoveredTool {
+            server_code: "docs".to_owned(),
+            tool_name: "search".to_owned(),
+            description: "Search docs".to_owned(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string"
+                    }
+                }
+            }),
+            output_schema: Some(serde_json::json!({
+                "type": "object"
+            })),
+            risk_level: ToolRiskLevel::Low,
+        };
+
+        let definition = tool.to_tool_definition("ai:mcp:docs:search");
+
+        assert_eq!(definition.code, "mcp.docs.search");
+        assert_eq!(
+            definition.input_schema["properties"]["query"]["type"],
+            "string"
+        );
+        assert_eq!(
+            definition.permission_code.as_deref(),
+            Some("ai:mcp:docs:search")
+        );
     }
 }

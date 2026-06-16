@@ -1,5 +1,5 @@
 use axum::{
-    extract::{Multipart, Query, State},
+    extract::{Multipart, Path, Query, State},
     routing::{get, post},
     Json, Router,
 };
@@ -8,10 +8,10 @@ use crate::{
     application::ai::capability_service::{
         CapabilityItemResp, CapabilityQuery, CapabilityService, CapabilitySummaryResp,
         ConnectorCredentialCommand, ConnectorCredentialQuery, ConnectorCredentialResp,
-        McpServerCommand, McpServerResp, PluginInstallCommand, PluginInstallationQuery,
-        PluginInstallationResp, SkillImportFromSourceCommand, SkillImportPreviewCommand,
-        SkillImportPreviewResp, SkillImportResultResp, ToolCallAuditQuery, ToolCallAuditResp,
-        ToolDryRunCommand, ToolDryRunResp,
+        McpDiscoveryCommand, McpServerCommand, McpServerResp, McpToolResp, PluginInstallCommand,
+        PluginInstallationQuery, PluginInstallationResp, SkillImportFromSourceCommand,
+        SkillImportPreviewCommand, SkillImportPreviewResp, SkillImportResultResp,
+        ToolCallAuditQuery, ToolCallAuditResp, ToolDryRunCommand, ToolDryRunResp,
     },
     domain::auth::model::CurrentUser,
     interfaces::http::{middleware::permission::require_permission, AppState},
@@ -66,6 +66,18 @@ pub fn routes() -> Router<AppState> {
         )
         .route("/ai/capabilities/plugins", get(list_plugins))
         .route("/ai/capabilities/triggers", get(list_triggers))
+        .route(
+            "/ai/capabilities/mcp/servers",
+            get(list_mcp_servers).post(upsert_mcp_server),
+        )
+        .route(
+            "/ai/capabilities/mcp/servers/:server_id/discover",
+            post(discover_mcp_tools),
+        )
+        .route(
+            "/ai/capabilities/mcp/servers/:server_id/tools",
+            get(list_mcp_tools),
+        )
         .route(
             "/ai/capabilities/mcp-servers",
             get(list_mcp_servers).post(upsert_mcp_server),
@@ -277,6 +289,35 @@ async fn upsert_mcp_server(
     )))
 }
 
+async fn discover_mcp_tools(
+    State(state): State<AppState>,
+    current_user: CurrentUser,
+    Path(server_id): Path<i64>,
+    Json(command): Json<McpDiscoveryCommand>,
+) -> Result<Json<ApiResponse<Vec<McpToolResp>>>, AppError> {
+    require_permission(&current_user, MCP_UPDATE_PERMISSION)?;
+    let service = CapabilityService::for_tenant(state.db, current_user.tenant_id);
+
+    Ok(Json(ApiResponse::ok(
+        service
+            .discover_mcp_tools(current_user.id, server_id, command)
+            .await?,
+    )))
+}
+
+async fn list_mcp_tools(
+    State(state): State<AppState>,
+    current_user: CurrentUser,
+    Path(server_id): Path<i64>,
+) -> Result<Json<ApiResponse<Vec<McpToolResp>>>, AppError> {
+    require_permission(&current_user, MCP_LIST_PERMISSION)?;
+    let service = CapabilityService::for_tenant(state.db, current_user.tenant_id);
+
+    Ok(Json(ApiResponse::ok(
+        service.list_mcp_tools(server_id).await?,
+    )))
+}
+
 async fn dry_run_tool(
     State(state): State<AppState>,
     current_user: CurrentUser,
@@ -344,6 +385,7 @@ mod tests {
 
     use super::*;
     use crate::{
+        application::ai::capability_service::McpDiscoveryToolCommand,
         domain::auth::model::{CurrentUser, RoleContext},
         infrastructure::security::jwt::JwtService,
         interfaces::http::{build_router, AppState},
@@ -357,6 +399,7 @@ mod tests {
                 .unwrap(),
             jwt: JwtService::new("test-secret".to_owned(), 24),
             captcha: Default::default(),
+            agent_runtime: Default::default(),
             scheduler_http_safety: Default::default(),
             parser_callback_token: None,
             parser_callback_user_id: 1,
@@ -645,6 +688,39 @@ zip-bytes\r\n\
         )
         .await
         .unwrap_err();
+
+        assert!(matches!(err, AppError::Forbidden));
+    }
+
+    #[tokio::test]
+    async fn mcp_discovery_handler_rejects_missing_permission() {
+        let err = discover_mcp_tools(
+            State(test_state()),
+            user_with_permissions(vec![]),
+            Path(42),
+            Json(McpDiscoveryCommand {
+                tools: vec![McpDiscoveryToolCommand {
+                    tool_name: "search".to_owned(),
+                    description: "Search docs".to_owned(),
+                    input_schema: serde_json::json!({"type":"object"}),
+                    output_schema: serde_json::json!({}),
+                    risk_level: 1,
+                    metadata: serde_json::json!({}),
+                    enabled: true,
+                }],
+            }),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(matches!(err, AppError::Forbidden));
+    }
+
+    #[tokio::test]
+    async fn mcp_tool_list_handler_rejects_missing_permission() {
+        let err = list_mcp_tools(State(test_state()), user_with_permissions(vec![]), Path(42))
+            .await
+            .unwrap_err();
 
         assert!(matches!(err, AppError::Forbidden));
     }

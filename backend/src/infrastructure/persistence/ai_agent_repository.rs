@@ -57,6 +57,19 @@ pub struct AgentTraceSaveRecord {
 }
 
 #[derive(Debug, Clone)]
+pub struct AgentRolloutSaveRecord {
+    pub id: i64,
+    pub tenant_id: i64,
+    pub run_id: i64,
+    pub trace_id: String,
+    pub event_bundle: Value,
+    pub summary_payload: Value,
+    pub source: String,
+    pub user_id: i64,
+    pub now: NaiveDateTime,
+}
+
+#[derive(Debug, Clone)]
 pub struct RunStepSaveRecord {
     pub id: i64,
     pub tenant_id: i64,
@@ -169,6 +182,18 @@ pub struct RunPauseRecord {
     pub id: i64,
     pub step_id: Option<i64>,
     pub pause_reason: String,
+}
+
+#[derive(Debug, Clone, FromRow)]
+pub struct AgentRolloutRecord {
+    pub id: i64,
+    pub run_id: i64,
+    pub trace_id: String,
+    pub event_bundle: Value,
+    pub summary_payload: Value,
+    pub source: String,
+    pub create_time: NaiveDateTime,
+    pub update_time: Option<NaiveDateTime>,
 }
 
 impl AiAgentRepository {
@@ -416,6 +441,40 @@ WHERE tenant_id = $1 AND run_id = $2;
         Ok(())
     }
 
+    pub async fn upsert_rollout_bundle(
+        &self,
+        record: &AgentRolloutSaveRecord,
+    ) -> Result<(), AppError> {
+        sqlx::query(
+            r#"
+INSERT INTO ai_rollout (
+    id, tenant_id, run_id, trace_id, event_bundle, summary_payload, source,
+    create_user, create_time, update_user, update_time
+)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $8, $9)
+ON CONFLICT (run_id, source)
+DO UPDATE SET
+    trace_id = EXCLUDED.trace_id,
+    event_bundle = EXCLUDED.event_bundle,
+    summary_payload = EXCLUDED.summary_payload,
+    update_user = EXCLUDED.update_user,
+    update_time = EXCLUDED.update_time;
+"#,
+        )
+        .bind(record.id)
+        .bind(record.tenant_id)
+        .bind(record.run_id)
+        .bind(&record.trace_id)
+        .bind(&record.event_bundle)
+        .bind(&record.summary_payload)
+        .bind(&record.source)
+        .bind(record.user_id)
+        .bind(record.now)
+        .execute(&self.db)
+        .await?;
+        Ok(())
+    }
+
     pub async fn complete_pause(
         &self,
         tenant_id: i64,
@@ -557,6 +616,46 @@ LIMIT $3 OFFSET $4;
         .bind(filter.limit)
         .bind(filter.offset)
         .fetch_all(&self.db)
+        .await?)
+    }
+
+    pub async fn find_rollout_by_run_id(
+        &self,
+        tenant_id: i64,
+        run_id: i64,
+    ) -> Result<Option<AgentRolloutRecord>, AppError> {
+        Ok(sqlx::query_as::<_, AgentRolloutRecord>(
+            r#"
+SELECT id, run_id, trace_id, event_bundle, summary_payload, source, create_time, update_time
+FROM ai_rollout
+WHERE tenant_id = $1 AND run_id = $2
+ORDER BY COALESCE(update_time, create_time) DESC, id DESC
+LIMIT 1;
+"#,
+        )
+        .bind(tenant_id)
+        .bind(run_id)
+        .fetch_optional(&self.db)
+        .await?)
+    }
+
+    pub async fn find_rollout_by_trace_id(
+        &self,
+        tenant_id: i64,
+        trace_id: &str,
+    ) -> Result<Option<AgentRolloutRecord>, AppError> {
+        Ok(sqlx::query_as::<_, AgentRolloutRecord>(
+            r#"
+SELECT id, run_id, trace_id, event_bundle, summary_payload, source, create_time, update_time
+FROM ai_rollout
+WHERE tenant_id = $1 AND trace_id = $2
+ORDER BY COALESCE(update_time, create_time) DESC, id DESC
+LIMIT 1;
+"#,
+        )
+        .bind(tenant_id)
+        .bind(trace_id)
+        .fetch_optional(&self.db)
         .await?)
     }
 

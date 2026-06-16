@@ -19,6 +19,8 @@ import {
   ShieldAlert,
   SquarePen
 } from "lucide-react";
+import { createAgentRun } from "@/api/agent";
+import type { AgentRunResp } from "@/types/agent";
 
 const navigationItems = [
   { label: "新对话", icon: SquarePen, active: true },
@@ -214,6 +216,9 @@ function Composer() {
   const [composerValue, setComposerValue] = useState("");
   const [isCommandMenuOpen, setIsCommandMenuOpen] = useState(false);
   const [activeCommandIndex, setActiveCommandIndex] = useState(0);
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [runResult, setRunResult] = useState<AgentRunResp | null>(null);
+  const [runError, setRunError] = useState<string | null>(null);
 
   function handleComposerChange(value: string) {
     setComposerValue(value);
@@ -247,6 +252,36 @@ function Composer() {
       event.preventDefault();
       setComposerValue(`/${commandItems[activeCommandIndex].name} `);
       setIsCommandMenuOpen(false);
+    }
+  }
+
+  async function handleSubmit() {
+    const input = composerValue.trim();
+    if (!input || isSubmitting) {
+      setRunError("请输入任务");
+      return;
+    }
+
+    setIsSubmitting(true);
+    setRunError(null);
+    setRunResult(null);
+    try {
+      const result = await createAgentRun({
+        input,
+        runtimeMode: "model_loop",
+        autoApprove: false,
+        budget: {
+          maxSteps: 8,
+          maxToolCalls: 1,
+          maxSeconds: 60,
+          maxCostCents: 0
+        }
+      });
+      setRunResult(result);
+    } catch (error) {
+      setRunError(error instanceof Error ? error.message : "提交失败");
+    } finally {
+      setIsSubmitting(false);
     }
   }
 
@@ -292,7 +327,9 @@ function Composer() {
               </button>
               <button
                 aria-label="发送"
-                className="flex h-[42px] w-[42px] items-center justify-center rounded-full bg-[#050505] text-white shadow-sm hover:bg-[#222222]"
+                className="flex h-[42px] w-[42px] items-center justify-center rounded-full bg-[#050505] text-white shadow-sm hover:bg-[#222222] disabled:cursor-not-allowed disabled:bg-[#B8B8B8]"
+                disabled={isSubmitting}
+                onClick={handleSubmit}
                 type="button"
               >
                 <ArrowUp aria-hidden="true" className="h-[22px] w-[22px]" strokeWidth={2.2} />
@@ -309,6 +346,25 @@ function Composer() {
           <ChevronDown aria-hidden="true" className="h-[15px] w-[15px]" strokeWidth={1.9} />
         </button>
       </div>
+
+      {runError ? (
+        <p className="mt-4 rounded-[10px] border border-[#F3B5B5] bg-[#FFF5F5] px-4 py-3 text-[14px] text-[#A12626]" role="alert">
+          {runError}
+        </p>
+      ) : null}
+
+      {runResult ? (
+        <section aria-live="polite" className="mt-4 rounded-[10px] border border-[#E5E5E5] bg-[#FAFAFA] px-4 py-3 text-[14px] text-[#333333]">
+          <div className="flex flex-wrap items-center gap-2 text-[#6F6F6F]">
+            <span>Run #{runResult.runId}</span>
+            <span>{runResult.status}</span>
+            <span>{runResult.traceId}</span>
+          </div>
+          <p className="mt-2 whitespace-pre-wrap text-[15px] leading-6 text-[#111111]">
+            {runResult.finalOutput || `Agent run ${runResult.status}`}
+          </p>
+        </section>
+      ) : null}
 
       <div className="mt-7 divide-y divide-[#EEEEEE]">
         {suggestions.map((suggestion, index) => (

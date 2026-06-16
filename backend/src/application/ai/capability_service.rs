@@ -1,8 +1,8 @@
 use base64::{engine::general_purpose, Engine as _};
 use chrono::Utc;
 use novex_mcp::{
-    validate_mcp_registration_policy, McpAuthScope, McpAuthType, McpRegistrationPolicy,
-    McpTransportKind,
+    mcp_tool_code, validate_mcp_registration_policy, McpAuthScope, McpAuthType, McpDiscoveredTool,
+    McpRegistrationPolicy, McpTransportKind,
 };
 use novex_skill::{
     normalize_skill_package_path as normalize_skill_package_path_core,
@@ -11,6 +11,7 @@ use novex_skill::{
     skill_root_from_skill_md_path, strip_skill_root, SkillPackageError, SkillPackagePath,
     SkillResourceKind,
 };
+use novex_tools::ToolRiskLevel;
 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, USER_AGENT};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
@@ -24,9 +25,10 @@ use crate::{
     infrastructure::persistence::ai_capability_repository::{
         AiCapabilityRepository, CapabilityFilter, CapabilityRecord, CapabilityResource,
         ConnectorCredentialFilter, ConnectorCredentialRecord, ConnectorCredentialSaveRecord,
-        McpServerRecord, McpServerSaveRecord, PluginInstallationFilter, PluginInstallationRecord,
-        PluginInstallationSaveRecord, SkillResourceSaveRecord, SkillSaveRecord, ToolAuditFilter,
-        ToolAuditRecord, ToolAuditSaveRecord,
+        McpServerRecord, McpServerSaveRecord, McpToolRecord, McpToolSaveRecord,
+        PluginInstallationFilter, PluginInstallationRecord, PluginInstallationSaveRecord,
+        SkillResourceSaveRecord, SkillSaveRecord, ToolAuditFilter, ToolAuditRecord,
+        ToolAuditSaveRecord, ToolSaveRecord,
     },
     shared::{
         error::AppError,
@@ -451,6 +453,58 @@ pub struct McpServerResp {
     pub update_time: Option<String>,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpDiscoveryCommand {
+    #[serde(default)]
+    pub tools: Vec<McpDiscoveryToolCommand>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpDiscoveryToolCommand {
+    #[serde(default)]
+    pub tool_name: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default = "default_json_object")]
+    pub input_schema: Value,
+    #[serde(default = "default_json_object")]
+    pub output_schema: Value,
+    #[serde(default = "default_low_risk_level")]
+    pub risk_level: i16,
+    #[serde(default = "default_json_object")]
+    pub metadata: Value,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpToolResp {
+    pub id: i64,
+    pub server_id: i64,
+    pub server_code: String,
+    pub tool_name: String,
+    pub tool_code: String,
+    pub description: String,
+    pub input_schema: Value,
+    pub output_schema: Value,
+    pub risk_level: i16,
+    pub permission_code: Option<String>,
+    pub status: i16,
+    pub metadata: Value,
+    pub create_time: String,
+    pub update_time: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct McpDiscoverySavePlan {
+    mcp_tools: Vec<McpToolSaveRecord>,
+    tools: Vec<ToolSaveRecord>,
+    discovered_tools: Value,
+}
+
 #[derive(Debug, Clone)]
 pub struct CapabilityService {
     tenant_id: i64,
@@ -783,6 +837,48 @@ impl CapabilityService {
         Ok(McpServerResp::from(
             self.repo.upsert_mcp_server(&record).await?,
         ))
+    }
+
+    pub async fn discover_mcp_tools(
+        &self,
+        user_id: i64,
+        server_id: i64,
+        command: McpDiscoveryCommand,
+    ) -> Result<Vec<McpToolResp>, AppError> {
+        let Some(server) = self
+            .repo
+            .find_mcp_server_by_id(self.tenant_id, server_id)
+            .await?
+        else {
+            return Err(AppError::NotFound);
+        };
+        let now = Utc::now().naive_utc();
+        let plan = build_mcp_discovery_save_plan(self.tenant_id, user_id, now, &server, command)?;
+        for tool in &plan.tools {
+            self.repo.upsert_tool(tool).await?;
+        }
+        self.repo.save_discovered_mcp_tools(&plan.mcp_tools).await?;
+        self.repo
+            .update_mcp_server_discovered_tools(
+                self.tenant_id,
+                server_id,
+                &plan.discovered_tools,
+                user_id,
+                now,
+            )
+            .await?;
+
+        self.list_mcp_tools(server_id).await
+    }
+
+    pub async fn list_mcp_tools(&self, server_id: i64) -> Result<Vec<McpToolResp>, AppError> {
+        Ok(self
+            .repo
+            .list_mcp_tools_by_server(self.tenant_id, server_id)
+            .await?
+            .into_iter()
+            .map(McpToolResp::from)
+            .collect())
     }
 
     pub async fn dry_run_tool(
@@ -2105,6 +2201,194 @@ pub fn normalize_mcp_server_command(
     Ok(command)
 }
 
+fn build_mcp_discovery_save_plan(
+    tenant_id: i64,
+    user_id: i64,
+    now: chrono::NaiveDateTime,
+    server: &McpServerRecord,
+    command: McpDiscoveryCommand,
+) -> Result<McpDiscoverySavePlan, AppError> {
+    if command.tools.is_empty() {
+        return Err(AppError::bad_request("MCP discovery tools 不能为空"));
+    }
+    let allowed_tools =
+        string_array_values("MCP Server tool allow-list", &server.tool_allowlist, 128)?
+            .into_iter()
+            .filter(|value| !value.is_empty())
+            .collect::<Vec<_>>();
+
+    let mut mcp_tools = Vec::with_capacity(command.tools.len());
+    let mut tools = Vec::with_capacity(command.tools.len());
+    let mut discovered_tools = Vec::with_capacity(command.tools.len());
+
+    for mut tool in command.tools {
+        tool.tool_name = tool.tool_name.trim().to_owned();
+        tool.description = tool.description.trim().to_owned();
+        if tool.tool_name.is_empty() {
+            return Err(AppError::bad_request("MCP Tool 名称不能为空"));
+        }
+        ensure_max_chars("MCP Tool 名称", &tool.tool_name, 128)?;
+        ensure_max_chars("MCP Tool 描述", &tool.description, 512)?;
+
+        let input_schema = normalize_json_object("MCP Tool inputSchema", tool.input_schema)?;
+        let output_schema = normalize_json_object("MCP Tool outputSchema", tool.output_schema)?;
+        let metadata = normalize_json_object("MCP Tool metadata", tool.metadata)?;
+        let risk_level = mcp_tool_risk_level(tool.risk_level)?;
+        let tool_code = mcp_tool_code(&server.code, &tool.tool_name);
+        let permission_code = mcp_permission_code(&server.code, &tool.tool_name);
+
+        if !mcp_tool_allowed(&server.code, &allowed_tools, &tool.tool_name, &tool_code) {
+            return Err(AppError::bad_request(format!(
+                "MCP Tool {} 不在 tool allow-list 中",
+                tool.tool_name
+            )));
+        }
+        ensure_max_chars("MCP Tool 编码", &tool_code, 128)?;
+        ensure_max_chars("MCP Tool permissionCode", &permission_code, 128)?;
+
+        let discovered = McpDiscoveredTool {
+            server_code: server.code.clone(),
+            tool_name: tool.tool_name.clone(),
+            description: tool.description.clone(),
+            input_schema: input_schema.clone(),
+            output_schema: Some(output_schema.clone()),
+            risk_level,
+        };
+        let definition = discovered.to_tool_definition(permission_code.clone());
+        let metadata = mcp_tool_metadata(server, &tool.tool_name, &metadata);
+        let status = if tool.enabled { ENABLED_STATUS } else { 0 };
+
+        mcp_tools.push(McpToolSaveRecord {
+            id: next_id(),
+            tenant_id,
+            server_id: server.id,
+            tool_name: tool.tool_name.clone(),
+            tool_code: definition.code.clone(),
+            description: definition.description.clone(),
+            input_schema: definition.input_schema.clone(),
+            output_schema: definition
+                .output_schema
+                .clone()
+                .unwrap_or_else(default_json_object),
+            risk_level: tool.risk_level,
+            permission_code: definition.permission_code.clone(),
+            status,
+            metadata: metadata.clone(),
+            user_id,
+            now,
+        });
+        tools.push(ToolSaveRecord {
+            id: next_id(),
+            tenant_id,
+            code: definition.code.clone(),
+            name: definition.name.clone(),
+            description: definition.description.clone(),
+            tool_kind: "mcp".to_owned(),
+            risk_level: tool.risk_level,
+            approval_policy: 1,
+            permission_code: definition.permission_code.clone(),
+            executor_kind: "mcp".to_owned(),
+            input_schema: definition.input_schema.clone(),
+            output_schema: definition.output_schema.unwrap_or_else(default_json_object),
+            status,
+            metadata: metadata.clone(),
+            user_id,
+            now,
+        });
+        discovered_tools.push(json!({
+            "serverId": server.id,
+            "serverCode": server.code,
+            "toolName": tool.tool_name,
+            "toolCode": definition.code,
+            "riskLevel": tool.risk_level,
+            "permissionCode": permission_code,
+            "enabled": tool.enabled,
+            "metadata": metadata,
+        }));
+    }
+
+    Ok(McpDiscoverySavePlan {
+        mcp_tools,
+        tools,
+        discovered_tools: Value::Array(discovered_tools),
+    })
+}
+
+fn normalize_json_object(label: &str, value: Value) -> Result<Value, AppError> {
+    if value.is_null() {
+        return Ok(default_json_object());
+    }
+    if !value.is_object() {
+        return Err(AppError::bad_request(format!("{label} 必须是对象")));
+    }
+    Ok(value)
+}
+
+fn mcp_tool_risk_level(value: i16) -> Result<ToolRiskLevel, AppError> {
+    match value {
+        1 => Ok(ToolRiskLevel::Low),
+        2 => Ok(ToolRiskLevel::Medium),
+        3 => Ok(ToolRiskLevel::High),
+        _ => Err(AppError::bad_request("MCP Tool riskLevel 必须是 1、2 或 3")),
+    }
+}
+
+fn mcp_permission_code(server_code: &str, tool_name: &str) -> String {
+    format!(
+        "ai:mcp:{}:{}",
+        normalize_permission_code_segment(server_code),
+        normalize_permission_code_segment(tool_name)
+    )
+}
+
+fn normalize_permission_code_segment(value: &str) -> String {
+    let normalized = value
+        .trim()
+        .chars()
+        .map(|ch| match ch {
+            ch if ch.is_ascii_alphanumeric() => ch.to_ascii_lowercase(),
+            '.' | '_' => ch,
+            '-' | '/' | ':' | ' ' => '_',
+            _ => '_',
+        })
+        .collect::<String>();
+    let collapsed = normalized
+        .split('_')
+        .filter(|segment| !segment.is_empty())
+        .collect::<Vec<_>>()
+        .join("_");
+    if collapsed.is_empty() {
+        "unknown".to_owned()
+    } else {
+        collapsed
+    }
+}
+
+fn mcp_tool_allowed(
+    server_code: &str,
+    allowed_tools: &[String],
+    tool_name: &str,
+    tool_code: &str,
+) -> bool {
+    let server_scoped_name = format!("{}.{}", server_code.trim(), tool_name.trim());
+    allowed_tools.iter().any(|allowed| {
+        let allowed = allowed.trim();
+        allowed == "*"
+            || allowed.eq_ignore_ascii_case(tool_name)
+            || allowed.eq_ignore_ascii_case(tool_code)
+            || allowed.eq_ignore_ascii_case(&server_scoped_name)
+    })
+}
+
+fn mcp_tool_metadata(server: &McpServerRecord, tool_name: &str, source: &Value) -> Value {
+    let mut metadata = source.as_object().cloned().unwrap_or_else(Map::new);
+    metadata.insert("source".to_owned(), json!("mcp_discovery"));
+    metadata.insert("serverId".to_owned(), json!(server.id));
+    metadata.insert("serverCode".to_owned(), json!(server.code));
+    metadata.insert("toolName".to_owned(), json!(tool_name));
+    Value::Object(metadata)
+}
+
 fn masked_secret_ref(secret_ref: &str) -> String {
     let secret_ref = secret_ref.trim();
     if let Some(env_name) = secret_ref.strip_prefix("env:") {
@@ -2275,6 +2559,27 @@ impl From<McpServerRecord> for McpServerResp {
     }
 }
 
+impl From<McpToolRecord> for McpToolResp {
+    fn from(record: McpToolRecord) -> Self {
+        Self {
+            id: record.id,
+            server_id: record.server_id,
+            server_code: record.server_code,
+            tool_name: record.tool_name,
+            tool_code: record.tool_code,
+            description: record.description,
+            input_schema: record.input_schema,
+            output_schema: record.output_schema,
+            risk_level: record.risk_level,
+            permission_code: record.permission_code,
+            status: record.status,
+            metadata: record.metadata,
+            create_time: format_datetime(record.create_time),
+            update_time: record.update_time.map(format_datetime),
+        }
+    }
+}
+
 fn summary_filter<'a>(tenant_id: i64) -> CapabilityFilter<'a> {
     CapabilityFilter {
         tenant_id,
@@ -2303,6 +2608,14 @@ fn default_enabled_status_i16() -> i16 {
 
 fn default_true() -> bool {
     true
+}
+
+fn default_low_risk_level() -> i16 {
+    1
+}
+
+fn default_json_object() -> Value {
+    Value::Object(Default::default())
 }
 
 #[cfg(test)]
@@ -2553,6 +2866,30 @@ Use the referenced methodology before drafting.
     }
 
     #[test]
+    fn customer_service_tool_seed_contains_tool_contracts() {
+        let seed_path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/migrations/202606160005_seed_customer_service_tools.sql"
+        );
+        let seed = std::fs::read_to_string(seed_path)
+            .expect("missing customer service tool seed migration");
+
+        for needle in [
+            "'faq.search'",
+            "'customer.lookup'",
+            "'ticket.create'",
+            "'handoff.request'",
+            "'ai:customer-service:read'",
+            "'ai:customer-service:ticket'",
+            "'ai:customer-service:handoff'",
+            "'ticket.create', 'Create Support Ticket'",
+            "'handoff.request', 'Request Human Handoff'",
+        ] {
+            assert!(seed.contains(needle), "{needle} missing");
+        }
+    }
+
+    #[test]
     fn skill_registry_seed_contains_every_template_skill_manifest() {
         let seed =
             include_str!("../../../migrations/202606050006_create_ai_capability_registry.sql");
@@ -2768,6 +3105,98 @@ Use the referenced methodology before drafting.
         .unwrap_err();
 
         assert!(err.to_string().contains("allow-list"));
+    }
+
+    #[test]
+    fn mcp_discovery_persists_allowed_tools_as_ai_tools() {
+        let now = Utc::now().naive_utc();
+        let server = mcp_server_record(now, json!(["search"]));
+
+        let plan = build_mcp_discovery_save_plan(
+            1,
+            7,
+            now,
+            &server,
+            McpDiscoveryCommand {
+                tools: vec![McpDiscoveryToolCommand {
+                    tool_name: " search ".to_owned(),
+                    description: " Search docs ".to_owned(),
+                    input_schema: json!({
+                        "type": "object",
+                        "properties": {
+                            "query": {
+                                "type": "string"
+                            }
+                        }
+                    }),
+                    output_schema: Value::Null,
+                    risk_level: 1,
+                    metadata: Value::Null,
+                    enabled: true,
+                }],
+            },
+        )
+        .expect("allowed MCP discovery should build save records");
+
+        assert_eq!(plan.mcp_tools[0].tool_name, "search");
+        assert_eq!(plan.mcp_tools[0].tool_code, "mcp.docs.search");
+        assert_eq!(
+            plan.mcp_tools[0].permission_code.as_deref(),
+            Some("ai:mcp:docs:search")
+        );
+        assert_eq!(plan.tools[0].code, "mcp.docs.search");
+        assert_eq!(plan.tools[0].tool_kind, "mcp");
+        assert_eq!(plan.tools[0].executor_kind, "mcp");
+        assert_eq!(
+            plan.tools[0].input_schema["properties"]["query"]["type"],
+            "string"
+        );
+    }
+
+    #[test]
+    fn mcp_discovery_rejects_unallowlisted_tool() {
+        let now = Utc::now().naive_utc();
+        let server = mcp_server_record(now, json!(["search"]));
+
+        let err = build_mcp_discovery_save_plan(
+            1,
+            7,
+            now,
+            &server,
+            McpDiscoveryCommand {
+                tools: vec![McpDiscoveryToolCommand {
+                    tool_name: "write".to_owned(),
+                    description: "Write docs".to_owned(),
+                    input_schema: json!({"type":"object"}),
+                    output_schema: Value::Null,
+                    risk_level: 2,
+                    metadata: Value::Null,
+                    enabled: true,
+                }],
+            },
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("allow-list"));
+    }
+
+    fn mcp_server_record(now: chrono::NaiveDateTime, tool_allowlist: Value) -> McpServerRecord {
+        McpServerRecord {
+            id: 42,
+            code: "docs".to_owned(),
+            name: "Docs".to_owned(),
+            endpoint_url: Some("https://mcp.example.com/mcp".to_owned()),
+            transport_kind: "streamable_http".to_owned(),
+            auth_scope: "tenant".to_owned(),
+            auth_type: "bearer_env".to_owned(),
+            secret_ref: Some("env:DOCS_MCP_TOKEN".to_owned()),
+            network_allowlist: json!(["mcp.example.com"]),
+            tool_allowlist,
+            discovered_tools: json!([]),
+            status: 1,
+            create_time: now,
+            update_time: None,
+        }
     }
 
     fn plugin_seed_fragment<'a>(seed: &'a str, plugin_code: &str) -> &'a str {

@@ -6,6 +6,7 @@ pub mod ai_integration_repository;
 pub mod ai_knowledge_repository;
 pub mod ai_media_repository;
 pub mod ai_memory_repository;
+pub mod ai_notebook_repository;
 pub mod ai_studio_repository;
 pub mod ai_template_repository;
 pub mod dept_repository;

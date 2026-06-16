@@ -390,6 +390,8 @@ dependencies = [
  "lapin",
  "mime_guess",
  "novex-agent",
+ "novex-agent-protocol",
+ "novex-agent-runtime",
  "novex-ai-core",
  "novex-connectors",
  "novex-eval",
@@ -400,6 +402,7 @@ dependencies = [
  "novex-rag",
  "novex-skill",
  "novex-tools",
+ "novex-trace",
  "novex-trigger",
  "rand 0.8.6",
  "reqwest",
@@ -1783,6 +1786,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "novex-agent-protocol"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "novex-agent-runtime"
+version = "0.1.0"
+dependencies = [
+ "novex-agent-protocol",
+ "novex-tools",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "novex-ai-core"
 version = "0.1.0"
 dependencies = [
@@ -1804,6 +1825,7 @@ name = "novex-eval"
 version = "0.1.0"
 dependencies = [
  "novex-ai-core",
+ "novex-trace",
  "serde",
  "serde_json",
 ]
@@ -1813,7 +1835,9 @@ name = "novex-mcp"
 version = "0.1.0"
 dependencies = [
  "novex-ai-core",
+ "novex-tools",
  "serde",
+ "serde_json",
  "url",
 ]
 
@@ -1869,8 +1893,17 @@ version = "0.1.0"
 dependencies = [
  "novex-ai-core",
  "novex-connectors",
- "novex-mcp",
  "novex-model",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "novex-trace"
+version = "0.1.0"
+dependencies = [
+ "novex-agent-protocol",
+ "novex-ai-core",
  "serde",
  "serde_json",
 ]

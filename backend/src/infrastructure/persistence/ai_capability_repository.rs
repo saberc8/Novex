@@ -91,9 +91,31 @@ pub struct SkillResourceRecord {
 pub struct ToolLookupRecord {
     pub id: i64,
     pub code: String,
+    pub tool_kind: String,
+    pub executor_kind: String,
     pub risk_level: i16,
     pub approval_policy: i16,
     pub permission_code: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ToolSaveRecord {
+    pub id: i64,
+    pub tenant_id: i64,
+    pub code: String,
+    pub name: String,
+    pub description: String,
+    pub tool_kind: String,
+    pub risk_level: i16,
+    pub approval_policy: i16,
+    pub permission_code: Option<String>,
+    pub executor_kind: String,
+    pub input_schema: Value,
+    pub output_schema: Value,
+    pub status: i16,
+    pub metadata: Value,
+    pub user_id: i64,
+    pub now: NaiveDateTime,
 }
 
 #[derive(Debug, Clone, FromRow)]
@@ -220,6 +242,62 @@ pub struct McpServerRecord {
     pub status: i16,
     pub create_time: NaiveDateTime,
     pub update_time: Option<NaiveDateTime>,
+}
+
+#[derive(Debug, Clone)]
+pub struct McpToolSaveRecord {
+    pub id: i64,
+    pub tenant_id: i64,
+    pub server_id: i64,
+    pub tool_name: String,
+    pub tool_code: String,
+    pub description: String,
+    pub input_schema: Value,
+    pub output_schema: Value,
+    pub risk_level: i16,
+    pub permission_code: Option<String>,
+    pub status: i16,
+    pub metadata: Value,
+    pub user_id: i64,
+    pub now: NaiveDateTime,
+}
+
+#[derive(Debug, Clone, FromRow)]
+pub struct McpToolRecord {
+    pub id: i64,
+    pub server_id: i64,
+    pub server_code: String,
+    pub tool_name: String,
+    pub tool_code: String,
+    pub description: String,
+    pub input_schema: Value,
+    pub output_schema: Value,
+    pub risk_level: i16,
+    pub permission_code: Option<String>,
+    pub status: i16,
+    pub metadata: Value,
+    pub create_time: NaiveDateTime,
+    pub update_time: Option<NaiveDateTime>,
+}
+
+#[derive(Debug, Clone, FromRow)]
+pub struct McpToolExecutionRecord {
+    pub id: i64,
+    pub server_id: i64,
+    pub server_code: String,
+    pub server_name: String,
+    pub endpoint_url: Option<String>,
+    pub transport_kind: String,
+    pub auth_type: String,
+    pub secret_ref: Option<String>,
+    pub tool_name: String,
+    pub tool_code: String,
+    pub description: String,
+    pub input_schema: Value,
+    pub output_schema: Value,
+    pub risk_level: i16,
+    pub permission_code: Option<String>,
+    pub metadata: Value,
 }
 
 #[derive(Debug, Clone, FromRow)]
@@ -375,7 +453,7 @@ impl AiCapabilityRepository {
     ) -> Result<Option<ToolLookupRecord>, AppError> {
         Ok(sqlx::query_as::<_, ToolLookupRecord>(
             r#"
-SELECT id, code, risk_level, approval_policy, permission_code
+SELECT id, code, tool_kind, executor_kind, risk_level, approval_policy, permission_code
 FROM ai_tool
 WHERE tenant_id = $1 AND code = $2 AND status = 1;
 "#,
@@ -383,6 +461,66 @@ WHERE tenant_id = $1 AND code = $2 AND status = 1;
         .bind(tenant_id)
         .bind(tool_code)
         .fetch_optional(&self.db)
+        .await?)
+    }
+
+    pub async fn upsert_tool(&self, record: &ToolSaveRecord) -> Result<CapabilityRecord, AppError> {
+        Ok(sqlx::query_as::<_, CapabilityRecord>(
+            r#"
+INSERT INTO ai_tool (
+    id, tenant_id, code, name, description, tool_kind, risk_level,
+    approval_policy, permission_code, executor_kind, input_schema, output_schema,
+    status, metadata, create_user, create_time
+)
+VALUES (
+    $1, $2, $3, $4, $5, $6, $7,
+    $8, $9, $10, $11, $12,
+    $13, $14, $15, $16
+)
+ON CONFLICT (tenant_id, code)
+DO UPDATE SET
+    name = EXCLUDED.name,
+    description = EXCLUDED.description,
+    tool_kind = EXCLUDED.tool_kind,
+    risk_level = EXCLUDED.risk_level,
+    approval_policy = EXCLUDED.approval_policy,
+    permission_code = EXCLUDED.permission_code,
+    executor_kind = EXCLUDED.executor_kind,
+    input_schema = EXCLUDED.input_schema,
+    output_schema = EXCLUDED.output_schema,
+    status = EXCLUDED.status,
+    metadata = EXCLUDED.metadata,
+    update_user = $15,
+    update_time = $16
+RETURNING
+    id,
+    code,
+    name,
+    COALESCE(description, '') AS description,
+    tool_kind AS kind,
+    status,
+    risk_level,
+    metadata,
+    create_time;
+"#,
+        )
+        .bind(record.id)
+        .bind(record.tenant_id)
+        .bind(&record.code)
+        .bind(&record.name)
+        .bind(&record.description)
+        .bind(&record.tool_kind)
+        .bind(record.risk_level)
+        .bind(record.approval_policy)
+        .bind(&record.permission_code)
+        .bind(&record.executor_kind)
+        .bind(&record.input_schema)
+        .bind(&record.output_schema)
+        .bind(record.status)
+        .bind(&record.metadata)
+        .bind(record.user_id)
+        .bind(record.now)
+        .fetch_one(&self.db)
         .await?)
     }
 
@@ -937,6 +1075,211 @@ RETURNING
         .await?)
     }
 
+    pub async fn find_mcp_server_by_id(
+        &self,
+        tenant_id: i64,
+        server_id: i64,
+    ) -> Result<Option<McpServerRecord>, AppError> {
+        Ok(sqlx::query_as::<_, McpServerRecord>(
+            r#"
+SELECT
+    id,
+    code,
+    name,
+    endpoint_url,
+    transport_kind,
+    auth_scope,
+    auth_type,
+    secret_ref,
+    network_allowlist,
+    tool_allowlist,
+    discovered_tools,
+    status,
+    create_time,
+    update_time
+FROM ai_mcp_server
+WHERE tenant_id = $1
+  AND id = $2
+  AND status = 1
+LIMIT 1;
+"#,
+        )
+        .bind(tenant_id)
+        .bind(server_id)
+        .fetch_optional(&self.db)
+        .await?)
+    }
+
+    pub async fn update_mcp_server_discovered_tools(
+        &self,
+        tenant_id: i64,
+        server_id: i64,
+        discovered_tools: &Value,
+        user_id: i64,
+        now: NaiveDateTime,
+    ) -> Result<(), AppError> {
+        sqlx::query(
+            r#"
+UPDATE ai_mcp_server
+SET
+    discovered_tools = $3,
+    update_user = $4,
+    update_time = $5
+WHERE tenant_id = $1
+  AND id = $2;
+"#,
+        )
+        .bind(tenant_id)
+        .bind(server_id)
+        .bind(discovered_tools)
+        .bind(user_id)
+        .bind(now)
+        .execute(&self.db)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn save_discovered_mcp_tools(
+        &self,
+        records: &[McpToolSaveRecord],
+    ) -> Result<(), AppError> {
+        let mut tx = self.db.begin().await?;
+        for record in records {
+            sqlx::query(
+                r#"
+INSERT INTO ai_mcp_tool (
+    id, tenant_id, server_id, tool_name, tool_code, description,
+    input_schema, output_schema, risk_level, permission_code, status,
+    metadata, create_user, create_time
+)
+VALUES (
+    $1, $2, $3, $4, $5, $6,
+    $7, $8, $9, $10, $11,
+    $12, $13, $14
+)
+ON CONFLICT (tenant_id, server_id, tool_name)
+DO UPDATE SET
+    tool_code = EXCLUDED.tool_code,
+    description = EXCLUDED.description,
+    input_schema = EXCLUDED.input_schema,
+    output_schema = EXCLUDED.output_schema,
+    risk_level = EXCLUDED.risk_level,
+    permission_code = EXCLUDED.permission_code,
+    status = EXCLUDED.status,
+    metadata = EXCLUDED.metadata,
+    update_user = $13,
+    update_time = $14;
+"#,
+            )
+            .bind(record.id)
+            .bind(record.tenant_id)
+            .bind(record.server_id)
+            .bind(&record.tool_name)
+            .bind(&record.tool_code)
+            .bind(&record.description)
+            .bind(&record.input_schema)
+            .bind(&record.output_schema)
+            .bind(record.risk_level)
+            .bind(&record.permission_code)
+            .bind(record.status)
+            .bind(&record.metadata)
+            .bind(record.user_id)
+            .bind(record.now)
+            .execute(&mut *tx)
+            .await?;
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+
+    pub async fn list_mcp_tools_by_server(
+        &self,
+        tenant_id: i64,
+        server_id: i64,
+    ) -> Result<Vec<McpToolRecord>, AppError> {
+        Ok(sqlx::query_as::<_, McpToolRecord>(mcp_tool_select_sql())
+            .bind(tenant_id)
+            .bind(server_id)
+            .fetch_all(&self.db)
+            .await?)
+    }
+
+    pub async fn find_mcp_tool_by_tool_code(
+        &self,
+        tenant_id: i64,
+        tool_code: &str,
+    ) -> Result<Option<McpToolRecord>, AppError> {
+        Ok(sqlx::query_as::<_, McpToolRecord>(
+            r#"
+SELECT
+    t.id,
+    t.server_id,
+    s.code AS server_code,
+    t.tool_name,
+    t.tool_code,
+    COALESCE(t.description, '') AS description,
+    t.input_schema,
+    t.output_schema,
+    t.risk_level,
+    t.permission_code,
+    t.status,
+    t.metadata,
+    t.create_time,
+    t.update_time
+FROM ai_mcp_tool AS t
+JOIN ai_mcp_server AS s ON s.id = t.server_id AND s.tenant_id = t.tenant_id
+WHERE t.tenant_id = $1
+  AND t.tool_code = $2
+  AND t.status = 1
+  AND s.status = 1
+LIMIT 1;
+"#,
+        )
+        .bind(tenant_id)
+        .bind(tool_code)
+        .fetch_optional(&self.db)
+        .await?)
+    }
+
+    pub async fn find_mcp_tool_for_execution(
+        &self,
+        tenant_id: i64,
+        tool_code: &str,
+    ) -> Result<Option<McpToolExecutionRecord>, AppError> {
+        Ok(sqlx::query_as::<_, McpToolExecutionRecord>(
+            r#"
+SELECT
+    t.id,
+    t.server_id,
+    s.code AS server_code,
+    s.name AS server_name,
+    s.endpoint_url,
+    s.transport_kind,
+    s.auth_type,
+    s.secret_ref,
+    t.tool_name,
+    t.tool_code,
+    COALESCE(t.description, '') AS description,
+    t.input_schema,
+    t.output_schema,
+    t.risk_level,
+    t.permission_code,
+    t.metadata
+FROM ai_mcp_tool AS t
+JOIN ai_mcp_server AS s ON s.id = t.server_id AND s.tenant_id = t.tenant_id
+WHERE t.tenant_id = $1
+  AND t.tool_code = $2
+  AND t.status = 1
+  AND s.status = 1
+LIMIT 1;
+"#,
+        )
+        .bind(tenant_id)
+        .bind(tool_code)
+        .fetch_optional(&self.db)
+        .await?)
+    }
+
     pub async fn find_webhook_trigger(
         &self,
         tenant_id: i64,
@@ -1317,6 +1660,33 @@ FROM ai_mcp_server AS c
     }
 }
 
+fn mcp_tool_select_sql() -> &'static str {
+    r#"
+SELECT
+    t.id,
+    t.server_id,
+    s.code AS server_code,
+    t.tool_name,
+    t.tool_code,
+    COALESCE(t.description, '') AS description,
+    t.input_schema,
+    t.output_schema,
+    t.risk_level,
+    t.permission_code,
+    t.status,
+    t.metadata,
+    t.create_time,
+    t.update_time
+FROM ai_mcp_tool AS t
+JOIN ai_mcp_server AS s ON s.id = t.server_id AND s.tenant_id = t.tenant_id
+WHERE t.tenant_id = $1
+  AND t.server_id = $2
+  AND t.status = 1
+  AND s.status = 1
+ORDER BY t.tool_name ASC, t.id ASC;
+"#
+}
+
 fn push_filters(
     query: &mut QueryBuilder<'_, Postgres>,
     resource: CapabilityResource,
@@ -1477,5 +1847,18 @@ mod tests {
         assert!(migration.contains("network_allowlist"));
         assert!(migration.contains("tool_allowlist"));
         assert!(migration.contains("discovered_tools"));
+    }
+
+    #[test]
+    fn mcp_gateway_migration_defines_discovered_tool_table() {
+        let migration = include_str!("../../../migrations/202606160001_create_ai_mcp_gateway.sql");
+
+        assert!(migration.contains("CREATE TABLE IF NOT EXISTS ai_mcp_tool"));
+        assert!(migration.contains("server_id"));
+        assert!(migration.contains("tool_name"));
+        assert!(migration.contains("tool_code"));
+        assert!(migration.contains("input_schema"));
+        assert!(migration.contains("output_schema"));
+        assert!(migration.contains("uk_ai_mcp_tool_tenant_tool_code"));
     }
 }

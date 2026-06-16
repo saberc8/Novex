@@ -5,12 +5,14 @@ use super::AppState;
 pub mod agent;
 pub mod capability;
 pub mod chat_flow;
+pub mod customer_service;
 pub mod eval;
 pub mod foundation;
 pub mod integration;
 pub mod knowledge;
 pub mod memory;
 pub mod model;
+pub mod notebook;
 pub mod studio;
 pub mod template;
 pub mod training;
@@ -21,12 +23,14 @@ pub fn routes() -> Router<AppState> {
         .merge(agent::routes())
         .merge(capability::routes())
         .merge(chat_flow::routes())
+        .merge(customer_service::routes())
         .merge(eval::routes())
         .merge(foundation::routes())
         .merge(integration::routes())
         .merge(knowledge::routes())
         .merge(memory::routes())
         .merge(model::routes())
+        .merge(notebook::routes())
         .merge(studio::routes())
         .merge(template::routes())
         .merge(trigger::routes())
