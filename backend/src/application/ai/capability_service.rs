@@ -2866,6 +2866,30 @@ Use the referenced methodology before drafting.
     }
 
     #[test]
+    fn customer_service_tool_seed_contains_tool_contracts() {
+        let seed_path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/migrations/202606160005_seed_customer_service_tools.sql"
+        );
+        let seed = std::fs::read_to_string(seed_path)
+            .expect("missing customer service tool seed migration");
+
+        for needle in [
+            "'faq.search'",
+            "'customer.lookup'",
+            "'ticket.create'",
+            "'handoff.request'",
+            "'ai:customer-service:read'",
+            "'ai:customer-service:ticket'",
+            "'ai:customer-service:handoff'",
+            "'ticket.create', 'Create Support Ticket'",
+            "'handoff.request', 'Request Human Handoff'",
+        ] {
+            assert!(seed.contains(needle), "{needle} missing");
+        }
+    }
+
+    #[test]
     fn skill_registry_seed_contains_every_template_skill_manifest() {
         let seed =
             include_str!("../../../migrations/202606050006_create_ai_capability_registry.sql");

@@ -145,6 +145,119 @@ pub fn evaluate_tool_execution_policy(
     }
 }
 
+pub fn customer_service_tool_definitions() -> Vec<ToolDefinition> {
+    vec![
+        ToolDefinition {
+            code: "faq.search".to_owned(),
+            name: "FAQ Search".to_owned(),
+            description:
+                "Search tenant-scoped customer service FAQ or policy knowledge with citations."
+                    .to_owned(),
+            input_schema: json!({
+                "type": "object",
+                "required": ["query", "datasetId"],
+                "properties": {
+                    "query": {"type": "string"},
+                    "datasetId": {"type": "integer"},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 10}
+                }
+            }),
+            output_schema: Some(json!({
+                "type": "object",
+                "properties": {
+                    "answer": {"type": "string"},
+                    "hits": {"type": "array"},
+                    "citations": {"type": "array"}
+                }
+            })),
+            risk_level: ToolRiskLevel::Low,
+            approval_policy: ApprovalPolicy::OnRisk,
+            permission_code: Some("ai:customer-service:read".to_owned()),
+        },
+        ToolDefinition {
+            code: "customer.lookup".to_owned(),
+            name: "Customer Lookup".to_owned(),
+            description: "Read tenant-scoped customer context needed to answer a support request."
+                .to_owned(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "customerId": {"type": "string"},
+                    "externalKey": {"type": "string"}
+                },
+                "anyOf": [
+                    {"required": ["customerId"]},
+                    {"required": ["externalKey"]}
+                ]
+            }),
+            output_schema: Some(json!({
+                "type": "object",
+                "properties": {
+                    "customerId": {"type": "string"},
+                    "profile": {"type": "object"},
+                    "entitlements": {"type": "array"}
+                }
+            })),
+            risk_level: ToolRiskLevel::Medium,
+            approval_policy: ApprovalPolicy::OnRisk,
+            permission_code: Some("ai:customer-service:read".to_owned()),
+        },
+        ToolDefinition {
+            code: "ticket.create".to_owned(),
+            name: "Create Support Ticket".to_owned(),
+            description: "Create an audited support ticket for a customer after policy approval."
+                .to_owned(),
+            input_schema: json!({
+                "type": "object",
+                "required": ["customerId", "title", "description", "priority"],
+                "properties": {
+                    "customerId": {"type": "string"},
+                    "title": {"type": "string"},
+                    "description": {"type": "string"},
+                    "priority": {"type": "string", "enum": ["low", "normal", "high", "urgent"]}
+                }
+            }),
+            output_schema: Some(json!({
+                "type": "object",
+                "properties": {
+                    "ticketId": {"type": "string"},
+                    "status": {"type": "string"},
+                    "auditId": {"type": "string"}
+                }
+            })),
+            risk_level: ToolRiskLevel::High,
+            approval_policy: ApprovalPolicy::Always,
+            permission_code: Some("ai:customer-service:ticket".to_owned()),
+        },
+        ToolDefinition {
+            code: "handoff.request".to_owned(),
+            name: "Request Human Handoff".to_owned(),
+            description: "Request a human support handoff with conversation summary and reason."
+                .to_owned(),
+            input_schema: json!({
+                "type": "object",
+                "required": ["conversationId", "reason", "summary"],
+                "properties": {
+                    "conversationId": {"type": "string"},
+                    "reason": {"type": "string"},
+                    "summary": {"type": "string"}
+                }
+            }),
+            output_schema: Some(json!({
+                "type": "object",
+                "properties": {
+                    "handoffId": {"type": "string"},
+                    "status": {"type": "string"},
+                    "auditId": {"type": "string"}
+                }
+            })),
+            risk_level: ToolRiskLevel::High,
+            approval_policy: ApprovalPolicy::Always,
+            permission_code: Some("ai:customer-service:handoff".to_owned()),
+        },
+    ]
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MediaImageGenerationRequest {
@@ -351,5 +464,27 @@ mod tests {
         assert_eq!(spec.name, "rag.search");
         assert_eq!(spec.parameters["required"][0], "query");
         assert_eq!(spec.metadata["riskLevel"], "low");
+    }
+
+    #[test]
+    fn customer_service_tools_have_risk_and_schema_contracts() {
+        let tools = customer_service_tool_definitions();
+
+        assert!(tools.iter().any(|tool| tool.code == "faq.search"));
+        assert!(tools.iter().any(|tool| tool.code == "customer.lookup"));
+        assert!(tools.iter().any(|tool| tool.code == "ticket.create"));
+        assert!(tools.iter().any(|tool| tool.code == "handoff.request"));
+
+        let ticket = tools
+            .iter()
+            .find(|tool| tool.code == "ticket.create")
+            .expect("ticket.create tool should exist");
+        assert_eq!(ticket.risk_level, ToolRiskLevel::High);
+        assert_eq!(ticket.approval_policy, ApprovalPolicy::Always);
+        assert_eq!(
+            ticket.permission_code.as_deref(),
+            Some("ai:customer-service:ticket")
+        );
+        assert_eq!(ticket.input_schema["required"][0], "customerId");
     }
 }
