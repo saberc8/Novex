@@ -116,6 +116,15 @@ impl EvalCaseCandidate {
         if let Some(tool_code) = tool_code.as_deref() {
             tags.insert("toolCode".to_owned(), json!(tool_code));
         }
+        let retrieval_count = trace_event_count(bundle, TraceEventKind::Retrieval);
+        let compaction_count = trace_event_count(bundle, TraceEventKind::ContextCompaction);
+        let cancelled = trace_event_count(bundle, TraceEventKind::Cancellation) > 0;
+        tags.insert("retrievalCount".to_owned(), json!(retrieval_count));
+        tags.insert("compactionCount".to_owned(), json!(compaction_count));
+        tags.insert("cancelled".to_owned(), json!(cancelled));
+        if let Some(cancel_reason) = trace_first_cancellation_reason(bundle) {
+            tags.insert("cancelReason".to_owned(), json!(cancel_reason));
+        }
         if policy.include_latency_cost_tags {
             tags.insert("latencyMs".to_owned(), Value::Null);
             tags.insert("costCents".to_owned(), Value::Null);
@@ -517,6 +526,24 @@ fn trace_last_event_payload_text(
         .and_then(|event| trace_value_text(event.payload.get(key)))
 }
 
+fn trace_event_count(bundle: &TraceBundle, kind: TraceEventKind) -> usize {
+    bundle
+        .events
+        .iter()
+        .filter(|event| event.kind == kind)
+        .count()
+}
+
+fn trace_first_cancellation_reason(bundle: &TraceBundle) -> Option<String> {
+    bundle
+        .events
+        .iter()
+        .find(|event| event.kind == TraceEventKind::Cancellation)
+        .and_then(|event| event.payload.get("cancelReason"))
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned)
+}
+
 fn trace_value_text(value: Option<&Value>) -> Option<String> {
     match value? {
         Value::String(value) => {
@@ -689,6 +716,27 @@ mod tests {
             .answer_contains
             .iter()
             .any(|snippet| snippet.contains("approved systems")));
+    }
+
+    #[test]
+    fn trace_eval_candidate_tags_runtime_spans() {
+        let bundle = TraceBundle::new("agent-1")
+            .with_event(TraceEvent::retrieval(1, json!({"hitCount":2})))
+            .with_event(TraceEvent::context_compaction(
+                2,
+                json!({"compactedItemCount":4}),
+            ))
+            .with_event(TraceEvent::cancellation(
+                3,
+                json!({"cancelReason":"external_cancel"}),
+            ));
+
+        let candidate = EvalCaseCandidate::from_trace_bundle(&bundle);
+
+        assert_eq!(candidate.tags["retrievalCount"], 1);
+        assert_eq!(candidate.tags["compactionCount"], 1);
+        assert_eq!(candidate.tags["cancelled"], true);
+        assert_eq!(candidate.tags["cancelReason"], "external_cancel");
     }
 
     #[test]
