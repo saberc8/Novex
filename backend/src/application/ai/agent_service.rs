@@ -123,6 +123,12 @@ struct ExecutedAgentToolCall {
     terminal_status: RunStatus,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ModelLoopCancelCheck {
+    Continue,
+    Cancelled,
+}
+
 #[derive(Debug, Clone)]
 struct MediaPersistenceRecords {
     asset: Option<MediaAssetSaveRecord>,
@@ -512,6 +518,14 @@ impl AgentService {
         let mut last_tool_terminal_status = RunStatus::Succeeded;
 
         for _turn_index in 0..runtime_state.budget.max_turns {
+            if self
+                .check_model_loop_cancelled(user_id, run_id, "before_model_call")
+                .await?
+                == ModelLoopCancelCheck::Cancelled
+            {
+                return self.get_run(run_id).await;
+            }
+
             let model_response = self
                 .model_runtime
                 .chat_completion_for_purpose(
@@ -1236,6 +1250,59 @@ impl AgentService {
         self.refresh_trace_snapshot(user_id, run_id, json!({ "cancelled": true }))
             .await?;
         self.get_run(run_id).await
+    }
+
+    async fn check_model_loop_cancelled(
+        &self,
+        user_id: i64,
+        run_id: i64,
+        stage: &str,
+    ) -> Result<ModelLoopCancelCheck, AppError> {
+        let Some(run) = self.repo.find_run(self.tenant_id, run_id).await? else {
+            return Err(AppError::NotFound);
+        };
+        if !model_loop_cancel_requested(&run.status) {
+            return Ok(ModelLoopCancelCheck::Continue);
+        }
+
+        self.finish_model_loop_cancelled(user_id, run_id, &run.status, stage)
+            .await?;
+        Ok(ModelLoopCancelCheck::Cancelled)
+    }
+
+    async fn finish_model_loop_cancelled(
+        &self,
+        user_id: i64,
+        run_id: i64,
+        current_status: &str,
+        stage: &str,
+    ) -> Result<(), AppError> {
+        let payload = model_loop_external_cancel_payload(stage);
+        if parse_run_status_code(current_status) == Some(RunStatus::Cancelling) {
+            ensure_agent_run_transition(current_status, RunStatus::Cancelled)?;
+            self.update_status(AgentStatusUpdate {
+                user_id,
+                run_id,
+                status: run_status_code(RunStatus::Cancelled),
+                output_payload: payload.clone(),
+                final_output: None,
+                pause_reason: None,
+                finished: true,
+            })
+            .await?;
+            self.append_event(
+                user_id,
+                run_id,
+                None,
+                RunEventKind::Cancelled,
+                run_status_code(RunStatus::Cancelled),
+                payload.clone(),
+            )
+            .await?;
+        }
+        self.refresh_trace_snapshot(user_id, run_id, payload)
+            .await?;
+        Ok(())
     }
 
     async fn create_run_records(
@@ -3093,6 +3160,22 @@ fn tool_observation_status_for_execution(execution: &AgentToolExecution) -> Tool
     ToolObservationStatus::Failed
 }
 
+fn model_loop_cancel_requested(status: &str) -> bool {
+    matches!(
+        parse_run_status_code(status),
+        Some(RunStatus::Cancelling | RunStatus::Cancelled)
+    )
+}
+
+fn model_loop_external_cancel_payload(stage: &str) -> Value {
+    json!({
+        "cancelled": true,
+        "cancelReason": "external_cancel",
+        "cancelStage": stage,
+        "runtimeMode": "model_loop",
+    })
+}
+
 fn build_compacted_model_loop_messages(
     original_input: &str,
     summary: &str,
@@ -3854,6 +3937,27 @@ mod tests {
 
         assert!(source.contains("\"cancelReason\""));
         assert!(source.contains("tool_io_timeout"));
+    }
+
+    #[test]
+    fn agent_service_model_loop_checks_external_cancel_before_model_call() {
+        let source = include_str!("agent_service.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+
+        assert!(source.contains("before_model_call"));
+        assert!(source.contains("check_model_loop_cancelled"));
+    }
+
+    #[test]
+    fn agent_service_model_loop_records_external_cancel_reason() {
+        let payload = model_loop_external_cancel_payload("before_model_call");
+
+        assert_eq!(payload["cancelled"], true);
+        assert_eq!(payload["cancelReason"], "external_cancel");
+        assert_eq!(payload["cancelStage"], "before_model_call");
+        assert_eq!(payload["runtimeMode"], "model_loop");
     }
 
     #[test]
