@@ -138,6 +138,9 @@ impl EvalCaseCandidate {
         if let Some(route_id) = guardian_review.model_route_id.as_deref() {
             tags.insert("guardianReviewModelRouteId".to_owned(), json!(route_id));
         }
+        if let Some(auto_approved) = guardian_review.auto_approved {
+            tags.insert("guardianAutoApproved".to_owned(), json!(auto_approved));
+        }
         if let Some(tool_code) = tool_code.as_deref() {
             tags.insert("toolCode".to_owned(), json!(tool_code));
         }
@@ -735,15 +738,19 @@ struct TraceGuardianReviewSummary {
     review_status: Option<String>,
     failure_reason: Option<String>,
     model_route_id: Option<String>,
+    auto_approved: Option<bool>,
 }
 
 fn trace_guardian_review_summary(bundle: &TraceBundle) -> TraceGuardianReviewSummary {
-    let Some(review) = bundle
-        .events
-        .iter()
-        .find(|event| event.kind == TraceEventKind::ApprovalRequested)
-        .and_then(|event| event.payload.get("guardianReview"))
-    else {
+    let Some(event) = bundle.events.iter().find(|event| {
+        matches!(
+            event.kind,
+            TraceEventKind::ApprovalRequested | TraceEventKind::ActionSelected
+        ) && event.payload.get("guardianReview").is_some()
+    }) else {
+        return TraceGuardianReviewSummary::default();
+    };
+    let Some(review) = event.payload.get("guardianReview") else {
         return TraceGuardianReviewSummary::default();
     };
 
@@ -769,6 +776,15 @@ fn trace_guardian_review_summary(bundle: &TraceBundle) -> TraceGuardianReviewSum
                 .get("modelRouteId")
                 .or_else(|| review.get("model_route_id")),
         ),
+        auto_approved: event
+            .payload
+            .get("guardianAutoApproved")
+            .or_else(|| event.payload.get("guardian_auto_approved"))
+            .and_then(Value::as_bool)
+            .or_else(|| {
+                trace_value_text(event.payload.get("approvalMode"))
+                    .map(|mode| mode == "guardian_auto_approved")
+            }),
     }
 }
 
@@ -1182,6 +1198,38 @@ mod tests {
         assert_eq!(candidate.tags["guardianReviewOutcome"], "needs_human");
         assert_eq!(candidate.tags["guardianReviewSource"], "policy");
         assert_eq!(candidate.tags["guardianReviewRequiresHumanApproval"], true);
+    }
+
+    #[test]
+    fn guardian_auto_approval_trace_eval_candidate_tags_action_review() {
+        let bundle = TraceBundle::new("trace-guardian-auto-approved")
+            .with_event(TraceEvent::user_message(1, "write an issue"))
+            .with_event(TraceEvent::action_selected(
+                2,
+                json!({
+                    "toolCode": "github.issue.write",
+                    "approvalMode": "guardian_auto_approved",
+                    "guardianAutoApproved": true,
+                    "guardianReview": {
+                        "outcome": "approved",
+                        "source": "guardian",
+                        "requiresHumanApproval": false,
+                        "reviewStatus": "reviewed",
+                        "modelRouteId": "runtime.llm.guardian"
+                    }
+                }),
+            ));
+
+        let candidate = EvalCaseCandidate::from_trace_bundle(&bundle);
+
+        assert_eq!(candidate.tags["guardianAutoApproved"], true);
+        assert_eq!(candidate.tags["guardianReviewOutcome"], "approved");
+        assert_eq!(candidate.tags["guardianReviewSource"], "guardian");
+        assert_eq!(candidate.tags["guardianReviewStatus"], "reviewed");
+        assert_eq!(
+            candidate.tags["guardianReviewModelRouteId"],
+            "runtime.llm.guardian"
+        );
     }
 
     #[test]

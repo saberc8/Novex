@@ -17,10 +17,10 @@ use novex_ai_core::{validate_run_transition, RunEventKind, RunStatus, RunStepTyp
 use novex_approval_review::{
     build_guardian_model_review_prompt, guardian_review_failure_decision,
     parse_guardian_model_assessment, review_tool_approval,
-    review_tool_approval_with_model_assessment, GuardianApprovalPolicy, GuardianModelReviewRequest,
-    GuardianReviewDecision, GuardianReviewFailureReason, GuardianReviewInput,
-    GuardianReviewedAction, GuardianRiskLevel, GuardianTranscriptEntry, GuardianTranscriptRole,
-    GuardianUserAuthorization,
+    review_tool_approval_with_model_assessment, GuardianApprovalPolicy, GuardianDecisionSource,
+    GuardianModelReviewRequest, GuardianReviewDecision, GuardianReviewFailureReason,
+    GuardianReviewInput, GuardianReviewStatus, GuardianReviewedAction, GuardianRiskLevel,
+    GuardianTranscriptEntry, GuardianTranscriptRole, GuardianUserAuthorization,
 };
 use novex_connectors::{
     parse_credential_scope, parse_github_code_search_response, resolve_env_secret_ref,
@@ -651,38 +651,72 @@ impl AgentService {
 
         if let Some(tool) = selected_tool {
             if plan.requires_approval {
-                self.pause_for_approval(
-                    user_id,
-                    run_id,
-                    &tool,
-                    &command.input,
-                    None,
-                    json!({ "input": command.input }),
-                    command.auto_approve,
-                    now,
-                )
-                .await?;
-                self.update_status(AgentStatusUpdate {
-                    user_id,
-                    run_id,
-                    status: initial_status,
-                    output_payload: Value::Null,
-                    final_output: None,
-                    pause_reason: Some("approval"),
-                    finished: false,
-                })
-                .await?;
-                self.append_event(
-                    user_id,
-                    run_id,
-                    None,
-                    RunEventKind::StatusChanged,
-                    run_status_code(RunStatus::WaitingApproval),
-                    json!({ "status": run_status_code(RunStatus::WaitingApproval) }),
-                )
-                .await?;
-                self.refresh_trace_snapshot(user_id, run_id, Value::Null)
+                let tool_arguments = json!({ "input": command.input.clone() });
+                let guardian_review_decision = self
+                    .guardian_review_decision_for_tool_policy(
+                        &command.input,
+                        None,
+                        &tool,
+                        tool_arguments.clone(),
+                        command.auto_approve,
+                    )
+                    .await;
+                let guardian_review =
+                    guardian_review_payload_from_decision(&guardian_review_decision);
+                if guardian_auto_approval_allows_execution(&guardian_review_decision) {
+                    self.append_event(
+                        user_id,
+                        run_id,
+                        None,
+                        RunEventKind::ActionSelected,
+                        run_status_code(RunStatus::Running),
+                        json!({
+                            "toolCode": tool.code,
+                            "riskLevel": tool.risk_level,
+                            "approvalMode": "guardian_auto_approved",
+                            "guardianAutoApproved": true,
+                            "guardianReview": guardian_review
+                        }),
+                    )
                     .await?;
+                    self.execute_tool_and_finish(user_id, run_id, &tool, tool_arguments)
+                        .await?;
+                } else {
+                    let guardian_review_override = Some(guardian_review);
+                    self.pause_for_approval(
+                        user_id,
+                        run_id,
+                        &tool,
+                        &command.input,
+                        None,
+                        tool_arguments,
+                        command.auto_approve,
+                        guardian_review_override,
+                        now,
+                    )
+                    .await?;
+                    self.update_status(AgentStatusUpdate {
+                        user_id,
+                        run_id,
+                        status: initial_status,
+                        output_payload: Value::Null,
+                        final_output: None,
+                        pause_reason: Some("approval"),
+                        finished: false,
+                    })
+                    .await?;
+                    self.append_event(
+                        user_id,
+                        run_id,
+                        None,
+                        RunEventKind::StatusChanged,
+                        run_status_code(RunStatus::WaitingApproval),
+                        json!({ "status": run_status_code(RunStatus::WaitingApproval) }),
+                    )
+                    .await?;
+                    self.refresh_trace_snapshot(user_id, run_id, Value::Null)
+                        .await?;
+                }
             } else {
                 self.execute_tool_and_finish(
                     user_id,
@@ -1085,6 +1119,7 @@ impl AgentService {
                         .collect::<Vec<_>>();
                     let batch_size = batch_plan.calls.len();
                     let mut prepared_calls = Vec::with_capacity(batch_size);
+                    let mut guardian_auto_approved_calls = HashMap::new();
 
                     for (batch_index, routed_call) in batch_plan.calls.into_iter().enumerate() {
                         let call_id = routed_call.call_id;
@@ -1110,11 +1145,23 @@ impl AgentService {
                             timeout: AGENT_TOOL_IO_TIMEOUT,
                         };
                         if batch_policy.requires_approval {
-                            runtime_state.push_item(AgentTurnItem::tool_call(
-                                call_id.clone(),
-                                tool_code.clone(),
-                                arguments.clone(),
-                            ));
+                            let guardian_review_decision = self
+                                .guardian_review_decision_for_tool_policy(
+                                    &command.input,
+                                    Some(&runtime_state.items),
+                                    &prepared_call.tool,
+                                    prepared_call.arguments.clone(),
+                                    command.auto_approve,
+                                )
+                                .await;
+                            let guardian_review =
+                                guardian_review_payload_from_decision(&guardian_review_decision);
+                            if guardian_auto_approval_allows_execution(&guardian_review_decision) {
+                                guardian_auto_approved_calls
+                                    .insert(prepared_call.call_id.clone(), guardian_review);
+                                prepared_calls.push(prepared_call);
+                                continue;
+                            }
                             let mut action_payload = agent_turn_item_event_payload(
                                 &AgentTurnItem::tool_call(call_id, tool_code.clone(), arguments),
                             );
@@ -1138,6 +1185,7 @@ impl AgentService {
                                 );
                                 object.insert("toolCallBatchIndex".to_owned(), json!(batch_index));
                                 object.insert("toolCallBatchSize".to_owned(), json!(batch_size));
+                                object.insert("guardianReview".to_owned(), guardian_review.clone());
                             }
                             self.append_event(
                                 user_id,
@@ -1162,6 +1210,7 @@ impl AgentService {
                                 finished: false,
                             })
                             .await?;
+                            let guardian_review_override = Some(guardian_review);
                             self.pause_for_approval(
                                 user_id,
                                 run_id,
@@ -1170,6 +1219,7 @@ impl AgentService {
                                 Some(&runtime_state.items),
                                 prepared_call.arguments.clone(),
                                 command.auto_approve,
+                                guardian_review_override,
                                 now,
                             )
                             .await?;
@@ -1219,6 +1269,16 @@ impl AgentService {
                                 json!(prepared_call.batch_index),
                             );
                             object.insert("toolCallBatchSize".to_owned(), json!(batch_size));
+                            if let Some(guardian_review) =
+                                guardian_auto_approved_calls.get(&prepared_call.call_id)
+                            {
+                                object.insert("guardianReview".to_owned(), guardian_review.clone());
+                                object.insert("guardianAutoApproved".to_owned(), json!(true));
+                                object.insert(
+                                    "approvalMode".to_owned(),
+                                    json!("guardian_auto_approved"),
+                                );
+                            }
                         }
                         self.append_event(
                             user_id,
@@ -1918,18 +1978,23 @@ impl AgentService {
         runtime_items: Option<&[AgentTurnItem]>,
         tool_arguments: Value,
         auto_approved: bool,
+        guardian_review_override: Option<Value>,
         now: NaiveDateTime,
     ) -> Result<(), AppError> {
         let step_id = next_id();
-        let guardian_review = self
-            .guardian_review_payload_for_tool_policy(
-                input,
-                runtime_items,
-                tool,
-                tool_arguments,
-                auto_approved,
-            )
-            .await;
+        let guardian_review = match guardian_review_override {
+            Some(review) => review,
+            None => {
+                self.guardian_review_payload_for_tool_policy(
+                    input,
+                    runtime_items,
+                    tool,
+                    tool_arguments,
+                    auto_approved,
+                )
+                .await
+            }
+        };
         self.repo
             .create_step(&RunStepSaveRecord {
                 id: step_id,
@@ -3784,6 +3849,16 @@ fn guardian_model_review_request_for_tool(
     }
 }
 
+fn guardian_auto_approval_allows_execution(decision: &GuardianReviewDecision) -> bool {
+    matches!(decision.source, GuardianDecisionSource::Guardian)
+        && matches!(decision.review_status, GuardianReviewStatus::Reviewed)
+        && decision.can_execute
+}
+
+fn guardian_review_payload_from_decision(decision: &GuardianReviewDecision) -> Value {
+    serde_json::to_value(decision).unwrap_or(Value::Null)
+}
+
 fn guardian_transcript_entries(
     input: &str,
     runtime_items: Option<&[AgentTurnItem]>,
@@ -4768,7 +4843,10 @@ mod tests {
     use super::*;
     use crate::application::ai::model_service::{ModelChatUsage, ModelProviderAttempt};
     use novex_ai_core::TaskBudget;
-    use novex_approval_review::{GuardianReviewOutcome, GuardianReviewStatus};
+    use novex_approval_review::{
+        GuardianDecisionSource, GuardianReviewFailureReason, GuardianReviewOutcome,
+        GuardianReviewStatus,
+    };
     use novex_trace::TraceEventKind;
     use sqlx::postgres::PgPoolOptions;
 
@@ -5967,6 +6045,99 @@ mod tests {
         assert_eq!(decision.model_provider.as_deref(), Some("deep-seek"));
         assert_eq!(decision.model_name.as_deref(), Some("deepseek-v4-flash"));
         assert_eq!(decision.review_latency_ms, Some(19));
+    }
+
+    #[test]
+    fn guardian_auto_approval_reviewed_approved_decision_allows_execution() {
+        let mut decision = guardian_review_for_tool_policy(
+            &ToolLookupRecord {
+                id: 1,
+                code: "github.issue.write".to_owned(),
+                tool_kind: "connector".to_owned(),
+                executor_kind: "connector".to_owned(),
+                risk_level: 3,
+                approval_policy: 1,
+                permission_code: Some("ai:agent:run".to_owned()),
+            },
+            true,
+        );
+        decision.outcome = GuardianReviewOutcome::Approved;
+        decision.source = GuardianDecisionSource::Guardian;
+        decision.requires_human_approval = false;
+        decision.can_execute = true;
+        decision.review_status = GuardianReviewStatus::Reviewed;
+
+        assert!(guardian_auto_approval_allows_execution(&decision));
+    }
+
+    #[test]
+    fn guardian_auto_approval_rejects_policy_only_and_failed_closed_decisions() {
+        let policy_only = guardian_review_for_tool_policy(
+            &ToolLookupRecord {
+                id: 1,
+                code: "rag.search".to_owned(),
+                tool_kind: "function".to_owned(),
+                executor_kind: "agent".to_owned(),
+                risk_level: 1,
+                approval_policy: 0,
+                permission_code: Some("ai:agent:run".to_owned()),
+            },
+            true,
+        );
+        assert_eq!(policy_only.source, GuardianDecisionSource::Policy);
+        assert_eq!(policy_only.review_status, GuardianReviewStatus::PolicyOnly);
+        assert!(!guardian_auto_approval_allows_execution(&policy_only));
+
+        let mut failed_closed = policy_only.clone();
+        failed_closed.source = GuardianDecisionSource::Guardian;
+        failed_closed.review_status = GuardianReviewStatus::FailedClosed;
+        failed_closed.failure_reason = Some(GuardianReviewFailureReason::Timeout);
+        failed_closed.can_execute = false;
+
+        assert!(!guardian_auto_approval_allows_execution(&failed_closed));
+    }
+
+    #[test]
+    fn guardian_auto_approval_backend_continues_before_deterministic_pause() {
+        let source = include_str!("agent_service.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+        let deterministic_branch = &source[source.find("if let Some(tool) = selected_tool").unwrap()
+            ..source.find("async fn create_model_loop_run").unwrap()];
+
+        let review_index = deterministic_branch
+            .find("guardian_review_decision_for_tool_policy")
+            .unwrap();
+        let gate_index = deterministic_branch
+            .find("guardian_auto_approval_allows_execution(&guardian_review_decision)")
+            .unwrap();
+        let pause_index = deterministic_branch.find("pause_for_approval").unwrap();
+
+        assert!(review_index < gate_index);
+        assert!(gate_index < pause_index);
+        assert!(deterministic_branch.contains("\"guardianAutoApproved\""));
+        assert!(deterministic_branch.contains("\"guardian_auto_approved\""));
+    }
+
+    #[test]
+    fn guardian_auto_approval_backend_handles_batch_before_execution() {
+        let source = include_str!("agent_service.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+        let batch_branch = &source[source.find("if batch_policy.requires_approval").unwrap()
+            ..source.find("let mut batch_observations").unwrap()];
+        let normalized_batch_branch = batch_branch.split_whitespace().collect::<String>();
+        let execution_index = source.find("execute_agent_tool_io_batch").unwrap();
+        let gate_index = source
+            .find("guardian_auto_approval_allows_execution(&guardian_review_decision)")
+            .unwrap();
+
+        assert!(gate_index < execution_index);
+        assert!(normalized_batch_branch.contains("guardian_auto_approved_calls.insert"));
+        assert!(batch_branch.contains("guardian_review_override"));
+        assert!(source.contains("guardian_review_override: Option<Value>"));
     }
 
     #[test]
