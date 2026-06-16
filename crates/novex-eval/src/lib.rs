@@ -134,6 +134,15 @@ impl EvalCaseCandidate {
             if let Some(status) = compaction_summary.status.as_deref() {
                 tags.insert("compactionStatus".to_owned(), json!(status));
             }
+            if compaction_summary.remote_count > 0 {
+                tags.insert(
+                    "remoteCompactionCount".to_owned(),
+                    json!(compaction_summary.remote_count),
+                );
+            }
+            if let Some(implementation) = compaction_summary.implementation.as_deref() {
+                tags.insert("compactionImplementation".to_owned(), json!(implementation));
+            }
         }
         tags.insert("cancelled".to_owned(), json!(cancelled));
         if let Some(cancel_reason) = trace_first_cancellation_reason(bundle) {
@@ -649,7 +658,9 @@ fn trace_event_count(bundle: &TraceBundle, kind: TraceEventKind) -> usize {
 struct TraceCompactionSummary {
     model_count: usize,
     fallback_count: usize,
+    remote_count: usize,
     status: Option<String>,
+    implementation: Option<String>,
 }
 
 fn trace_compaction_summary(bundle: &TraceBundle) -> TraceCompactionSummary {
@@ -666,6 +677,16 @@ fn trace_compaction_summary(bundle: &TraceBundle) -> TraceCompactionSummary {
         }
         if let Some(status) = trace_value_text(event.payload.get("compactionStatus")) {
             summary.status = Some(status);
+        }
+        if let Some(implementation) =
+            trace_value_text(event.payload.get("compactionImplementation"))
+        {
+            summary.implementation = Some(implementation.clone());
+            if implementation == "responses_compaction_v2" {
+                summary.remote_count += 1;
+            }
+        } else if event.payload.get("remoteCompaction").is_some() {
+            summary.remote_count += 1;
         }
     }
     summary
@@ -1089,6 +1110,32 @@ mod tests {
         assert_eq!(candidate.tags["modelCompactionCount"], 1);
         assert_eq!(candidate.tags["compactionFallbackCount"], 0);
         assert_eq!(candidate.tags["compactionStatus"], "succeeded");
+    }
+
+    #[test]
+    fn remote_compaction_trace_eval_candidate_tags_endpoint_contract() {
+        let bundle =
+            TraceBundle::new("trace-remote-compact").with_event(TraceEvent::context_compaction(
+                1,
+                json!({
+                    "compactionStrategy": "model",
+                    "compactionStatus": "succeeded",
+                    "compactionImplementation": "responses_compaction_v2",
+                    "remoteCompaction": {
+                        "implementation": "responses_compaction_v2",
+                        "trigger": "auto",
+                        "reason": "observation_threshold"
+                    }
+                }),
+            ));
+
+        let candidate = EvalCaseCandidate::from_trace_bundle(&bundle);
+
+        assert_eq!(candidate.tags["remoteCompactionCount"], 1);
+        assert_eq!(
+            candidate.tags["compactionImplementation"],
+            "responses_compaction_v2"
+        );
     }
 
     #[test]
