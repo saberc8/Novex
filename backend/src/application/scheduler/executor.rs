@@ -6,9 +6,12 @@ use serde_json::{json, Value};
 use sqlx::PgPool;
 
 use crate::{
-    application::scheduler::{
-        http_safety::{validate_http_target, HttpSafetyConfig},
-        service::{JOB_TYPE_BUILTIN, JOB_TYPE_HTTP},
+    application::{
+        ai::model_service::ModelRuntimeService,
+        scheduler::{
+            http_safety::{validate_http_target, HttpSafetyConfig},
+            service::{JOB_TYPE_BUILTIN, JOB_TYPE_HTTP},
+        },
     },
     infrastructure::{
         mq::rabbitmq::SchedulerMessage,
@@ -33,7 +36,7 @@ pub async fn execute_scheduler_message(
     worker_id: &str,
     message: &SchedulerMessage,
 ) -> Result<ExecutionOutcome, AppError> {
-    let repo = SchedulerRepository::new(db);
+    let repo = SchedulerRepository::new(db.clone());
     let job = repo
         .get_job(message.job_id)
         .await?
@@ -48,7 +51,7 @@ pub async fn execute_scheduler_message(
 
     let result = match job.task_type {
         JOB_TYPE_HTTP => execute_http_job(&job, http_safety).await,
-        JOB_TYPE_BUILTIN => execute_builtin_job(&job.builtin_key).await,
+        JOB_TYPE_BUILTIN => execute_builtin_job(&db, &job.builtin_key).await,
         _ => Err(AppError::bad_request("任务类型不正确")),
     };
 
@@ -165,12 +168,23 @@ async fn execute_http_job(
     })
 }
 
-async fn execute_builtin_job(key: &str) -> Result<HttpOutput, AppError> {
+async fn execute_builtin_job(db: &PgPool, key: &str) -> Result<HttpOutput, AppError> {
     match key {
         "system.noop" => Ok(HttpOutput {
             status: Some(200),
             body: "ok".to_owned(),
         }),
+        "ai.model.health_check" => {
+            let health_rows = ModelRuntimeService::refresh_active_tenant_model_health(db).await?;
+            Ok(HttpOutput {
+                status: Some(200),
+                body: json!({
+                    "status": "ok",
+                    "healthRows": health_rows,
+                })
+                .to_string(),
+            })
+        }
         _ => Err(AppError::bad_request(format!("未知内置任务: {key}"))),
     }
 }
@@ -203,5 +217,17 @@ mod tests {
         };
 
         assert!(outcome.retryable);
+    }
+
+    #[test]
+    fn model_health_check_key_source_contract_routes_scheduler_builtin() {
+        let source = include_str!("executor.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+
+        assert!(source.contains("ai.model.health_check"));
+        assert!(source.contains("ModelRuntimeService::refresh_active_tenant_model_health"));
+        assert!(source.contains("execute_builtin_job(&db, &job.builtin_key)"));
     }
 }

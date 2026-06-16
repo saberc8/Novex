@@ -598,6 +598,17 @@ mod tests {
     }
 
     #[test]
+    fn model_health_check_key_builtin_job_is_accepted() {
+        let mut command = base_command();
+        command.task_type = JOB_TYPE_BUILTIN;
+        command.builtin_key = "ai.model.health_check".to_owned();
+
+        let command = normalize_job_command(command, &safety_config()).unwrap();
+
+        assert_eq!(command.builtin_key, "ai.model.health_check");
+    }
+
+    #[test]
     fn normalize_job_rejects_retry_outside_range() {
         let mut command = base_command();
         command.max_retry = 11;
