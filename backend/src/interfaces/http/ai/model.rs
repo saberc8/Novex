@@ -20,6 +20,7 @@ pub const MODEL_HEALTH_PERMISSION: &str = "ai:model:healthCheck";
 pub const MODEL_CHAT_PERMISSION: &str = "ai:model:chat";
 pub const MODEL_CIRCUIT_BREAKER_LIST_PERMISSION: &str = "ai:model:circuitBreaker:list";
 pub const MODEL_CIRCUIT_BREAKER_CLEAR_PERMISSION: &str = "ai:model:circuitBreaker:clear";
+pub const MODEL_OPS_SUMMARY_PERMISSION: &str = "ai:model:opsSummary";
 
 pub fn routes() -> Router<AppState> {
     Router::new()
@@ -200,6 +201,14 @@ mod tests {
 
         assert!(seed.contains(MODEL_CIRCUIT_BREAKER_LIST_PERMISSION));
         assert!(seed.contains(MODEL_CIRCUIT_BREAKER_CLEAR_PERMISSION));
+    }
+
+    #[test]
+    fn model_ops_summary_permission_seed_contains_control() {
+        let seed =
+            include_str!("../../../../migrations/202606170003_seed_ai_model_ops_summary_permission.sql");
+
+        assert!(seed.contains(MODEL_OPS_SUMMARY_PERMISSION));
     }
 
     #[test]
