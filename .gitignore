@@ -50,6 +50,7 @@ backend/data/file/knowledge/
 
 # 其他工具
 .worktrees/
+.pnpm-store/
 .env
 .env.poc
 .env.local
