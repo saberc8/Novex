@@ -7,8 +7,8 @@ use axum::{
 use crate::{
     application::ai::model_service::{
         ModelChatCommand, ModelChatConversationResp, ModelChatResp, ModelHealthCheckCommand,
-        ModelHealthCheckResp, ModelRegistrySummary, ModelRouteCircuitBreakerResp,
-        ModelRuntimeService,
+        ModelHealthCheckResp, ModelOpsSummaryResp, ModelRegistrySummary,
+        ModelRouteCircuitBreakerResp, ModelRuntimeService,
     },
     domain::auth::model::CurrentUser,
     interfaces::http::{middleware::permission::require_permission, AppState},
@@ -20,11 +20,13 @@ pub const MODEL_HEALTH_PERMISSION: &str = "ai:model:healthCheck";
 pub const MODEL_CHAT_PERMISSION: &str = "ai:model:chat";
 pub const MODEL_CIRCUIT_BREAKER_LIST_PERMISSION: &str = "ai:model:circuitBreaker:list";
 pub const MODEL_CIRCUIT_BREAKER_CLEAR_PERMISSION: &str = "ai:model:circuitBreaker:clear";
+pub const MODEL_OPS_SUMMARY_PERMISSION: &str = "ai:model:opsSummary";
 
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/ai/models/runtime-config", get(runtime_config))
         .route("/ai/models/registry", get(model_registry))
+        .route("/ai/models/ops-summary", get(model_ops_summary))
         .route("/ai/models/health-check", post(health_check))
         .route(
             "/ai/models/route-circuit-breakers",
@@ -75,6 +77,16 @@ async fn health_check(
     Ok(Json(ApiResponse::ok(
         service.health_check_for_tenant(command).await?,
     )))
+}
+
+async fn model_ops_summary(
+    State(state): State<AppState>,
+    current_user: CurrentUser,
+) -> Result<Json<ApiResponse<ModelOpsSummaryResp>>, AppError> {
+    require_permission(&current_user, MODEL_OPS_SUMMARY_PERMISSION)?;
+    let service = ModelRuntimeService::for_tenant(state.db, current_user.tenant_id);
+
+    Ok(Json(ApiResponse::ok(service.model_ops_summary().await?)))
 }
 
 async fn list_route_circuit_breakers(
@@ -200,6 +212,15 @@ mod tests {
 
         assert!(seed.contains(MODEL_CIRCUIT_BREAKER_LIST_PERMISSION));
         assert!(seed.contains(MODEL_CIRCUIT_BREAKER_CLEAR_PERMISSION));
+    }
+
+    #[test]
+    fn model_ops_summary_permission_seed_contains_control() {
+        let seed = include_str!(
+            "../../../../migrations/202606170003_seed_ai_model_ops_summary_permission.sql"
+        );
+
+        assert!(seed.contains(MODEL_OPS_SUMMARY_PERMISSION));
     }
 
     #[test]
@@ -365,12 +386,29 @@ mod tests {
         assert!(matches!(err, AppError::Forbidden));
     }
 
+    #[tokio::test]
+    async fn model_ops_summary_handler_rejects_missing_permission() {
+        let err = model_ops_summary(State(test_state()), user_with_permissions(vec![]))
+            .await
+            .unwrap_err();
+
+        assert!(matches!(err, AppError::Forbidden));
+    }
+
     #[test]
     fn model_circuit_breaker_routes_are_registered() {
         let source = include_str!("model.rs");
 
         assert!(source.contains("/ai/models/route-circuit-breakers"));
         assert!(source.contains("/ai/models/route-circuit-breakers/:route_id"));
+    }
+
+    #[test]
+    fn model_ops_summary_route_is_registered() {
+        let source = include_str!("model.rs");
+
+        assert!(source.contains("/ai/models/ops-summary"));
+        assert!(source.contains("MODEL_OPS_SUMMARY_PERMISSION"));
     }
 
     #[tokio::test]

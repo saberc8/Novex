@@ -279,6 +279,46 @@ pub struct ModelRouteCircuitBreakerResp {
     pub remaining_ms: i64,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelOpsUsageSummaryResp {
+    pub request_count: i64,
+    pub total_tokens: i64,
+    pub cost_cents: f64,
+    pub avg_latency_ms: Option<f64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelRouteOpsSummaryResp {
+    pub route_id: String,
+    pub route_purpose: String,
+    pub provider: String,
+    pub provider_type: String,
+    pub model: String,
+    pub network_zone: String,
+    pub status: i16,
+    pub breaker_open: bool,
+    pub breaker_remaining_ms: i64,
+    pub breaker_opened_until: Option<String>,
+    pub last_health_status: Option<String>,
+    pub last_health_checked_at: Option<String>,
+    pub last_health_latency_ms: Option<i64>,
+    pub degraded: bool,
+    pub usage_24h: ModelOpsUsageSummaryResp,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelOpsSummaryResp {
+    pub route_count: usize,
+    pub active_route_count: usize,
+    pub open_breaker_count: usize,
+    pub degraded_route_count: usize,
+    pub usage_24h: ModelOpsUsageSummaryResp,
+    pub routes: Vec<ModelRouteOpsSummaryResp>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, FromRow)]
 pub struct ModelProviderRegistryRow {
     pub id: i64,
@@ -369,6 +409,25 @@ struct ModelRouteCircuitBreakerControlRow {
     pub open_reason: String,
     pub last_error_kind: Option<String>,
     pub last_http_status: Option<i32>,
+}
+
+#[derive(Debug, Clone, PartialEq, FromRow)]
+struct ModelRouteOpsSummaryRow {
+    pub route_code: String,
+    pub route_purpose: String,
+    pub provider_code: String,
+    pub provider_type: String,
+    pub model_name: String,
+    pub network_zone: String,
+    pub status: i16,
+    pub breaker_opened_until: Option<NaiveDateTime>,
+    pub last_health_status: Option<String>,
+    pub last_health_checked_at: Option<NaiveDateTime>,
+    pub last_health_latency_ms: Option<i64>,
+    pub request_count_24h: i64,
+    pub total_tokens_24h: i64,
+    pub cost_cents_24h: f64,
+    pub avg_latency_ms_24h: Option<f64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, FromRow)]
@@ -606,6 +665,71 @@ WHERE tenant_id = $1
         model_circuit_breaker_clear(route_id);
 
         Ok(())
+    }
+
+    pub async fn model_ops_summary(&self) -> Result<ModelOpsSummaryResp, AppError> {
+        let rows = sqlx::query_as::<_, ModelRouteOpsSummaryRow>(
+            r#"
+SELECT
+    r.code AS route_code,
+    r.route_purpose,
+    provider.code AS provider_code,
+    provider.provider_type,
+    profile.model_name,
+    deployment.network_zone,
+    r.status,
+    breaker.opened_until AS breaker_opened_until,
+    health.status AS last_health_status,
+    health.checked_at AS last_health_checked_at,
+    health.latency_ms AS last_health_latency_ms,
+    COALESCE(usage.request_count_24h, 0)::bigint AS request_count_24h,
+    COALESCE(usage.total_tokens_24h, 0)::bigint AS total_tokens_24h,
+    COALESCE(usage.cost_cents_24h, 0)::float8 AS cost_cents_24h,
+    usage.avg_latency_ms_24h AS avg_latency_ms_24h
+FROM ai_model_route r
+JOIN ai_model_profile profile
+  ON profile.tenant_id = r.tenant_id
+ AND profile.id = r.model_profile_id
+JOIN ai_model_deployment deployment
+  ON deployment.tenant_id = profile.tenant_id
+ AND deployment.id = profile.deployment_id
+JOIN ai_model_provider provider
+  ON provider.tenant_id = deployment.tenant_id
+ AND provider.id = deployment.provider_id
+LEFT JOIN ai_model_route_circuit_breaker breaker
+  ON breaker.tenant_id = r.tenant_id
+ AND breaker.route_id = r.code
+ AND breaker.opened_until > NOW()::timestamp
+LEFT JOIN LATERAL (
+    SELECT status, checked_at, latency_ms
+    FROM ai_model_health_check health
+    WHERE health.tenant_id = r.tenant_id
+      AND health.route_id = r.id
+    ORDER BY health.checked_at DESC, health.id DESC
+    LIMIT 1
+) health ON TRUE
+LEFT JOIN (
+    SELECT
+        route_id,
+        SUM(request_count)::bigint AS request_count_24h,
+        SUM(total_tokens)::bigint AS total_tokens_24h,
+        SUM(cost_cents)::float8 AS cost_cents_24h,
+        AVG(latency_ms)::float8 AS avg_latency_ms_24h
+    FROM ai_model_usage
+    WHERE tenant_id = $1
+      AND create_time >= NOW()::timestamp - INTERVAL '24 hours'
+      AND route_id IS NOT NULL
+    GROUP BY route_id
+) usage ON usage.route_id = r.id
+WHERE r.tenant_id = $1
+ORDER BY r.priority ASC, r.id ASC;
+"#,
+        )
+        .bind(self.tenant_id)
+        .fetch_all(&self.db)
+        .await?;
+
+        Ok(model_ops_summary_from_rows(rows, Utc::now().naive_utc()))
     }
 
     async fn fallback_plan_for_purpose_with_route_id(
@@ -1927,6 +2051,86 @@ impl From<ModelChatConversationRow> for ModelChatConversationResp {
     }
 }
 
+fn model_ops_summary_from_rows(
+    rows: Vec<ModelRouteOpsSummaryRow>,
+    now: NaiveDateTime,
+) -> ModelOpsSummaryResp {
+    let route_count = rows.len();
+    let active_route_count = rows.iter().filter(|row| row.status == 1).count();
+    let mut open_breaker_count = 0usize;
+    let mut degraded_route_count = 0usize;
+    let mut usage_24h = ModelOpsUsageSummaryResp::default();
+    let mut weighted_latency_sum = 0.0f64;
+    let mut weighted_latency_count = 0i64;
+    let mut routes = Vec::with_capacity(rows.len());
+
+    for row in rows {
+        let breaker_remaining_ms = row
+            .breaker_opened_until
+            .map(|opened_until| (opened_until - now).num_milliseconds().max(0))
+            .unwrap_or(0);
+        let breaker_open = breaker_remaining_ms > 0;
+        let health_degraded = row
+            .last_health_status
+            .as_deref()
+            .is_some_and(|status| status != "ok");
+        let degraded = breaker_open || health_degraded;
+        if breaker_open {
+            open_breaker_count += 1;
+        }
+        if degraded {
+            degraded_route_count += 1;
+        }
+
+        usage_24h.request_count += row.request_count_24h;
+        usage_24h.total_tokens += row.total_tokens_24h;
+        usage_24h.cost_cents += row.cost_cents_24h;
+        if let Some(avg_latency_ms) = row.avg_latency_ms_24h {
+            if row.request_count_24h > 0 {
+                weighted_latency_sum += avg_latency_ms * row.request_count_24h as f64;
+                weighted_latency_count += row.request_count_24h;
+            }
+        }
+
+        let usage = ModelOpsUsageSummaryResp {
+            request_count: row.request_count_24h,
+            total_tokens: row.total_tokens_24h,
+            cost_cents: row.cost_cents_24h,
+            avg_latency_ms: row.avg_latency_ms_24h,
+        };
+        routes.push(ModelRouteOpsSummaryResp {
+            route_id: row.route_code,
+            route_purpose: row.route_purpose,
+            provider: row.provider_code,
+            provider_type: row.provider_type,
+            model: row.model_name,
+            network_zone: row.network_zone,
+            status: row.status,
+            breaker_open,
+            breaker_remaining_ms,
+            breaker_opened_until: row.breaker_opened_until.map(format_datetime),
+            last_health_status: row.last_health_status,
+            last_health_checked_at: row.last_health_checked_at.map(format_datetime),
+            last_health_latency_ms: row.last_health_latency_ms,
+            degraded,
+            usage_24h: usage,
+        });
+    }
+
+    if weighted_latency_count > 0 {
+        usage_24h.avg_latency_ms = Some(weighted_latency_sum / weighted_latency_count as f64);
+    }
+
+    ModelOpsSummaryResp {
+        route_count,
+        active_route_count,
+        open_breaker_count,
+        degraded_route_count,
+        usage_24h,
+        routes,
+    }
+}
+
 fn model_chat_history_records(
     tenant_id: i64,
     user_id: i64,
@@ -3172,6 +3376,74 @@ mod tests {
             .unwrap();
 
         assert!(persistent < local);
+    }
+
+    #[test]
+    fn model_ops_summary_source_contract_reads_route_health_usage_and_breakers() {
+        let source = include_str!("model_service.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+
+        assert!(source.contains("pub async fn model_ops_summary"));
+        assert!(source.contains("FROM ai_model_route r"));
+        assert!(source.contains("ai_model_route_circuit_breaker"));
+        assert!(source.contains("ai_model_health_check"));
+        assert!(source.contains("ai_model_usage"));
+        assert!(source.contains("WHERE r.tenant_id = $1"));
+        assert!(source.contains("INTERVAL '24 hours'"));
+    }
+
+    #[test]
+    fn model_ops_summary_from_rows_counts_open_breakers_and_degraded_routes() {
+        let now =
+            NaiveDateTime::parse_from_str("2026-06-17 10:00:00", "%Y-%m-%d %H:%M:%S").unwrap();
+        let summary = model_ops_summary_from_rows(
+            vec![
+                ModelRouteOpsSummaryRow {
+                    route_code: "runtime.llm.chat".to_owned(),
+                    route_purpose: "chat".to_owned(),
+                    provider_code: "deepseek".to_owned(),
+                    provider_type: "deep-seek".to_owned(),
+                    model_name: "deepseek-v4".to_owned(),
+                    network_zone: "public".to_owned(),
+                    status: 1,
+                    breaker_opened_until: Some(now + chrono::Duration::minutes(5)),
+                    last_health_status: Some("ok".to_owned()),
+                    last_health_checked_at: Some(now),
+                    last_health_latency_ms: Some(120),
+                    request_count_24h: 3,
+                    total_tokens_24h: 1200,
+                    cost_cents_24h: 1.5,
+                    avg_latency_ms_24h: Some(330.0),
+                },
+                ModelRouteOpsSummaryRow {
+                    route_code: "runtime.embedding".to_owned(),
+                    route_purpose: "embedding".to_owned(),
+                    provider_code: "dashscope".to_owned(),
+                    provider_type: "dash-scope".to_owned(),
+                    model_name: "text-embedding-v4".to_owned(),
+                    network_zone: "public".to_owned(),
+                    status: 1,
+                    breaker_opened_until: None,
+                    last_health_status: Some("provider returned HTTP 500".to_owned()),
+                    last_health_checked_at: Some(now),
+                    last_health_latency_ms: Some(800),
+                    request_count_24h: 2,
+                    total_tokens_24h: 500,
+                    cost_cents_24h: 0.25,
+                    avg_latency_ms_24h: Some(90.0),
+                },
+            ],
+            now,
+        );
+
+        assert_eq!(summary.route_count, 2);
+        assert_eq!(summary.active_route_count, 2);
+        assert_eq!(summary.open_breaker_count, 1);
+        assert_eq!(summary.degraded_route_count, 2);
+        assert_eq!(summary.usage_24h.request_count, 5);
+        assert_eq!(summary.usage_24h.total_tokens, 1700);
     }
 
     #[test]
