@@ -37,7 +37,7 @@ use tokio::sync::watch;
 
 use crate::{
     application::ai::model_service::{
-        ModelChatCommand, ModelChatMessage, ModelChatResp, ModelRuntimeService,
+        ModelChatCommand, ModelChatMessage, ModelChatResp, ModelRetryPolicy, ModelRuntimeService,
     },
     application::system::{ensure_max_chars, format_datetime},
     infrastructure::persistence::{
@@ -580,6 +580,10 @@ impl AgentService {
         plan.selected_tool_code = None;
         plan.requires_approval = false;
         plan.pause_reason = None;
+        let model_retry_policy: ModelRetryPolicy = self
+            .model_runtime
+            .retry_policy_for_purpose(ModelRoutePurpose::CodeAgent)
+            .await?;
 
         let run_id = next_id();
         let trace_id = format!("agent-{run_id}");
@@ -633,92 +637,117 @@ impl AgentService {
                 return self.get_run(run_id).await;
             }
 
-            let model_call_started = Instant::now();
-            let model_call_result = await_model_loop_future_or_cancelled(
-                cancel_token.clone(),
-                "model_call",
-                self.model_runtime.chat_completion_for_purpose(
-                    ModelRoutePurpose::CodeAgent,
-                    ModelChatCommand {
-                        messages: messages.clone(),
-                        temperature: Some(0.2),
-                        max_tokens: Some(1024),
-                        ..ModelChatCommand::default()
-                    },
-                ),
-            )
-            .await;
-            let model_response = match model_call_result {
-                Ok(ModelLoopFutureAwait::Completed(model_response)) => model_response,
-                Ok(ModelLoopFutureAwait::Cancelled) => {
-                    if self
-                        .check_model_loop_cancelled(user_id, run_id, "model_call")
-                        .await?
-                        == ModelLoopCancelCheck::Continue
-                    {
-                        self.finish_model_loop_cancelled(
+            let mut model_response = None;
+            for attempt in 1..=model_retry_policy.max_attempts() {
+                let model_call_started = Instant::now();
+                let model_call_result = await_model_loop_future_or_cancelled(
+                    cancel_token.clone(),
+                    "model_call",
+                    self.model_runtime.chat_completion_for_purpose(
+                        ModelRoutePurpose::CodeAgent,
+                        ModelChatCommand {
+                            messages: messages.clone(),
+                            temperature: Some(0.2),
+                            max_tokens: Some(1024),
+                            ..ModelChatCommand::default()
+                        },
+                    ),
+                )
+                .await;
+                match model_call_result {
+                    Ok(ModelLoopFutureAwait::Completed(response)) => {
+                        model_response = Some(response);
+                        break;
+                    }
+                    Ok(ModelLoopFutureAwait::Cancelled) => {
+                        if self
+                            .check_model_loop_cancelled(user_id, run_id, "model_call")
+                            .await?
+                            == ModelLoopCancelCheck::Continue
+                        {
+                            self.finish_model_loop_cancelled(
+                                user_id,
+                                run_id,
+                                &run_status_code(RunStatus::Cancelling),
+                                "model_call",
+                            )
+                            .await?;
+                        }
+                        return self.get_run(run_id).await;
+                    }
+                    Err(err) => {
+                        let latency_ms = model_call_started.elapsed().as_millis();
+                        let will_retry = model_inference_error_should_retry(&err)
+                            && attempt < model_retry_policy.max_attempts();
+                        let error_payload = model_inference_error_attempt_event_payload(
+                            &err,
+                            latency_ms,
+                            attempt,
+                            model_retry_policy.max_attempts(),
+                            will_retry,
+                        );
+                        self.append_event(
                             user_id,
                             run_id,
-                            &run_status_code(RunStatus::Cancelling),
-                            "model_call",
+                            None,
+                            RunEventKind::Thought,
+                            if will_retry {
+                                run_status_code(RunStatus::Running)
+                            } else {
+                                run_status_code(RunStatus::Failed)
+                            },
+                            error_payload,
                         )
                         .await?;
+                        if will_retry {
+                            tokio::time::sleep(model_inference_retry_delay(attempt)).await;
+                            continue;
+                        }
+                        let error_message = model_inference_error_message(&err);
+                        self.append_event(
+                            user_id,
+                            run_id,
+                            None,
+                            RunEventKind::Error,
+                            run_status_code(RunStatus::Failed),
+                            json!({
+                                "runtimeMode": "model_loop",
+                                "stopReason": "model_call_failed",
+                                "message": error_message.clone()
+                            }),
+                        )
+                        .await?;
+                        self.finish_model_loop_run(
+                            user_id,
+                            run_id,
+                            None,
+                            RunStatus::Failed,
+                            &error_message,
+                            json!({
+                                "answer": error_message.clone(),
+                                "runtimeMode": "model_loop",
+                                "stopReason": "model_call_failed"
+                            }),
+                            agent_turn_item_event_payload(&AgentTurnItem::FinalAnswer {
+                                content: error_message.clone(),
+                            }),
+                        )
+                        .await?;
+                        self.refresh_trace_snapshot(
+                            user_id,
+                            run_id,
+                            json!({
+                                "runtimeMode": "model_loop",
+                                "stopReason": "model_call_failed"
+                            }),
+                        )
+                        .await?;
+                        return self.get_run(run_id).await;
                     }
-                    return self.get_run(run_id).await;
                 }
-                Err(err) => {
-                    let latency_ms = model_call_started.elapsed().as_millis();
-                    let error_message = model_inference_error_message(&err);
-                    let error_payload = model_inference_error_event_payload(&err, latency_ms);
-                    self.append_event(
-                        user_id,
-                        run_id,
-                        None,
-                        RunEventKind::Thought,
-                        run_status_code(RunStatus::Failed),
-                        error_payload,
-                    )
-                    .await?;
-                    self.append_event(
-                        user_id,
-                        run_id,
-                        None,
-                        RunEventKind::Error,
-                        run_status_code(RunStatus::Failed),
-                        json!({
-                            "runtimeMode": "model_loop",
-                            "stopReason": "model_call_failed",
-                            "message": error_message.clone()
-                        }),
-                    )
-                    .await?;
-                    self.finish_model_loop_run(
-                        user_id,
-                        run_id,
-                        None,
-                        RunStatus::Failed,
-                        &error_message,
-                        json!({
-                            "answer": error_message.clone(),
-                            "runtimeMode": "model_loop",
-                            "stopReason": "model_call_failed"
-                        }),
-                        agent_turn_item_event_payload(&AgentTurnItem::FinalAnswer {
-                            content: error_message.clone(),
-                        }),
-                    )
-                    .await?;
-                    self.refresh_trace_snapshot(
-                        user_id,
-                        run_id,
-                        json!({
-                            "runtimeMode": "model_loop",
-                            "stopReason": "model_call_failed"
-                        }),
-                    )
-                    .await?;
-                    return self.get_run(run_id).await;
-                }
+            }
+            let Some(model_response) = model_response else {
+                unreachable!("model retry loop should finish with a response or terminal run state")
             };
 
             self.append_event(
@@ -3473,14 +3502,26 @@ struct ModelInferenceErrorClass {
     retryable: bool,
 }
 
+#[allow(dead_code)]
 fn model_inference_error_event_payload(error: &AppError, latency_ms: u128) -> Value {
+    model_inference_error_attempt_event_payload(error, latency_ms, 1, 1, false)
+}
+
+fn model_inference_error_attempt_event_payload(
+    error: &AppError,
+    latency_ms: u128,
+    attempt: usize,
+    max_attempts: usize,
+    will_retry: bool,
+) -> Value {
     let class = classify_model_inference_error(error);
     let mut item = json!({
         "type": "model_inference_error",
         "routeId": CODE_AGENT_MODEL_ROUTE_ID,
         "routePurpose": CODE_AGENT_ROUTE_PURPOSE,
-        "attempt": 1,
-        "maxAttempts": 1,
+        "attempt": attempt,
+        "maxAttempts": max_attempts,
+        "willRetry": will_retry,
         "retryable": class.retryable,
         "errorKind": class.kind,
         "message": model_inference_error_message(error),
@@ -3496,6 +3537,14 @@ fn model_inference_error_event_payload(error: &AppError, latency_ms: u128) -> Va
         "runtimeMode": "model_loop",
         "item": item
     })
+}
+
+fn model_inference_error_should_retry(error: &AppError) -> bool {
+    classify_model_inference_error(error).retryable
+}
+
+fn model_inference_retry_delay(attempt: usize) -> Duration {
+    Duration::from_millis((attempt as u64).saturating_mul(50).min(250))
 }
 
 fn classify_model_inference_error(error: &AppError) -> ModelInferenceErrorClass {
@@ -4484,16 +4533,49 @@ mod tests {
     }
 
     #[test]
+    fn model_inference_error_provider_retry_payload_marks_attempts() {
+        let payload = model_inference_error_attempt_event_payload(
+            &AppError::bad_request("LLM 模型调用失败: HTTP 429"),
+            12,
+            2,
+            3,
+            true,
+        );
+
+        assert_eq!(payload["item"]["type"], "model_inference_error");
+        assert_eq!(payload["item"]["attempt"], 2);
+        assert_eq!(payload["item"]["maxAttempts"], 3);
+        assert_eq!(payload["item"]["willRetry"], true);
+        assert_eq!(payload["item"]["retryable"], true);
+        assert_eq!(payload["item"]["httpStatus"], 429);
+    }
+
+    #[test]
     fn agent_service_model_loop_records_provider_error_spans() {
         let source = include_str!("agent_service.rs")
             .split("#[cfg(test)]")
             .next()
             .unwrap();
+        let normalized_source = source.split_whitespace().collect::<Vec<_>>().join(" ");
 
-        assert!(source.contains("model_inference_error_event_payload(&err"));
+        assert!(normalized_source
+            .contains("let error_payload = model_inference_error_attempt_event_payload( &err,"));
         assert!(source.contains("RunEventKind::Error"));
         assert!(source.contains("\"model_inference_error\""));
         assert!(source.contains("\"stopReason\": \"model_call_failed\""));
+    }
+
+    #[test]
+    fn agent_service_model_loop_provider_retry_retries_retryable_errors() {
+        let source = include_str!("agent_service.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+
+        assert!(source.contains("retry_policy_for_purpose(ModelRoutePurpose::CodeAgent)"));
+        assert!(source.contains("for attempt in 1..=model_retry_policy.max_attempts()"));
+        assert!(source.contains("will_retry"));
+        assert!(source.contains("model_inference_error_attempt_event_payload"));
     }
 
     #[test]
