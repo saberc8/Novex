@@ -3736,7 +3736,7 @@ fn agent_tool_policy_decision(
     })
 }
 
-#[cfg(test)]
+#[allow(dead_code)]
 fn guardian_review_for_tool_policy(
     tool: &ToolLookupRecord,
     auto_approved: bool,
