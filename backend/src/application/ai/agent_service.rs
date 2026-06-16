@@ -3481,17 +3481,36 @@ fn model_loop_external_cancel_payload(stage: &str) -> Value {
 }
 
 fn model_inference_event_payload(response: &ModelChatResp) -> Value {
+    let fallback_route_id = response
+        .provider_attempts
+        .iter()
+        .find(|attempt| attempt.attempt_kind == "fallback" && attempt.status == "succeeded")
+        .map(|attempt| attempt.route_id.clone());
+    let mut item = json!({
+        "type": "model_inference",
+        "routeId": &response.route_id,
+        "provider": &response.provider,
+        "model": &response.model,
+        "latencyMs": u128_to_i64(response.latency_ms),
+        "usage": &response.usage,
+        "costCents": response.cost_cents,
+    });
+    if let Some(object) = item.as_object_mut() {
+        if !response.provider_attempts.is_empty() {
+            object.insert(
+                "providerAttempts".to_owned(),
+                json!(&response.provider_attempts),
+            );
+        }
+        if let Some(fallback_route_id) = fallback_route_id {
+            object.insert("fallbackUsed".to_owned(), json!(true));
+            object.insert("fallbackRouteId".to_owned(), json!(fallback_route_id));
+        }
+    }
+
     json!({
         "runtimeMode": "model_loop",
-        "item": {
-            "type": "model_inference",
-            "routeId": &response.route_id,
-            "provider": &response.provider,
-            "model": &response.model,
-            "latencyMs": u128_to_i64(response.latency_ms),
-            "usage": &response.usage,
-            "costCents": response.cost_cents,
-        }
+        "item": item
     })
 }
 
@@ -4108,7 +4127,7 @@ fn default_event_size() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::application::ai::model_service::ModelChatUsage;
+    use crate::application::ai::model_service::{ModelChatUsage, ModelProviderAttempt};
     use novex_ai_core::TaskBudget;
     use novex_trace::TraceEventKind;
     use sqlx::postgres::PgPoolOptions;
@@ -4145,6 +4164,24 @@ mod tests {
                 "ok".to_owned(),
             ),
             terminal_status: RunStatus::Succeeded,
+        }
+    }
+
+    fn test_provider_attempt(
+        attempt_kind: &str,
+        route_id: &str,
+        status: &str,
+    ) -> ModelProviderAttempt {
+        ModelProviderAttempt {
+            attempt_kind: attempt_kind.to_owned(),
+            route_id: route_id.to_owned(),
+            provider: "deep-seek".to_owned(),
+            model: Some("deepseek-v4-flash".to_owned()),
+            status: status.to_owned(),
+            latency_ms: 12,
+            error_kind: (status == "failed").then(|| "provider_http".to_owned()),
+            http_status: (status == "failed").then_some(502),
+            message: (status == "failed").then(|| "LLM 模型调用失败: HTTP 502".to_owned()),
         }
     }
 
@@ -4516,6 +4553,35 @@ mod tests {
         let payload = model_inference_event_payload(&response);
 
         assert_eq!(payload["item"]["costCents"], 0.65);
+    }
+
+    #[test]
+    fn provider_lifecycle_trace_payload_exposes_fallback_attempts() {
+        let response = ModelChatResp {
+            conversation_id: None,
+            answer: "ok".to_owned(),
+            route_id: "runtime.llm.backup".to_owned(),
+            provider: "deep-seek".to_owned(),
+            model: Some("deepseek-v4-flash".to_owned()),
+            latency_ms: 20,
+            usage: ModelChatUsage::default(),
+            cost_cents: None,
+            provider_attempts: vec![
+                test_provider_attempt("primary", "runtime.llm", "failed"),
+                test_provider_attempt("fallback", "runtime.llm.backup", "succeeded"),
+            ],
+        };
+
+        let payload = model_inference_event_payload(&response);
+
+        assert_eq!(payload["item"]["fallbackUsed"], true);
+        assert_eq!(payload["item"]["fallbackRouteId"], "runtime.llm.backup");
+        assert_eq!(
+            payload["item"]["providerAttempts"]
+                .as_array()
+                .map(Vec::len),
+            Some(2)
+        );
     }
 
     #[test]

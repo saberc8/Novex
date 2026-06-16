@@ -143,6 +143,21 @@ impl EvalCaseCandidate {
                 json!(inference_summary.retry_count),
             );
         }
+        if inference_summary.provider_attempt_count > 0 {
+            tags.insert(
+                "modelProviderAttemptCount".to_owned(),
+                json!(inference_summary.provider_attempt_count),
+            );
+        }
+        if inference_summary.fallback_count > 0 {
+            tags.insert(
+                "modelFallbackCount".to_owned(),
+                json!(inference_summary.fallback_count),
+            );
+            if let Some(route_id) = inference_summary.fallback_route_id.as_deref() {
+                tags.insert("modelFallbackRouteId".to_owned(), json!(route_id));
+            }
+        }
         if let Some(route_id) = inference_summary.route_id.as_deref() {
             tags.insert("modelRouteId".to_owned(), json!(route_id));
         }
@@ -618,6 +633,9 @@ struct TraceInferenceSummary {
     error_count: usize,
     retry_count: usize,
     retryable_error_count: usize,
+    provider_attempt_count: usize,
+    fallback_count: usize,
+    fallback_route_id: Option<String>,
     error_kind: Option<String>,
     http_status: Option<i64>,
 }
@@ -661,6 +679,23 @@ fn trace_inference_summary(bundle: &TraceBundle) -> TraceInferenceSummary {
             }
             if summary.http_status.is_none() {
                 summary.http_status = trace_value_i64(payload.get("httpStatus"));
+            }
+        }
+        if let Some(attempts) = payload.get("providerAttempts").and_then(Value::as_array) {
+            summary.provider_attempt_count += attempts.len();
+            for attempt in attempts {
+                let attempt_kind = trace_value_text(attempt.get("attemptKind"))
+                    .unwrap_or_default()
+                    .to_ascii_lowercase();
+                let status = trace_value_text(attempt.get("status"))
+                    .unwrap_or_default()
+                    .to_ascii_lowercase();
+                if attempt_kind == "fallback" && status == "succeeded" {
+                    summary.fallback_count += 1;
+                    if summary.fallback_route_id.is_none() {
+                        summary.fallback_route_id = trace_value_text(attempt.get("routeId"));
+                    }
+                }
             }
         }
         summary.latency_ms += trace_value_i64(payload.get("latencyMs")).unwrap_or_default();
@@ -1018,6 +1053,40 @@ mod tests {
         assert_eq!(candidate.tags["inferenceErrorCount"], 1);
         assert_eq!(candidate.tags["modelRetryCount"], 1);
         assert_eq!(candidate.tags["latencyMs"], 32);
+    }
+
+    #[test]
+    fn trace_eval_candidate_tags_provider_fallback_attempts() {
+        let bundle = TraceBundle::new("agent-1").with_event(TraceEvent::inference(
+            1,
+            json!({
+                "item": {
+                    "type": "model_inference",
+                    "routeId": "runtime.llm.backup",
+                    "providerAttempts": [
+                        {
+                            "attemptKind": "primary",
+                            "routeId": "runtime.llm",
+                            "status": "failed"
+                        },
+                        {
+                            "attemptKind": "fallback",
+                            "routeId": "runtime.llm.backup",
+                            "status": "succeeded"
+                        }
+                    ]
+                }
+            }),
+        ));
+
+        let candidate = EvalCaseCandidate::from_trace_bundle(&bundle);
+
+        assert_eq!(candidate.tags["modelProviderAttemptCount"], 2);
+        assert_eq!(candidate.tags["modelFallbackCount"], 1);
+        assert_eq!(
+            candidate.tags["modelFallbackRouteId"],
+            "runtime.llm.backup"
+        );
     }
 
     #[test]
