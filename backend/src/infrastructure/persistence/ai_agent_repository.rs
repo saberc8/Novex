@@ -9,6 +9,13 @@ pub struct AiAgentRepository {
     db: PgPool,
 }
 
+pub const AGENT_RUN_QUEUE_STATUS_PENDING: &str = "pending";
+pub const AGENT_RUN_QUEUE_STATUS_RUNNING: &str = "running";
+pub const AGENT_RUN_QUEUE_STATUS_RETRYING: &str = "retrying";
+pub const AGENT_RUN_QUEUE_STATUS_SUCCEEDED: &str = "succeeded";
+pub const AGENT_RUN_QUEUE_STATUS_FAILED: &str = "failed";
+pub const AGENT_RUN_QUEUE_STATUS_CANCELLED: &str = "cancelled";
+
 #[derive(Debug, Clone)]
 pub struct RunSaveRecord {
     pub id: i64,
@@ -132,6 +139,28 @@ pub struct RunPauseSaveRecord {
     pub resume_token_hash: Option<String>,
     pub user_id: i64,
     pub now: NaiveDateTime,
+}
+
+#[derive(Debug, Clone)]
+pub struct AgentRunQueueSaveRecord {
+    pub id: i64,
+    pub tenant_id: i64,
+    pub run_id: i64,
+    pub priority: i32,
+    pub max_attempts: i32,
+    pub payload: Value,
+    pub user_id: i64,
+    pub now: NaiveDateTime,
+}
+
+#[derive(Debug, Clone, FromRow)]
+pub struct AgentRunQueueClaimRecord {
+    pub id: i64,
+    pub tenant_id: i64,
+    pub run_id: i64,
+    pub attempt_count: i32,
+    pub max_attempts: i32,
+    pub payload: Value,
 }
 
 #[derive(Debug, Clone)]
@@ -363,6 +392,186 @@ VALUES ($1, $2, $3, $4, $5, 'active', $6, $7, $8, $9, $8, $9);
         .bind(&record.resume_token_hash)
         .bind(record.user_id)
         .bind(record.now)
+        .execute(&self.db)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn enqueue_agent_run(
+        &self,
+        record: &AgentRunQueueSaveRecord,
+    ) -> Result<(), AppError> {
+        sqlx::query(
+            r#"
+INSERT INTO ai_agent_run_queue (
+    id, tenant_id, run_id, queue_status, priority, attempt_count, max_attempts,
+    payload, queued_at, create_user, create_time, update_user, update_time
+)
+VALUES ($1, $2, $3, 'pending', $4, 0, $5, $6, $8, $7, $8, $7, $8);
+"#,
+        )
+        .bind(record.id)
+        .bind(record.tenant_id)
+        .bind(record.run_id)
+        .bind(record.priority)
+        .bind(record.max_attempts)
+        .bind(&record.payload)
+        .bind(record.user_id)
+        .bind(record.now)
+        .execute(&self.db)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn claim_agent_run_queue(
+        &self,
+        tenant_id: Option<i64>,
+        limit: i64,
+        worker_id: &str,
+        lease_until: NaiveDateTime,
+        user_id: i64,
+        now: NaiveDateTime,
+    ) -> Result<Vec<AgentRunQueueClaimRecord>, AppError> {
+        Ok(sqlx::query_as::<_, AgentRunQueueClaimRecord>(
+            r#"
+WITH candidate AS (
+    SELECT id
+    FROM ai_agent_run_queue
+    WHERE queue_status IN ('pending', 'retrying')
+      AND ($1::BIGINT IS NULL OR tenant_id = $1)
+      AND (locked_until IS NULL OR locked_until <= $3)
+      AND attempt_count < max_attempts
+    ORDER BY priority DESC, queued_at ASC, id ASC
+    LIMIT $2
+    FOR UPDATE SKIP LOCKED
+)
+UPDATE ai_agent_run_queue AS q
+SET queue_status = 'running',
+    attempt_count = q.attempt_count + 1,
+    locked_by = $4,
+    locked_until = $5,
+    started_at = COALESCE(q.started_at, $3),
+    update_user = $6,
+    update_time = $3
+FROM candidate
+WHERE q.id = candidate.id
+RETURNING q.id, q.tenant_id, q.run_id, q.attempt_count, q.max_attempts, q.payload;
+"#,
+        )
+        .bind(tenant_id)
+        .bind(limit)
+        .bind(now)
+        .bind(worker_id)
+        .bind(lease_until)
+        .bind(user_id)
+        .fetch_all(&self.db)
+        .await?)
+    }
+
+    pub async fn mark_agent_run_queue_succeeded(
+        &self,
+        queue_id: i64,
+        user_id: i64,
+        now: NaiveDateTime,
+    ) -> Result<(), AppError> {
+        self.mark_agent_run_queue_terminal(
+            queue_id,
+            AGENT_RUN_QUEUE_STATUS_SUCCEEDED,
+            None,
+            user_id,
+            now,
+        )
+        .await
+    }
+
+    pub async fn mark_agent_run_queue_failed(
+        &self,
+        queue_id: i64,
+        last_error: &str,
+        user_id: i64,
+        now: NaiveDateTime,
+    ) -> Result<(), AppError> {
+        self.mark_agent_run_queue_terminal(
+            queue_id,
+            AGENT_RUN_QUEUE_STATUS_FAILED,
+            Some(last_error),
+            user_id,
+            now,
+        )
+        .await
+    }
+
+    pub async fn mark_agent_run_queue_cancelled(
+        &self,
+        queue_id: i64,
+        user_id: i64,
+        now: NaiveDateTime,
+    ) -> Result<(), AppError> {
+        self.mark_agent_run_queue_terminal(
+            queue_id,
+            AGENT_RUN_QUEUE_STATUS_CANCELLED,
+            None,
+            user_id,
+            now,
+        )
+        .await
+    }
+
+    pub async fn mark_agent_run_queue_retrying(
+        &self,
+        queue_id: i64,
+        last_error: &str,
+        user_id: i64,
+        now: NaiveDateTime,
+    ) -> Result<(), AppError> {
+        sqlx::query(
+            r#"
+UPDATE ai_agent_run_queue
+SET queue_status = $2,
+    locked_by = NULL,
+    locked_until = NULL,
+    last_error = $3,
+    update_user = $4,
+    update_time = $5
+WHERE id = $1;
+"#,
+        )
+        .bind(queue_id)
+        .bind(AGENT_RUN_QUEUE_STATUS_RETRYING)
+        .bind(last_error)
+        .bind(user_id)
+        .bind(now)
+        .execute(&self.db)
+        .await?;
+        Ok(())
+    }
+
+    async fn mark_agent_run_queue_terminal(
+        &self,
+        queue_id: i64,
+        status: &str,
+        last_error: Option<&str>,
+        user_id: i64,
+        now: NaiveDateTime,
+    ) -> Result<(), AppError> {
+        sqlx::query(
+            r#"
+UPDATE ai_agent_run_queue
+SET queue_status = $2,
+    locked_by = NULL,
+    locked_until = NULL,
+    last_error = COALESCE($3, last_error),
+    finished_at = $5,
+    update_user = $4,
+    update_time = $5
+WHERE id = $1;
+"#,
+        )
+        .bind(queue_id)
+        .bind(status)
+        .bind(last_error)
+        .bind(user_id)
+        .bind(now)
         .execute(&self.db)
         .await?;
         Ok(())
@@ -764,5 +973,44 @@ mod tests {
         assert!(source.contains("sequence_no > $3"));
         assert!(source.contains("ORDER BY sequence_no ASC"));
         assert!(source.contains("LIMIT $4"));
+    }
+
+    #[test]
+    fn agent_run_queue_migration_defines_durable_queue_contract() {
+        let migration =
+            include_str!("../../../migrations/202606170006_create_ai_agent_run_queue.sql");
+
+        assert!(migration.contains("CREATE TABLE IF NOT EXISTS ai_agent_run_queue"));
+        assert!(migration.contains("queue_status"));
+        assert!(migration.contains("locked_by"));
+        assert!(migration.contains("locked_until"));
+        assert!(migration.contains("attempt_count"));
+        assert!(migration.contains("max_attempts"));
+        assert!(migration.contains("payload JSONB"));
+        assert!(migration.contains("tenant_id, run_id"));
+    }
+
+    #[test]
+    fn agent_run_queue_repository_exposes_claim_and_status_contract() {
+        let source = include_str!("ai_agent_repository.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+
+        assert!(source.contains("AgentRunQueueSaveRecord"));
+        assert!(source.contains("AgentRunQueueClaimRecord"));
+        assert!(source.contains("AGENT_RUN_QUEUE_STATUS_PENDING"));
+        assert!(source.contains("AGENT_RUN_QUEUE_STATUS_RUNNING"));
+        assert!(source.contains("AGENT_RUN_QUEUE_STATUS_RETRYING"));
+        assert!(source.contains("AGENT_RUN_QUEUE_STATUS_SUCCEEDED"));
+        assert!(source.contains("AGENT_RUN_QUEUE_STATUS_FAILED"));
+        assert!(source.contains("AGENT_RUN_QUEUE_STATUS_CANCELLED"));
+        assert!(source.contains("FOR UPDATE SKIP LOCKED"));
+        assert!(source.contains("enqueue_agent_run"));
+        assert!(source.contains("claim_agent_run_queue"));
+        assert!(source.contains("mark_agent_run_queue_succeeded"));
+        assert!(source.contains("mark_agent_run_queue_retrying"));
+        assert!(source.contains("mark_agent_run_queue_failed"));
+        assert!(source.contains("mark_agent_run_queue_cancelled"));
     }
 }
