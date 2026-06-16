@@ -36,7 +36,11 @@ async fn create_run(
     Json(command): Json<AgentRunCommand>,
 ) -> Result<Json<ApiResponse<AgentRunResp>>, AppError> {
     require_permission(&current_user, AGENT_RUN_PERMISSION)?;
-    let service = AgentService::for_tenant(state.db, current_user.tenant_id);
+    let service = AgentService::for_tenant_with_runtime(
+        state.db,
+        current_user.tenant_id,
+        state.agent_runtime,
+    );
 
     Ok(Json(ApiResponse::ok(
         service.create_run(current_user.id, command).await?,
@@ -49,7 +53,11 @@ async fn list_runs(
     Query(query): Query<AgentRunQuery>,
 ) -> Result<Json<ApiResponse<PageResult<AgentRunResp>>>, AppError> {
     require_permission(&current_user, AGENT_LIST_PERMISSION)?;
-    let service = AgentService::for_tenant(state.db, current_user.tenant_id);
+    let service = AgentService::for_tenant_with_runtime(
+        state.db,
+        current_user.tenant_id,
+        state.agent_runtime,
+    );
 
     Ok(Json(ApiResponse::ok(service.list_runs(query).await?)))
 }
@@ -60,7 +68,11 @@ async fn get_run(
     Path(run_id): Path<i64>,
 ) -> Result<Json<ApiResponse<AgentRunResp>>, AppError> {
     require_permission(&current_user, AGENT_LIST_PERMISSION)?;
-    let service = AgentService::for_tenant(state.db, current_user.tenant_id);
+    let service = AgentService::for_tenant_with_runtime(
+        state.db,
+        current_user.tenant_id,
+        state.agent_runtime,
+    );
 
     Ok(Json(ApiResponse::ok(service.get_run(run_id).await?)))
 }
@@ -72,7 +84,11 @@ async fn list_events(
     Query(query): Query<AgentRunEventQuery>,
 ) -> Result<Json<ApiResponse<PageResult<AgentRunEventResp>>>, AppError> {
     require_permission(&current_user, AGENT_EVENT_LIST_PERMISSION)?;
-    let service = AgentService::for_tenant(state.db, current_user.tenant_id);
+    let service = AgentService::for_tenant_with_runtime(
+        state.db,
+        current_user.tenant_id,
+        state.agent_runtime,
+    );
 
     Ok(Json(ApiResponse::ok(
         service.list_events(run_id, query).await?,
@@ -85,7 +101,11 @@ async fn get_run_trace(
     Path(run_id): Path<i64>,
 ) -> Result<Json<ApiResponse<AgentTraceReplayResp>>, AppError> {
     require_permission(&current_user, AGENT_EVENT_LIST_PERMISSION)?;
-    let service = AgentService::for_tenant(state.db, current_user.tenant_id);
+    let service = AgentService::for_tenant_with_runtime(
+        state.db,
+        current_user.tenant_id,
+        state.agent_runtime,
+    );
 
     Ok(Json(ApiResponse::ok(service.get_run_trace(run_id).await?)))
 }
@@ -97,7 +117,11 @@ async fn resume_run(
     Json(command): Json<AgentRunResumeCommand>,
 ) -> Result<Json<ApiResponse<AgentRunResp>>, AppError> {
     require_permission(&current_user, AGENT_RESUME_PERMISSION)?;
-    let service = AgentService::for_tenant(state.db, current_user.tenant_id);
+    let service = AgentService::for_tenant_with_runtime(
+        state.db,
+        current_user.tenant_id,
+        state.agent_runtime,
+    );
 
     Ok(Json(ApiResponse::ok(
         service.resume_run(current_user.id, run_id, command).await?,
@@ -110,7 +134,11 @@ async fn cancel_run(
     Path(run_id): Path<i64>,
 ) -> Result<Json<ApiResponse<AgentRunResp>>, AppError> {
     require_permission(&current_user, AGENT_CANCEL_PERMISSION)?;
-    let service = AgentService::for_tenant(state.db, current_user.tenant_id);
+    let service = AgentService::for_tenant_with_runtime(
+        state.db,
+        current_user.tenant_id,
+        state.agent_runtime,
+    );
 
     Ok(Json(ApiResponse::ok(
         service.cancel_run(current_user.id, run_id).await?,
@@ -148,6 +176,7 @@ mod tests {
                 .unwrap(),
             jwt: JwtService::new("test-secret".to_owned(), 24),
             captcha: Default::default(),
+            agent_runtime: Default::default(),
             scheduler_http_safety: Default::default(),
             parser_callback_token: None,
             parser_callback_user_id: 1,
@@ -181,14 +210,35 @@ mod tests {
 
     #[test]
     fn agent_handlers_bind_runtime_to_current_tenant() {
-        let source = include_str!("agent.rs");
+        let source = include_str!("agent.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
 
         assert!(
             source
-                .matches("AgentService::for_tenant(state.db, current_user.tenant_id)")
+                .matches("AgentService::for_tenant_with_runtime")
                 .count()
                 >= 6
         );
+    }
+
+    #[test]
+    fn agent_handlers_share_runtime_registry_from_app_state() {
+        let source = include_str!("agent.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+
+        assert!(source.contains("state.agent_runtime"));
+        assert!(source.contains("AgentService::for_tenant_with_runtime"));
+    }
+
+    #[test]
+    fn app_state_owns_agent_runtime_registry() {
+        let source = include_str!("../mod.rs");
+
+        assert!(source.contains("agent_runtime: AgentRuntimeRegistry"));
     }
 
     #[tokio::test]

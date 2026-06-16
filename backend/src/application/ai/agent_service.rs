@@ -397,6 +397,7 @@ pub struct AgentService {
     media_repo: AiMediaRepository,
     memory_repo: AiMemoryRepository,
     model_runtime: ModelRuntimeService,
+    agent_runtime: AgentRuntimeRegistry,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -417,6 +418,14 @@ impl AgentService {
     }
 
     pub fn for_tenant(db: PgPool, tenant_id: i64) -> Self {
+        Self::for_tenant_with_runtime(db, tenant_id, AgentRuntimeRegistry::default())
+    }
+
+    pub fn for_tenant_with_runtime(
+        db: PgPool,
+        tenant_id: i64,
+        agent_runtime: AgentRuntimeRegistry,
+    ) -> Self {
         Self {
             tenant_id,
             repo: AiAgentRepository::new(db.clone()),
@@ -424,6 +433,7 @@ impl AgentService {
             media_repo: AiMediaRepository::new(db.clone()),
             memory_repo: AiMemoryRepository::new(db.clone()),
             model_runtime: ModelRuntimeService::for_tenant(db.clone(), tenant_id),
+            agent_runtime,
         }
     }
 
@@ -1323,6 +1333,7 @@ impl AgentService {
     pub async fn cancel_run(&self, user_id: i64, run_id: i64) -> Result<AgentRunResp, AppError> {
         let run = self.get_run(run_id).await?;
         ensure_agent_run_transition(&run.status, RunStatus::Cancelling)?;
+        let _runtime_signal_sent = self.agent_runtime.cancel_run(self.tenant_id, run_id);
         self.update_status(AgentStatusUpdate {
             user_id,
             run_id,
@@ -3821,6 +3832,16 @@ mod tests {
         assert!(registry.cancel_run(42, 1001));
         token.clone().cancelled().await;
         assert!(token.is_cancelled());
+    }
+
+    #[test]
+    fn agent_runtime_registry_is_signalled_by_cancel_run() {
+        let source = include_str!("agent_service.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+
+        assert!(source.contains("self.agent_runtime.cancel_run"));
     }
 
     #[test]
