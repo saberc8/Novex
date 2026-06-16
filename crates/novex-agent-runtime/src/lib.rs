@@ -124,12 +124,25 @@ impl AgentRuntimeState {
     }
 
     pub fn compact_context(&mut self) -> Option<AgentContextCompaction> {
+        let summary = self.compaction_candidate_summary()?;
+        self.compact_context_with_summary(summary)
+    }
+
+    pub fn compaction_candidate_summary(&self) -> Option<String> {
+        self.should_compact_context()
+            .then(|| build_compaction_summary(&self.items_since_last_compaction()))
+    }
+
+    pub fn compact_context_with_summary(
+        &mut self,
+        summary: impl Into<String>,
+    ) -> Option<AgentContextCompaction> {
         if !self.should_compact_context() {
             return None;
         }
 
-        let compacted_items = self.items_since_last_compaction();
-        let summary = build_compaction_summary(&compacted_items);
+        let compacted_item_count = self.items_since_last_compaction().len();
+        let summary = summary.into();
         self.compaction_window_id = self.compaction_window_id.saturating_add(1);
         self.items.push(AgentTurnItem::ContextCompaction {
             summary: summary.clone(),
@@ -139,7 +152,7 @@ impl AgentRuntimeState {
             window_id: self.compaction_window_id,
             summary,
             retained_item_count: 1,
-            compacted_item_count: compacted_items.len(),
+            compacted_item_count,
         })
     }
 
@@ -442,6 +455,41 @@ mod tests {
         assert!(matches!(
             state.items.last(),
             Some(AgentTurnItem::ContextCompaction { .. })
+        ));
+    }
+
+    #[test]
+    fn runtime_compaction_can_install_model_generated_summary() {
+        let budget = AgentRuntimeBudget {
+            max_turns: 8,
+            max_tool_calls: 4,
+            compact_after_observations: Some(1),
+        };
+        let mut state = AgentRuntimeState::with_budget("run-1", budget);
+        state.push_item(AgentTurnItem::user_message("summarize refund policy"));
+        state.push_item(AgentTurnItem::tool_observation(
+            "call-1",
+            ToolObservationStatus::Succeeded,
+            json!({"hits":[{"text":"refund within 7 days"}]}),
+        ));
+
+        let candidate = state.compaction_candidate_summary().unwrap();
+        assert!(candidate.contains("refund within 7 days"));
+
+        let compaction = state
+            .compact_context_with_summary("Model summary: refunds are allowed within 7 days.")
+            .unwrap();
+
+        assert_eq!(compaction.window_id, 1);
+        assert_eq!(
+            compaction.summary,
+            "Model summary: refunds are allowed within 7 days."
+        );
+        assert!(!state.should_compact_context());
+        assert!(matches!(
+            state.items.last(),
+            Some(AgentTurnItem::ContextCompaction { summary })
+                if summary == "Model summary: refunds are allowed within 7 days."
         ));
     }
 

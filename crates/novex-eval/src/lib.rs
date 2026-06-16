@@ -121,6 +121,20 @@ impl EvalCaseCandidate {
         let cancelled = trace_event_count(bundle, TraceEventKind::Cancellation) > 0;
         tags.insert("retrievalCount".to_owned(), json!(retrieval_count));
         tags.insert("compactionCount".to_owned(), json!(compaction_count));
+        if compaction_count > 0 {
+            let compaction_summary = trace_compaction_summary(bundle);
+            tags.insert(
+                "modelCompactionCount".to_owned(),
+                json!(compaction_summary.model_count),
+            );
+            tags.insert(
+                "compactionFallbackCount".to_owned(),
+                json!(compaction_summary.fallback_count),
+            );
+            if let Some(status) = compaction_summary.status.as_deref() {
+                tags.insert("compactionStatus".to_owned(), json!(status));
+            }
+        }
         tags.insert("cancelled".to_owned(), json!(cancelled));
         if let Some(cancel_reason) = trace_first_cancellation_reason(bundle) {
             tags.insert("cancelReason".to_owned(), json!(cancel_reason));
@@ -615,6 +629,32 @@ fn trace_event_count(bundle: &TraceBundle, kind: TraceEventKind) -> usize {
         .count()
 }
 
+#[derive(Debug, Default)]
+struct TraceCompactionSummary {
+    model_count: usize,
+    fallback_count: usize,
+    status: Option<String>,
+}
+
+fn trace_compaction_summary(bundle: &TraceBundle) -> TraceCompactionSummary {
+    let mut summary = TraceCompactionSummary::default();
+    for event in bundle
+        .events
+        .iter()
+        .filter(|event| event.kind == TraceEventKind::ContextCompaction)
+    {
+        match trace_value_text(event.payload.get("compactionStrategy")).as_deref() {
+            Some("model") => summary.model_count += 1,
+            Some("deterministic_fallback") => summary.fallback_count += 1,
+            _ => {}
+        }
+        if let Some(status) = trace_value_text(event.payload.get("compactionStatus")) {
+            summary.status = Some(status);
+        }
+    }
+    summary
+}
+
 fn trace_first_cancellation_reason(bundle: &TraceBundle) -> Option<String> {
     bundle
         .events
@@ -957,6 +997,28 @@ mod tests {
         assert_eq!(candidate.tags["compactionCount"], 1);
         assert_eq!(candidate.tags["cancelled"], true);
         assert_eq!(candidate.tags["cancelReason"], "external_cancel");
+    }
+
+    #[test]
+    fn trace_eval_candidate_tags_model_compaction_strategy() {
+        let bundle = TraceBundle::new("trace-compact")
+            .with_event(TraceEvent::user_message(1, "answer from a long notebook"))
+            .with_event(TraceEvent::context_compaction(
+                2,
+                json!({
+                    "item": {"type":"context_compaction","summary":"model summary"},
+                    "compactionStrategy": "model",
+                    "compactionStatus": "succeeded"
+                }),
+            ))
+            .with_event(TraceEvent::final_answer(3, "done"));
+
+        let candidate = EvalCaseCandidate::from_trace_bundle(&bundle);
+
+        assert_eq!(candidate.tags["compactionCount"], 1);
+        assert_eq!(candidate.tags["modelCompactionCount"], 1);
+        assert_eq!(candidate.tags["compactionFallbackCount"], 0);
+        assert_eq!(candidate.tags["compactionStatus"], "succeeded");
     }
 
     #[test]
