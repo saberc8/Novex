@@ -729,10 +729,7 @@ ORDER BY r.priority ASC, r.id ASC;
         .fetch_all(&self.db)
         .await?;
 
-        Ok(model_ops_summary_from_rows(
-            rows,
-            Utc::now().naive_utc(),
-        ))
+        Ok(model_ops_summary_from_rows(rows, Utc::now().naive_utc()))
     }
 
     async fn fallback_plan_for_purpose_with_route_id(

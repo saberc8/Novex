@@ -216,8 +216,9 @@ mod tests {
 
     #[test]
     fn model_ops_summary_permission_seed_contains_control() {
-        let seed =
-            include_str!("../../../../migrations/202606170003_seed_ai_model_ops_summary_permission.sql");
+        let seed = include_str!(
+            "../../../../migrations/202606170003_seed_ai_model_ops_summary_permission.sql"
+        );
 
         assert!(seed.contains(MODEL_OPS_SUMMARY_PERMISSION));
     }
