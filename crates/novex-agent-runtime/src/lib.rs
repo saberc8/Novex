@@ -9,6 +9,8 @@ pub const CRATE_ID: &str = "novex-agent-runtime";
 pub struct AgentRuntimeBudget {
     pub max_turns: usize,
     pub max_tool_calls: usize,
+    #[serde(default)]
+    pub compact_after_observations: Option<usize>,
 }
 
 impl Default for AgentRuntimeBudget {
@@ -16,8 +18,18 @@ impl Default for AgentRuntimeBudget {
         Self {
             max_turns: 8,
             max_tool_calls: 4,
+            compact_after_observations: None,
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentContextCompaction {
+    pub window_id: u64,
+    pub summary: String,
+    pub retained_item_count: usize,
+    pub compacted_item_count: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -26,6 +38,8 @@ pub struct AgentRuntimeState {
     pub run_ref: String,
     pub budget: AgentRuntimeBudget,
     pub items: Vec<AgentTurnItem>,
+    #[serde(default)]
+    pub compaction_window_id: u64,
 }
 
 impl AgentRuntimeState {
@@ -38,6 +52,7 @@ impl AgentRuntimeState {
             run_ref: run_ref.into(),
             budget,
             items: Vec::new(),
+            compaction_window_id: 0,
         }
     }
 
@@ -87,6 +102,111 @@ impl AgentRuntimeState {
         }
         TurnOutcome::Final
     }
+
+    pub fn should_compact_context(&self) -> bool {
+        let Some(threshold) = self.budget.compact_after_observations else {
+            return false;
+        };
+        if threshold == 0 {
+            return false;
+        }
+        self.observation_count_since_last_compaction() >= threshold
+    }
+
+    pub fn compact_context(&mut self) -> Option<AgentContextCompaction> {
+        if !self.should_compact_context() {
+            return None;
+        }
+
+        let compacted_items = self.items_since_last_compaction();
+        let summary = build_compaction_summary(&compacted_items);
+        self.compaction_window_id = self.compaction_window_id.saturating_add(1);
+        self.items.push(AgentTurnItem::ContextCompaction {
+            summary: summary.clone(),
+        });
+
+        Some(AgentContextCompaction {
+            window_id: self.compaction_window_id,
+            summary,
+            retained_item_count: 1,
+            compacted_item_count: compacted_items.len(),
+        })
+    }
+
+    fn observation_count_since_last_compaction(&self) -> usize {
+        self.items_since_last_compaction()
+            .iter()
+            .filter(|item| matches!(item, AgentTurnItem::ToolObservation { .. }))
+            .count()
+    }
+
+    fn items_since_last_compaction(&self) -> Vec<AgentTurnItem> {
+        self.items
+            .iter()
+            .rev()
+            .take_while(|item| !matches!(item, AgentTurnItem::ContextCompaction { .. }))
+            .cloned()
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect()
+    }
+}
+
+fn build_compaction_summary(items: &[AgentTurnItem]) -> String {
+    let mut lines = vec!["Compacted prior agent context:".to_owned()];
+    for item in items {
+        match item {
+            AgentTurnItem::UserMessage { content } => {
+                lines.push(format!("User: {}", compact_text(content, 500)));
+            }
+            AgentTurnItem::AssistantMessage { content } => {
+                lines.push(format!("Assistant: {}", compact_text(content, 500)));
+            }
+            AgentTurnItem::Reasoning { summary } => {
+                lines.push(format!("Reasoning: {}", compact_text(summary, 500)));
+            }
+            AgentTurnItem::ToolCall {
+                call_id,
+                tool_code,
+                arguments,
+            } => {
+                lines.push(format!(
+                    "Tool call {call_id} `{tool_code}` args: {}",
+                    compact_text(&arguments.to_string(), 500)
+                ));
+            }
+            AgentTurnItem::ToolObservation {
+                call_id,
+                status,
+                output,
+            } => {
+                lines.push(format!(
+                    "Observation for {call_id} ({status:?}): {}",
+                    compact_text(&output.to_string(), 1000)
+                ));
+            }
+            AgentTurnItem::FinalAnswer { content } => {
+                lines.push(format!("Final answer: {}", compact_text(content, 500)));
+            }
+            AgentTurnItem::ContextCompaction { summary } => {
+                lines.push(format!(
+                    "Previous compaction: {}",
+                    compact_text(summary, 500)
+                ));
+            }
+        }
+    }
+    lines.join("\n")
+}
+
+fn compact_text(text: &str, max_chars: usize) -> String {
+    if text.chars().count() <= max_chars {
+        return text.to_owned();
+    }
+    let mut compacted = text.chars().take(max_chars).collect::<String>();
+    compacted.push_str("...");
+    compacted
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -169,6 +289,7 @@ mod tests {
         let budget = AgentRuntimeBudget {
             max_turns: 4,
             max_tool_calls: 1,
+            compact_after_observations: None,
         };
         let mut state = AgentRuntimeState::with_budget("run-1", budget);
         state.push_item(AgentTurnItem::tool_call("call-1", "rag.search", json!({})));
@@ -182,6 +303,7 @@ mod tests {
         let budget = AgentRuntimeBudget {
             max_turns: 4,
             max_tool_calls: 1,
+            compact_after_observations: None,
         };
         let state = AgentRuntimeState::with_budget("run-1", budget);
 
@@ -194,12 +316,67 @@ mod tests {
         let budget = AgentRuntimeBudget {
             max_turns: 4,
             max_tool_calls: 1,
+            compact_after_observations: None,
         };
         let mut state = AgentRuntimeState::with_budget("run-1", budget);
         state.push_item(AgentTurnItem::tool_call("call-1", "rag.search", json!({})));
 
         assert!(!state.can_execute_tool_call());
         assert!(state.is_tool_call_budget_exhausted());
+    }
+
+    #[test]
+    fn runtime_compaction_is_needed_after_observation_threshold() {
+        let budget = AgentRuntimeBudget {
+            max_turns: 8,
+            max_tool_calls: 4,
+            compact_after_observations: Some(2),
+        };
+        let mut state = AgentRuntimeState::with_budget("run-1", budget);
+        state.push_item(AgentTurnItem::user_message("find policy"));
+        state.push_item(AgentTurnItem::tool_observation(
+            "call-1",
+            ToolObservationStatus::Succeeded,
+            json!({"hits":[{"title":"A"}]}),
+        ));
+        assert!(!state.should_compact_context());
+        state.push_item(AgentTurnItem::tool_observation(
+            "call-2",
+            ToolObservationStatus::Succeeded,
+            json!({"hits":[{"title":"B"}]}),
+        ));
+        assert!(state.should_compact_context());
+    }
+
+    #[test]
+    fn runtime_compaction_pushes_summary_and_advances_window() {
+        let budget = AgentRuntimeBudget {
+            max_turns: 8,
+            max_tool_calls: 4,
+            compact_after_observations: Some(1),
+        };
+        let mut state = AgentRuntimeState::with_budget("run-1", budget);
+        state.push_item(AgentTurnItem::user_message("find policy"));
+        state.push_item(AgentTurnItem::tool_call(
+            "call-1",
+            "rag.search",
+            json!({"query":"policy"}),
+        ));
+        state.push_item(AgentTurnItem::tool_observation(
+            "call-1",
+            ToolObservationStatus::Succeeded,
+            json!({"hits":[{"citation":"doc#1","text":"refund within 7 days"}]}),
+        ));
+
+        let compaction = state.compact_context().unwrap();
+
+        assert_eq!(compaction.window_id, 1);
+        assert!(compaction.summary.contains("refund within 7 days"));
+        assert!(!state.should_compact_context());
+        assert!(matches!(
+            state.items.last(),
+            Some(AgentTurnItem::ContextCompaction { .. })
+        ));
     }
 
     #[test]
