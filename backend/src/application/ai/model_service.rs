@@ -6468,7 +6468,10 @@ mod tests {
             .contains("pub(super) async fn send_model_provider_native_cancel_request"));
         assert!(!transport_source.contains("fn parse_rerank_score("));
         assert!(!transport_source.contains("fn parse_embedding_vector("));
-        assert!(http_source.contains("pub(super) fn model_provider_http_client"));
+        assert!(http_source
+            .contains("pub(super) use novex_provider_client::model_provider_http_client;"));
+        assert!(http_source.contains("ModelProviderClientError"));
+        assert!(!http_source.contains("reqwest::Client::builder()"));
         assert!(http_source
             .contains("pub(in crate::application::ai) async fn send_model_provider_http_request"));
         assert!(native_cancel_source.contains(
@@ -6523,6 +6526,46 @@ mod tests {
         assert!(!rag_source.contains("fn parse_rerank_score("));
         assert!(!rag_source.contains("fn json_usize("));
         assert!(!rag_source.contains("fn json_f32("));
+    }
+
+    #[test]
+    fn provider_client_http_primitives_live_in_provider_client_crate() {
+        let workspace_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("backend manifest should live below workspace root");
+        let source = |path: &str| {
+            std::fs::read_to_string(workspace_root.join(path))
+                .unwrap_or_else(|err| panic!("failed to read {path}: {err}"))
+        };
+        let provider_cargo_source = source("crates/novex-provider-client/Cargo.toml");
+        let provider_client_source = source("crates/novex-provider-client/src/lib.rs");
+        let backend_http_source =
+            source("backend/src/application/ai/model_provider_transport/http.rs");
+        let native_cancel_source =
+            source("backend/src/application/ai/model_provider_transport/native_cancel.rs");
+        let rag_source = source("backend/src/application/ai/model_provider_transport/rag.rs");
+        let media_source = source("backend/src/application/ai/model_provider_transport/media.rs");
+
+        assert!(provider_cargo_source.contains("reqwest = { version = \"0.12\""));
+        assert!(provider_client_source.contains("pub struct ModelProviderHttpRequest"));
+        assert!(provider_client_source.contains("pub enum ModelProviderClientError"));
+        assert!(provider_client_source.contains("pub fn model_provider_http_client"));
+        assert!(provider_client_source.contains("pub async fn send_model_provider_http_request"));
+        assert!(provider_client_source.contains(".bearer_auth(request.api_key)"));
+        assert!(provider_client_source.contains(".json(request.payload)"));
+        assert!(backend_http_source.contains("use novex_provider_client::{"));
+        assert!(backend_http_source.contains("ModelProviderClientError"));
+        assert!(backend_http_source.contains("model_provider_client_error_to_app_error"));
+        assert!(backend_http_source.contains(
+            "pub(in crate::application::ai) use novex_provider_client::ModelProviderHttpRequest"
+        ));
+        assert!(backend_http_source
+            .contains("novex_provider_client::send_model_provider_http_request(request)"));
+        assert!(!backend_http_source.contains("reqwest::Client::builder()"));
+        assert!(!backend_http_source.contains(".post(request.endpoint)"));
+        assert!(native_cancel_source.contains("model_provider_http_client(request.timeout)"));
+        assert!(rag_source.contains("model_provider_http_client(request.timeout)"));
+        assert!(media_source.contains("model_provider_http_client(request.timeout)"));
     }
 
     #[test]

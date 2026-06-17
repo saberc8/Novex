@@ -1888,6 +1888,7 @@ name = "novex-provider-client"
 version = "0.1.0"
 dependencies = [
  "novex-model",
+ "reqwest",
  "serde_json",
 ]
 
