@@ -29,7 +29,7 @@
 - Produces: `ModelProviderCallLeaseCancelResp`, `ModelProviderNativeCancelResp`
 - Produces: `model_provider_native_cancel_plan(row, route) -> ModelProviderNativeCancelPlan`
 
-- [ ] **Step 1: Write failing tests**
+- [x] **Step 1: Write failing tests**
 
 Add tests named:
 
@@ -87,7 +87,7 @@ fn provider_call_lease_cancel_completion_records_native_cancel_evidence() {
 }
 ```
 
-- [ ] **Step 2: Run red test**
+- [x] **Step 2: Run red test**
 
 Run:
 
@@ -97,11 +97,11 @@ cargo test -p backend-rust provider_call_lease_native_cancel --offline
 
 Expected: FAIL because the cancel response structs and plan helpers do not exist.
 
-- [ ] **Step 3: Implement helpers**
+- [x] **Step 3: Implement helpers**
 
 Add response structs, native cancel plan structs, provider response id extraction, endpoint construction, and completion payload helper.
 
-- [ ] **Step 4: Run green test**
+- [x] **Step 4: Run green test**
 
 Run:
 
@@ -120,7 +120,7 @@ Expected: PASS.
 - Produces: `ModelRuntimeService::cancel_provider_call_lease(user_id, lease_id)`
 - Modifies: `complete_model_provider_call_lease` to update only running rows.
 
-- [ ] **Step 1: Write failing tests**
+- [x] **Step 1: Write failing tests**
 
 Add source-contract tests:
 
@@ -145,7 +145,7 @@ fn provider_call_lease_completion_only_updates_running_rows() {
 }
 ```
 
-- [ ] **Step 2: Run red test**
+- [x] **Step 2: Run red test**
 
 Run:
 
@@ -155,11 +155,11 @@ cargo test -p backend-rust provider_call_lease_cancel --offline
 
 Expected: FAIL because the service method and running-row guard do not exist.
 
-- [ ] **Step 3: Implement method**
+- [x] **Step 3: Implement method**
 
 Fetch the lease row, resolve route by route purpose and code, build/send native cancel when supported, mark the lease cancelled, and return the public response.
 
-- [ ] **Step 4: Run green test**
+- [x] **Step 4: Run green test**
 
 Run:
 
@@ -181,7 +181,7 @@ Expected: PASS.
 - Produces: `POST /ai/models/provider-call-leases/:lease_id/cancel`
 - Produces: `ai:model:providerCallLease:cancel`
 
-- [ ] **Step 1: Write failing tests**
+- [x] **Step 1: Write failing tests**
 
 Add tests named:
 
@@ -217,7 +217,7 @@ fn provider_call_lease_cancel_route_is_registered() {
 }
 ```
 
-- [ ] **Step 2: Run red test**
+- [x] **Step 2: Run red test**
 
 Run:
 
@@ -227,15 +227,15 @@ cargo test -p backend-rust provider_call_lease_cancel --offline
 
 Expected: FAIL because route, permission, and migration do not exist.
 
-- [ ] **Step 3: Implement HTTP and migration**
+- [x] **Step 3: Implement HTTP and migration**
 
 Wire the route and seed permission id `3029`.
 
-- [ ] **Step 4: Update matrix**
+- [x] **Step 4: Update matrix**
 
 Move provider-native cancel controls into Runtime loop evidence while keeping WebSocket streaming and background Responses response-id capture as remaining work.
 
-- [ ] **Step 5: Verify**
+- [x] **Step 5: Verify**
 
 Run:
 
@@ -249,6 +249,15 @@ git diff --check
 ```
 
 Expected: all pass with exit code 0.
+
+**Evidence:**
+- Red: `cargo test -p backend-rust provider_call_lease_native_cancel --offline` failed before structs/helpers existed.
+- Green: `cargo test -p backend-rust provider_call_lease_native_cancel --offline` passed after native cancel plan helpers.
+- Green: `cargo test -p backend-rust provider_call_lease_cancel --offline` passed after service and HTTP wiring.
+- Regression: `cargo test -p backend-rust provider_call_lease --offline` passed.
+- Regression: `cargo test -p backend-rust provider_abort --offline` passed.
+- Format: `cargo fmt -- --check` passed.
+- Workspace: `cargo test --workspace --offline` passed.
 
 ### Task 4: Commit, Merge, Clean
 
