@@ -242,6 +242,30 @@ impl EvalCaseCandidate {
                     .collect::<Vec<_>>()),
             );
         }
+        if inference_summary.provider_native_cancel_count > 0 {
+            tags.insert(
+                "providerNativeCancelCount".to_owned(),
+                json!(inference_summary.provider_native_cancel_count),
+            );
+            if let Some(attempted) = inference_summary.provider_native_cancel_attempted {
+                tags.insert("providerNativeCancelAttempted".to_owned(), json!(attempted));
+            }
+            if let Some(supported) = inference_summary.provider_native_cancel_supported {
+                tags.insert("providerNativeCancelSupported".to_owned(), json!(supported));
+            }
+            if let Some(provider) = inference_summary.provider_native_cancel_provider.as_deref() {
+                tags.insert("providerNativeCancelProvider".to_owned(), json!(provider));
+            }
+            if let Some(status) = inference_summary.provider_native_cancel_status.as_deref() {
+                tags.insert("providerNativeCancelStatus".to_owned(), json!(status));
+            }
+            if let Some(http_status) = inference_summary.provider_native_cancel_http_status {
+                tags.insert(
+                    "providerNativeCancelHttpStatus".to_owned(),
+                    json!(http_status),
+                );
+            }
+        }
         if inference_summary.fallback_count > 0 {
             tags.insert(
                 "modelFallbackCount".to_owned(),
@@ -863,6 +887,12 @@ struct TraceInferenceSummary {
     delta_text_length: usize,
     streaming_tool_call_count: usize,
     streaming_tool_codes: BTreeSet<String>,
+    provider_native_cancel_count: usize,
+    provider_native_cancel_attempted: Option<bool>,
+    provider_native_cancel_supported: Option<bool>,
+    provider_native_cancel_provider: Option<String>,
+    provider_native_cancel_status: Option<String>,
+    provider_native_cancel_http_status: Option<i64>,
     fallback_count: usize,
     circuit_open_count: usize,
     fallback_route_id: Option<String>,
@@ -909,6 +939,30 @@ fn trace_inference_summary(bundle: &TraceBundle) -> TraceInferenceSummary {
                         summary.streaming_tool_codes.insert(tool_code);
                     }
                 }
+            }
+        }
+        if matches!(
+            inference_type.as_deref(),
+            Some("provider_native_cancel") | Some("provider_native_cancel_error")
+        ) {
+            summary.provider_native_cancel_count += 1;
+            if summary.provider_native_cancel_attempted.is_none() {
+                summary.provider_native_cancel_attempted =
+                    payload.get("attempted").and_then(Value::as_bool);
+            }
+            if summary.provider_native_cancel_supported.is_none() {
+                summary.provider_native_cancel_supported =
+                    payload.get("supported").and_then(Value::as_bool);
+            }
+            if summary.provider_native_cancel_provider.is_none() {
+                summary.provider_native_cancel_provider = trace_value_text(payload.get("provider"));
+            }
+            if summary.provider_native_cancel_status.is_none() {
+                summary.provider_native_cancel_status = trace_value_text(payload.get("status"));
+            }
+            if summary.provider_native_cancel_http_status.is_none() {
+                summary.provider_native_cancel_http_status =
+                    trace_value_i64(payload.get("httpStatus"));
             }
         }
         if inference_type.as_deref() == Some("model_inference_error") {
@@ -1523,6 +1577,38 @@ mod tests {
             candidate.tags["streamingToolCodes"],
             json!(["github.repo.read", "rag.search"])
         );
+    }
+
+    #[test]
+    fn provider_native_cancel_trace_eval_candidate_tags_cancel_attempt() {
+        let bundle = TraceBundle::new("agent-1").with_event(TraceEvent::inference(
+            1,
+            json!({
+                "item": {
+                    "type": "provider_native_cancel",
+                    "providerCallLeaseId": 4242,
+                    "status": "cancelled",
+                    "attempted": true,
+                    "supported": true,
+                    "provider": "openai-compatible",
+                    "providerResponseId": "resp_stream_1",
+                    "httpStatus": 200,
+                    "message": "native_cancel_sent"
+                }
+            }),
+        ));
+
+        let candidate = EvalCaseCandidate::from_trace_bundle(&bundle);
+
+        assert_eq!(candidate.tags["providerNativeCancelCount"], 1);
+        assert_eq!(candidate.tags["providerNativeCancelAttempted"], true);
+        assert_eq!(candidate.tags["providerNativeCancelSupported"], true);
+        assert_eq!(
+            candidate.tags["providerNativeCancelProvider"],
+            "openai-compatible"
+        );
+        assert_eq!(candidate.tags["providerNativeCancelStatus"], "cancelled");
+        assert_eq!(candidate.tags["providerNativeCancelHttpStatus"], 200);
     }
 
     #[test]

@@ -89,6 +89,7 @@ pub struct ModelProviderStreamEvent {
     pub route_id: String,
     pub provider: String,
     pub model: Option<String>,
+    pub provider_call_lease_id: Option<i64>,
     pub provider_response_id: Option<String>,
     pub provider_response_status: Option<String>,
     pub chunk: ModelProviderStreamChunk,
@@ -121,6 +122,8 @@ pub struct ModelChatCommand {
     pub request_metadata: Option<ModelChatRequestMetadata>,
     #[serde(skip)]
     pub provider_call_context: Option<ModelProviderCallContext>,
+    #[serde(skip)]
+    pub provider_call_lease_id: Option<i64>,
     #[serde(skip)]
     pub provider_stream_sender: Option<mpsc::UnboundedSender<ModelProviderStreamEvent>>,
 }
@@ -1159,6 +1162,16 @@ RETURNING id;
         user_id: i64,
         lease_id: i64,
     ) -> Result<ModelProviderCallLeaseCancelResp, AppError> {
+        self.cancel_provider_call_lease_with_response_metadata(user_id, lease_id, None)
+            .await
+    }
+
+    pub async fn cancel_provider_call_lease_with_response_metadata(
+        &self,
+        user_id: i64,
+        lease_id: i64,
+        provider_response_id: Option<&str>,
+    ) -> Result<ModelProviderCallLeaseCancelResp, AppError> {
         if lease_id <= 0 {
             return Err(AppError::bad_request("模型调用租约 ID 不合法"));
         }
@@ -1181,7 +1194,14 @@ RETURNING id;
             }
             None => None,
         };
-        let plan = model_provider_native_cancel_plan(&row, route.as_ref());
+        let plan = match provider_response_id {
+            Some(provider_response_id) => model_provider_native_cancel_plan_with_response_id(
+                &row,
+                route.as_ref(),
+                Some(provider_response_id),
+            ),
+            None => model_provider_native_cancel_plan(&row, route.as_ref()),
+        };
         let started = Instant::now();
         let native_cancel = if plan.supported {
             let route = route
@@ -2320,6 +2340,7 @@ LIMIT 1;
             started_at,
         );
         let lease_id = begin_model_provider_call_lease(&self.db, &record).await?;
+        command.provider_call_lease_id = Some(lease_id);
         let heartbeat = start_model_provider_call_lease_heartbeat(
             self.db.clone(),
             self.tenant_id,
@@ -3166,6 +3187,7 @@ struct ModelChatProviderOutput {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct ModelChatStreamState {
     next_chunk_index: usize,
+    provider_call_lease_id: Option<i64>,
     provider_response_id: Option<String>,
     provider_response_status: Option<String>,
 }
@@ -3178,7 +3200,10 @@ async fn model_chat_streaming_response_text(
     let sender = command.provider_stream_sender.as_ref();
     let mut body_text = String::new();
     let mut pending = String::new();
-    let mut stream_state = ModelChatStreamState::default();
+    let mut stream_state = ModelChatStreamState {
+        provider_call_lease_id: command.provider_call_lease_id,
+        ..ModelChatStreamState::default()
+    };
 
     while let Some(chunk) = response
         .chunk()
@@ -3222,6 +3247,7 @@ fn model_chat_emit_complete_stream_records(
                     route_id: route.summary().route_id.clone(),
                     provider: route.provider().as_str().to_owned(),
                     model: route.model().map(str::to_owned),
+                    provider_call_lease_id: stream_state.provider_call_lease_id,
                     provider_response_id: stream_state.provider_response_id.clone(),
                     provider_response_status: stream_state.provider_response_status.clone(),
                     chunk,
@@ -4018,6 +4044,14 @@ fn model_provider_native_cancel_plan(
     row: &ModelProviderCallLeaseControlRow,
     route: Option<&ModelRuntimeRoute>,
 ) -> ModelProviderNativeCancelPlan {
+    model_provider_native_cancel_plan_with_response_id(row, route, None)
+}
+
+fn model_provider_native_cancel_plan_with_response_id(
+    row: &ModelProviderCallLeaseControlRow,
+    route: Option<&ModelRuntimeRoute>,
+    provider_response_id_override: Option<&str>,
+) -> ModelProviderNativeCancelPlan {
     let provider = route
         .map(|route| route.provider().as_str().to_owned())
         .unwrap_or_else(|| row.provider_type.clone());
@@ -4039,8 +4073,11 @@ fn model_provider_native_cancel_plan(
             message: "unsupported_provider".to_owned(),
         };
     }
-    let provider_response_id =
-        model_provider_response_id_from_payloads(&row.request_payload, &row.response_payload);
+    let provider_response_id = provider_response_id_override
+        .and_then(normalize_model_provider_response_id)
+        .or_else(|| {
+            model_provider_response_id_from_payloads(&row.request_payload, &row.response_payload)
+        });
     let Some(provider_response_id) = provider_response_id else {
         return ModelProviderNativeCancelPlan {
             supported: false,
@@ -4086,12 +4123,15 @@ fn model_provider_response_id_from_payload(payload: &Value) -> Option<String> {
     .into_iter()
     .flatten()
     .filter_map(Value::as_str)
-    .map(str::trim)
-    .filter(|value| {
-        !value.is_empty() && !value.contains('/') && !value.contains('?') && !value.contains('#')
-    })
-    .map(str::to_owned)
-    .next()
+    .find_map(normalize_model_provider_response_id)
+}
+
+fn normalize_model_provider_response_id(value: &str) -> Option<String> {
+    let value = value.trim();
+    if value.is_empty() || value.contains('/') || value.contains('?') || value.contains('#') {
+        return None;
+    }
+    Some(value.to_owned())
 }
 
 fn model_provider_response_status_from_payload(payload: &Value) -> Option<String> {
@@ -8032,6 +8072,35 @@ mod tests {
     }
 
     #[test]
+    fn provider_stream_lease_id_event_carries_provider_call_lease_id() {
+        let route = openai_compatible_llm_route();
+        let (sender, mut receiver) = mpsc::unbounded_channel();
+        let mut pending = concat!(
+            "event: response.output_text.delta\n",
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"Hello\"}\n\n",
+        )
+        .to_owned();
+        let mut stream_state = ModelChatStreamState {
+            provider_call_lease_id: Some(4242),
+            ..ModelChatStreamState::default()
+        };
+
+        model_chat_emit_complete_stream_records(
+            &route,
+            Some(&sender),
+            &mut pending,
+            &mut stream_state,
+        )
+        .unwrap();
+        let event = receiver
+            .try_recv()
+            .expect("delta stream event should be emitted");
+
+        assert_eq!(event.provider_call_lease_id, Some(4242));
+        assert_eq!(event.chunk.content, "Hello");
+    }
+
+    #[test]
     fn provider_token_delta_responses_sse_rejects_incomplete_stream() {
         let route = openai_compatible_llm_route();
         let sse = concat!(
@@ -8494,6 +8563,25 @@ mod tests {
         assert_eq!(
             plan.endpoint.as_deref(),
             Some("https://llm.internal/v1/responses/resp_123/cancel")
+        );
+    }
+
+    #[test]
+    fn provider_stream_native_cancel_plan_prefers_stream_response_id_override() {
+        let route = openai_compatible_llm_route();
+        let row = test_provider_call_lease_control_row("running", json!({}), json!({}));
+
+        let plan = model_provider_native_cancel_plan_with_response_id(
+            &row,
+            Some(&route),
+            Some("resp_stream_1"),
+        );
+
+        assert!(plan.supported);
+        assert_eq!(plan.provider_response_id.as_deref(), Some("resp_stream_1"));
+        assert_eq!(
+            plan.endpoint.as_deref(),
+            Some("https://llm.internal/v1/responses/resp_stream_1/cancel")
         );
     }
 
