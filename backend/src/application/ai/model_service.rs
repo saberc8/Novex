@@ -2275,6 +2275,7 @@ LIMIT 1;
                 &route,
                 &command,
                 Some(conversation_id),
+                ModelProviderDispatchMode::Unary,
                 "ai.models.chat",
                 "primary",
             )
@@ -2324,6 +2325,7 @@ LIMIT 1;
                 &route,
                 &command,
                 command.conversation_id,
+                ModelProviderDispatchMode::Unary,
                 source,
                 "primary",
             )
@@ -2355,6 +2357,7 @@ LIMIT 1;
                 &route,
                 &command,
                 command.conversation_id,
+                ModelProviderDispatchMode::Unary,
             )
             .await?;
         Ok(response)
@@ -2397,6 +2400,7 @@ LIMIT 1;
             &route,
             &command,
             command.conversation_id,
+            ModelProviderDispatchMode::Stream,
         )
         .await
     }
@@ -2408,6 +2412,7 @@ LIMIT 1;
         route: &ModelRuntimeRoute,
         command: &ModelChatCommand,
         conversation_id: Option<i64>,
+        dispatch_mode: ModelProviderDispatchMode,
         source: &str,
         attempt_kind: &str,
     ) -> Result<ModelChatResp, AppError> {
@@ -2438,8 +2443,13 @@ LIMIT 1;
             user_id,
         );
         let started = Instant::now();
-        let result =
-            execute_normalized_chat_completion_with_route(route, &command, conversation_id).await;
+        let result = execute_normalized_chat_completion_with_route(
+            route,
+            &command,
+            conversation_id,
+            dispatch_mode,
+        )
+        .await;
         let latency_ms = started.elapsed().as_millis();
         let completed_at = Utc::now().naive_utc();
         heartbeat.stop().await;
@@ -2494,6 +2504,7 @@ LIMIT 1;
         primary_route: &ModelRuntimeRoute,
         command: &ModelChatCommand,
         conversation_id: Option<i64>,
+        dispatch_mode: ModelProviderDispatchMode,
     ) -> Result<ModelChatResp, AppError> {
         let mut current_route = primary_route.clone();
         let mut visited_route_ids = HashSet::from([primary_route.route_id().to_owned()]);
@@ -2564,6 +2575,7 @@ LIMIT 1;
                     &current_route,
                     command,
                     conversation_id,
+                    dispatch_mode,
                     &attempt_source,
                     attempt_kind,
                 )
@@ -2814,13 +2826,20 @@ async fn execute_normalized_chat_completion(
                 .map_or(true, |route_id| route.route_id() == route_id)
         })
         .ok_or_else(|| AppError::bad_request("LLM 模型环境变量未配置完整"))?;
-    execute_normalized_chat_completion_with_route(route, command, conversation_id).await
+    execute_normalized_chat_completion_with_route(
+        route,
+        command,
+        conversation_id,
+        ModelProviderDispatchMode::Unary,
+    )
+    .await
 }
 
 async fn execute_normalized_chat_completion_with_route(
     route: &ModelRuntimeRoute,
     command: &ModelChatCommand,
     conversation_id: Option<i64>,
+    dispatch_mode: ModelProviderDispatchMode,
 ) -> Result<ModelChatResp, AppError> {
     let client = reqwest::Client::builder()
         .timeout(MODEL_CHAT_TIMEOUT)
@@ -2844,7 +2863,8 @@ async fn execute_normalized_chat_completion_with_route(
         )));
     }
 
-    if model_chat_provider_request_streams_chat_completion(&provider_request) {
+    let stream_dispatch = matches!(dispatch_mode, ModelProviderDispatchMode::Stream);
+    if stream_dispatch && model_chat_provider_request_streams_chat_completion(&provider_request) {
         let output = model_chat_streaming_provider_output(response, route, command).await?;
         return Ok(model_chat_response_from_provider_output(
             route,
@@ -2987,6 +3007,12 @@ enum ModelChatProviderTransport {
     ResponsesCodeAgent,
     ResponsesCompactionV2,
     ResponsesCompactUnary,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ModelProviderDispatchMode {
+    Unary,
+    Stream,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -6746,6 +6772,60 @@ mod tests {
     }
 
     #[test]
+    fn model_provider_stream_dispatch_mode_is_explicit() {
+        let source = include_str!("model_service.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+        let unary_transport = &source[source
+            .find("pub async fn chat_completion_for_purpose")
+            .unwrap()
+            ..source
+                .find("pub async fn chat_completion_stream_for_purpose")
+                .unwrap()];
+        let stream_transport = &source[source
+            .find("async fn execute_chat_completion_stream_transport")
+            .unwrap()
+            ..source
+                .find("async fn execute_normalized_chat_completion_with_provider_call_lease")
+                .unwrap()];
+
+        assert!(source.contains("enum ModelProviderDispatchMode"));
+        assert!(source.contains("ModelProviderDispatchMode::Unary"));
+        assert!(source.contains("ModelProviderDispatchMode::Stream"));
+        assert!(unary_transport.contains("ModelProviderDispatchMode::Unary"));
+        assert!(stream_transport.contains("ModelProviderDispatchMode::Stream"));
+    }
+
+    #[test]
+    fn model_provider_stream_dispatch_route_path_separates_unary_and_stream() {
+        let source = include_str!("model_service.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+        let runtime_path = &source[source
+            .find("async fn execute_normalized_chat_completion_with_route")
+            .unwrap()
+            ..source.find("fn normalize_model_chat_command").unwrap()];
+        let normalized_runtime_path = runtime_path
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+
+        assert!(runtime_path.contains("dispatch_mode: ModelProviderDispatchMode"));
+        assert!(runtime_path.contains(
+            "let stream_dispatch = matches!(dispatch_mode, ModelProviderDispatchMode::Stream);"
+        ));
+        assert!(normalized_runtime_path.contains(
+            "if stream_dispatch && model_chat_provider_request_streams_chat_completion(&provider_request)"
+        ));
+        assert!(normalized_runtime_path.contains("let body_text = response.text().await"));
+        assert!(normalized_runtime_path.contains(
+            "ModelChatProviderTransport::ChatCompletions | ModelChatProviderTransport::ResponsesCodeAgent"
+        ));
+    }
+
+    #[test]
     fn model_stream_call_lifecycle_exposes_purpose_route_and_source() {
         let source = include_str!("model_service.rs")
             .split("#[cfg(test)]")
@@ -8323,7 +8403,7 @@ mod tests {
             .collect::<Vec<_>>()
             .join(" ");
         assert!(normalized_runtime_path.contains(
-            "if model_chat_provider_request_streams_chat_completion(&provider_request) { let output = model_chat_streaming_provider_output"
+            "if stream_dispatch && model_chat_provider_request_streams_chat_completion(&provider_request) { let output = model_chat_streaming_provider_output"
         ));
         assert!(
             normalized_runtime_path.contains("return Ok(model_chat_response_from_provider_output(")
