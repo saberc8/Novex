@@ -131,6 +131,22 @@ pub struct RunEventSaveRecord {
 }
 
 #[derive(Debug, Clone)]
+pub struct AgentTurnItemSaveRecord {
+    pub id: i64,
+    pub tenant_id: i64,
+    pub run_id: i64,
+    pub step_id: Option<i64>,
+    pub source_event_id: i64,
+    pub sequence_no: i64,
+    pub item_type: String,
+    pub call_id: Option<String>,
+    pub tool_code: Option<String>,
+    pub item_payload: Value,
+    pub user_id: i64,
+    pub now: NaiveDateTime,
+}
+
+#[derive(Debug, Clone)]
 pub struct RunPauseSaveRecord {
     pub id: i64,
     pub tenant_id: i64,
@@ -210,6 +226,14 @@ pub struct RunEventFilter {
 }
 
 #[derive(Debug, Clone)]
+pub struct AgentTurnItemFilter {
+    pub tenant_id: i64,
+    pub run_id: i64,
+    pub limit: i64,
+    pub offset: i64,
+}
+
+#[derive(Debug, Clone)]
 pub struct RunEventCursorFilter {
     pub tenant_id: i64,
     pub run_id: i64,
@@ -241,6 +265,20 @@ pub struct RunEventRecord {
     pub sequence_no: i64,
     pub status: String,
     pub payload: Value,
+    pub create_time: NaiveDateTime,
+}
+
+#[derive(Debug, Clone, FromRow)]
+pub struct AgentTurnItemRecord {
+    pub id: i64,
+    pub run_id: i64,
+    pub step_id: Option<i64>,
+    pub source_event_id: i64,
+    pub sequence_no: i64,
+    pub item_type: String,
+    pub call_id: Option<String>,
+    pub tool_code: Option<String>,
+    pub item_payload: Value,
     pub create_time: NaiveDateTime,
 }
 
@@ -379,27 +417,20 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $11, $12);
     }
 
     pub async fn create_event(&self, record: &RunEventSaveRecord) -> Result<(), AppError> {
-        sqlx::query(
-            r#"
-INSERT INTO ai_run_event (
-    id, tenant_id, run_id, step_id, event_type, sequence_no, status,
-    payload, create_user, create_time
-)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10);
-"#,
-        )
-        .bind(record.id)
-        .bind(record.tenant_id)
-        .bind(record.run_id)
-        .bind(record.step_id)
-        .bind(&record.event_type)
-        .bind(record.sequence_no)
-        .bind(&record.status)
-        .bind(&record.payload)
-        .bind(record.user_id)
-        .bind(record.now)
-        .execute(&self.db)
-        .await?;
+        self.create_event_with_turn_item(record, None).await
+    }
+
+    pub async fn create_event_with_turn_item(
+        &self,
+        record: &RunEventSaveRecord,
+        turn_item: Option<&AgentTurnItemSaveRecord>,
+    ) -> Result<(), AppError> {
+        let mut tx = self.db.begin().await?;
+        insert_run_event(&mut tx, record).await?;
+        if let Some(turn_item) = turn_item {
+            insert_agent_turn_item(&mut tx, turn_item).await?;
+        }
+        tx.commit().await?;
         Ok(())
     }
 
@@ -1182,6 +1213,29 @@ LIMIT $3 OFFSET $4;
         .await?)
     }
 
+    pub async fn list_turn_items(
+        &self,
+        filter: &AgentTurnItemFilter,
+    ) -> Result<Vec<AgentTurnItemRecord>, AppError> {
+        Ok(sqlx::query_as::<_, AgentTurnItemRecord>(
+            r#"
+SELECT
+    id, run_id, step_id, source_event_id, sequence_no, item_type,
+    call_id, tool_code, item_payload, create_time
+FROM ai_agent_turn_item
+WHERE tenant_id = $1 AND run_id = $2
+ORDER BY sequence_no ASC
+LIMIT $3 OFFSET $4;
+"#,
+        )
+        .bind(filter.tenant_id)
+        .bind(filter.run_id)
+        .bind(filter.limit)
+        .bind(filter.offset)
+        .fetch_all(&self.db)
+        .await?)
+    }
+
     pub async fn list_events_after_sequence(
         &self,
         filter: &RunEventCursorFilter,
@@ -1278,6 +1332,64 @@ LIMIT 1;
     }
 }
 
+async fn insert_run_event(
+    tx: &mut Transaction<'_, Postgres>,
+    record: &RunEventSaveRecord,
+) -> Result<(), AppError> {
+    sqlx::query(
+        r#"
+INSERT INTO ai_run_event (
+    id, tenant_id, run_id, step_id, event_type, sequence_no, status,
+    payload, create_user, create_time
+)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10);
+"#,
+    )
+    .bind(record.id)
+    .bind(record.tenant_id)
+    .bind(record.run_id)
+    .bind(record.step_id)
+    .bind(&record.event_type)
+    .bind(record.sequence_no)
+    .bind(&record.status)
+    .bind(&record.payload)
+    .bind(record.user_id)
+    .bind(record.now)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
+async fn insert_agent_turn_item(
+    tx: &mut Transaction<'_, Postgres>,
+    record: &AgentTurnItemSaveRecord,
+) -> Result<(), AppError> {
+    sqlx::query(
+        r#"
+INSERT INTO ai_agent_turn_item (
+    id, tenant_id, run_id, step_id, source_event_id, sequence_no,
+    item_type, call_id, tool_code, item_payload, create_user, create_time
+)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12);
+"#,
+    )
+    .bind(record.id)
+    .bind(record.tenant_id)
+    .bind(record.run_id)
+    .bind(record.step_id)
+    .bind(record.source_event_id)
+    .bind(record.sequence_no)
+    .bind(&record.item_type)
+    .bind(&record.call_id)
+    .bind(&record.tool_code)
+    .bind(&record.item_payload)
+    .bind(record.user_id)
+    .bind(record.now)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
 async fn insert_agent_queue_outbox(
     tx: &mut Transaction<'_, Postgres>,
     outbox: &AgentQueueOutboxSaveRecord,
@@ -1345,6 +1457,62 @@ fn non_empty(value: Option<&str>) -> Option<&str> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn agent_turn_item_migration_defines_response_item_ledger_contract() {
+        let migration_path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/migrations/202606170009_create_ai_agent_turn_item.sql"
+        );
+        let migration = std::fs::read_to_string(migration_path)
+            .expect("missing AI agent turn item ledger migration");
+
+        for needle in [
+            "CREATE TABLE IF NOT EXISTS ai_agent_turn_item",
+            "source_event_id",
+            "sequence_no",
+            "item_type",
+            "call_id",
+            "tool_code",
+            "item_payload JSONB",
+            "uk_ai_agent_turn_item_run_sequence",
+            "uk_ai_agent_turn_item_event",
+            "idx_ai_agent_turn_item_run_id",
+            "idx_ai_agent_turn_item_type",
+            "idx_ai_agent_turn_item_call_id",
+        ] {
+            assert!(
+                migration.contains(needle),
+                "{needle} missing from agent turn item ledger migration"
+            );
+        }
+    }
+
+    #[test]
+    fn agent_turn_item_repository_exposes_transactional_event_item_ledger() {
+        let source = include_str!("ai_agent_repository.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+
+        for needle in [
+            "AgentTurnItemSaveRecord",
+            "AgentTurnItemRecord",
+            "AgentTurnItemFilter",
+            "create_event_with_turn_item",
+            "list_turn_items",
+            "INSERT INTO ai_agent_turn_item",
+            "FROM ai_agent_turn_item",
+            "ORDER BY sequence_no ASC",
+            "Transaction<'_, Postgres>",
+            "source_event_id",
+        ] {
+            assert!(
+                source.contains(needle),
+                "{needle} missing from agent turn item repository contract"
+            );
+        }
+    }
+
     #[test]
     fn agent_event_stream_repository_uses_sequence_cursor() {
         let source = include_str!("ai_agent_repository.rs")

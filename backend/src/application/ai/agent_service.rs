@@ -55,7 +55,8 @@ use crate::{
         ai_agent_repository::{
             AgentQueueOutboxSaveRecord, AgentRolloutSaveRecord, AgentRunFilter,
             AgentRunQueueSaveRecord, AgentRunRecord, AgentRunSaveRecord, AgentRunStatusUpdate,
-            AgentTraceSaveRecord, AiAgentRepository, RunEventCursorFilter, RunEventFilter,
+            AgentTraceSaveRecord, AgentTurnItemFilter, AgentTurnItemRecord,
+            AgentTurnItemSaveRecord, AiAgentRepository, RunEventCursorFilter, RunEventFilter,
             RunEventRecord, RunEventSaveRecord, RunPauseSaveRecord, RunSaveRecord, RunStatusUpdate,
             RunStepSaveRecord,
         },
@@ -588,6 +589,8 @@ pub struct AgentTraceReplayResp {
     pub trace_id: String,
     pub events: Vec<TraceEvent>,
     pub summary: TraceReplaySummary,
+    #[serde(default)]
+    pub turn_items: Vec<AgentTurnItem>,
 }
 
 #[derive(Debug, Clone)]
@@ -2082,13 +2085,16 @@ impl AgentService {
         let Some(run) = self.repo.find_run(self.tenant_id, run_id).await? else {
             return Err(AppError::NotFound);
         };
+        let turn_items = self.load_model_loop_turn_item_history(run_id).await?;
         if let Some(rollout) = self
             .repo
             .find_rollout_by_run_id(self.tenant_id, run_id)
             .await?
         {
             if let Ok(bundle) = serde_json::from_value::<TraceBundle>(rollout.event_bundle) {
-                return Ok(AgentTraceReplayResp::from(bundle));
+                return Ok(AgentTraceReplayResp::from_bundle_with_turn_items(
+                    bundle, turn_items,
+                ));
             }
         }
         let filter = RunEventFilter {
@@ -2099,10 +2105,10 @@ impl AgentService {
         };
         let events = self.repo.list_events(&filter).await?;
 
-        Ok(AgentTraceReplayResp::from(agent_events_to_trace_bundle(
-            run.trace_id,
-            events,
-        )))
+        Ok(AgentTraceReplayResp::from_bundle_with_turn_items(
+            agent_events_to_trace_bundle(run.trace_id, events),
+            turn_items,
+        ))
     }
 
     pub async fn resume_run(
@@ -3053,6 +3059,25 @@ impl AgentService {
             .await
     }
 
+    async fn load_model_loop_turn_item_history(
+        &self,
+        run_id: i64,
+    ) -> Result<Vec<AgentTurnItem>, AppError> {
+        let records = self
+            .repo
+            .list_turn_items(&AgentTurnItemFilter {
+                tenant_id: self.tenant_id,
+                run_id,
+                limit: MAX_TRACE_REPLAY_EVENTS,
+                offset: 0,
+            })
+            .await?;
+        records
+            .into_iter()
+            .map(agent_turn_item_from_record)
+            .collect()
+    }
+
     async fn append_event(
         &self,
         user_id: i64,
@@ -3066,19 +3091,32 @@ impl AgentService {
             .repo
             .next_event_sequence(self.tenant_id, run_id)
             .await?;
+        let event_id = next_id();
+        let now = Utc::now().naive_utc();
+        let turn_item_record = agent_turn_item_save_record_from_event_payload(
+            self.tenant_id,
+            run_id,
+            step_id,
+            event_id,
+            sequence_no,
+            &payload,
+            user_id,
+            now,
+        );
+        let event_record = RunEventSaveRecord {
+            id: event_id,
+            tenant_id: self.tenant_id,
+            run_id,
+            step_id,
+            event_type: event_kind_code(event_type),
+            sequence_no,
+            status,
+            payload,
+            user_id,
+            now,
+        };
         self.repo
-            .create_event(&RunEventSaveRecord {
-                id: next_id(),
-                tenant_id: self.tenant_id,
-                run_id,
-                step_id,
-                event_type: event_kind_code(event_type),
-                sequence_no,
-                status,
-                payload,
-                user_id,
-                now: Utc::now().naive_utc(),
-            })
+            .create_event_with_turn_item(&event_record, turn_item_record.as_ref())
             .await
     }
 
@@ -5229,6 +5267,67 @@ fn agent_turn_item_event_payload(item: &novex_agent_protocol::AgentTurnItem) -> 
     })
 }
 
+fn agent_turn_item_save_record_from_event_payload(
+    tenant_id: i64,
+    run_id: i64,
+    step_id: Option<i64>,
+    source_event_id: i64,
+    sequence_no: i64,
+    payload: &Value,
+    user_id: i64,
+    now: NaiveDateTime,
+) -> Option<AgentTurnItemSaveRecord> {
+    if payload.get("eventSource").and_then(Value::as_str) != Some("novex-agent-runtime") {
+        return None;
+    }
+    let item_payload = payload.get("item")?.clone();
+    let item = serde_json::from_value::<AgentTurnItem>(item_payload.clone()).ok()?;
+
+    Some(AgentTurnItemSaveRecord {
+        id: next_id(),
+        tenant_id,
+        run_id,
+        step_id,
+        source_event_id,
+        sequence_no,
+        item_type: agent_turn_item_type_code(&item).to_owned(),
+        call_id: agent_turn_item_call_id(&item),
+        tool_code: agent_turn_item_tool_code(&item),
+        item_payload,
+        user_id,
+        now,
+    })
+}
+
+fn agent_turn_item_from_record(record: AgentTurnItemRecord) -> Result<AgentTurnItem, AppError> {
+    serde_json::from_value::<AgentTurnItem>(record.item_payload).map_err(|err| {
+        AppError::bad_request(format!("Agent turn item replay payload invalid: {err}"))
+    })
+}
+
+fn agent_turn_item_type_code(item: &AgentTurnItem) -> &'static str {
+    match item {
+        AgentTurnItem::UserMessage { .. } => "user_message",
+        AgentTurnItem::AssistantMessage { .. } => "assistant_message",
+        AgentTurnItem::Reasoning { .. } => "reasoning",
+        AgentTurnItem::ToolCall { .. } => "tool_call",
+        AgentTurnItem::ToolObservation { .. } => "tool_observation",
+        AgentTurnItem::FinalAnswer { .. } => "final_answer",
+        AgentTurnItem::ContextCompaction { .. } => "context_compaction",
+    }
+}
+
+fn agent_turn_item_call_id(item: &AgentTurnItem) -> Option<String> {
+    item.call_id().map(ToOwned::to_owned)
+}
+
+fn agent_turn_item_tool_code(item: &AgentTurnItem) -> Option<String> {
+    match item {
+        AgentTurnItem::ToolCall { tool_code, .. } => Some(tool_code.clone()),
+        _ => None,
+    }
+}
+
 fn agent_events_to_trace_bundle(
     trace_id: impl Into<String>,
     events: Vec<RunEventRecord>,
@@ -5423,11 +5522,18 @@ impl From<RunEventRecord> for AgentRunEventResp {
 
 impl From<TraceBundle> for AgentTraceReplayResp {
     fn from(bundle: TraceBundle) -> Self {
+        Self::from_bundle_with_turn_items(bundle, Vec::new())
+    }
+}
+
+impl AgentTraceReplayResp {
+    fn from_bundle_with_turn_items(bundle: TraceBundle, turn_items: Vec<AgentTurnItem>) -> Self {
         let summary = bundle.replay_summary();
         Self {
             trace_id: bundle.trace_id,
             events: bundle.events,
             summary,
+            turn_items,
         }
     }
 }
@@ -5948,6 +6054,75 @@ mod tests {
         assert_eq!(payload["item"]["type"], "tool_call");
         assert_eq!(payload["item"]["callId"], "call-1");
         assert_eq!(payload["eventSource"], "novex-agent-runtime");
+    }
+
+    #[test]
+    fn agent_turn_item_ledger_payload_round_trips_for_replay() {
+        let now = Utc::now().naive_utc();
+        let item = novex_agent_protocol::AgentTurnItem::tool_call(
+            "call-1",
+            "rag.search",
+            serde_json::json!({"query":"policy"}),
+        );
+        let payload = agent_turn_item_event_payload(&item);
+
+        let save_record =
+            agent_turn_item_save_record_from_event_payload(1, 42, None, 99, 7, &payload, 8, now)
+                .expect("turn item payload should produce a ledger record");
+
+        assert_eq!(save_record.tenant_id, 1);
+        assert_eq!(save_record.run_id, 42);
+        assert_eq!(save_record.source_event_id, 99);
+        assert_eq!(save_record.sequence_no, 7);
+        assert_eq!(save_record.item_type, "tool_call");
+        assert_eq!(save_record.call_id.as_deref(), Some("call-1"));
+        assert_eq!(save_record.tool_code.as_deref(), Some("rag.search"));
+
+        let replay_record =
+            crate::infrastructure::persistence::ai_agent_repository::AgentTurnItemRecord {
+                id: save_record.id,
+                run_id: save_record.run_id,
+                step_id: save_record.step_id,
+                source_event_id: save_record.source_event_id,
+                sequence_no: save_record.sequence_no,
+                item_type: save_record.item_type,
+                call_id: save_record.call_id,
+                tool_code: save_record.tool_code,
+                item_payload: save_record.item_payload,
+                create_time: save_record.now,
+            };
+
+        let replayed = agent_turn_item_from_record(replay_record).expect("valid replay item");
+
+        assert_eq!(replayed, item);
+    }
+
+    #[test]
+    fn agent_service_response_item_ledger_source_contract_wires_append_and_replay() {
+        let source = include_str!("agent_service.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+        let append_event = &source[source.find("async fn append_event").unwrap()
+            ..source.find("async fn refresh_trace_snapshot").unwrap()];
+        let get_run_trace = &source[source.find("pub async fn get_run_trace").unwrap()
+            ..source.find("pub async fn resume_run").unwrap()];
+
+        for needle in [
+            "agent_turn_item_save_record_from_event_payload",
+            "agent_turn_item_from_record",
+            "load_model_loop_turn_item_history",
+            "turn_items: Vec<AgentTurnItem>",
+        ] {
+            assert!(
+                source.contains(needle),
+                "{needle} missing from agent response item ledger service contract"
+            );
+        }
+        assert!(append_event.contains("create_event_with_turn_item"));
+        assert!(append_event.contains("agent_turn_item_save_record_from_event_payload"));
+        assert!(get_run_trace.contains("load_model_loop_turn_item_history(run_id)"));
+        assert!(get_run_trace.contains("turn_items"));
     }
 
     #[test]
