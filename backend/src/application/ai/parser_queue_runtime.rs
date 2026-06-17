@@ -378,6 +378,14 @@ mod tests {
             rabbitmq_parser_retry_routing_key: "parser.retry".to_owned(),
             rabbitmq_parser_dead_routing_key: "parser.dead".to_owned(),
             rabbitmq_parser_retry_ttl_ms: 30_000,
+            rabbitmq_agent_exchange: "novex.agent".to_owned(),
+            rabbitmq_agent_execute_queue: "novex.agent.execute".to_owned(),
+            rabbitmq_agent_retry_queue: "novex.agent.retry".to_owned(),
+            rabbitmq_agent_dead_queue: "novex.agent.dead".to_owned(),
+            rabbitmq_agent_execute_routing_key: "agent.execute".to_owned(),
+            rabbitmq_agent_retry_routing_key: "agent.retry".to_owned(),
+            rabbitmq_agent_dead_routing_key: "agent.dead".to_owned(),
+            rabbitmq_agent_retry_ttl_ms: 30_000,
         }
     }
 }
