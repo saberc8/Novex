@@ -4,7 +4,7 @@
 
 **Goal:** Add an Agent RabbitMQ execute consumer that wakes queued Agent runs while Postgres remains the durable execution queue.
 
-**Progress 2026-06-17:** Implemented exact message-row claim, Agent broker execute consumer, shared claim execution status handling, retry/dead message routing, main startup wiring, and focused broker consumer verification.
+**Progress 2026-06-17:** Implemented exact message-row claim, Agent broker execute consumer, shared claim execution status handling, retry/dead message routing, main startup wiring, focused broker consumer verification, and full feature-branch verification.
 
 **Architecture:** Reuse scheduler's RabbitMQ consumer style, but claim Agent work through `ai_agent_run_queue` by message identity before execution. Keep the existing polling worker as fallback, and route retry/dead outcomes through the Agent RabbitMQ topology.
 
@@ -106,7 +106,7 @@ cargo test -p backend-rust ai_agent_repository --offline
 
 ### Task 4: Docs, Full Verification, Merge
 
-Status: In progress.
+Status: Completed.
 
 **Files:**
 - Modify: `docs/plans/2026-06-16-codex-migration-matrix.md`
