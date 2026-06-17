@@ -2738,7 +2738,8 @@ async fn execute_normalized_chat_completion_with_route(
     };
 
     match provider_request.transport {
-        ModelChatProviderTransport::ChatCompletions => {
+        ModelChatProviderTransport::ChatCompletions
+        | ModelChatProviderTransport::ResponsesCodeAgent => {
             model_chat_response_from_chat_completion_text(
                 route,
                 &body_text,
@@ -2846,6 +2847,7 @@ fn normalize_optional_runtime_route_id(
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ModelChatProviderTransport {
     ChatCompletions,
+    ResponsesCodeAgent,
     ResponsesCompactionV2,
     ResponsesCompactUnary,
 }
@@ -2879,6 +2881,14 @@ fn model_chat_provider_request(
         };
     }
 
+    if model_chat_route_uses_responses_code_agent(route, command) {
+        return ModelChatProviderRequest {
+            endpoint: route.endpoint().to_owned(),
+            payload: model_chat_responses_code_agent_payload(route, command),
+            transport: ModelChatProviderTransport::ResponsesCodeAgent,
+        };
+    }
+
     ModelChatProviderRequest {
         endpoint: route.endpoint().to_owned(),
         payload: model_chat_request_payload(route, command),
@@ -2890,6 +2900,7 @@ fn model_chat_provider_request_streams_chat_completion(request: &ModelChatProvid
     matches!(
         request.transport,
         ModelChatProviderTransport::ChatCompletions
+            | ModelChatProviderTransport::ResponsesCodeAgent
     ) && request
         .payload
         .get("stream")
@@ -2922,6 +2933,23 @@ fn model_chat_route_supports_responses_compaction(route: &ModelRuntimeRoute) -> 
     )
 }
 
+fn model_chat_route_uses_responses_code_agent(
+    route: &ModelRuntimeRoute,
+    command: &ModelChatCommand,
+) -> bool {
+    model_chat_route_supports_responses_compaction(route)
+        && model_chat_should_stream_chat_completion(command)
+        && model_chat_route_endpoint_is_responses(route)
+}
+
+fn model_chat_route_endpoint_is_responses(route: &ModelRuntimeRoute) -> bool {
+    route
+        .endpoint()
+        .trim()
+        .trim_end_matches('/')
+        .ends_with("/responses")
+}
+
 fn model_chat_should_stream_chat_completion(command: &ModelChatCommand) -> bool {
     !model_chat_is_compaction(command)
         && command
@@ -2937,6 +2965,23 @@ fn model_chat_responses_compaction_endpoint(route: &ModelRuntimeRoute) -> String
 
 fn model_chat_responses_compact_unary_endpoint(route: &ModelRuntimeRoute) -> String {
     join_model_endpoint(route.base_url(), Some("responses/compact"))
+}
+
+fn model_chat_responses_code_agent_payload(
+    route: &ModelRuntimeRoute,
+    command: &ModelChatCommand,
+) -> Value {
+    let mut payload = json!({
+        "model": route.model().unwrap_or_default(),
+        "input": model_chat_message_input_items(command),
+        "temperature": command.temperature.unwrap_or(DEFAULT_MODEL_CHAT_TEMPERATURE),
+        "max_output_tokens": command.max_tokens.unwrap_or(DEFAULT_MODEL_CHAT_MAX_TOKENS),
+        "stream": true,
+    });
+    if let Some(metadata) = model_chat_provider_metadata(route, command) {
+        payload["metadata"] = metadata;
+    }
+    payload
 }
 
 fn model_chat_responses_compaction_payload(
@@ -7775,7 +7820,44 @@ mod tests {
             request.transport,
             ModelChatProviderTransport::ChatCompletions
         );
+        assert_eq!(request.endpoint, route.endpoint());
         assert_eq!(request.payload["stream"], true);
+        assert!(request.payload.get("messages").is_some());
+        assert!(request.payload.get("input").is_none());
+    }
+
+    #[test]
+    fn provider_responses_transport_code_agent_request_uses_configured_responses_endpoint() {
+        let row = dynamic_route_test_row(
+            "tenant42.code_agent.responses",
+            "code_agent",
+            "llm",
+            Some("/responses"),
+            Some("env:LLM_PRIVATE_KEY"),
+        );
+        let route = runtime_route_from_registry_row(&row, |key| match key {
+            "LLM_PRIVATE_KEY" => Some("sk-fake-private-secret-0001".to_owned()),
+            _ => None,
+        })
+        .unwrap();
+        let command = test_code_agent_chat_command();
+
+        let request = model_chat_provider_request(&route, &command);
+
+        assert_eq!(
+            request.transport,
+            ModelChatProviderTransport::ResponsesCodeAgent
+        );
+        assert_eq!(request.endpoint, "https://llm.internal/v1/responses");
+        assert_eq!(request.payload["model"], "qwen-private");
+        assert_eq!(request.payload["stream"], true);
+        assert_eq!(
+            request.payload["max_output_tokens"],
+            json!(command.max_tokens.unwrap())
+        );
+        assert!(request.payload.get("input").is_some());
+        assert!(request.payload.get("messages").is_none());
+        assert!(request.payload.get("max_tokens").is_none());
     }
 
     #[test]
