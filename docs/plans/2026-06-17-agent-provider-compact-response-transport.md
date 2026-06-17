@@ -12,7 +12,7 @@
 
 ### Task 1: Provider Request Plan And Payload
 
-Status: Pending.
+Status: Completed.
 
 **Files:**
 - Modify: `backend/src/application/ai/model_service.rs`
@@ -62,7 +62,7 @@ Expected: PASS.
 
 ### Task 2: Responses Compaction Parser
 
-Status: Pending.
+Status: Completed.
 
 **Files:**
 - Modify: `backend/src/application/ai/model_service.rs`
@@ -113,7 +113,7 @@ Expected: PASS.
 
 ### Task 3: Documentation, Full Verification, Merge
 
-Status: Pending.
+Status: Completed.
 
 **Files:**
 - Modify: `docs/plans/2026-06-16-codex-migration-matrix.md`

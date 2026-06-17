@@ -2080,17 +2080,18 @@ async fn execute_normalized_chat_completion_with_route(
         .timeout(MODEL_CHAT_TIMEOUT)
         .build()
         .map_err(|err| AppError::Anyhow(err.into()))?;
-    let payload = model_chat_request_payload(route, command);
+    let provider_request = model_chat_provider_request(route, command);
     let started = Instant::now();
     let response = client
-        .post(route.endpoint())
+        .post(&provider_request.endpoint)
         .bearer_auth(route.api_key())
-        .json(&payload)
+        .json(&provider_request.payload)
         .send()
         .await
         .map_err(|err| AppError::Anyhow(err.into()))?;
     let status = response.status();
-    let body = response.json::<Value>().await.unwrap_or(Value::Null);
+    let body_text = response.text().await.unwrap_or_default();
+    let body = serde_json::from_str::<Value>(&body_text).unwrap_or(Value::Null);
 
     if !status.is_success() {
         return Err(AppError::bad_request(format!(
@@ -2099,7 +2100,22 @@ async fn execute_normalized_chat_completion_with_route(
         )));
     }
 
-    model_chat_response_from_provider(route, body, started.elapsed().as_millis(), conversation_id)
+    match provider_request.transport {
+        ModelChatProviderTransport::ChatCompletions => model_chat_response_from_provider(
+            route,
+            body,
+            started.elapsed().as_millis(),
+            conversation_id,
+        ),
+        ModelChatProviderTransport::ResponsesCompactionV2 => {
+            model_chat_response_from_responses_compaction_text(
+                route,
+                &body_text,
+                started.elapsed().as_millis(),
+                conversation_id,
+            )
+        }
+    }
 }
 
 fn normalize_model_chat_command(
@@ -2178,6 +2194,96 @@ fn normalize_optional_runtime_route_id(
         ensure_max_chars("模型路由", route_id, 128)?;
     }
     Ok(route_id)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ModelChatProviderTransport {
+    ChatCompletions,
+    ResponsesCompactionV2,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct ModelChatProviderRequest {
+    endpoint: String,
+    payload: Value,
+    transport: ModelChatProviderTransport,
+}
+
+fn model_chat_provider_request(
+    route: &ModelRuntimeRoute,
+    command: &ModelChatCommand,
+) -> ModelChatProviderRequest {
+    if model_chat_route_supports_responses_compaction(route)
+        && matches!(
+            command
+                .request_metadata
+                .as_ref()
+                .map(|metadata| metadata.request_kind),
+            Some(ModelChatRequestKind::Compaction)
+        )
+    {
+        return ModelChatProviderRequest {
+            endpoint: model_chat_responses_compaction_endpoint(route),
+            payload: model_chat_responses_compaction_payload(route, command),
+            transport: ModelChatProviderTransport::ResponsesCompactionV2,
+        };
+    }
+
+    ModelChatProviderRequest {
+        endpoint: route.endpoint().to_owned(),
+        payload: model_chat_request_payload(route, command),
+        transport: ModelChatProviderTransport::ChatCompletions,
+    }
+}
+
+fn model_chat_route_supports_responses_compaction(route: &ModelRuntimeRoute) -> bool {
+    matches!(
+        route.provider(),
+        ModelProviderType::OpenAiCompatible | ModelProviderType::LocalRuntime
+    )
+}
+
+fn model_chat_responses_compaction_endpoint(route: &ModelRuntimeRoute) -> String {
+    join_model_endpoint(route.base_url(), Some("responses"))
+}
+
+fn model_chat_responses_compaction_payload(
+    route: &ModelRuntimeRoute,
+    command: &ModelChatCommand,
+) -> Value {
+    let mut input = model_chat_message_input_items(command);
+    input.push(json!({ "type": "compaction_trigger" }));
+
+    let mut payload = json!({
+        "model": route.model().unwrap_or_default(),
+        "input": input,
+        "temperature": command.temperature.unwrap_or(DEFAULT_MODEL_CHAT_TEMPERATURE),
+        "max_output_tokens": command.max_tokens.unwrap_or(DEFAULT_MODEL_CHAT_MAX_TOKENS),
+        "stream": true,
+    });
+    if let Some(metadata) = model_chat_provider_metadata(route, command) {
+        payload["metadata"] = metadata;
+    }
+    payload
+}
+
+fn model_chat_message_input_items(command: &ModelChatCommand) -> Vec<Value> {
+    let mut messages = Vec::new();
+    if !command.file_contexts.is_empty() {
+        messages.push(json!({
+            "type": "message",
+            "role": "system",
+            "content": [{ "type": "input_text", "text": model_chat_file_context_prompt(&command.file_contexts) }],
+        }));
+    }
+    messages.extend(command.messages.iter().map(|message| {
+        json!({
+            "type": "message",
+            "role": message.role,
+            "content": [{ "type": "input_text", "text": message.content }],
+        })
+    }));
+    messages
 }
 
 fn model_chat_request_payload(route: &ModelRuntimeRoute, command: &ModelChatCommand) -> Value {
@@ -2312,6 +2418,147 @@ fn model_chat_response_from_provider(
             "primary", route, latency_ms,
         )],
     })
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct ModelChatCompactionProviderOutput {
+    answer: String,
+    usage: ModelChatUsage,
+}
+
+fn model_chat_response_from_responses_compaction_text(
+    route: &ModelRuntimeRoute,
+    body_text: &str,
+    latency_ms: u128,
+    conversation_id: Option<i64>,
+) -> Result<ModelChatResp, AppError> {
+    let trimmed = body_text.trim();
+    let output = if let Ok(body) = serde_json::from_str::<Value>(trimmed) {
+        model_chat_compaction_provider_output_from_body(&body)?
+    } else {
+        model_chat_compaction_provider_output_from_sse_text(trimmed)?
+    };
+    Ok(ModelChatResp {
+        conversation_id,
+        answer: output.answer,
+        route_id: route.summary().route_id,
+        provider: route.provider().as_str().to_owned(),
+        model: route.model().map(str::to_owned),
+        latency_ms,
+        usage: output.usage,
+        cost_cents: None,
+        provider_attempts: vec![model_provider_attempt_succeeded(
+            "primary", route, latency_ms,
+        )],
+    })
+}
+
+fn model_chat_compaction_provider_output_from_body(
+    body: &Value,
+) -> Result<ModelChatCompactionProviderOutput, AppError> {
+    let output_items = body
+        .get("output")
+        .and_then(Value::as_array)
+        .ok_or_else(|| AppError::bad_request("LLM compaction 响应缺少 output"))?;
+    let answer = model_chat_compaction_output_from_items(output_items.iter())?;
+    Ok(ModelChatCompactionProviderOutput {
+        answer,
+        usage: normalize_model_provider_usage(body),
+    })
+}
+
+fn model_chat_compaction_provider_output_from_sse_text(
+    body_text: &str,
+) -> Result<ModelChatCompactionProviderOutput, AppError> {
+    let mut output_items = Vec::new();
+    let mut completed = false;
+    let mut usage = ModelChatUsage::default();
+    for data in model_chat_sse_data_payloads(body_text) {
+        if data == "[DONE]" {
+            continue;
+        }
+        let value = serde_json::from_str::<Value>(&data)
+            .map_err(|_| AppError::bad_request("LLM compaction SSE 响应不是合法 JSON"))?;
+        match value.get("type").and_then(Value::as_str) {
+            Some("response.output_item.done") => {
+                if let Some(item) = value.get("item") {
+                    output_items.push(item.clone());
+                }
+            }
+            Some("response.completed") => {
+                completed = true;
+                usage = value
+                    .pointer("/response/usage")
+                    .map(normalize_model_provider_usage)
+                    .unwrap_or_else(|| normalize_model_provider_usage(&value));
+            }
+            _ => {}
+        }
+    }
+
+    if !completed {
+        return Err(AppError::bad_request(
+            "LLM compaction SSE 响应在 response.completed 前结束",
+        ));
+    }
+
+    let answer = model_chat_compaction_output_from_items(output_items.iter())?;
+    Ok(ModelChatCompactionProviderOutput { answer, usage })
+}
+
+fn model_chat_sse_data_payloads(body_text: &str) -> Vec<String> {
+    let normalized = body_text.replace("\r\n", "\n");
+    normalized
+        .split("\n\n")
+        .filter_map(|record| {
+            let data = record
+                .lines()
+                .filter_map(|line| line.strip_prefix("data:"))
+                .map(str::trim)
+                .collect::<Vec<_>>()
+                .join("\n");
+            (!data.trim().is_empty()).then(|| data.trim().to_owned())
+        })
+        .collect()
+}
+
+fn model_chat_compaction_output_from_items<'a, I>(items: I) -> Result<String, AppError>
+where
+    I: IntoIterator<Item = &'a Value>,
+{
+    let mut output_item_count = 0usize;
+    let mut compaction_count = 0usize;
+    let mut answer = None;
+    for item in items {
+        output_item_count += 1;
+        if let Some(compaction) = model_chat_compaction_output_item_text(item)? {
+            compaction_count += 1;
+            if answer.is_none() {
+                answer = Some(compaction);
+            }
+        }
+    }
+
+    if compaction_count != 1 {
+        return Err(AppError::bad_request(format!(
+            "LLM compaction 响应应包含 1 个 compaction 输出，实际 {compaction_count}/{output_item_count}"
+        )));
+    }
+
+    answer.ok_or_else(|| AppError::bad_request("LLM compaction 响应为空"))
+}
+
+fn model_chat_compaction_output_item_text(item: &Value) -> Result<Option<String>, AppError> {
+    match item.get("type").and_then(Value::as_str) {
+        Some("compaction" | "compaction_summary") => item
+            .get("encrypted_content")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|content| !content.is_empty())
+            .map(|content| Some(content.to_owned()))
+            .ok_or_else(|| AppError::bad_request("LLM compaction 输出缺少 encrypted_content")),
+        _ => Ok(None),
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3994,6 +4241,36 @@ mod tests {
 
     use super::*;
 
+    fn model_chat_response_from_responses_compaction_body(
+        route: &ModelRuntimeRoute,
+        body: Value,
+        latency_ms: u128,
+        conversation_id: Option<i64>,
+    ) -> Result<ModelChatResp, AppError> {
+        let output = model_chat_compaction_provider_output_from_body(&body)?;
+        Ok(ModelChatResp {
+            conversation_id,
+            answer: output.answer,
+            route_id: route.summary().route_id,
+            provider: route.provider().as_str().to_owned(),
+            model: route.model().map(str::to_owned),
+            latency_ms,
+            usage: output.usage,
+            cost_cents: None,
+            provider_attempts: vec![model_provider_attempt_succeeded(
+                "primary", route, latency_ms,
+            )],
+        })
+    }
+
+    fn model_chat_compaction_output_from_provider_body(body: &Value) -> Result<String, AppError> {
+        model_chat_compaction_provider_output_from_body(body).map(|output| output.answer)
+    }
+
+    fn model_chat_compaction_output_from_sse_text(body_text: &str) -> Result<String, AppError> {
+        model_chat_compaction_provider_output_from_sse_text(body_text).map(|output| output.answer)
+    }
+
     #[tokio::test]
     async fn model_runtime_service_can_be_bound_to_request_tenant() {
         let db = sqlx::postgres::PgPoolOptions::new()
@@ -5211,6 +5488,153 @@ mod tests {
     }
 
     #[test]
+    fn provider_compact_transport_uses_responses_endpoint_for_compatible_compaction_route() {
+        let route = openai_compatible_llm_route();
+        let command = test_compaction_chat_command();
+
+        let request = model_chat_provider_request(&route, &command);
+
+        assert_eq!(
+            request.transport,
+            ModelChatProviderTransport::ResponsesCompactionV2
+        );
+        assert_eq!(request.endpoint, "https://llm.internal/v1/responses");
+        assert_eq!(request.payload["model"], route.model().unwrap());
+        assert_eq!(request.payload["stream"], true);
+        assert_eq!(request.payload["max_output_tokens"], 512);
+        assert_eq!(request.payload["metadata"]["request_kind"], "compaction");
+        assert_eq!(
+            request
+                .payload
+                .get("input")
+                .and_then(Value::as_array)
+                .and_then(|items| items.last())
+                .and_then(|item| item.get("type"))
+                .and_then(Value::as_str),
+            Some("compaction_trigger")
+        );
+    }
+
+    #[test]
+    fn provider_compact_transport_keeps_chat_completions_for_unsupported_provider() {
+        let route = llm_test_config()
+            .route(ModelRuntimeTarget::Llm)
+            .unwrap()
+            .clone();
+        let command = test_compaction_chat_command();
+
+        let request = model_chat_provider_request(&route, &command);
+
+        assert_eq!(
+            request.transport,
+            ModelChatProviderTransport::ChatCompletions
+        );
+        assert_eq!(request.endpoint, route.endpoint());
+        assert!(request.payload.get("messages").is_some());
+        assert!(request.payload.get("input").is_none());
+    }
+
+    #[test]
+    fn provider_compact_transport_parses_json_compaction_output() {
+        let route = openai_compatible_llm_route();
+        let body = json!({
+            "output": [
+                { "type": "compaction", "encrypted_content": "compact summary" }
+            ],
+            "usage": {
+                "input_tokens": 10,
+                "output_tokens": 2,
+                "total_tokens": 12
+            }
+        });
+
+        let response =
+            model_chat_response_from_responses_compaction_body(&route, body, 33, None).unwrap();
+
+        assert_eq!(response.answer, "compact summary");
+        assert_eq!(response.usage.prompt_tokens, Some(10));
+        assert_eq!(response.usage.completion_tokens, Some(2));
+        assert_eq!(response.usage.total_tokens, Some(12));
+    }
+
+    #[test]
+    fn provider_compact_transport_accepts_compaction_summary_alias() {
+        let body = json!({
+            "output": [
+                { "type": "compaction_summary", "encrypted_content": "alias summary" }
+            ]
+        });
+
+        let output = model_chat_compaction_output_from_provider_body(&body).unwrap();
+
+        assert_eq!(output, "alias summary");
+    }
+
+    #[test]
+    fn provider_compact_transport_parses_sse_compaction_output() {
+        let route = openai_compatible_llm_route();
+        let sse = concat!(
+            "event: response.output_item.done\n",
+            "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"message\",\"content\":\"ignored\"}}\n\n",
+            "event: response.output_item.done\n",
+            "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"compaction\",\"encrypted_content\":\"sse summary\"}}\n\n",
+            "event: response.completed\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":14,\"output_tokens\":3,\"total_tokens\":17}}}\n\n",
+        );
+
+        let response =
+            model_chat_response_from_responses_compaction_text(&route, sse, 44, None).unwrap();
+
+        assert_eq!(response.answer, "sse summary");
+        assert_eq!(response.usage.prompt_tokens, Some(14));
+        assert_eq!(response.usage.completion_tokens, Some(3));
+        assert_eq!(response.usage.total_tokens, Some(17));
+    }
+
+    #[test]
+    fn provider_compact_transport_parses_crlf_sse_compaction_output() {
+        let route = openai_compatible_llm_route();
+        let sse = concat!(
+            "event: response.output_item.done\r\n",
+            "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"compaction\",\"encrypted_content\":\"crlf summary\"}}\r\n\r\n",
+            "event: response.completed\r\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":8,\"output_tokens\":2,\"total_tokens\":10}}}\r\n\r\n",
+        );
+
+        let response =
+            model_chat_response_from_responses_compaction_text(&route, sse, 44, None).unwrap();
+
+        assert_eq!(response.answer, "crlf summary");
+        assert_eq!(response.usage.prompt_tokens, Some(8));
+        assert_eq!(response.usage.completion_tokens, Some(2));
+        assert_eq!(response.usage.total_tokens, Some(10));
+    }
+
+    #[test]
+    fn provider_compact_transport_rejects_missing_or_duplicate_compaction_output() {
+        let missing = json!({ "output": [] });
+        let duplicate = json!({
+            "output": [
+                { "type": "compaction", "encrypted_content": "first" },
+                { "type": "compaction", "encrypted_content": "second" }
+            ]
+        });
+
+        assert!(model_chat_compaction_output_from_provider_body(&missing).is_err());
+        assert!(model_chat_compaction_output_from_provider_body(&duplicate).is_err());
+    }
+
+    #[test]
+    fn provider_compact_transport_rejects_incomplete_sse_stream() {
+        let sse = concat!(
+            "event: response.output_item.done\n",
+            "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"compaction\",\"encrypted_content\":\"partial\"}}\n\n",
+        );
+
+        assert!(model_chat_compaction_output_from_sse_text(sse).is_err());
+    }
+
+    #[test]
     fn model_chat_command_accepts_existing_conversation_id() {
         let command = normalize_model_chat_command(ModelChatCommand {
             conversation_id: Some(88),
@@ -5660,6 +6084,26 @@ mod tests {
             retained_item_count: 1,
             tool_codes: vec!["rag.search".to_owned()],
         })
+    }
+
+    fn test_compaction_chat_command() -> ModelChatCommand {
+        normalize_model_chat_command(ModelChatCommand {
+            messages: vec![
+                ModelChatMessage {
+                    role: "system".to_owned(),
+                    content: "compact agent context".to_owned(),
+                },
+                ModelChatMessage {
+                    role: "user".to_owned(),
+                    content: "tool evidence and prior conversation".to_owned(),
+                },
+            ],
+            temperature: Some(0.1),
+            max_tokens: Some(512),
+            request_metadata: Some(test_compaction_request_metadata()),
+            ..ModelChatCommand::default()
+        })
+        .unwrap()
     }
 
     fn dynamic_route_test_row(
