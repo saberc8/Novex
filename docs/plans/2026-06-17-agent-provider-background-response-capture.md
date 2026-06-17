@@ -29,7 +29,7 @@
 **Interfaces:**
 - Produces: `model_chat_responses_compaction_payload(...)` with `background=true`, `store=true`, `stream=true`.
 
-- [ ] **Step 1: Write failing test**
+- [x] **Step 1: Write failing test**
 
 Add:
 
@@ -52,7 +52,7 @@ fn provider_background_response_capture_payload_marks_responses_background() {
 }
 ```
 
-- [ ] **Step 2: Run red test**
+- [x] **Step 2: Run red test**
 
 Run:
 
@@ -62,11 +62,11 @@ cargo test -p backend-rust provider_background_response_capture_payload --offlin
 
 Expected: FAIL because `background` and `store` are not present.
 
-- [ ] **Step 3: Implement minimal request payload change**
+- [x] **Step 3: Implement minimal request payload change**
 
 Add `background=true` and `store=true` to `model_chat_responses_compaction_payload`.
 
-- [ ] **Step 4: Run green test**
+- [x] **Step 4: Run green test**
 
 Run:
 
@@ -86,7 +86,7 @@ Expected: PASS.
 - Produces: `provider_response_id: Option<String>`
 - Produces: `provider_response_status: Option<String>`
 
-- [ ] **Step 1: Write failing tests**
+- [x] **Step 1: Write failing tests**
 
 Add:
 
@@ -132,7 +132,7 @@ fn provider_background_response_capture_parses_sse_response_metadata() {
 }
 ```
 
-- [ ] **Step 2: Run red test**
+- [x] **Step 2: Run red test**
 
 Run:
 
@@ -142,11 +142,11 @@ cargo test -p backend-rust provider_background_response_capture_parses --offline
 
 Expected: FAIL because the output type does not expose provider response metadata.
 
-- [ ] **Step 3: Implement parser fields**
+- [x] **Step 3: Implement parser fields**
 
 Add optional metadata fields to `ModelChatCompactionProviderOutput`, extract root JSON `id/status`, and update SSE parsing so terminal `response.completed.response.id/status` wins over earlier in-progress values.
 
-- [ ] **Step 4: Run green test**
+- [x] **Step 4: Run green test**
 
 Run:
 
@@ -165,7 +165,7 @@ Expected: PASS.
 - Modifies: `ModelChatResp`
 - Modifies: `model_provider_call_lease_completion_from_response(...)`
 
-- [ ] **Step 1: Write failing test**
+- [x] **Step 1: Write failing test**
 
 Add:
 
@@ -207,7 +207,7 @@ fn provider_background_response_capture_persists_provider_id_for_cancel() {
 }
 ```
 
-- [ ] **Step 2: Run red test**
+- [x] **Step 2: Run red test**
 
 Run:
 
@@ -217,11 +217,11 @@ cargo test -p backend-rust provider_background_response_capture_persists --offli
 
 Expected: FAIL because `ModelChatResp` has no provider response metadata fields and lease completion does not persist them.
 
-- [ ] **Step 3: Implement lease propagation**
+- [x] **Step 3: Implement lease propagation**
 
 Add optional provider response metadata to `ModelChatResp`, set it from compaction parser output, default it to `None` in non-Responses constructors and tests, and persist non-empty values in the lease completion payload.
 
-- [ ] **Step 4: Run green test**
+- [x] **Step 4: Run green test**
 
 Run:
 
@@ -232,17 +232,26 @@ cargo test -p backend-rust provider_call_lease_cancel --offline
 
 Expected: PASS.
 
+**Evidence:**
+- Red: `cargo test -p backend-rust provider_background_response_capture_payload --offline` failed because `background` was `Null`.
+- Green: `cargo test -p backend-rust provider_background_response_capture_payload --offline` passed after adding `background=true` and `store=true`.
+- Red: `cargo test -p backend-rust provider_background_response_capture_parses --offline` failed because `ModelChatCompactionProviderOutput` lacked provider metadata fields.
+- Green: `cargo test -p backend-rust provider_background_response_capture_parses --offline` passed after JSON/SSE metadata extraction.
+- Red: `cargo test -p backend-rust provider_background_response_capture_persists --offline` failed because `ModelChatResp` lacked provider metadata fields.
+- Green: `cargo test -p backend-rust provider_background_response_capture_persists --offline` passed after lease propagation.
+- Regression: `cargo test -p backend-rust provider_background_response_capture --offline`, `cargo test -p backend-rust provider_compact_transport --offline`, and `cargo test -p backend-rust provider_call_lease_cancel --offline` passed.
+
 ### Task 4: Matrix, Verification, Merge
 
 **Files:**
 - Modify: `docs/plans/2026-06-16-codex-migration-matrix.md`
 - Modify: `docs/plans/2026-06-17-agent-provider-background-response-capture.md`
 
-- [ ] **Step 1: Update matrix**
+- [x] **Step 1: Update matrix**
 
 Move background Responses response-id capture into Runtime loop evidence, keep WebSocket streaming transport as remaining work, and add this plan to the follow-up implementation list.
 
-- [ ] **Step 2: Verify**
+- [x] **Step 2: Verify**
 
 Run:
 
@@ -257,6 +266,15 @@ git diff --check
 ```
 
 Expected: all pass with exit code 0.
+
+**Evidence:**
+- Format: `cargo fmt -- --check` passed after rustfmt.
+- New slice: `cargo test -p backend-rust provider_background_response_capture --offline` passed.
+- Regression: `cargo test -p backend-rust provider_compact_transport --offline` passed.
+- Regression: `cargo test -p backend-rust provider_call_lease_cancel --offline` passed.
+- Regression: `cargo test -p backend-rust provider_call_lease --offline` passed.
+- Workspace: `cargo test --workspace --offline` passed with backend `760` tests.
+- Diff hygiene: `git diff --check` passed.
 
 - [ ] **Step 3: Commit, merge, clean**
 
