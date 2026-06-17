@@ -2,7 +2,6 @@ use std::{
     collections::{BTreeMap, HashMap, HashSet},
     env,
     future::Future,
-    pin::Pin,
     sync::{Mutex, OnceLock},
     time::{Duration, Instant},
 };
@@ -96,9 +95,6 @@ pub struct ModelProviderStreamEvent {
     pub chunk: ModelProviderStreamChunk,
 }
 
-pub type ModelChatStreamFuture =
-    Pin<Box<dyn Future<Output = Result<ModelChatResp, AppError>> + Send>>;
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModelChatStreamLifecycle {
     pub purpose: ModelRoutePurpose,
@@ -106,9 +102,45 @@ pub struct ModelChatStreamLifecycle {
     pub source: String,
 }
 
+pub struct ModelChatStreamTransportTask {
+    handle: Option<tokio::task::JoinHandle<Result<ModelChatResp, AppError>>>,
+}
+
+impl ModelChatStreamTransportTask {
+    fn spawn<F>(future: F) -> Self
+    where
+        F: Future<Output = Result<ModelChatResp, AppError>> + Send + 'static,
+    {
+        Self {
+            handle: Some(tokio::spawn(future)),
+        }
+    }
+
+    pub async fn wait(mut self) -> Result<ModelChatResp, AppError> {
+        let handle = self.handle.take().ok_or_else(|| {
+            AppError::Anyhow(anyhow::anyhow!(
+                "model stream transport task already awaited"
+            ))
+        })?;
+        handle.await.map_err(|error| {
+            AppError::Anyhow(anyhow::anyhow!(
+                "model stream transport task failed: {error}"
+            ))
+        })?
+    }
+}
+
+impl Drop for ModelChatStreamTransportTask {
+    fn drop(&mut self) {
+        if let Some(handle) = self.handle.take() {
+            handle.abort();
+        }
+    }
+}
+
 pub struct ModelChatStreamCall {
     pub lifecycle: ModelChatStreamLifecycle,
-    pub response: ModelChatStreamFuture,
+    pub transport: ModelChatStreamTransportTask,
     pub events: mpsc::UnboundedReceiver<ModelProviderStreamEvent>,
 }
 
@@ -2337,12 +2369,13 @@ LIMIT 1;
         let (sender, events) = mpsc::unbounded_channel();
         command.provider_stream_sender = Some(sender);
         let service = self.clone();
-        let response =
-            Box::pin(async move { service.chat_completion_for_purpose(purpose, command).await });
+        let transport = ModelChatStreamTransportTask::spawn(async move {
+            service.chat_completion_for_purpose(purpose, command).await
+        });
 
         Ok(ModelChatStreamCall {
             lifecycle,
-            response,
+            transport,
             events,
         })
     }
@@ -6610,17 +6643,65 @@ mod tests {
     }
 
     #[test]
-    fn model_stream_native_runtime_api_exposes_future_and_event_receiver() {
+    fn model_stream_native_runtime_api_exposes_transport_task_and_event_receiver() {
         let source = include_str!("model_service.rs")
             .split("#[cfg(test)]")
             .next()
             .unwrap();
 
-        assert!(source.contains("pub type ModelChatStreamFuture"));
+        assert!(source.contains("pub struct ModelChatStreamTransportTask"));
         assert!(source.contains("pub struct ModelChatStreamCall"));
-        assert!(source.contains("pub response: ModelChatStreamFuture"));
+        assert!(source.contains("pub transport: ModelChatStreamTransportTask"));
         assert!(source.contains("pub events: mpsc::UnboundedReceiver<ModelProviderStreamEvent>"));
         assert!(source.contains("pub async fn chat_completion_stream_for_purpose"));
+    }
+
+    #[test]
+    fn model_stream_transport_task_replaces_boxed_future() {
+        let source = include_str!("model_service.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+
+        assert!(source.contains("pub struct ModelChatStreamTransportTask"));
+        assert!(source.contains("pub transport: ModelChatStreamTransportTask"));
+        assert!(source.contains("tokio::spawn"));
+        assert!(source.contains("JoinHandle<Result<ModelChatResp, AppError>>"));
+        assert!(source.contains("impl Drop for ModelChatStreamTransportTask"));
+        assert!(!source.contains("pub type ModelChatStreamFuture"));
+        assert!(!source.contains("pub response: ModelChatStreamFuture"));
+    }
+
+    #[tokio::test]
+    async fn model_stream_transport_task_drop_aborts_provider_task() {
+        struct AbortGuard(Option<tokio::sync::oneshot::Sender<()>>);
+
+        impl Drop for AbortGuard {
+            fn drop(&mut self) {
+                if let Some(sender) = self.0.take() {
+                    let _ = sender.send(());
+                }
+            }
+        }
+
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (aborted_tx, aborted_rx) = tokio::sync::oneshot::channel();
+        let task = ModelChatStreamTransportTask::spawn(async move {
+            let _guard = AbortGuard(Some(aborted_tx));
+            let _ = started_tx.send(());
+            std::future::pending::<Result<ModelChatResp, AppError>>().await
+        });
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), started_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        drop(task);
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), aborted_rx)
+            .await
+            .unwrap()
+            .unwrap();
     }
 
     #[test]
