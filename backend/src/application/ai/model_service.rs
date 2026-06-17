@@ -24,9 +24,12 @@ use super::model_provider_transport::{
     model_chat_sse_record_data_payload, model_provider_response_id_from_payloads,
     normalize_model_provider_response_id, parse_model_chat_compaction_provider_output_from_text,
     parse_model_chat_provider_output_from_body, parse_model_chat_provider_output_from_text,
-    read_model_provider_response_text, send_model_provider_http_request,
-    send_model_provider_native_cancel_request, ModelChatProviderOutput,
-    ModelChatStreamCompletionBuilder, ModelProviderHttpRequest, ModelProviderNativeCancelRequest,
+    parse_model_provider_embedding_vectors, parse_model_provider_rerank_scores,
+    read_model_provider_response_text, send_model_provider_embedding_request,
+    send_model_provider_http_request, send_model_provider_native_cancel_request,
+    send_model_provider_rerank_request, ModelChatProviderOutput, ModelChatStreamCompletionBuilder,
+    ModelProviderEmbeddingRequest, ModelProviderHttpRequest, ModelProviderNativeCancelRequest,
+    ModelProviderRerankRequest,
 };
 
 use crate::{
@@ -1598,22 +1601,11 @@ ORDER BY r.priority ASC, r.id ASC;
     }
 
     pub fn parse_rerank_scores(body: &Value) -> Vec<ModelRerankScore> {
-        body.get("results")
-            .or_else(|| body.get("data"))
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
-            .filter_map(parse_rerank_score)
-            .collect()
+        parse_model_provider_rerank_scores(body)
     }
 
     pub fn parse_embedding_vectors(body: &Value) -> Vec<ModelEmbeddingVector> {
-        body.get("data")
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
-            .filter_map(parse_embedding_vector)
-            .collect()
+        parse_model_provider_embedding_vectors(body)
     }
 
     pub async fn embed_texts(
@@ -1623,32 +1615,14 @@ ORDER BY r.priority ASC, r.id ASC;
         if texts.is_empty() {
             return Ok(Vec::new());
         }
-        let client = reqwest::Client::builder()
-            .timeout(MODEL_EMBEDDING_TIMEOUT)
-            .build()
-            .map_err(|err| AppError::Anyhow(err.into()))?;
-        let response = client
-            .post(route.endpoint())
-            .bearer_auth(route.api_key())
-            .json(&json!({
-                "model": route.model().unwrap_or_default(),
-                "input": texts,
-            }))
-            .send()
-            .await
-            .map_err(|err| AppError::Anyhow(err.into()))?;
-        let status = response.status();
-        let body = response.json::<Value>().await.unwrap_or(Value::Null);
-        if !status.is_success() {
-            return Err(AppError::bad_request(format!(
-                "Embedding 模型调用失败: {status}"
-            )));
-        }
-        let vectors = Self::parse_embedding_vectors(&body);
-        if vectors.is_empty() {
-            return Err(AppError::bad_request("Embedding 模型响应为空"));
-        }
-        Ok(vectors)
+        send_model_provider_embedding_request(ModelProviderEmbeddingRequest {
+            endpoint: route.endpoint(),
+            api_key: route.api_key(),
+            model: route.model(),
+            texts,
+            timeout: MODEL_EMBEDDING_TIMEOUT,
+        })
+        .await
     }
 
     pub async fn embed_texts_for_source(
@@ -1695,33 +1669,15 @@ ORDER BY r.priority ASC, r.id ASC;
         if documents.is_empty() {
             return Ok(Vec::new());
         }
-        let client = reqwest::Client::builder()
-            .timeout(MODEL_RERANK_TIMEOUT)
-            .build()
-            .map_err(|err| AppError::Anyhow(err.into()))?;
-        let response = client
-            .post(route.endpoint())
-            .bearer_auth(route.api_key())
-            .json(&json!({
-                "model": route.model().unwrap_or_default(),
-                "query": query,
-                "documents": documents,
-            }))
-            .send()
-            .await
-            .map_err(|err| AppError::Anyhow(err.into()))?;
-        let status = response.status();
-        let body = response.json::<Value>().await.unwrap_or(Value::Null);
-        if !status.is_success() {
-            return Err(AppError::bad_request(format!(
-                "Rerank 模型调用失败: {status}"
-            )));
-        }
-        let scores = Self::parse_rerank_scores(&body);
-        if scores.is_empty() {
-            return Err(AppError::bad_request("Rerank 模型响应为空"));
-        }
-        Ok(scores)
+        send_model_provider_rerank_request(ModelProviderRerankRequest {
+            endpoint: route.endpoint(),
+            api_key: route.api_key(),
+            model: route.model(),
+            query,
+            documents,
+            timeout: MODEL_RERANK_TIMEOUT,
+        })
+        .await
     }
 
     pub async fn rerank_documents_for_source(
@@ -5849,56 +5805,6 @@ fn health_message(status: reqwest::StatusCode, ok: bool) -> String {
     }
 }
 
-fn parse_rerank_score(value: &Value) -> Option<ModelRerankScore> {
-    let index = value
-        .get("index")
-        .and_then(json_usize)
-        .or_else(|| value.get("document_index").and_then(json_usize))
-        .or_else(|| value.get("documentIndex").and_then(json_usize))?;
-    let score = value
-        .get("relevance_score")
-        .or_else(|| value.get("relevanceScore"))
-        .or_else(|| value.get("score"))
-        .and_then(json_f32)?;
-    if !score.is_finite() {
-        return None;
-    }
-    Some(ModelRerankScore { index, score })
-}
-
-fn parse_embedding_vector(value: &Value) -> Option<ModelEmbeddingVector> {
-    let index = value.get("index").and_then(json_usize).unwrap_or(0);
-    let vector = value
-        .get("embedding")?
-        .as_array()?
-        .iter()
-        .filter_map(json_f32)
-        .filter(|value| value.is_finite())
-        .collect::<Vec<_>>();
-    if vector.is_empty() {
-        return None;
-    }
-    Some(ModelEmbeddingVector { index, vector })
-}
-
-fn json_usize(value: &Value) -> Option<usize> {
-    if let Some(value) = value.as_u64() {
-        return usize::try_from(value).ok();
-    }
-    value
-        .as_str()
-        .and_then(|text| text.trim().parse::<usize>().ok())
-}
-
-fn json_f32(value: &Value) -> Option<f32> {
-    if let Some(value) = value.as_f64() {
-        return Some(value as f32);
-    }
-    value
-        .as_str()
-        .and_then(|text| text.trim().parse::<f32>().ok())
-}
-
 fn sanitize_error_message(message: &str, route: &ModelRuntimeRoute) -> String {
     message.replace(route.api_key(), &mask_api_key(route.api_key()))
 }
@@ -6431,6 +6337,58 @@ mod tests {
         assert!(!cancel_path.contains(".post(endpoint)"));
         assert!(!cancel_path.contains(".bearer_auth(route.api_key())"));
         assert!(!cancel_path.contains("Provider native cancel failed: HTTP {}"));
+    }
+
+    #[test]
+    fn model_provider_rag_transport_adapter_source_contract() {
+        let service_source = include_str!("model_service.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+        let transport_source = include_str!("model_provider_transport.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+        let embed_path = &service_source[service_source.find("pub async fn embed_texts").unwrap()
+            ..service_source
+                .find("pub async fn embed_texts_for_source")
+                .unwrap()];
+        let rerank_path = &service_source[service_source
+            .find("pub async fn rerank_documents")
+            .unwrap()
+            ..service_source
+                .find("pub async fn rerank_documents_for_source")
+                .unwrap()];
+
+        assert!(service_source.contains("ModelProviderEmbeddingRequest"));
+        assert!(service_source.contains("ModelProviderRerankRequest"));
+        assert!(service_source.contains("send_model_provider_embedding_request"));
+        assert!(service_source.contains("send_model_provider_rerank_request"));
+        assert!(service_source.contains("parse_model_provider_embedding_vectors"));
+        assert!(service_source.contains("parse_model_provider_rerank_scores"));
+        assert!(transport_source.contains("pub(super) struct ModelProviderEmbeddingRequest"));
+        assert!(transport_source.contains("pub(super) struct ModelProviderRerankRequest"));
+        assert!(
+            transport_source.contains("pub(super) async fn send_model_provider_embedding_request")
+        );
+        assert!(transport_source.contains("pub(super) async fn send_model_provider_rerank_request"));
+        assert!(transport_source.contains("pub(super) fn parse_model_provider_embedding_vectors"));
+        assert!(transport_source.contains("pub(super) fn parse_model_provider_rerank_scores"));
+        assert!(embed_path
+            .contains("send_model_provider_embedding_request(ModelProviderEmbeddingRequest"));
+        assert!(
+            rerank_path.contains("send_model_provider_rerank_request(ModelProviderRerankRequest")
+        );
+        assert!(!embed_path.contains("reqwest::Client::builder()"));
+        assert!(!embed_path.contains(".post(route.endpoint())"));
+        assert!(!embed_path.contains(".bearer_auth(route.api_key())"));
+        assert!(!embed_path.contains("Embedding 模型调用失败: {status}"));
+        assert!(!rerank_path.contains("reqwest::Client::builder()"));
+        assert!(!rerank_path.contains(".post(route.endpoint())"));
+        assert!(!rerank_path.contains(".bearer_auth(route.api_key())"));
+        assert!(!rerank_path.contains("Rerank 模型调用失败: {status}"));
+        assert!(!service_source.contains("fn parse_rerank_score("));
+        assert!(!service_source.contains("fn parse_embedding_vector("));
     }
 
     #[test]
