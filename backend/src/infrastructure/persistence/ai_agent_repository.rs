@@ -470,6 +470,53 @@ RETURNING q.id, q.tenant_id, q.run_id, q.attempt_count, q.max_attempts, q.payloa
         .await?)
     }
 
+    pub async fn claim_agent_run_queue_by_message(
+        &self,
+        queue_id: i64,
+        tenant_id: i64,
+        run_id: i64,
+        worker_id: &str,
+        lease_until: NaiveDateTime,
+        user_id: i64,
+        now: NaiveDateTime,
+    ) -> Result<Option<AgentRunQueueClaimRecord>, AppError> {
+        Ok(sqlx::query_as::<_, AgentRunQueueClaimRecord>(
+            r#"
+WITH candidate AS (
+    SELECT id
+    FROM ai_agent_run_queue
+    WHERE id = $1
+      AND tenant_id = $2
+      AND run_id = $3
+      AND queue_status IN ('pending', 'retrying')
+      AND (locked_until IS NULL OR locked_until <= $4)
+      AND attempt_count < max_attempts
+    FOR UPDATE SKIP LOCKED
+)
+UPDATE ai_agent_run_queue AS q
+SET queue_status = 'running',
+    attempt_count = q.attempt_count + 1,
+    locked_by = $5,
+    locked_until = $6,
+    started_at = COALESCE(q.started_at, $4),
+    update_user = $7,
+    update_time = $4
+FROM candidate
+WHERE q.id = candidate.id
+RETURNING q.id, q.tenant_id, q.run_id, q.attempt_count, q.max_attempts, q.payload;
+"#,
+        )
+        .bind(queue_id)
+        .bind(tenant_id)
+        .bind(run_id)
+        .bind(now)
+        .bind(worker_id)
+        .bind(lease_until)
+        .bind(user_id)
+        .fetch_optional(&self.db)
+        .await?)
+    }
+
     pub async fn mark_agent_run_queue_succeeded(
         &self,
         queue_id: i64,
@@ -1147,5 +1194,20 @@ mod tests {
         assert!(source.contains("locked_until = NULL"));
         assert!(source.contains("finished_at = NULL"));
         assert!(source.contains("queue_status IN ('waiting_approval', 'succeeded')"));
+    }
+
+    #[test]
+    fn agent_queue_broker_consumer_claims_exact_message_row() {
+        let source = include_str!("ai_agent_repository.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+
+        assert!(source.contains("claim_agent_run_queue_by_message"));
+        assert!(source.contains("WHERE id = $1"));
+        assert!(source.contains("tenant_id = $2"));
+        assert!(source.contains("run_id = $3"));
+        assert!(source.contains("queue_status IN ('pending', 'retrying')"));
+        assert!(source.contains("FOR UPDATE SKIP LOCKED"));
     }
 }
