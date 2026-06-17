@@ -322,6 +322,83 @@ pub struct ModelTurnParseError {
     pub message: String,
 }
 
+pub const MAX_STREAMING_MODEL_TURN_BUFFER_CHARS: usize = 64 * 1024;
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum StreamingModelTurnParseStatus {
+    Pending,
+    Ready(ParsedModelTurnOutput),
+}
+
+#[derive(Debug, Clone)]
+pub struct StreamingModelTurnParser {
+    buffer: String,
+    ready: bool,
+    max_chars: usize,
+}
+
+impl StreamingModelTurnParser {
+    pub fn new() -> Self {
+        Self::with_max_chars(MAX_STREAMING_MODEL_TURN_BUFFER_CHARS)
+    }
+
+    pub fn with_max_chars(max_chars: usize) -> Self {
+        Self {
+            buffer: String::new(),
+            ready: false,
+            max_chars,
+        }
+    }
+
+    pub fn push_delta(
+        &mut self,
+        delta: &str,
+    ) -> Result<StreamingModelTurnParseStatus, ModelTurnParseError> {
+        if self.ready {
+            return Err(ModelTurnParseError {
+                message: "streaming model turn was already parsed".to_owned(),
+            });
+        }
+        if self.buffer.chars().count() + delta.chars().count() > self.max_chars {
+            return Err(ModelTurnParseError {
+                message: "streaming model turn exceeded buffer limit".to_owned(),
+            });
+        }
+
+        self.buffer.push_str(delta);
+        let trimmed = self.buffer.trim();
+        if trimmed.is_empty() || !trimmed.starts_with('{') {
+            return Ok(StreamingModelTurnParseStatus::Pending);
+        }
+
+        let value = match serde_json::from_str::<Value>(trimmed) {
+            Ok(value) => value,
+            Err(err) if err.is_eof() => return Ok(StreamingModelTurnParseStatus::Pending),
+            Err(err) => {
+                return Err(ModelTurnParseError {
+                    message: format!("streaming model turn JSON is invalid: {err}"),
+                })
+            }
+        };
+        match value.get("type").and_then(Value::as_str) {
+            Some("tool_call" | "tool_calls") => {
+                let parsed = parse_model_turn_output(trimmed)?;
+                self.ready = true;
+                Ok(StreamingModelTurnParseStatus::Ready(parsed))
+            }
+            _ => Err(ModelTurnParseError {
+                message: "streaming model turn JSON is not a tool call".to_owned(),
+            }),
+        }
+    }
+}
+
+impl Default for StreamingModelTurnParser {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 pub fn parse_model_turn_output(output: &str) -> Result<ParsedModelTurnOutput, ModelTurnParseError> {
     let trimmed = output.trim();
     if trimmed.is_empty() {
@@ -656,6 +733,93 @@ mod tests {
         );
         assert_eq!(parsed.items.len(), 1);
         assert_eq!(parsed.outcome, TurnOutcome::NeedsFollowUp);
+    }
+
+    #[test]
+    fn streaming_parser_waits_for_complete_tool_call_json() {
+        let mut parser = StreamingModelTurnParser::new();
+
+        assert_eq!(
+            parser.push_delta(r#"{"type":"tool_"#).unwrap(),
+            StreamingModelTurnParseStatus::Pending
+        );
+        let status = parser
+            .push_delta(
+                r#"call","callId":"call-1","toolCode":"rag.search","arguments":{"query":"policy"}}"#,
+            )
+            .unwrap();
+
+        match status {
+            StreamingModelTurnParseStatus::Ready(parsed) => {
+                assert_eq!(parsed.outcome, TurnOutcome::NeedsFollowUp);
+                assert_eq!(parsed.items.len(), 1);
+                assert_eq!(
+                    parsed.item,
+                    AgentTurnItem::tool_call("call-1", "rag.search", json!({"query":"policy"}))
+                );
+            }
+            StreamingModelTurnParseStatus::Pending => panic!("expected complete tool call"),
+        }
+    }
+
+    #[test]
+    fn streaming_parser_reads_tool_call_batch_across_chunks() {
+        let mut parser = StreamingModelTurnParser::new();
+
+        assert_eq!(
+            parser
+                .push_delta(r#"{"type":"tool_calls","calls":[{"callId":"call-1","#)
+                .unwrap(),
+            StreamingModelTurnParseStatus::Pending
+        );
+        let status = parser
+            .push_delta(
+                r#""toolCode":"rag.search","arguments":{"query":"policy"}},{"callId":"call-2","toolCode":"github.repo.read","arguments":{"repository":"org/repo","path":"README.md"}}]}"#,
+            )
+            .unwrap();
+
+        match status {
+            StreamingModelTurnParseStatus::Ready(parsed) => {
+                assert_eq!(parsed.outcome, TurnOutcome::NeedsFollowUp);
+                assert_eq!(parsed.items.len(), 2);
+                assert_eq!(
+                    parsed.items[0],
+                    AgentTurnItem::tool_call("call-1", "rag.search", json!({"query":"policy"}))
+                );
+                assert_eq!(
+                    parsed.items[1],
+                    AgentTurnItem::tool_call(
+                        "call-2",
+                        "github.repo.read",
+                        json!({"repository":"org/repo","path":"README.md"})
+                    )
+                );
+            }
+            StreamingModelTurnParseStatus::Pending => panic!("expected complete tool-call batch"),
+        }
+    }
+
+    #[test]
+    fn streaming_parser_keeps_natural_language_pending() {
+        let mut parser = StreamingModelTurnParser::new();
+
+        assert_eq!(
+            parser.push_delta("Here is the answer").unwrap(),
+            StreamingModelTurnParseStatus::Pending
+        );
+        assert_eq!(
+            parser.push_delta(" with more text.").unwrap(),
+            StreamingModelTurnParseStatus::Pending
+        );
+    }
+
+    #[test]
+    fn streaming_parser_rejects_oversized_buffer() {
+        let mut parser = StreamingModelTurnParser::with_max_chars(8);
+
+        let err = parser.push_delta(r#"{"type":"tool_call"}"#).unwrap_err();
+
+        assert_eq!(err.message, "streaming model turn exceeded buffer limit");
     }
 
     #[test]
