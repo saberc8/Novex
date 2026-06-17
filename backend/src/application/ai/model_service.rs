@@ -24,8 +24,9 @@ use super::model_provider_transport::{
     model_chat_sse_record_data_payload, model_provider_response_id_from_payloads,
     normalize_model_provider_response_id, parse_model_chat_compaction_provider_output_from_text,
     parse_model_chat_provider_output_from_body, parse_model_chat_provider_output_from_text,
-    read_model_provider_response_text, send_model_provider_http_request, ModelChatProviderOutput,
-    ModelChatStreamCompletionBuilder, ModelProviderHttpRequest,
+    read_model_provider_response_text, send_model_provider_http_request,
+    send_model_provider_native_cancel_request, ModelChatProviderOutput,
+    ModelChatStreamCompletionBuilder, ModelProviderHttpRequest, ModelProviderNativeCancelRequest,
 };
 
 use crate::{
@@ -4218,28 +4219,17 @@ async fn execute_model_provider_native_cancel(
         .endpoint
         .as_deref()
         .ok_or_else(|| AppError::bad_request("模型调用缺少 provider native cancel endpoint"))?;
-    let client = reqwest::Client::builder()
-        .timeout(MODEL_PROVIDER_NATIVE_CANCEL_TIMEOUT)
-        .build()
-        .map_err(|err| AppError::Anyhow(err.into()))?;
-    let response = client
-        .post(endpoint)
-        .bearer_auth(route.api_key())
-        .send()
-        .await
-        .map_err(|err| AppError::Anyhow(err.into()))?;
-    let status = response.status();
-    if !status.is_success() {
-        return Err(AppError::bad_request(format!(
-            "Provider native cancel failed: HTTP {}",
-            status.as_u16()
-        )));
-    }
+    let status = send_model_provider_native_cancel_request(ModelProviderNativeCancelRequest {
+        endpoint,
+        api_key: route.api_key(),
+        timeout: MODEL_PROVIDER_NATIVE_CANCEL_TIMEOUT,
+    })
+    .await?;
 
     Ok(model_provider_native_cancel_resp_from_plan(
         plan,
         true,
-        Some(status.as_u16()),
+        Some(status),
         "native_cancel_sent",
     ))
 }
@@ -6410,6 +6400,37 @@ mod tests {
         assert!(!service_source.contains("fn model_chat_provider_output_from_sse_text"));
         assert!(!service_source.contains("fn model_chat_compaction_provider_output_from_body"));
         assert!(!service_source.contains("fn model_chat_compaction_provider_output_from_sse_text"));
+    }
+
+    #[test]
+    fn model_provider_native_cancel_transport_adapter_source_contract() {
+        let service_source = include_str!("model_service.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+        let transport_source = include_str!("model_provider_transport.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+        let cancel_path = &service_source[service_source
+            .find("async fn execute_model_provider_native_cancel")
+            .unwrap()
+            ..service_source
+                .find("fn normalize_provider_call_lease_query")
+                .unwrap()];
+
+        assert!(service_source.contains("ModelProviderNativeCancelRequest"));
+        assert!(service_source.contains("send_model_provider_native_cancel_request"));
+        assert!(transport_source.contains("pub(super) struct ModelProviderNativeCancelRequest"));
+        assert!(transport_source
+            .contains("pub(super) async fn send_model_provider_native_cancel_request"));
+        assert!(cancel_path.contains(
+            "send_model_provider_native_cancel_request(ModelProviderNativeCancelRequest"
+        ));
+        assert!(!cancel_path.contains("reqwest::Client::builder()"));
+        assert!(!cancel_path.contains(".post(endpoint)"));
+        assert!(!cancel_path.contains(".bearer_auth(route.api_key())"));
+        assert!(!cancel_path.contains("Provider native cancel failed: HTTP {}"));
     }
 
     #[test]
