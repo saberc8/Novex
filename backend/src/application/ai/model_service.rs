@@ -21,6 +21,8 @@ use serde_json::{json, Value};
 use sqlx::{FromRow, PgPool};
 use tokio::sync::mpsc;
 
+use super::model_provider_transport::{send_model_provider_http_request, ModelProviderHttpRequest};
+
 use crate::{
     application::system::{ensure_max_chars, format_datetime},
     infrastructure::persistence::ai_capability_repository::{
@@ -2841,27 +2843,16 @@ async fn execute_normalized_chat_completion_with_route(
     conversation_id: Option<i64>,
     dispatch_mode: ModelProviderDispatchMode,
 ) -> Result<ModelChatResp, AppError> {
-    let client = reqwest::Client::builder()
-        .timeout(MODEL_CHAT_TIMEOUT)
-        .build()
-        .map_err(|err| AppError::Anyhow(err.into()))?;
     let provider_request = model_chat_provider_request(route, command);
     let started = Instant::now();
-    let response = client
-        .post(&provider_request.endpoint)
-        .bearer_auth(route.api_key())
-        .json(&provider_request.payload)
-        .send()
-        .await
-        .map_err(|err| AppError::Anyhow(err.into()))?;
-    let status = response.status();
-
-    if !status.is_success() {
-        return Err(AppError::bad_request(format!(
-            "LLM 模型调用失败: HTTP {}",
-            status.as_u16()
-        )));
-    }
+    let response = send_model_provider_http_request(ModelProviderHttpRequest {
+        endpoint: &provider_request.endpoint,
+        api_key: route.api_key(),
+        payload: &provider_request.payload,
+        timeout: MODEL_CHAT_TIMEOUT,
+        failure_message: "LLM 模型调用失败",
+    })
+    .await?;
 
     let stream_dispatch = matches!(dispatch_mode, ModelProviderDispatchMode::Stream);
     if stream_dispatch && model_chat_provider_request_streams_chat_completion(&provider_request) {
@@ -6823,6 +6814,27 @@ mod tests {
         assert!(normalized_runtime_path.contains(
             "ModelChatProviderTransport::ChatCompletions | ModelChatProviderTransport::ResponsesCodeAgent"
         ));
+    }
+
+    #[test]
+    fn model_provider_http_transport_adapter_source_contract() {
+        let source = include_str!("model_service.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+        let route_path = &source[source
+            .find("async fn execute_normalized_chat_completion_with_route")
+            .unwrap()
+            ..source.find("fn normalize_model_chat_command").unwrap()];
+
+        assert!(source.contains("model_provider_transport::{"));
+        assert!(source.contains("ModelProviderHttpRequest"));
+        assert!(source.contains("send_model_provider_http_request"));
+        assert!(route_path.contains("send_model_provider_http_request(ModelProviderHttpRequest"));
+        assert!(!route_path.contains("reqwest::Client::builder()"));
+        assert!(!route_path.contains(".post(&provider_request.endpoint)"));
+        assert!(!route_path.contains(".bearer_auth(route.api_key())"));
+        assert!(!route_path.contains("LLM 模型调用失败: HTTP {}"));
     }
 
     #[test]
