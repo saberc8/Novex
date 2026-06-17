@@ -14,7 +14,7 @@ use novex_model::{
     ModelRoutePurpose, ModelRuntimeConfig, ModelRuntimeRoute, ModelRuntimeRouteSummary,
     ModelRuntimeSummary, ModelRuntimeTarget, ModelTokenUsage, ModelUsageCostInput,
 };
-use novex_tools::{parse_media_image_generation_response, MediaImageGenerationRequest};
+use novex_tools::MediaImageGenerationRequest;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sqlx::{FromRow, PgPool};
@@ -26,9 +26,10 @@ use super::model_provider_transport::{
     parse_model_chat_provider_output_from_body, parse_model_chat_provider_output_from_text,
     parse_model_provider_embedding_vectors, parse_model_provider_rerank_scores,
     read_model_provider_response_text, send_model_provider_embedding_request,
-    send_model_provider_http_request, send_model_provider_native_cancel_request,
-    send_model_provider_rerank_request, ModelChatProviderOutput, ModelChatStreamCompletionBuilder,
-    ModelProviderEmbeddingRequest, ModelProviderHttpRequest, ModelProviderNativeCancelRequest,
+    send_model_provider_http_request, send_model_provider_media_image_request,
+    send_model_provider_native_cancel_request, send_model_provider_rerank_request,
+    ModelChatProviderOutput, ModelChatStreamCompletionBuilder, ModelProviderEmbeddingRequest,
+    ModelProviderHttpRequest, ModelProviderMediaImageRequest, ModelProviderNativeCancelRequest,
     ModelProviderRerankRequest,
 };
 
@@ -1720,36 +1721,13 @@ ORDER BY r.priority ASC, r.id ASC;
         route: &ModelRuntimeRoute,
         request: &MediaImageGenerationRequest,
     ) -> Result<ModelMediaImageGenerationResp, AppError> {
-        let request_payload = request.to_provider_payload();
-        let client = reqwest::Client::builder()
-            .timeout(MODEL_MEDIA_IMAGE_TIMEOUT)
-            .build()
-            .map_err(|err| AppError::bad_request(format!("图片生成客户端初始化失败: {err}")))?;
-        let response = client
-            .post(route.endpoint())
-            .bearer_auth(route.api_key())
-            .header("x-api-key", route.api_key())
-            .json(&request_payload)
-            .send()
-            .await
-            .map_err(|err| AppError::bad_request(format!("图片生成请求失败: {err}")))?;
-        let status = response.status();
-        let provider_payload = response.json::<Value>().await.unwrap_or_else(|_| json!({}));
-        if !status.is_success() {
-            return Err(AppError::bad_request(format!(
-                "图片生成请求失败: HTTP {}",
-                status.as_u16()
-            )));
-        }
-        let Some(result) = parse_media_image_generation_response(&provider_payload) else {
-            return Err(AppError::bad_request("图片生成响应缺少资产 URL"));
-        };
-
-        Ok(ModelMediaImageGenerationResp {
-            provider_payload,
-            asset_url: result.asset_url,
-            provider_asset_id: result.provider_asset_id,
+        send_model_provider_media_image_request(ModelProviderMediaImageRequest {
+            endpoint: route.endpoint(),
+            api_key: route.api_key(),
+            request,
+            timeout: MODEL_MEDIA_IMAGE_TIMEOUT,
         })
+        .await
     }
 
     pub async fn generate_media_image_for_source(
@@ -6389,6 +6367,38 @@ mod tests {
         assert!(!rerank_path.contains("Rerank 模型调用失败: {status}"));
         assert!(!service_source.contains("fn parse_rerank_score("));
         assert!(!service_source.contains("fn parse_embedding_vector("));
+    }
+
+    #[test]
+    fn model_provider_media_transport_adapter_source_contract() {
+        let service_source = include_str!("model_service.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+        let transport_source = include_str!("model_provider_transport.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+        let media_path = &service_source[service_source
+            .find("pub async fn generate_media_image")
+            .unwrap()
+            ..service_source
+                .find("pub async fn generate_media_image_for_source")
+                .unwrap()];
+
+        assert!(service_source.contains("ModelProviderMediaImageRequest"));
+        assert!(service_source.contains("send_model_provider_media_image_request"));
+        assert!(transport_source.contains("pub(super) struct ModelProviderMediaImageRequest"));
+        assert!(transport_source
+            .contains("pub(super) async fn send_model_provider_media_image_request"));
+        assert!(media_path
+            .contains("send_model_provider_media_image_request(ModelProviderMediaImageRequest"));
+        assert!(!media_path.contains("reqwest::Client::builder()"));
+        assert!(!media_path.contains(".post(route.endpoint())"));
+        assert!(!media_path.contains(".bearer_auth(route.api_key())"));
+        assert!(!media_path.contains(".header(\"x-api-key\", route.api_key())"));
+        assert!(!media_path.contains("parse_media_image_generation_response"));
+        assert!(!service_source.contains("parse_media_image_generation_response"));
     }
 
     #[test]
