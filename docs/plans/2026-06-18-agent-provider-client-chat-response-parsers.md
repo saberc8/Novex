@@ -4,6 +4,8 @@
 
 **Goal:** Move provider-neutral chat, stream-completion, response metadata, and Responses compaction parsing from the backend adapter into `novex-provider-client`.
 
+**Status:** Implemented in branch `feat/enterprise-agent-foundation`; pending final full verification and merge at the time this plan was updated.
+
 **Architecture:** `novex-provider-client` owns provider response text reading, JSON-or-SSE chat output parsing, incremental stream completion assembly, response id/status extraction, and Responses compaction output parsing. `backend/src/application/ai/model_provider_transport.rs` remains a compatibility adapter that maps `ModelProviderClientError` into `AppError` and re-exports parser DTOs used by `model_service.rs`. Route resolution, fallback, provider-call leases, trace/eval, Agent events, tenant context, and cost accounting stay in backend.
 
 **Tech Stack:** Rust 2021, Cargo workspace, `reqwest`, `serde_json`, `novex-model`, backend source-contract tests, provider-client crate unit tests, offline cargo verification.

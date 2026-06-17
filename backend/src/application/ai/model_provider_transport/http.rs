@@ -11,7 +11,7 @@ pub(in crate::application::ai) async fn send_model_provider_http_request(
         .map_err(model_provider_client_error_to_app_error)
 }
 
-pub(super) fn model_provider_client_error_to_app_error(
+pub(in crate::application::ai) fn model_provider_client_error_to_app_error(
     error: ModelProviderClientError,
 ) -> AppError {
     match error {

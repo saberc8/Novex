@@ -24,8 +24,9 @@ use sqlx::{FromRow, PgPool};
 use tokio::sync::mpsc;
 
 use super::model_provider_transport::{
-    model_chat_sse_record_data_payload, model_provider_response_id_from_payloads,
-    normalize_model_provider_response_id, parse_model_chat_compaction_provider_output_from_text,
+    model_chat_sse_record_data_payload, model_provider_client_error_to_app_error,
+    model_provider_response_id_from_payloads, normalize_model_provider_response_id,
+    parse_model_chat_compaction_provider_output_from_text,
     parse_model_chat_provider_output_from_body, parse_model_chat_provider_output_from_text,
     parse_model_provider_embedding_vectors, parse_model_provider_rerank_scores,
     read_model_provider_response_text, send_model_provider_embedding_request,
@@ -3245,7 +3246,9 @@ async fn model_chat_streaming_provider_output(
         )?;
     }
 
-    builder.finish()
+    builder
+        .finish()
+        .map_err(model_provider_client_error_to_app_error)
 }
 
 fn model_chat_emit_complete_stream_records(
@@ -6239,6 +6242,11 @@ mod tests {
             .split("#[cfg(test)]")
             .next()
             .unwrap();
+        let provider_client_source =
+            include_str!("../../../../crates/novex-provider-client/src/lib.rs")
+                .split("#[cfg(test)]")
+                .next()
+                .unwrap();
         let route_path = &service_source[service_source
             .find("async fn execute_normalized_chat_completion_with_route")
             .unwrap()
@@ -6249,15 +6257,31 @@ mod tests {
         assert!(service_source.contains("read_model_provider_response_text"));
         assert!(service_source.contains("ModelChatStreamCompletionBuilder"));
         assert!(transport_source.contains("pub(super) async fn read_model_provider_response_text"));
-        assert!(transport_source.contains("pub(super) struct ModelChatProviderOutput"));
-        assert!(transport_source.contains("pub(super) struct ModelChatCompactionProviderOutput"));
-        assert!(transport_source.contains("pub(super) struct ModelChatStreamCompletionBuilder"));
+        assert!(transport_source
+            .contains("novex_provider_client::read_model_provider_response_text(response)"));
+        assert!(transport_source
+            .contains("novex_provider_client::parse_model_chat_provider_output_from_text"));
+        assert!(transport_source.contains(
+            "novex_provider_client::parse_model_chat_compaction_provider_output_from_text"
+        ));
+        assert!(transport_source.contains("model_provider_client_error_to_app_error"));
+        assert!(provider_client_source.contains("pub struct ModelChatProviderOutput"));
+        assert!(provider_client_source.contains("pub struct ModelChatCompactionProviderOutput"));
+        assert!(provider_client_source.contains("pub struct ModelChatStreamCompletionBuilder"));
+        assert!(
+            provider_client_source.contains("pub fn parse_model_chat_provider_output_from_text")
+        );
+        assert!(provider_client_source
+            .contains("pub fn parse_model_chat_compaction_provider_output_from_text"));
         assert!(route_path.contains("read_model_provider_response_text(response).await?"));
         assert!(!route_path.contains("response.text().await.unwrap_or_default()"));
         assert!(!service_source.contains("fn model_chat_provider_output_from_body"));
         assert!(!service_source.contains("fn model_chat_provider_output_from_sse_text"));
         assert!(!service_source.contains("fn model_chat_compaction_provider_output_from_body"));
         assert!(!service_source.contains("fn model_chat_compaction_provider_output_from_sse_text"));
+        assert!(!transport_source.contains("pub(super) struct ModelChatProviderOutput"));
+        assert!(!transport_source.contains("pub(super) struct ModelChatCompactionProviderOutput"));
+        assert!(!transport_source.contains("pub(super) struct ModelChatStreamCompletionBuilder"));
     }
 
     #[test]
@@ -6446,6 +6470,11 @@ mod tests {
             .split("#[cfg(test)]")
             .next()
             .unwrap();
+        let provider_client_source =
+            include_str!("../../../../crates/novex-provider-client/src/lib.rs")
+                .split("#[cfg(test)]")
+                .next()
+                .unwrap();
 
         assert!(model_source.contains("pub struct ModelProviderStreamChunk"));
         assert!(model_source.contains("pub struct ModelEmbeddingVector"));
@@ -6456,7 +6485,8 @@ mod tests {
         assert!(!service_source.contains("pub struct ModelEmbeddingVector"));
         assert!(!service_source.contains("pub struct ModelRerankScore"));
         assert!(!service_source.contains("pub struct ModelMediaImageGenerationResp"));
-        assert!(transport_source.contains("use novex_model::{"));
+        assert!(provider_client_source.contains("use novex_model::{"));
+        assert!(transport_source.contains("pub(super) use novex_provider_client::{"));
         assert!(!transport_source.contains("use super::model_service::{"));
     }
 
@@ -6567,6 +6597,52 @@ mod tests {
     }
 
     #[test]
+    fn provider_client_chat_response_parsers_live_in_provider_client_crate() {
+        let workspace_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("backend manifest should live below workspace root");
+        let source = |path: &str| {
+            std::fs::read_to_string(workspace_root.join(path))
+                .unwrap_or_else(|err| panic!("failed to read {path}: {err}"))
+        };
+        let provider_client_source = source("crates/novex-provider-client/src/lib.rs");
+        let backend_transport_source =
+            source("backend/src/application/ai/model_provider_transport.rs");
+
+        assert!(provider_client_source.contains("pub async fn read_model_provider_response_text"));
+        assert!(provider_client_source.contains("pub struct ModelChatProviderOutput"));
+        assert!(provider_client_source.contains("pub struct ModelChatCompactionProviderOutput"));
+        assert!(provider_client_source.contains("pub struct ModelChatStreamCompletionBuilder"));
+        assert!(
+            provider_client_source.contains("pub fn parse_model_chat_provider_output_from_text")
+        );
+        assert!(
+            provider_client_source.contains("pub fn parse_model_chat_provider_output_from_body")
+        );
+        assert!(provider_client_source
+            .contains("pub fn parse_model_chat_provider_output_from_sse_text"));
+        assert!(provider_client_source
+            .contains("pub fn parse_model_chat_compaction_provider_output_from_text"));
+        assert!(provider_client_source
+            .contains("pub fn parse_model_chat_compaction_provider_output_from_body"));
+        assert!(provider_client_source
+            .contains("pub fn parse_model_chat_compaction_provider_output_from_sse_text"));
+        assert!(provider_client_source.contains("pub fn model_chat_sse_record_data_payload"));
+        assert!(provider_client_source.contains("pub fn model_provider_response_id_from_payloads"));
+        assert!(provider_client_source.contains("pub fn normalize_model_provider_response_id"));
+        assert!(backend_transport_source
+            .contains("novex_provider_client::read_model_provider_response_text(response)"));
+        assert!(backend_transport_source.contains("model_provider_client_error_to_app_error"));
+        assert!(!backend_transport_source.contains("pub(super) struct ModelChatProviderOutput"));
+        assert!(!backend_transport_source
+            .contains("pub(super) struct ModelChatCompactionProviderOutput"));
+        assert!(!backend_transport_source
+            .contains("pub(super) struct ModelChatStreamCompletionBuilder"));
+        assert!(!backend_transport_source.contains("fn model_chat_compaction_output_from_items"));
+        assert!(!backend_transport_source.contains("fn model_chat_answer_from_provider_body"));
+    }
+
+    #[test]
     fn provider_client_http_primitives_live_in_provider_client_crate() {
         let workspace_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
@@ -6649,9 +6725,9 @@ mod tests {
         assert!(provider_client_source.contains("ModelProviderClientError::BadResponse"));
         assert!(provider_client_source.contains("Embedding 模型响应为空"));
         assert!(provider_client_source.contains("Rerank 模型响应为空"));
-        assert!(
-            backend_http_source.contains("pub(super) fn model_provider_client_error_to_app_error")
-        );
+        assert!(backend_http_source.contains(
+            "pub(in crate::application::ai) fn model_provider_client_error_to_app_error"
+        ));
         assert!(backend_rag_source
             .contains("pub(in crate::application::ai) use novex_provider_client::{"));
         assert!(backend_rag_source.contains("ModelProviderEmbeddingRequest"));
@@ -6693,9 +6769,9 @@ mod tests {
         assert!(provider_client_source.contains("model_provider_http_client(request.timeout)"));
         assert!(provider_client_source.contains("Provider native cancel failed"));
         assert!(provider_client_source.contains("ModelProviderClientError::HttpStatus"));
-        assert!(
-            backend_http_source.contains("pub(super) fn model_provider_client_error_to_app_error")
-        );
+        assert!(backend_http_source.contains(
+            "pub(in crate::application::ai) fn model_provider_client_error_to_app_error"
+        ));
         assert!(backend_native_source.contains(
             "pub(in crate::application::ai) use novex_provider_client::ModelProviderNativeCancelRequest",
         ));
@@ -6744,9 +6820,9 @@ mod tests {
         assert!(provider_client_source.contains("图片生成客户端初始化失败"));
         assert!(provider_client_source.contains("图片生成请求失败"));
         assert!(provider_client_source.contains("图片生成响应缺少资产 URL"));
-        assert!(
-            backend_http_source.contains("pub(super) fn model_provider_client_error_to_app_error")
-        );
+        assert!(backend_http_source.contains(
+            "pub(in crate::application::ai) fn model_provider_client_error_to_app_error"
+        ));
         assert!(backend_media_source.contains(
             "pub(in crate::application::ai) use novex_provider_client::ModelProviderMediaImageRequest",
         ));
