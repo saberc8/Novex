@@ -920,6 +920,45 @@ impl AgentService {
         run_id: i64,
         queue_payload: Value,
     ) -> Result<AgentRunResp, AppError> {
+        if let Some(resume_input) = agent_resume_input_from_queue_payload(&queue_payload)? {
+            let run = self.get_run(run_id).await?;
+            let Some(current_status) = parse_run_status_code(&run.status) else {
+                return Err(AppError::conflict(format!("未知 Run 状态: {}", run.status)));
+            };
+            if current_status.is_terminal() || current_status == RunStatus::WaitingApproval {
+                return Ok(run);
+            }
+            if current_status != RunStatus::Running {
+                ensure_agent_run_transition(&run.status, RunStatus::Running)?;
+                self.update_status(AgentStatusUpdate {
+                    user_id,
+                    run_id,
+                    status: run_status_code(RunStatus::Running),
+                    output_payload: Value::Null,
+                    final_output: None,
+                    pause_reason: None,
+                    finished: false,
+                })
+                .await?;
+                self.append_event(
+                    user_id,
+                    run_id,
+                    None,
+                    RunEventKind::StatusChanged,
+                    run_status_code(RunStatus::Running),
+                    json!({
+                        "status": run_status_code(RunStatus::Running),
+                        "executionMode": "queued",
+                        "resumeQueued": true
+                    }),
+                )
+                .await?;
+            }
+            self.execute_resumed_tool_and_finish(user_id, run_id, resume_input)
+                .await?;
+            return self.get_run(run_id).await;
+        }
+
         let command = agent_run_command_from_queue_payload(queue_payload)?;
         let run = self.get_run(run_id).await?;
         let Some(current_status) = parse_run_status_code(&run.status) else {
@@ -2062,6 +2101,42 @@ impl AgentService {
             json!({ "pauseReason": pause.pause_reason }),
         )
         .await?;
+        let requeued = self
+            .repo
+            .requeue_agent_run_for_resume(
+                self.tenant_id,
+                run_id,
+                &agent_resume_queue_payload(&command),
+                user_id,
+                now,
+            )
+            .await?;
+        if requeued > 0 {
+            self.append_event(
+                user_id,
+                run_id,
+                None,
+                RunEventKind::StatusChanged,
+                run_status_code(RunStatus::Resuming),
+                json!({
+                    "status": run_status_code(RunStatus::Resuming),
+                    "executionMode": "queued",
+                    "resumeQueued": true
+                }),
+            )
+            .await?;
+            self.refresh_trace_snapshot(
+                user_id,
+                run_id,
+                json!({
+                    "resumed": true,
+                    "executionMode": "queued",
+                    "resumeQueued": true
+                }),
+            )
+            .await?;
+            return self.get_run(run_id).await;
+        }
         ensure_agent_run_transition(&run_status_code(RunStatus::Resuming), RunStatus::Running)?;
         self.update_status(AgentStatusUpdate {
             user_id,
@@ -2082,6 +2157,18 @@ impl AgentService {
             json!({ "status": run_status_code(RunStatus::Running) }),
         )
         .await?;
+        self.execute_resumed_tool_and_finish(user_id, run_id, command.input)
+            .await?;
+        self.get_run(run_id).await
+    }
+
+    async fn execute_resumed_tool_and_finish(
+        &self,
+        user_id: i64,
+        run_id: i64,
+        resume_input: Value,
+    ) -> Result<(), AppError> {
+        let run = self.get_run(run_id).await?;
         let Some(tool_code) = run.selected_tool_code.as_deref() else {
             return Err(AppError::bad_request("恢复 Run 缺少工具上下文"));
         };
@@ -2093,11 +2180,10 @@ impl AgentService {
             return Err(AppError::NotFound);
         };
 
-        self.execute_tool_and_finish(user_id, run_id, &tool, command.input)
+        self.execute_tool_and_finish(user_id, run_id, &tool, resume_input)
             .await?;
         self.refresh_trace_snapshot(user_id, run_id, json!({ "resumed": true }))
-            .await?;
-        self.get_run(run_id).await
+            .await
     }
 
     pub async fn cancel_run(&self, user_id: i64, run_id: i64) -> Result<AgentRunResp, AppError> {
@@ -4370,6 +4456,32 @@ fn agent_run_command_from_queue_payload(payload: Value) -> Result<AgentRunComman
     normalize_agent_run_command(command)
 }
 
+fn agent_resume_queue_payload(command: &AgentRunResumeCommand) -> Value {
+    json!({
+        "source": "agent.resume_run",
+        "executionMode": "queued",
+        "resume": {
+            "approved": command.approved,
+            "input": command.input
+        }
+    })
+}
+
+fn agent_resume_input_from_queue_payload(payload: &Value) -> Result<Option<Value>, AppError> {
+    if payload.get("source").and_then(Value::as_str) != Some("agent.resume_run") {
+        return Ok(None);
+    }
+    let Some(resume) = payload.get("resume") else {
+        return Err(AppError::bad_request("Agent resume queue payload 无效"));
+    };
+    if resume.get("approved").and_then(Value::as_bool) != Some(true) {
+        return Err(AppError::bad_request(
+            "Agent resume queue payload 未通过审批",
+        ));
+    }
+    Ok(Some(resume.get("input").cloned().unwrap_or(Value::Null)))
+}
+
 fn build_model_loop_tool_router() -> Result<ToolRouter, ToolRouteError> {
     ToolRouter::from_definitions(agent_model_loop_tool_definitions())
 }
@@ -5511,6 +5623,28 @@ mod tests {
         assert!(cancel_run.contains("run_id"));
         assert!(cancel_run.contains("user_id"));
         assert!(cancel_run.contains("now"));
+    }
+
+    #[test]
+    fn agent_queue_resume_requeue_service_returns_after_requeueing_resume() {
+        let source = include_str!("agent_service.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+
+        let resume_run = &source[source.find("pub async fn resume_run").unwrap()
+            ..source.find("pub async fn cancel_run").unwrap()];
+        let execute_queued_run = &source[source.find("pub async fn execute_queued_run").unwrap()
+            ..source.find("async fn create_model_loop_run").unwrap()];
+
+        assert!(source.contains("agent_resume_queue_payload"));
+        assert!(source.contains("agent_resume_input_from_queue_payload"));
+        assert!(source.contains("execute_resumed_tool_and_finish"));
+        assert!(resume_run.contains("requeue_agent_run_for_resume"));
+        assert!(resume_run.contains("\"resumeQueued\""));
+        assert!(resume_run.contains("return self.get_run(run_id).await"));
+        assert!(execute_queued_run.contains("agent_resume_input_from_queue_payload"));
+        assert!(execute_queued_run.contains("execute_resumed_tool_and_finish"));
     }
 
     #[test]

@@ -102,6 +102,11 @@ pub async fn run_agent_queue_tick(
                     .await?;
                 executed += 1;
             }
+            Ok(run) if run.status == "waiting_approval" => {
+                repo.mark_agent_run_queue_waiting_approval(claim.id, 0, Utc::now().naive_utc())
+                    .await?;
+                executed += 1;
+            }
             Ok(_) => {
                 repo.mark_agent_run_queue_succeeded(claim.id, 0, Utc::now().naive_utc())
                     .await?;
@@ -153,6 +158,21 @@ mod tests {
         assert!(source.contains("mark_agent_run_queue_retrying"));
         assert!(source.contains("mark_agent_run_queue_failed"));
         assert!(source.contains("mark_agent_run_queue_cancelled"));
+    }
+
+    #[test]
+    fn agent_queue_resume_requeue_worker_marks_waiting_approval_without_success() {
+        let source = include_str!("agent_queue_runtime.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+
+        assert!(source.contains("run.status == \"waiting_approval\""));
+        assert!(source.contains("mark_agent_run_queue_waiting_approval"));
+        assert!(
+            source.find("run.status == \"waiting_approval\"").unwrap()
+                < source.find("mark_agent_run_queue_succeeded").unwrap()
+        );
     }
 
     #[test]

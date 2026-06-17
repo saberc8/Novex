@@ -12,6 +12,7 @@ pub struct AiAgentRepository {
 pub const AGENT_RUN_QUEUE_STATUS_PENDING: &str = "pending";
 pub const AGENT_RUN_QUEUE_STATUS_RUNNING: &str = "running";
 pub const AGENT_RUN_QUEUE_STATUS_RETRYING: &str = "retrying";
+pub const AGENT_RUN_QUEUE_STATUS_WAITING_APPROVAL: &str = "waiting_approval";
 pub const AGENT_RUN_QUEUE_STATUS_SUCCEEDED: &str = "succeeded";
 pub const AGENT_RUN_QUEUE_STATUS_FAILED: &str = "failed";
 pub const AGENT_RUN_QUEUE_STATUS_CANCELLED: &str = "cancelled";
@@ -518,6 +519,32 @@ RETURNING q.id, q.tenant_id, q.run_id, q.attempt_count, q.max_attempts, q.payloa
         .await
     }
 
+    pub async fn mark_agent_run_queue_waiting_approval(
+        &self,
+        queue_id: i64,
+        user_id: i64,
+        now: NaiveDateTime,
+    ) -> Result<(), AppError> {
+        sqlx::query(
+            r#"
+UPDATE ai_agent_run_queue
+SET queue_status = $2,
+    locked_by = NULL,
+    locked_until = NULL,
+    update_user = $3,
+    update_time = $4
+WHERE id = $1;
+"#,
+        )
+        .bind(queue_id)
+        .bind(AGENT_RUN_QUEUE_STATUS_WAITING_APPROVAL)
+        .bind(user_id)
+        .bind(now)
+        .execute(&self.db)
+        .await?;
+        Ok(())
+    }
+
     pub async fn cancel_agent_run_queue_for_run(
         &self,
         tenant_id: i64,
@@ -544,6 +571,44 @@ WHERE tenant_id = $1
         .bind(run_id)
         .bind(AGENT_RUN_QUEUE_STATUS_CANCELLED)
         .bind("run cancelled before claim")
+        .bind(user_id)
+        .bind(now)
+        .execute(&self.db)
+        .await?;
+        Ok(result.rows_affected())
+    }
+
+    pub async fn requeue_agent_run_for_resume(
+        &self,
+        tenant_id: i64,
+        run_id: i64,
+        payload: &Value,
+        user_id: i64,
+        now: NaiveDateTime,
+    ) -> Result<u64, AppError> {
+        let result = sqlx::query(
+            r#"
+UPDATE ai_agent_run_queue
+SET queue_status = $3,
+    attempt_count = 0,
+    locked_by = NULL,
+    locked_until = NULL,
+    last_error = NULL,
+    payload = $4,
+    queued_at = $6,
+    started_at = NULL,
+    finished_at = NULL,
+    update_user = $5,
+    update_time = $6
+WHERE tenant_id = $1
+  AND run_id = $2
+  AND queue_status IN ('waiting_approval', 'succeeded');
+"#,
+        )
+        .bind(tenant_id)
+        .bind(run_id)
+        .bind(AGENT_RUN_QUEUE_STATUS_PENDING)
+        .bind(payload)
         .bind(user_id)
         .bind(now)
         .execute(&self.db)
@@ -1063,5 +1128,24 @@ mod tests {
         assert!(source.contains("locked_until = NULL"));
         assert!(source.contains("finished_at ="));
         assert!(source.contains("rows_affected"));
+    }
+
+    #[test]
+    fn agent_queue_resume_requeue_repository_tracks_waiting_approval_rows() {
+        let source = include_str!("ai_agent_repository.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+
+        assert!(source.contains("AGENT_RUN_QUEUE_STATUS_WAITING_APPROVAL"));
+        assert!(source.contains("mark_agent_run_queue_waiting_approval"));
+        assert!(source.contains("requeue_agent_run_for_resume"));
+        assert!(source.contains("queue_status = $3"));
+        assert!(source.contains("attempt_count = 0"));
+        assert!(source.contains("payload = $4"));
+        assert!(source.contains("locked_by = NULL"));
+        assert!(source.contains("locked_until = NULL"));
+        assert!(source.contains("finished_at = NULL"));
+        assert!(source.contains("queue_status IN ('waiting_approval', 'succeeded')"));
     }
 }

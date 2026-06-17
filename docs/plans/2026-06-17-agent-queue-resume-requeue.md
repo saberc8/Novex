@@ -4,6 +4,8 @@
 
 **Goal:** Route queued Agent approval resume through `ai_agent_run_queue` so HTTP approval unblocks the run and the worker performs the resumed tool execution.
 
+**Progress 2026-06-17:** Implemented `waiting_approval` queue status, worker waiting-approval marking, resume requeue SQL, queued resume payload parsing, and shared resumed-tool execution.
+
 **Architecture:** Add a non-claimable `waiting_approval` queue status, mark queue rows with that status when queued execution pauses, and requeue the existing row to `pending` from `resume_run`. `execute_queued_run` gets a resume-payload branch that runs the approved tool input using a shared helper.
 
 **Tech Stack:** Rust, SQLx/Postgres, existing Agent service, existing embedded Agent queue worker.
@@ -12,7 +14,7 @@
 
 ### Task 1: Source Contract And Red Tests
 
-Status: Planned.
+Status: Completed.
 
 **Files:**
 - Modify: `backend/src/infrastructure/persistence/ai_agent_repository.rs`
@@ -41,7 +43,7 @@ Expected: FAIL until the status, repository methods, worker branch, and service 
 
 ### Task 2: Repository Queue Status And Requeue
 
-Status: Planned.
+Status: Completed.
 
 **Files:**
 - Modify: `backend/src/infrastructure/persistence/ai_agent_repository.rs`
@@ -71,7 +73,7 @@ cargo test -p backend-rust agent_run_queue --offline
 
 ### Task 3: Worker Waiting-Approval Handling
 
-Status: Planned.
+Status: Completed.
 
 **Files:**
 - Modify: `backend/src/application/ai/agent_queue_runtime.rs`
@@ -95,7 +97,7 @@ cargo test -p backend-rust agent_queue_runtime --offline
 
 ### Task 4: Resume API Requeue And Queued Resume Execution
 
-Status: Planned.
+Status: Completed.
 
 **Files:**
 - Modify: `backend/src/application/ai/agent_service.rs`
@@ -132,7 +134,7 @@ cargo test -p backend-rust agent_queue_runtime --offline
 
 ### Task 5: Docs, Full Verification, Merge
 
-Status: Planned.
+Status: In progress.
 
 **Files:**
 - Modify: `docs/plans/2026-06-16-codex-migration-matrix.md`
@@ -155,4 +157,3 @@ cd apps/codex-app-poc && pnpm test -- src/api/agent.test.ts
 **Step 3: Merge and verify main**
 
 Merge `feat/enterprise-agent-foundation` into `main`, then rerun the same verification commands on `main`.
-
