@@ -34,10 +34,10 @@ use novex_memory::{
 };
 use novex_model::ModelRoutePurpose;
 use novex_tools::{
-    agent_model_loop_tool_definitions, evaluate_tool_execution_policy,
-    parse_media_image_generation_response, ApprovalPolicy, MediaImageGenerationRequest,
-    ToolBatchExecutionMode, ToolBatchPlan, ToolExecutionPolicyDecision, ToolExecutionPolicyInput,
-    ToolKind, ToolRiskLevel, ToolRouteError, ToolRouteErrorKind, ToolRouter,
+    agent_model_loop_tool_definitions, evaluate_tool_execution_policy, ApprovalPolicy,
+    MediaImageGenerationRequest, ToolBatchExecutionMode, ToolBatchPlan,
+    ToolExecutionPolicyDecision, ToolExecutionPolicyInput, ToolKind, ToolRiskLevel, ToolRouteError,
+    ToolRouteErrorKind, ToolRouter,
 };
 use novex_trace::{TraceBundle, TraceEvent, TraceReplaySummary};
 use serde::{Deserialize, Serialize};
@@ -88,7 +88,6 @@ const GITHUB_REPO_SEARCH_TOOL_CODE: &str = "github.repo.search";
 const GITHUB_REPO_READ_TOOL_CODE: &str = "github.repo.read";
 const GITHUB_CONNECTOR_CODE: &str = "github.default";
 const FEISHU_WEBHOOK_TIMEOUT: Duration = Duration::from_secs(10);
-const MEDIA_IMAGE_TIMEOUT: Duration = Duration::from_secs(30);
 const GITHUB_CONNECTOR_TIMEOUT: Duration = Duration::from_secs(15);
 const AGENT_TOOL_IO_TIMEOUT: Duration = Duration::from_secs(45);
 const GUARDIAN_REVIEW_TIMEOUT: Duration = Duration::from_secs(90);
@@ -3693,41 +3692,14 @@ async fn execute_media_image_tool(
         );
     }
 
-    let client = match reqwest::Client::builder()
-        .timeout(MEDIA_IMAGE_TIMEOUT)
-        .build()
-    {
-        Ok(client) => client,
-        Err(err) => {
-            let error = format!("图片生成客户端初始化失败: {err}");
-            return AgentToolExecution::failed(
-                json!({
-                    "dryRun": false,
-                    "toolCode": MEDIA_IMAGE_TOOL_CODE,
-                    "status": "failed",
-                    "provider": provider,
-                    "modelRoute": route_id,
-                    "model": model,
-                    "requestPayload": request_payload,
-                    "error": error,
-                }),
-                error,
-                "Agent failed to generate image.".to_owned(),
-            );
-        }
-    };
-
-    let response = match client
-        .post(&endpoint)
-        .bearer_auth(route.api_key())
-        .header("x-api-key", route.api_key())
-        .json(&request_payload)
-        .send()
+    let response = match model_runtime
+        .expect("model runtime is required after media route resolution")
+        .generate_media_image_for_source(&route, &request, "ai.agent.media.image")
         .await
     {
         Ok(response) => response,
         Err(err) => {
-            let error = format!("图片生成请求失败: {err}");
+            let error = err.to_string();
             return AgentToolExecution::failed(
                 json!({
                     "dryRun": false,
@@ -3744,46 +3716,7 @@ async fn execute_media_image_tool(
             );
         }
     };
-
-    let status = response.status();
-    let provider_payload = response.json::<Value>().await.unwrap_or_else(|_| json!({}));
-    if !status.is_success() {
-        let error = format!("图片生成请求失败: HTTP {}", status.as_u16());
-        return AgentToolExecution::failed(
-            json!({
-                "dryRun": false,
-                "toolCode": MEDIA_IMAGE_TOOL_CODE,
-                "status": "failed",
-                "provider": provider,
-                "modelRoute": route_id,
-                "model": model,
-                "requestPayload": request_payload,
-                "response": provider_payload,
-                "error": error,
-            }),
-            error,
-            "Agent failed to generate image.".to_owned(),
-        );
-    }
-
-    let Some(result) = parse_media_image_generation_response(&provider_payload) else {
-        let error = "图片生成响应缺少资产 URL".to_owned();
-        return AgentToolExecution::failed(
-            json!({
-                "dryRun": false,
-                "toolCode": MEDIA_IMAGE_TOOL_CODE,
-                "status": "failed",
-                "provider": provider,
-                "modelRoute": route_id,
-                "model": model,
-                "requestPayload": request_payload,
-                "response": provider_payload,
-                "error": error,
-            }),
-            error,
-            "Agent failed to generate image.".to_owned(),
-        );
-    };
+    let provider_payload = response.provider_payload;
 
     AgentToolExecution::succeeded(
         json!({
@@ -3793,8 +3726,8 @@ async fn execute_media_image_tool(
             "provider": provider,
             "modelRoute": route_id,
             "model": model,
-            "assetUrl": result.asset_url,
-            "providerAssetId": result.provider_asset_id,
+            "assetUrl": response.asset_url,
+            "providerAssetId": response.provider_asset_id,
             "requestPayload": request_payload,
             "response": provider_payload,
             "message": "Image generated"
