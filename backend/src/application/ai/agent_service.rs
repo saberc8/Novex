@@ -173,6 +173,12 @@ enum ModelLoopFutureAwait<T> {
 }
 
 #[derive(Debug, Clone)]
+struct ModelLoopProviderCompletion<T> {
+    response: T,
+    streamed_tool_call_output: Option<ParsedModelTurnOutput>,
+}
+
+#[derive(Debug, Clone)]
 struct ModelLoopContextCompactionOutcome {
     summary: String,
     strategy: String,
@@ -1144,6 +1150,7 @@ impl AgentService {
             }
 
             let mut model_response = None;
+            let mut streamed_tool_call_output = None;
             for attempt in 1..=model_retry_policy.max_attempts() {
                 let model_call_started = Instant::now();
                 let provider_attempt_kind = if attempt == 1 { "primary" } else { "retry" };
@@ -1182,8 +1189,9 @@ impl AgentService {
                     )
                     .await;
                 match model_call_result {
-                    Ok(ModelLoopFutureAwait::Completed(response)) => {
-                        model_response = Some(response);
+                    Ok(ModelLoopFutureAwait::Completed(completion)) => {
+                        streamed_tool_call_output = completion.streamed_tool_call_output;
+                        model_response = Some(completion.response);
                         break;
                     }
                     Ok(ModelLoopFutureAwait::Cancelled) => {
@@ -1287,9 +1295,8 @@ impl AgentService {
             )
             .await?;
 
-            let parsed = parse_model_turn_output(&model_response.answer).map_err(|err| {
-                AppError::bad_request(format!("Agent 模型输出解析失败: {}", err.message))
-            })?;
+            let parsed =
+                model_loop_parse_turn_output(&model_response, streamed_tool_call_output.as_ref())?;
             let parsed_items = parsed.items.clone();
             let parsed_payload = agent_turn_item_event_payload(&parsed.item);
             if self
@@ -3259,6 +3266,7 @@ struct ModelLoopProviderStreamState {
     tool_call_parser: StreamingModelTurnParser,
     tool_call_detected: bool,
     tool_call_parser_disabled: bool,
+    detected_tool_call_output: Option<ParsedModelTurnOutput>,
 }
 
 impl ModelLoopProviderStreamState {
@@ -3267,6 +3275,7 @@ impl ModelLoopProviderStreamState {
             tool_call_parser: StreamingModelTurnParser::new(),
             tool_call_detected: false,
             tool_call_parser_disabled: false,
+            detected_tool_call_output: None,
         }
     }
 
@@ -3279,6 +3288,7 @@ impl ModelLoopProviderStreamState {
             Ok(StreamingModelTurnParseStatus::Pending) => None,
             Ok(StreamingModelTurnParseStatus::Ready(parsed)) => {
                 self.tool_call_detected = true;
+                self.detected_tool_call_output = Some(parsed.clone());
                 Some(model_stream_tool_call_event_payload(event, &parsed))
             }
             Err(_) => {
@@ -3286,6 +3296,10 @@ impl ModelLoopProviderStreamState {
                 None
             }
         }
+    }
+
+    fn detected_tool_call_output(&self) -> Option<ParsedModelTurnOutput> {
+        self.detected_tool_call_output.clone()
     }
 }
 
@@ -3298,7 +3312,7 @@ async fn await_model_loop_provider_future_or_cancelled_with_delta_events<F, C, T
     user_id: i64,
     run_id: i64,
     future: F,
-) -> Result<ModelLoopFutureAwait<T>, AppError>
+) -> Result<ModelLoopFutureAwait<ModelLoopProviderCompletion<T>>, AppError>
 where
     F: Future<Output = Result<T, AppError>>,
     C: Future<Output = Result<(), AppError>>,
@@ -3327,7 +3341,12 @@ where
                 while let Ok(event) = provider_stream_receiver.try_recv() {
                     drain_model_delta_events(service, user_id, run_id, &mut stream_state, event).await?;
                 }
-                return result.map(ModelLoopFutureAwait::Completed);
+                return result.map(|response| {
+                    ModelLoopFutureAwait::Completed(ModelLoopProviderCompletion {
+                        response,
+                        streamed_tool_call_output: stream_state.detected_tool_call_output(),
+                    })
+                });
             }
         }
     }
@@ -3364,6 +3383,18 @@ async fn drain_model_delta_events(
             .await?;
     }
     Ok(())
+}
+
+fn model_loop_parse_turn_output(
+    response: &ModelChatResp,
+    streamed_tool_call_output: Option<&ParsedModelTurnOutput>,
+) -> Result<ParsedModelTurnOutput, AppError> {
+    if let Some(streamed_tool_call_output) = streamed_tool_call_output {
+        return Ok(streamed_tool_call_output.clone());
+    }
+
+    parse_model_turn_output(&response.answer)
+        .map_err(|err| AppError::bad_request(format!("Agent 模型输出解析失败: {}", err.message)))
 }
 
 async fn execute_agent_tool_io_batch<F, Fut>(
@@ -6925,6 +6956,45 @@ mod tests {
     }
 
     #[test]
+    fn streamed_tool_call_output_is_retained_for_model_loop_decision() {
+        let mut state = ModelLoopProviderStreamState::new();
+        let first = ModelProviderStreamEvent {
+            route_id: "runtime.llm.code_agent".to_owned(),
+            provider: "openai-compatible".to_owned(),
+            model: Some("gpt-compatible".to_owned()),
+            chunk: ModelProviderStreamChunk {
+                index: 0,
+                content: r#"{"type":"tool_"#.to_owned(),
+                provider_event: Some("response.output_text.delta".to_owned()),
+            },
+        };
+        let second = ModelProviderStreamEvent {
+            route_id: "runtime.llm.code_agent".to_owned(),
+            provider: "openai-compatible".to_owned(),
+            model: Some("gpt-compatible".to_owned()),
+            chunk: ModelProviderStreamChunk {
+                index: 1,
+                content: r#"call","callId":"call-1","toolCode":"rag.search","arguments":{"query":"policy"}}"#.to_owned(),
+                provider_event: Some("response.output_text.delta".to_owned()),
+            },
+        };
+
+        assert!(state.observe_tool_call(&first).is_none());
+        assert!(state.observe_tool_call(&second).is_some());
+        let streamed = state
+            .detected_tool_call_output()
+            .expect("streamed parsed tool call should be retained");
+        let expected = AgentTurnItem::tool_call("call-1", "rag.search", json!({"query":"policy"}));
+
+        assert_eq!(streamed.item, expected);
+        assert_eq!(streamed.items, vec![expected]);
+        assert_eq!(
+            streamed.outcome,
+            novex_agent_protocol::TurnOutcome::NeedsFollowUp
+        );
+    }
+
+    #[test]
     fn agent_service_model_loop_attaches_provider_stream_channel() {
         let source = include_str!("agent_service.rs")
             .split("#[cfg(test)]")
@@ -6944,6 +7014,60 @@ mod tests {
         );
         assert!(source.contains("drain_model_delta_events"));
         assert!(source.contains("model_delta_event_payload"));
+    }
+
+    #[test]
+    fn streamed_tool_call_decision_prefers_streamed_parse_over_final_text() {
+        let expected = AgentTurnItem::tool_call("call-1", "rag.search", json!({"query":"policy"}));
+        let streamed = ParsedModelTurnOutput {
+            item: expected.clone(),
+            items: vec![expected.clone()],
+            outcome: novex_agent_protocol::TurnOutcome::NeedsFollowUp,
+        };
+        let response = ModelChatResp {
+            conversation_id: None,
+            answer: "This final text would otherwise parse as a final answer.".to_owned(),
+            route_id: "runtime.llm.code_agent".to_owned(),
+            provider: "openai-compatible".to_owned(),
+            model: Some("gpt-compatible".to_owned()),
+            latency_ms: 42,
+            usage: ModelChatUsage::default(),
+            cost_cents: None,
+            provider_attempts: vec![],
+            provider_call_lease_id: None,
+            provider_response_id: None,
+            provider_response_status: None,
+            provider_delta_chunks: vec![],
+        };
+
+        let parsed = model_loop_parse_turn_output(&response, Some(&streamed)).unwrap();
+
+        assert_eq!(parsed.item, expected);
+        assert_eq!(parsed.items, vec![expected]);
+        assert_eq!(
+            parsed.outcome,
+            novex_agent_protocol::TurnOutcome::NeedsFollowUp
+        );
+    }
+
+    #[test]
+    fn streamed_tool_call_decision_model_loop_uses_provider_completion_contract() {
+        let source = include_str!("agent_service.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+        let model_loop = &source[source
+            .find("async fn execute_model_loop_existing_run")
+            .unwrap()
+            ..source
+                .find("async fn model_loop_context_compaction_outcome")
+                .unwrap()];
+
+        assert!(source.contains("struct ModelLoopProviderCompletion"));
+        assert!(model_loop.contains("completion.streamed_tool_call_output"));
+        assert!(model_loop.contains(
+            "model_loop_parse_turn_output(&model_response, streamed_tool_call_output.as_ref())"
+        ));
     }
 
     #[test]
