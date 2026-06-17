@@ -1162,6 +1162,16 @@ RETURNING id;
         user_id: i64,
         lease_id: i64,
     ) -> Result<ModelProviderCallLeaseCancelResp, AppError> {
+        self.cancel_provider_call_lease_with_response_metadata(user_id, lease_id, None)
+            .await
+    }
+
+    pub async fn cancel_provider_call_lease_with_response_metadata(
+        &self,
+        user_id: i64,
+        lease_id: i64,
+        provider_response_id: Option<&str>,
+    ) -> Result<ModelProviderCallLeaseCancelResp, AppError> {
         if lease_id <= 0 {
             return Err(AppError::bad_request("模型调用租约 ID 不合法"));
         }
@@ -1184,7 +1194,14 @@ RETURNING id;
             }
             None => None,
         };
-        let plan = model_provider_native_cancel_plan(&row, route.as_ref());
+        let plan = match provider_response_id {
+            Some(provider_response_id) => model_provider_native_cancel_plan_with_response_id(
+                &row,
+                route.as_ref(),
+                Some(provider_response_id),
+            ),
+            None => model_provider_native_cancel_plan(&row, route.as_ref()),
+        };
         let started = Instant::now();
         let native_cancel = if plan.supported {
             let route = route
@@ -4027,6 +4044,14 @@ fn model_provider_native_cancel_plan(
     row: &ModelProviderCallLeaseControlRow,
     route: Option<&ModelRuntimeRoute>,
 ) -> ModelProviderNativeCancelPlan {
+    model_provider_native_cancel_plan_with_response_id(row, route, None)
+}
+
+fn model_provider_native_cancel_plan_with_response_id(
+    row: &ModelProviderCallLeaseControlRow,
+    route: Option<&ModelRuntimeRoute>,
+    provider_response_id_override: Option<&str>,
+) -> ModelProviderNativeCancelPlan {
     let provider = route
         .map(|route| route.provider().as_str().to_owned())
         .unwrap_or_else(|| row.provider_type.clone());
@@ -4048,8 +4073,11 @@ fn model_provider_native_cancel_plan(
             message: "unsupported_provider".to_owned(),
         };
     }
-    let provider_response_id =
-        model_provider_response_id_from_payloads(&row.request_payload, &row.response_payload);
+    let provider_response_id = provider_response_id_override
+        .and_then(normalize_model_provider_response_id)
+        .or_else(|| {
+            model_provider_response_id_from_payloads(&row.request_payload, &row.response_payload)
+        });
     let Some(provider_response_id) = provider_response_id else {
         return ModelProviderNativeCancelPlan {
             supported: false,
@@ -4095,12 +4123,15 @@ fn model_provider_response_id_from_payload(payload: &Value) -> Option<String> {
     .into_iter()
     .flatten()
     .filter_map(Value::as_str)
-    .map(str::trim)
-    .filter(|value| {
-        !value.is_empty() && !value.contains('/') && !value.contains('?') && !value.contains('#')
-    })
-    .map(str::to_owned)
-    .next()
+    .find_map(normalize_model_provider_response_id)
+}
+
+fn normalize_model_provider_response_id(value: &str) -> Option<String> {
+    let value = value.trim();
+    if value.is_empty() || value.contains('/') || value.contains('?') || value.contains('#') {
+        return None;
+    }
+    Some(value.to_owned())
 }
 
 fn model_provider_response_status_from_payload(payload: &Value) -> Option<String> {
@@ -8532,6 +8563,25 @@ mod tests {
         assert_eq!(
             plan.endpoint.as_deref(),
             Some("https://llm.internal/v1/responses/resp_123/cancel")
+        );
+    }
+
+    #[test]
+    fn provider_stream_native_cancel_plan_prefers_stream_response_id_override() {
+        let route = openai_compatible_llm_route();
+        let row = test_provider_call_lease_control_row("running", json!({}), json!({}));
+
+        let plan = model_provider_native_cancel_plan_with_response_id(
+            &row,
+            Some(&route),
+            Some("resp_stream_1"),
+        );
+
+        assert!(plan.supported);
+        assert_eq!(plan.provider_response_id.as_deref(), Some("resp_stream_1"));
+        assert_eq!(
+            plan.endpoint.as_deref(),
+            Some("https://llm.internal/v1/responses/resp_stream_1/cancel")
         );
     }
 

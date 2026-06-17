@@ -49,8 +49,8 @@ use tokio::sync::{mpsc, watch};
 use crate::{
     application::ai::model_service::{
         ModelChatCommand, ModelChatCompactionMetadata, ModelChatMessage, ModelChatRequestMetadata,
-        ModelChatResp, ModelChatUsage, ModelProviderCallContext, ModelProviderStreamChunk,
-        ModelProviderStreamEvent, ModelRetryPolicy, ModelRuntimeService,
+        ModelChatResp, ModelChatUsage, ModelProviderCallContext, ModelProviderCallLeaseCancelResp,
+        ModelProviderStreamChunk, ModelProviderStreamEvent, ModelRetryPolicy, ModelRuntimeService,
     },
     application::system::{ensure_max_chars, format_datetime},
     infrastructure::persistence::{
@@ -1214,6 +1214,18 @@ impl AgentService {
                                 "Agent 模型输出解析失败: streamed tool-call early stop missing parsed output",
                             ));
                         }
+                        if matches!(
+                            completion_reason,
+                            ModelLoopProviderCompletionReason::StreamedToolCallDetected
+                        ) {
+                            self.try_cancel_streamed_provider_call(
+                                user_id,
+                                run_id,
+                                provider_call_lease_id,
+                                provider_response_id.as_deref(),
+                            )
+                            .await?;
+                        }
                         let _stream_provider_response_metadata_present = provider_call_lease_id
                             .is_some()
                             || provider_response_id.is_some()
@@ -1958,6 +1970,67 @@ impl AgentService {
         )
         .await?;
         self.get_run(run_id).await
+    }
+
+    async fn try_cancel_streamed_provider_call(
+        &self,
+        user_id: i64,
+        run_id: i64,
+        provider_call_lease_id: Option<i64>,
+        provider_response_id: Option<&str>,
+    ) -> Result<(), AppError> {
+        let Some(provider_call_lease_id) = provider_call_lease_id else {
+            return Ok(());
+        };
+        let Some(provider_response_id) = provider_response_id else {
+            return Ok(());
+        };
+
+        match self
+            .model_runtime
+            .cancel_provider_call_lease_with_response_metadata(
+                user_id,
+                provider_call_lease_id,
+                Some(provider_response_id),
+            )
+            .await
+        {
+            Ok(cancel) => {
+                self.append_event(
+                    user_id,
+                    run_id,
+                    None,
+                    RunEventKind::Thought,
+                    run_status_code(RunStatus::Running),
+                    provider_native_cancel_event_payload(&cancel),
+                )
+                .await?;
+            }
+            Err(err) => {
+                tracing::warn!(
+                    error = %err,
+                    run_id,
+                    provider_call_lease_id,
+                    provider_response_id,
+                    "failed to dispatch streamed provider native cancel"
+                );
+                self.append_event(
+                    user_id,
+                    run_id,
+                    None,
+                    RunEventKind::Thought,
+                    run_status_code(RunStatus::Running),
+                    provider_native_cancel_error_event_payload(
+                        provider_call_lease_id,
+                        Some(provider_response_id),
+                        &err,
+                    ),
+                )
+                .await?;
+            }
+        }
+
+        Ok(())
     }
 
     async fn model_loop_context_compaction_outcome(
@@ -4890,6 +4963,57 @@ fn runtime_cancelled_event_payload(signal: AgentRuntimeCancelSignal) -> Value {
     })
 }
 
+fn provider_native_cancel_event_payload(cancel: &ModelProviderCallLeaseCancelResp) -> Value {
+    let native = &cancel.native_cancel;
+    let mut item = json!({
+        "type": "provider_native_cancel",
+        "providerCallLeaseId": cancel.lease_id,
+        "status": cancel.status,
+        "attempted": native.attempted,
+        "supported": native.supported,
+        "provider": native.provider,
+        "message": native.message,
+    });
+    if let Some(object) = item.as_object_mut() {
+        if let Some(provider_response_id) = native.provider_response_id.as_deref() {
+            object.insert("providerResponseId".to_owned(), json!(provider_response_id));
+        }
+        if let Some(endpoint) = native.endpoint.as_deref() {
+            object.insert("endpoint".to_owned(), json!(endpoint));
+        }
+        if let Some(http_status) = native.http_status {
+            object.insert("httpStatus".to_owned(), json!(http_status));
+        }
+    }
+
+    json!({
+        "runtimeMode": "model_loop",
+        "item": item
+    })
+}
+
+fn provider_native_cancel_error_event_payload(
+    provider_call_lease_id: i64,
+    provider_response_id: Option<&str>,
+    error: &AppError,
+) -> Value {
+    let mut item = json!({
+        "type": "provider_native_cancel_error",
+        "providerCallLeaseId": provider_call_lease_id,
+        "message": model_inference_error_message(error),
+    });
+    if let Some(object) = item.as_object_mut() {
+        if let Some(provider_response_id) = provider_response_id {
+            object.insert("providerResponseId".to_owned(), json!(provider_response_id));
+        }
+    }
+
+    json!({
+        "runtimeMode": "model_loop",
+        "item": item
+    })
+}
+
 fn model_inference_event_payload(response: &ModelChatResp) -> Value {
     let fallback_route_id = response
         .provider_attempts
@@ -5812,7 +5936,12 @@ fn trace_event_from_run_event(event: &RunEventRecord) -> Option<TraceEvent> {
 fn is_model_inference_trace_item(item_type: &str) -> bool {
     matches!(
         item_type,
-        "model_inference" | "model_inference_error" | "model_delta" | "model_stream_tool_call"
+        "model_inference"
+            | "model_inference_error"
+            | "model_delta"
+            | "model_stream_tool_call"
+            | "provider_native_cancel"
+            | "provider_native_cancel_error"
     )
 }
 
@@ -7049,7 +7178,7 @@ mod tests {
             route_id: "runtime.llm.code_agent".to_owned(),
             provider: "openai-compatible".to_owned(),
             model: Some("gpt-compatible".to_owned()),
-            provider_call_lease_id: None,
+            provider_call_lease_id: Some(4242),
             provider_response_id: Some("resp_stream_1".to_owned()),
             provider_response_status: Some("in_progress".to_owned()),
             chunk: ModelProviderStreamChunk {
@@ -7095,7 +7224,7 @@ mod tests {
             route_id: "runtime.llm.code_agent".to_owned(),
             provider: "openai-compatible".to_owned(),
             model: Some("gpt-compatible".to_owned()),
-            provider_call_lease_id: None,
+            provider_call_lease_id: Some(4242),
             provider_response_id: None,
             provider_response_status: None,
             chunk: ModelProviderStreamChunk {
@@ -7108,7 +7237,7 @@ mod tests {
             route_id: "runtime.llm.code_agent".to_owned(),
             provider: "openai-compatible".to_owned(),
             model: Some("gpt-compatible".to_owned()),
-            provider_call_lease_id: None,
+            provider_call_lease_id: Some(4242),
             provider_response_id: None,
             provider_response_status: None,
             chunk: ModelProviderStreamChunk {
@@ -7147,7 +7276,7 @@ mod tests {
             route_id: "runtime.llm.code_agent".to_owned(),
             provider: "openai-compatible".to_owned(),
             model: Some("gpt-compatible".to_owned()),
-            provider_call_lease_id: None,
+            provider_call_lease_id: Some(4242),
             provider_response_id: Some("resp_stream_1".to_owned()),
             provider_response_status: Some("in_progress".to_owned()),
             chunk: ModelProviderStreamChunk {
@@ -7323,7 +7452,7 @@ mod tests {
             route_id: "runtime.llm.code_agent".to_owned(),
             provider: "openai-compatible".to_owned(),
             model: Some("gpt-compatible".to_owned()),
-            provider_call_lease_id: None,
+            provider_call_lease_id: Some(4242),
             provider_response_id: Some("resp_stream_1".to_owned()),
             provider_response_status: Some("in_progress".to_owned()),
             chunk: ModelProviderStreamChunk {
@@ -7336,7 +7465,7 @@ mod tests {
             route_id: "runtime.llm.code_agent".to_owned(),
             provider: "openai-compatible".to_owned(),
             model: Some("gpt-compatible".to_owned()),
-            provider_call_lease_id: None,
+            provider_call_lease_id: Some(4242),
             provider_response_id: Some("resp_stream_1".to_owned()),
             provider_response_status: Some("in_progress".to_owned()),
             chunk: ModelProviderStreamChunk {
@@ -7358,6 +7487,7 @@ mod tests {
             completion.completion_reason,
             ModelLoopProviderCompletionReason::StreamedToolCallDetected
         );
+        assert_eq!(completion.provider_call_lease_id, Some(4242));
         assert_eq!(
             completion.provider_response_id.as_deref(),
             Some("resp_stream_1")
@@ -7373,6 +7503,26 @@ mod tests {
                 .item,
             expected
         );
+    }
+
+    #[test]
+    fn provider_stream_native_cancel_source_contract_dispatches_after_early_stop() {
+        let source = include_str!("agent_service.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+        let model_loop = &source[source
+            .find("async fn execute_model_loop_existing_run")
+            .unwrap()
+            ..source
+                .find("async fn model_loop_context_compaction_outcome")
+                .unwrap()];
+
+        assert!(model_loop.contains("try_cancel_streamed_provider_call("));
+        assert!(source.contains("async fn try_cancel_streamed_provider_call"));
+        assert!(source.contains("cancel_provider_call_lease_with_response_metadata"));
+        assert!(source.contains("provider_native_cancel_event_payload"));
+        assert!(source.contains("provider_native_cancel_error_event_payload"));
     }
 
     #[test]
