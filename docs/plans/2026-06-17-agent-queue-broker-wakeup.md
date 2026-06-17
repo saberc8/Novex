@@ -4,7 +4,7 @@
 
 **Goal:** Add an Agent-specific RabbitMQ wake-up message contract and publisher abstraction while keeping Postgres as the Agent queue source of truth.
 
-**Progress 2026-06-17:** Implemented Agent RabbitMQ config/message/client types, AppConfig topology mapping, Agent queue wake-up message builder, publisher trait, fake-publisher tests, and local env/compose wiring for the Agent topology.
+**Progress 2026-06-17:** Implemented Agent RabbitMQ config/message/client types, AppConfig topology mapping, Agent queue wake-up message builder, publisher trait, fake-publisher tests, and local env/compose wiring for the Agent topology. Full feature-branch verification passed before merge.
 
 **Architecture:** Reuse the existing RabbitMQ infrastructure shape from scheduler/parser. Add Agent RabbitMQ config/message/client types, map app config into that topology from `agent_queue_runtime`, and add a fake-publisher-tested wake-up message builder for queued run rows.
 
@@ -115,7 +115,7 @@ cargo test -p backend-rust rabbitmq --offline
 
 ### Task 4: Docs, Full Verification, Merge
 
-Status: In progress.
+Status: Completed.
 
 **Files:**
 - Modify: `docs/plans/2026-06-16-codex-migration-matrix.md`
