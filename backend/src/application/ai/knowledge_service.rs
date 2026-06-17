@@ -2873,7 +2873,10 @@ async fn enrich_chunk_records_with_runtime_embeddings(
         .iter()
         .map(|record| record.semantic_search_text.clone())
         .collect::<Vec<_>>();
-    match ModelRuntimeService::embed_texts(&route, &texts).await {
+    match model_runtime
+        .embed_texts_for_source(&route, &texts, "ai.knowledge.embedding")
+        .await
+    {
         Ok(vectors) => {
             apply_embedding_vectors_to_chunk_records(
                 records,
@@ -3160,7 +3163,12 @@ async fn runtime_query_embedding(
         .resolve_route_for_purpose(ModelRoutePurpose::Embedding)
         .await
         .ok()??;
-    let mut vectors = ModelRuntimeService::embed_texts(&route, &[question.to_owned()])
+    let mut vectors = model_runtime
+        .embed_texts_for_source(
+            &route,
+            &[question.to_owned()],
+            "ai.knowledge.query_embedding",
+        )
         .await
         .ok()?;
     vectors.sort_by_key(|vector| vector.index);
@@ -4136,7 +4144,10 @@ async fn rerank_dataset_hits(
     };
     let documents = hits.iter().map(rerank_document_text).collect::<Vec<_>>();
 
-    let reranked = match ModelRuntimeService::rerank_documents(&route, question, &documents).await {
+    let reranked = match model_runtime
+        .rerank_documents_for_source(&route, question, &documents, "ai.knowledge.rerank")
+        .await
+    {
         Ok(scores) if !scores.is_empty() => rerank_retrieval_hits(&hits, &scores, limit),
         Ok(_) if strict => return Err(AppError::bad_request("Rerank 模型响应为空")),
         Err(err) if strict => return Err(err),

@@ -1,6 +1,7 @@
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     env,
+    future::Future,
     sync::{Mutex, OnceLock},
     time::{Duration, Instant},
 };
@@ -1463,6 +1464,42 @@ ORDER BY r.priority ASC, r.id ASC;
         Ok(vectors)
     }
 
+    pub async fn embed_texts_for_source(
+        &self,
+        route: &ModelRuntimeRoute,
+        texts: &[String],
+        source: &str,
+    ) -> Result<Vec<ModelEmbeddingVector>, AppError> {
+        if texts.is_empty() {
+            return Ok(Vec::new());
+        }
+        let input_char_count = texts.iter().map(|text| text.chars().count()).sum::<usize>();
+        let request_payload = json!({
+            "inputCount": texts.len(),
+            "inputCharCount": input_char_count,
+        });
+        self.execute_provider_call_with_lease(
+            MODEL_RUNTIME_SYSTEM_USER_ID,
+            route,
+            ModelRoutePurpose::Embedding,
+            "embedding",
+            source,
+            request_payload,
+            || async { Self::embed_texts(route, texts).await },
+            |vectors: &Vec<ModelEmbeddingVector>, latency_ms| {
+                json!({
+                    "routeId": route.route_id(),
+                    "provider": route.provider().as_str(),
+                    "model": route.model(),
+                    "latencyMs": u128_to_i64(latency_ms),
+                    "vectorCount": vectors.len(),
+                    "dimension": vectors.first().map(|vector| vector.vector.len()),
+                })
+            },
+        )
+        .await
+    }
+
     pub async fn rerank_documents(
         route: &ModelRuntimeRoute,
         query: &str,
@@ -1498,6 +1535,122 @@ ORDER BY r.priority ASC, r.id ASC;
             return Err(AppError::bad_request("Rerank 模型响应为空"));
         }
         Ok(scores)
+    }
+
+    pub async fn rerank_documents_for_source(
+        &self,
+        route: &ModelRuntimeRoute,
+        query: &str,
+        documents: &[String],
+        source: &str,
+    ) -> Result<Vec<ModelRerankScore>, AppError> {
+        if documents.is_empty() {
+            return Ok(Vec::new());
+        }
+        let request_payload = json!({
+            "queryCharCount": query.chars().count(),
+            "documentCount": documents.len(),
+            "documentCharCount": documents.iter().map(|document| document.chars().count()).sum::<usize>(),
+        });
+        self.execute_provider_call_with_lease(
+            MODEL_RUNTIME_SYSTEM_USER_ID,
+            route,
+            ModelRoutePurpose::Rerank,
+            "rerank",
+            source,
+            request_payload,
+            || async { Self::rerank_documents(route, query, documents).await },
+            |scores: &Vec<ModelRerankScore>, latency_ms| {
+                json!({
+                    "routeId": route.route_id(),
+                    "provider": route.provider().as_str(),
+                    "model": route.model(),
+                    "latencyMs": u128_to_i64(latency_ms),
+                    "scoreCount": scores.len(),
+                })
+            },
+        )
+        .await
+    }
+
+    async fn execute_provider_call_with_lease<T, Fut, F, P>(
+        &self,
+        user_id: i64,
+        route: &ModelRuntimeRoute,
+        purpose: ModelRoutePurpose,
+        request_kind: &'static str,
+        source: &str,
+        request_payload: Value,
+        call: F,
+        response_payload: P,
+    ) -> Result<T, AppError>
+    where
+        F: FnOnce() -> Fut,
+        Fut: Future<Output = Result<T, AppError>>,
+        P: FnOnce(&T, u128) -> Value,
+    {
+        let lease_owner = model_provider_call_lease_owner();
+        let started_at = Utc::now().naive_utc();
+        let record = model_provider_call_lease_record_from_provider_request(
+            self.tenant_id,
+            user_id,
+            &lease_owner,
+            route,
+            purpose,
+            request_kind,
+            source,
+            "primary",
+            request_payload,
+            started_at,
+        );
+        let lease_id = begin_model_provider_call_lease(&self.db, &record).await?;
+        let heartbeat = start_model_provider_call_lease_heartbeat(
+            self.db.clone(),
+            self.tenant_id,
+            lease_id,
+            user_id,
+        );
+        let started = Instant::now();
+        let result = call().await;
+        let latency_ms = started.elapsed().as_millis();
+        let completed_at = Utc::now().naive_utc();
+        heartbeat.stop().await;
+
+        match result {
+            Ok(output) => {
+                let completion = model_provider_call_lease_completion_from_provider_payload(
+                    response_payload(&output, latency_ms),
+                    latency_ms,
+                    completed_at,
+                );
+                if let Err(err) =
+                    complete_model_provider_call_lease(&self.db, lease_id, user_id, &completion)
+                        .await
+                {
+                    tracing::warn!(
+                        error = %err,
+                        lease_id,
+                        "failed to complete provider call lease"
+                    );
+                }
+                Ok(output)
+            }
+            Err(err) => {
+                let completion =
+                    model_provider_call_lease_completion_from_error(&err, latency_ms, completed_at);
+                if let Err(complete_err) =
+                    complete_model_provider_call_lease(&self.db, lease_id, user_id, &completion)
+                        .await
+                {
+                    tracing::warn!(
+                        error = %complete_err,
+                        lease_id,
+                        "failed to complete failed provider call lease"
+                    );
+                }
+                Err(err)
+            }
+        }
     }
 
     pub async fn registry_summary(db: &PgPool) -> Result<ModelRegistrySummary, AppError> {
@@ -2962,8 +3115,69 @@ fn model_provider_call_lease_record_from_command(
     }
 }
 
+fn model_provider_call_lease_record_from_provider_request(
+    tenant_id: i64,
+    user_id: i64,
+    lease_owner: &str,
+    route: &ModelRuntimeRoute,
+    route_purpose: ModelRoutePurpose,
+    request_kind: &str,
+    source: &str,
+    attempt_kind: &str,
+    request_payload: Value,
+    started_at: NaiveDateTime,
+) -> ModelProviderCallLeaseRecord {
+    ModelProviderCallLeaseRecord {
+        id: next_id(),
+        tenant_id,
+        user_id,
+        run_id: None,
+        route_code: route.route_id().to_owned(),
+        route_purpose: route_purpose.as_str().to_owned(),
+        provider_type: route.provider().as_str().to_owned(),
+        model_name: route.model().map(str::to_owned),
+        request_kind: request_kind.to_owned(),
+        source: source.trim().to_owned(),
+        attempt_kind: attempt_kind.trim().to_owned(),
+        status: "running".to_owned(),
+        lease_owner: lease_owner.to_owned(),
+        lease_expires_at: model_provider_call_lease_expiry_from_heartbeat(started_at),
+        heartbeat_at: started_at,
+        started_at,
+        request_payload: model_provider_call_lease_provider_request_payload(
+            route,
+            request_kind,
+            source,
+            attempt_kind,
+            request_payload,
+        ),
+    }
+}
+
 fn model_provider_call_lease_expiry_from_heartbeat(heartbeat_at: NaiveDateTime) -> NaiveDateTime {
     heartbeat_at + chrono::Duration::seconds(MODEL_PROVIDER_CALL_LEASE_SECONDS)
+}
+
+fn model_provider_call_lease_provider_request_payload(
+    route: &ModelRuntimeRoute,
+    request_kind: &str,
+    source: &str,
+    attempt_kind: &str,
+    request_payload: Value,
+) -> Value {
+    let mut payload = serde_json::Map::new();
+    payload.insert("routeId".to_owned(), json!(route.route_id()));
+    payload.insert("provider".to_owned(), json!(route.provider().as_str()));
+    payload.insert("model".to_owned(), json!(route.model()));
+    payload.insert("requestKind".to_owned(), json!(request_kind));
+    payload.insert("source".to_owned(), json!(source));
+    payload.insert("attemptKind".to_owned(), json!(attempt_kind));
+    if let Value::Object(extra) = request_payload {
+        for (key, value) in extra {
+            payload.insert(key, value);
+        }
+    }
+    Value::Object(payload)
 }
 
 fn model_provider_call_lease_request_payload(
@@ -3060,6 +3274,26 @@ fn model_provider_call_lease_completion_from_error(
             "message": model_provider_error_message(error),
             "latencyMs": u128_to_i64(latency_ms),
         }),
+    }
+}
+
+fn model_provider_call_lease_completion_from_provider_payload(
+    response_payload: Value,
+    latency_ms: u128,
+    completed_at: NaiveDateTime,
+) -> ModelProviderCallLeaseCompletion {
+    ModelProviderCallLeaseCompletion {
+        status: "succeeded".to_owned(),
+        completed_at,
+        latency_ms: u128_to_i64(latency_ms),
+        prompt_tokens: 0,
+        completion_tokens: 0,
+        total_tokens: 0,
+        cost_cents: None,
+        error_kind: None,
+        http_status: None,
+        error_message: None,
+        response_payload,
     }
 }
 
@@ -5381,6 +5615,75 @@ mod tests {
     }
 
     #[test]
+    fn provider_call_lease_record_maps_embedding_provider_request() {
+        let route = embedding_route();
+        let now =
+            NaiveDateTime::parse_from_str("2026-06-17 10:00:00", "%Y-%m-%d %H:%M:%S").unwrap();
+
+        let record = model_provider_call_lease_record_from_provider_request(
+            42,
+            99,
+            "worker-a",
+            &route,
+            ModelRoutePurpose::Embedding,
+            "embedding",
+            "ai.knowledge.embedding",
+            "primary",
+            json!({
+                "inputCount": 2,
+                "inputCharCount": 128,
+            }),
+            now,
+        );
+
+        assert_eq!(record.tenant_id, 42);
+        assert_eq!(record.run_id, None);
+        assert_eq!(record.route_code, "runtime.embedding");
+        assert_eq!(record.route_purpose, "embedding");
+        assert_eq!(record.provider_type, "dash-scope");
+        assert_eq!(record.model_name.as_deref(), Some("text-embedding-v4"));
+        assert_eq!(record.request_kind, "embedding");
+        assert_eq!(record.source, "ai.knowledge.embedding");
+        assert_eq!(record.attempt_kind, "primary");
+        assert_eq!(record.request_payload["requestKind"], "embedding");
+        assert_eq!(record.request_payload["inputCount"], 2);
+        assert!(!record.request_payload.to_string().contains("sk-fake"));
+    }
+
+    #[test]
+    fn provider_call_lease_source_contract_wraps_embedding_and_rerank_calls() {
+        let model_source = include_str!("model_service.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+        let embedding_method = &model_source[model_source
+            .find("pub async fn embed_texts_for_source")
+            .unwrap()
+            ..model_source.find("pub async fn rerank_documents").unwrap()];
+        let rerank_method = &model_source[model_source
+            .find("pub async fn rerank_documents_for_source")
+            .unwrap()
+            ..model_source
+                .find("async fn execute_provider_call_with_lease")
+                .unwrap()];
+        let knowledge_source = include_str!("knowledge_service.rs");
+
+        assert!(model_source.contains("embed_texts_for_source"));
+        assert!(model_source.contains("rerank_documents_for_source"));
+        assert!(embedding_method.contains("ModelRoutePurpose::Embedding"));
+        assert!(embedding_method.contains("\"embedding\""));
+        assert!(rerank_method.contains("ModelRoutePurpose::Rerank"));
+        assert!(rerank_method.contains("\"rerank\""));
+        assert!(model_source.contains("model_provider_call_lease_record_from_provider_request"));
+        assert!(model_source.contains("begin_model_provider_call_lease(&self.db"));
+        assert!(model_source.contains("complete_model_provider_call_lease(&self.db"));
+        assert!(knowledge_source.contains(".embed_texts_for_source("));
+        assert!(knowledge_source.contains(".rerank_documents_for_source("));
+        assert!(!knowledge_source.contains("ModelRuntimeService::embed_texts(&route"));
+        assert!(!knowledge_source.contains("ModelRuntimeService::rerank_documents(&route"));
+    }
+
+    #[test]
     fn provider_call_lease_controls_query_normalizes_status_run_and_limit() {
         let query = normalize_provider_call_lease_query(ModelProviderCallLeaseQuery {
             status: Some(" RUNNING ".to_owned()),
@@ -7207,6 +7510,22 @@ mod tests {
             "sk-fake-private-secret-0001",
             vec![ModelRoutePurpose::CodeAgent],
             vec!["LLM_PRIVATE_KEY".to_owned()],
+        )
+        .unwrap()
+    }
+
+    fn embedding_route() -> ModelRuntimeRoute {
+        ModelRuntimeRoute::new(
+            "runtime.embedding",
+            ModelRuntimeTarget::Embedding,
+            ModelKind::Embedding,
+            ModelProviderType::DashScope,
+            Some("text-embedding-v4".to_owned()),
+            "https://dashscope.aliyuncs.com/compatible-mode/v1",
+            "https://dashscope.aliyuncs.com/compatible-mode/v1/embeddings",
+            "sk-fake-embedding-secret-ffff",
+            vec![ModelRoutePurpose::Embedding],
+            vec!["EMBEDDING_API_KEY".to_owned()],
         )
         .unwrap()
     }
