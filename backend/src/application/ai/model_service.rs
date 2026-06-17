@@ -2650,6 +2650,14 @@ async fn execute_normalized_chat_completion_with_route(
                 conversation_id,
             )
         }
+        ModelChatProviderTransport::ResponsesCompactUnary => {
+            model_chat_response_from_responses_compaction_text(
+                route,
+                &body_text,
+                started.elapsed().as_millis(),
+                conversation_id,
+            )
+        }
     }
 }
 
@@ -2735,6 +2743,7 @@ fn normalize_optional_runtime_route_id(
 enum ModelChatProviderTransport {
     ChatCompletions,
     ResponsesCompactionV2,
+    ResponsesCompactUnary,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -2748,15 +2757,17 @@ fn model_chat_provider_request(
     route: &ModelRuntimeRoute,
     command: &ModelChatCommand,
 ) -> ModelChatProviderRequest {
-    if model_chat_route_supports_responses_compaction(route)
-        && matches!(
-            command
-                .request_metadata
-                .as_ref()
-                .map(|metadata| metadata.request_kind),
-            Some(ModelChatRequestKind::Compaction)
-        )
-    {
+    if model_chat_route_supports_responses_compaction(route) && model_chat_is_compaction(command) {
+        if matches!(
+            model_chat_compaction_implementation(command),
+            Some("responses_compaction_unary")
+        ) {
+            return ModelChatProviderRequest {
+                endpoint: model_chat_responses_compact_unary_endpoint(route),
+                payload: model_chat_responses_compact_unary_payload(route, command),
+                transport: ModelChatProviderTransport::ResponsesCompactUnary,
+            };
+        }
         return ModelChatProviderRequest {
             endpoint: model_chat_responses_compaction_endpoint(route),
             payload: model_chat_responses_compaction_payload(route, command),
@@ -2771,6 +2782,24 @@ fn model_chat_provider_request(
     }
 }
 
+fn model_chat_is_compaction(command: &ModelChatCommand) -> bool {
+    matches!(
+        command
+            .request_metadata
+            .as_ref()
+            .map(|metadata| metadata.request_kind),
+        Some(ModelChatRequestKind::Compaction)
+    )
+}
+
+fn model_chat_compaction_implementation(command: &ModelChatCommand) -> Option<&str> {
+    command
+        .request_metadata
+        .as_ref()
+        .and_then(|metadata| metadata.compaction.as_ref())
+        .map(|compaction| compaction.implementation.as_str())
+}
+
 fn model_chat_route_supports_responses_compaction(route: &ModelRuntimeRoute) -> bool {
     matches!(
         route.provider(),
@@ -2780,6 +2809,10 @@ fn model_chat_route_supports_responses_compaction(route: &ModelRuntimeRoute) -> 
 
 fn model_chat_responses_compaction_endpoint(route: &ModelRuntimeRoute) -> String {
     join_model_endpoint(route.base_url(), Some("responses"))
+}
+
+fn model_chat_responses_compact_unary_endpoint(route: &ModelRuntimeRoute) -> String {
+    join_model_endpoint(route.base_url(), Some("responses/compact"))
 }
 
 fn model_chat_responses_compaction_payload(
@@ -2795,6 +2828,22 @@ fn model_chat_responses_compaction_payload(
         "temperature": command.temperature.unwrap_or(DEFAULT_MODEL_CHAT_TEMPERATURE),
         "max_output_tokens": command.max_tokens.unwrap_or(DEFAULT_MODEL_CHAT_MAX_TOKENS),
         "stream": true,
+    });
+    if let Some(metadata) = model_chat_provider_metadata(route, command) {
+        payload["metadata"] = metadata;
+    }
+    payload
+}
+
+fn model_chat_responses_compact_unary_payload(
+    route: &ModelRuntimeRoute,
+    command: &ModelChatCommand,
+) -> Value {
+    let mut payload = json!({
+        "model": route.model().unwrap_or_default(),
+        "input": model_chat_message_input_items(command),
+        "tools": [],
+        "parallel_tool_calls": false,
     });
     if let Some(metadata) = model_chat_provider_metadata(route, command) {
         payload["metadata"] = metadata;
@@ -6998,6 +7047,65 @@ mod tests {
     }
 
     #[test]
+    fn provider_compact_unary_uses_responses_compact_endpoint_for_unary_implementation() {
+        let route = openai_compatible_llm_route();
+        let command = test_unary_compaction_chat_command();
+
+        let request = model_chat_provider_request(&route, &command);
+
+        assert_eq!(
+            request.transport,
+            ModelChatProviderTransport::ResponsesCompactUnary
+        );
+        assert_eq!(
+            request.endpoint,
+            "https://llm.internal/v1/responses/compact"
+        );
+        assert_eq!(request.payload["model"], route.model().unwrap());
+        assert!(request.payload.get("stream").is_none());
+        assert_eq!(request.payload["metadata"]["request_kind"], "compaction");
+        assert_eq!(
+            request.payload["metadata"]["compaction_implementation"],
+            "responses_compaction_unary"
+        );
+        assert_ne!(
+            request
+                .payload
+                .get("input")
+                .and_then(Value::as_array)
+                .and_then(|items| items.last())
+                .and_then(|item| item.get("type"))
+                .and_then(Value::as_str),
+            Some("compaction_trigger")
+        );
+    }
+
+    #[test]
+    fn provider_compact_unary_keeps_v2_responses_trigger_transport() {
+        let route = openai_compatible_llm_route();
+        let command = test_compaction_chat_command();
+
+        let request = model_chat_provider_request(&route, &command);
+
+        assert_eq!(
+            request.transport,
+            ModelChatProviderTransport::ResponsesCompactionV2
+        );
+        assert_eq!(request.endpoint, "https://llm.internal/v1/responses");
+        assert_eq!(request.payload["stream"], true);
+        assert_eq!(
+            request
+                .payload
+                .get("input")
+                .and_then(Value::as_array)
+                .and_then(|items| items.last())
+                .and_then(|item| item.get("type"))
+                .and_then(Value::as_str),
+            Some("compaction_trigger")
+        );
+    }
+
+    #[test]
     fn provider_compact_transport_keeps_chat_completions_for_unsupported_provider() {
         let route = llm_test_config()
             .route(ModelRuntimeTarget::Llm)
@@ -7114,6 +7222,29 @@ mod tests {
         );
 
         assert!(model_chat_compaction_output_from_sse_text(sse).is_err());
+    }
+
+    #[test]
+    fn provider_compact_unary_reuses_json_compaction_response_parser() {
+        let route = openai_compatible_llm_route();
+        let body = json!({
+            "output": [
+                { "type": "compaction", "encrypted_content": "unary compact summary" }
+            ],
+            "usage": {
+                "input_tokens": 21,
+                "output_tokens": 4,
+                "total_tokens": 25
+            }
+        });
+
+        let response =
+            model_chat_response_from_responses_compaction_body(&route, body, 55, None).unwrap();
+
+        assert_eq!(response.answer, "unary compact summary");
+        assert_eq!(response.usage.prompt_tokens, Some(21));
+        assert_eq!(response.usage.completion_tokens, Some(4));
+        assert_eq!(response.usage.total_tokens, Some(25));
     }
 
     #[test]
@@ -7728,6 +7859,14 @@ mod tests {
         })
     }
 
+    fn test_unary_compaction_request_metadata() -> ModelChatRequestMetadata {
+        let mut metadata = test_compaction_request_metadata();
+        if let Some(compaction) = &mut metadata.compaction {
+            compaction.implementation = "responses_compaction_unary".to_owned();
+        }
+        metadata
+    }
+
     fn test_compaction_chat_command() -> ModelChatCommand {
         normalize_model_chat_command(ModelChatCommand {
             messages: vec![
@@ -7744,6 +7883,14 @@ mod tests {
             max_tokens: Some(512),
             request_metadata: Some(test_compaction_request_metadata()),
             ..ModelChatCommand::default()
+        })
+        .unwrap()
+    }
+
+    fn test_unary_compaction_chat_command() -> ModelChatCommand {
+        normalize_model_chat_command(ModelChatCommand {
+            request_metadata: Some(test_unary_compaction_request_metadata()),
+            ..test_compaction_chat_command()
         })
         .unwrap()
     }
