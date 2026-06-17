@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use novex_ai_core::FoundationModule;
 use novex_trace::{TraceBundle, TraceEventKind};
@@ -226,6 +226,21 @@ impl EvalCaseCandidate {
                 json!(inference_summary.delta_text_length),
             );
             tags.insert("streamingModelOutput".to_owned(), json!(true));
+        }
+        if inference_summary.streaming_tool_call_count > 0 {
+            tags.insert("streamingToolCallDetected".to_owned(), json!(true));
+            tags.insert(
+                "streamingToolCallCount".to_owned(),
+                json!(inference_summary.streaming_tool_call_count),
+            );
+            tags.insert(
+                "streamingToolCodes".to_owned(),
+                json!(inference_summary
+                    .streaming_tool_codes
+                    .iter()
+                    .cloned()
+                    .collect::<Vec<_>>()),
+            );
         }
         if inference_summary.fallback_count > 0 {
             tags.insert(
@@ -846,6 +861,8 @@ struct TraceInferenceSummary {
     provider_attempt_count: usize,
     delta_count: usize,
     delta_text_length: usize,
+    streaming_tool_call_count: usize,
+    streaming_tool_codes: BTreeSet<String>,
     fallback_count: usize,
     circuit_open_count: usize,
     fallback_route_id: Option<String>,
@@ -877,6 +894,22 @@ fn trace_inference_summary(bundle: &TraceBundle) -> TraceInferenceSummary {
             summary.delta_text_length += trace_value_raw_text(payload.get("content"))
                 .map(|content| content.chars().count())
                 .unwrap_or_default();
+        }
+        if inference_type.as_deref() == Some("model_stream_tool_call") {
+            let tool_calls = payload.get("toolCalls").and_then(Value::as_array);
+            let tool_call_count = trace_value_i64(payload.get("toolCallCount"))
+                .filter(|count| *count > 0)
+                .map(|count| count as usize)
+                .or_else(|| tool_calls.map(Vec::len))
+                .unwrap_or(1);
+            summary.streaming_tool_call_count += tool_call_count;
+            if let Some(tool_calls) = tool_calls {
+                for tool_call in tool_calls {
+                    if let Some(tool_code) = trace_value_text(tool_call.get("toolCode")) {
+                        summary.streaming_tool_codes.insert(tool_code);
+                    }
+                }
+            }
         }
         if inference_type.as_deref() == Some("model_inference_error") {
             summary.error_count += 1;
@@ -1451,6 +1484,45 @@ mod tests {
         assert_eq!(candidate.tags["streamingModelOutput"], true);
         assert_eq!(candidate.tags["modelProvider"], "openai-compatible");
         assert_eq!(candidate.tags["modelRouteId"], "runtime.llm.code_agent");
+    }
+
+    #[test]
+    fn trace_eval_candidate_tags_streaming_tool_call_detection() {
+        let bundle = TraceBundle::new("agent-1").with_event(TraceEvent::inference(
+            1,
+            json!({
+                "item": {
+                    "type": "model_stream_tool_call",
+                    "source": "provider_stream",
+                    "routeId": "runtime.llm.code_agent",
+                    "provider": "openai-compatible",
+                    "model": "gpt-compatible",
+                    "deltaIndex": 1,
+                    "toolCallCount": 2,
+                    "toolCalls": [
+                        {
+                            "callId": "call-1",
+                            "toolCode": "rag.search",
+                            "arguments": {"query": "policy"}
+                        },
+                        {
+                            "callId": "call-2",
+                            "toolCode": "github.repo.read",
+                            "arguments": {"repository": "org/repo", "path": "README.md"}
+                        }
+                    ]
+                }
+            }),
+        ));
+
+        let candidate = EvalCaseCandidate::from_trace_bundle(&bundle);
+
+        assert_eq!(candidate.tags["streamingToolCallDetected"], true);
+        assert_eq!(candidate.tags["streamingToolCallCount"], 2);
+        assert_eq!(
+            candidate.tags["streamingToolCodes"],
+            json!(["github.repo.read", "rag.search"])
+        );
     }
 
     #[test]

@@ -12,6 +12,7 @@ use novex_agent::{plan_react_run_with_memory, AgentIntent, AgentLoopKind};
 use novex_agent_protocol::{AgentTurnItem, ToolObservationStatus};
 use novex_agent_runtime::{
     parse_model_turn_output, AgentRemoteCompactionRequest, AgentRuntimeBudget, AgentRuntimeState,
+    ParsedModelTurnOutput, StreamingModelTurnParseStatus, StreamingModelTurnParser,
 };
 use novex_ai_core::{validate_run_transition, RunEventKind, RunStatus, RunStepType, TaskBudget};
 use novex_approval_review::{
@@ -3253,6 +3254,41 @@ fn provider_stream_channel() -> (
     mpsc::unbounded_channel()
 }
 
+#[derive(Debug, Clone)]
+struct ModelLoopProviderStreamState {
+    tool_call_parser: StreamingModelTurnParser,
+    tool_call_detected: bool,
+    tool_call_parser_disabled: bool,
+}
+
+impl ModelLoopProviderStreamState {
+    fn new() -> Self {
+        Self {
+            tool_call_parser: StreamingModelTurnParser::new(),
+            tool_call_detected: false,
+            tool_call_parser_disabled: false,
+        }
+    }
+
+    fn observe_tool_call(&mut self, event: &ModelProviderStreamEvent) -> Option<Value> {
+        if self.tool_call_detected || self.tool_call_parser_disabled {
+            return None;
+        }
+
+        match self.tool_call_parser.push_delta(&event.chunk.content) {
+            Ok(StreamingModelTurnParseStatus::Pending) => None,
+            Ok(StreamingModelTurnParseStatus::Ready(parsed)) => {
+                self.tool_call_detected = true;
+                Some(model_stream_tool_call_event_payload(event, &parsed))
+            }
+            Err(_) => {
+                self.tool_call_parser_disabled = true;
+                None
+            }
+        }
+    }
+}
+
 async fn await_model_loop_provider_future_or_cancelled_with_delta_events<F, C, T>(
     cancel_token: AgentRunCancellationToken,
     persistent_cancel: C,
@@ -3270,6 +3306,7 @@ where
     tokio::pin!(future);
     tokio::pin!(persistent_cancel);
     let mut stream_closed = false;
+    let mut stream_state = ModelLoopProviderStreamState::new();
 
     loop {
         tokio::select! {
@@ -3281,14 +3318,14 @@ where
             }
             maybe_event = provider_stream_receiver.recv(), if !stream_closed => {
                 if let Some(event) = maybe_event {
-                    drain_model_delta_events(service, user_id, run_id, event).await?;
+                    drain_model_delta_events(service, user_id, run_id, &mut stream_state, event).await?;
                 } else {
                     stream_closed = true;
                 }
             }
             result = &mut future => {
                 while let Ok(event) = provider_stream_receiver.try_recv() {
-                    drain_model_delta_events(service, user_id, run_id, event).await?;
+                    drain_model_delta_events(service, user_id, run_id, &mut stream_state, event).await?;
                 }
                 return result.map(ModelLoopFutureAwait::Completed);
             }
@@ -3300,8 +3337,10 @@ async fn drain_model_delta_events(
     service: &AgentService,
     user_id: i64,
     run_id: i64,
+    stream_state: &mut ModelLoopProviderStreamState,
     event: ModelProviderStreamEvent,
 ) -> Result<(), AppError> {
+    let tool_call_payload = stream_state.observe_tool_call(&event);
     service
         .append_event(
             user_id,
@@ -3311,7 +3350,20 @@ async fn drain_model_delta_events(
             run_status_code(RunStatus::Running),
             model_delta_event_payload_from_stream_event(&event),
         )
-        .await
+        .await?;
+    if let Some(tool_call_payload) = tool_call_payload {
+        service
+            .append_event(
+                user_id,
+                run_id,
+                None,
+                RunEventKind::Thought,
+                run_status_code(RunStatus::Running),
+                tool_call_payload,
+            )
+            .await?;
+    }
+    Ok(())
 }
 
 async fn execute_agent_tool_io_batch<F, Fut>(
@@ -4819,6 +4871,42 @@ fn model_delta_event_payload_from_stream_event(event: &ModelProviderStreamEvent)
     model_delta_event_payload(&response, &event.chunk)
 }
 
+fn model_stream_tool_call_event_payload(
+    event: &ModelProviderStreamEvent,
+    parsed: &ParsedModelTurnOutput,
+) -> Value {
+    let tool_calls = parsed
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            AgentTurnItem::ToolCall {
+                call_id,
+                tool_code,
+                arguments,
+            } => Some(json!({
+                "callId": call_id,
+                "toolCode": tool_code,
+                "arguments": arguments,
+            })),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+
+    json!({
+        "runtimeMode": "model_loop",
+        "item": {
+            "type": "model_stream_tool_call",
+            "source": "provider_stream",
+            "routeId": &event.route_id,
+            "provider": &event.provider,
+            "model": &event.model,
+            "deltaIndex": event.chunk.index,
+            "toolCallCount": tool_calls.len(),
+            "toolCalls": tool_calls,
+        }
+    })
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ModelInferenceErrorClass {
     kind: &'static str,
@@ -5566,7 +5654,7 @@ fn trace_event_from_run_event(event: &RunEventRecord) -> Option<TraceEvent> {
 fn is_model_inference_trace_item(item_type: &str) -> bool {
     matches!(
         item_type,
-        "model_inference" | "model_inference_error" | "model_delta"
+        "model_inference" | "model_inference_error" | "model_delta" | "model_stream_tool_call"
     )
 }
 
@@ -5804,7 +5892,9 @@ fn default_event_size() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::application::ai::model_service::{ModelChatUsage, ModelProviderAttempt};
+    use crate::application::ai::model_service::{
+        ModelChatUsage, ModelProviderAttempt, ModelProviderStreamChunk, ModelProviderStreamEvent,
+    };
     use novex_ai_core::TaskBudget;
     use novex_approval_review::{
         GuardianDecisionSource, GuardianReviewFailureReason, GuardianReviewOutcome,
@@ -6786,6 +6876,52 @@ mod tests {
         assert_eq!(payload["item"]["deltaIndex"], 3);
         assert_eq!(payload["item"]["content"], " partial");
         assert_eq!(payload["item"]["providerEvent"], "chat.completion.chunk");
+    }
+
+    #[test]
+    fn provider_stream_tool_call_state_detects_complete_json_across_chunks() {
+        let mut state = ModelLoopProviderStreamState::new();
+        let first = ModelProviderStreamEvent {
+            route_id: "runtime.llm.code_agent".to_owned(),
+            provider: "openai-compatible".to_owned(),
+            model: Some("gpt-compatible".to_owned()),
+            chunk: ModelProviderStreamChunk {
+                index: 0,
+                content: r#"{"type":"tool_"#.to_owned(),
+                provider_event: Some("response.output_text.delta".to_owned()),
+            },
+        };
+        let second = ModelProviderStreamEvent {
+            route_id: "runtime.llm.code_agent".to_owned(),
+            provider: "openai-compatible".to_owned(),
+            model: Some("gpt-compatible".to_owned()),
+            chunk: ModelProviderStreamChunk {
+                index: 1,
+                content: r#"call","callId":"call-1","toolCode":"rag.search","arguments":{"query":"policy"}}"#.to_owned(),
+                provider_event: Some("response.output_text.delta".to_owned()),
+            },
+        };
+
+        assert!(state.observe_tool_call(&first).is_none());
+        let payload = state
+            .observe_tool_call(&second)
+            .expect("complete streamed tool call should be detected");
+
+        assert_eq!(payload["runtimeMode"], "model_loop");
+        assert_eq!(payload["item"]["type"], "model_stream_tool_call");
+        assert_eq!(payload["item"]["source"], "provider_stream");
+        assert_eq!(payload["item"]["routeId"], "runtime.llm.code_agent");
+        assert_eq!(payload["item"]["provider"], "openai-compatible");
+        assert_eq!(payload["item"]["model"], "gpt-compatible");
+        assert_eq!(payload["item"]["deltaIndex"], 1);
+        assert_eq!(payload["item"]["toolCallCount"], 1);
+        assert_eq!(payload["item"]["toolCalls"][0]["callId"], "call-1");
+        assert_eq!(payload["item"]["toolCalls"][0]["toolCode"], "rag.search");
+        assert_eq!(
+            payload["item"]["toolCalls"][0]["arguments"]["query"],
+            "policy"
+        );
+        assert!(state.observe_tool_call(&second).is_none());
     }
 
     #[test]
@@ -7887,6 +8023,46 @@ mod tests {
         assert_eq!(
             bundle.events[0].payload["item"]["providerEvent"],
             "chat.completion.chunk"
+        );
+    }
+
+    #[test]
+    fn agent_run_events_convert_model_stream_tool_call_spans_to_trace_bundle() {
+        let events = vec![fake_agent_event(
+            "thought",
+            2,
+            json!({
+                "runtimeMode": "model_loop",
+                "item": {
+                    "type": "model_stream_tool_call",
+                    "source": "provider_stream",
+                    "routeId": "runtime.llm.code_agent",
+                    "provider": "openai-compatible",
+                    "model": "gpt-compatible",
+                    "deltaIndex": 1,
+                    "toolCallCount": 1,
+                    "toolCalls": [
+                        {
+                            "callId": "call-1",
+                            "toolCode": "rag.search",
+                            "arguments": {"query": "policy"}
+                        }
+                    ]
+                }
+            }),
+        )];
+
+        let bundle = agent_events_to_trace_bundle("agent-1", events);
+
+        assert_eq!(bundle.events[0].kind, TraceEventKind::Inference);
+        assert_eq!(
+            bundle.events[0].payload["item"]["type"],
+            "model_stream_tool_call"
+        );
+        assert_eq!(bundle.events[0].payload["item"]["toolCallCount"], 1);
+        assert_eq!(
+            bundle.events[0].payload["item"]["toolCalls"][0]["toolCode"],
+            "rag.search"
         );
     }
 
