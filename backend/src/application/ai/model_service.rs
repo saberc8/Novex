@@ -6284,12 +6284,18 @@ mod tests {
         assert!(service_source.contains("ModelProviderNativeCancelRequest"));
         assert!(service_source.contains("send_model_provider_native_cancel_request"));
         assert!(transport_source.contains("pub(super) use native_cancel::{"));
-        assert!(native_cancel_source
-            .contains("pub(in crate::application::ai) struct ModelProviderNativeCancelRequest"));
+        assert!(native_cancel_source.contains(
+            "pub(in crate::application::ai) use novex_provider_client::ModelProviderNativeCancelRequest",
+        ));
         assert!(native_cancel_source.contains(
             "pub(in crate::application::ai) async fn send_model_provider_native_cancel_request"
         ));
-        assert!(native_cancel_source.contains("model_provider_http_client(request.timeout)"));
+        assert!(native_cancel_source
+            .contains("novex_provider_client::send_model_provider_native_cancel_request(request)"));
+        assert!(native_cancel_source.contains("model_provider_client_error_to_app_error"));
+        assert!(!native_cancel_source.contains("model_provider_http_client(request.timeout)"));
+        assert!(!native_cancel_source.contains(".post(request.endpoint)"));
+        assert!(!native_cancel_source.contains(".bearer_auth(request.api_key)"));
         assert!(cancel_path.contains(
             "send_model_provider_native_cancel_request(ModelProviderNativeCancelRequest"
         ));
@@ -6491,7 +6497,10 @@ mod tests {
         assert!(native_cancel_source.contains(
             "pub(in crate::application::ai) async fn send_model_provider_native_cancel_request",
         ));
-        assert!(native_cancel_source.contains("model_provider_http_client(request.timeout)"));
+        assert!(native_cancel_source
+            .contains("novex_provider_client::send_model_provider_native_cancel_request(request)"));
+        assert!(native_cancel_source.contains("model_provider_client_error_to_app_error"));
+        assert!(!native_cancel_source.contains("model_provider_http_client(request.timeout)"));
         assert!(rag_source.contains("pub(in crate::application::ai) use novex_provider_client::{"));
         assert!(rag_source.contains("ModelProviderEmbeddingRequest"));
         assert!(rag_source.contains("ModelProviderRerankRequest"));
@@ -6584,7 +6593,13 @@ mod tests {
             .contains("novex_provider_client::send_model_provider_http_request(request)"));
         assert!(!backend_http_source.contains("reqwest::Client::builder()"));
         assert!(!backend_http_source.contains(".post(request.endpoint)"));
-        assert!(native_cancel_source.contains("model_provider_http_client(request.timeout)"));
+        assert!(native_cancel_source.contains(
+            "pub(in crate::application::ai) use novex_provider_client::ModelProviderNativeCancelRequest",
+        ));
+        assert!(native_cancel_source
+            .contains("novex_provider_client::send_model_provider_native_cancel_request(request)"));
+        assert!(native_cancel_source.contains("model_provider_client_error_to_app_error"));
+        assert!(!native_cancel_source.contains("model_provider_http_client(request.timeout)"));
         assert!(rag_source.contains("model_provider_client_error_to_app_error"));
         assert!(!rag_source.contains("model_provider_http_client(request.timeout)"));
         assert!(media_source.contains("model_provider_http_client(request.timeout)"));
@@ -6639,6 +6654,44 @@ mod tests {
         assert!(!backend_rag_source.contains("Rerank 模型调用失败: {status}"));
         assert!(!backend_rag_source.contains("Embedding 模型响应为空"));
         assert!(!backend_rag_source.contains("Rerank 模型响应为空"));
+    }
+
+    #[test]
+    fn provider_client_native_cancel_dispatch_lives_in_provider_client_crate() {
+        let workspace_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("backend manifest should live below workspace root");
+        let source = |path: &str| {
+            std::fs::read_to_string(workspace_root.join(path))
+                .unwrap_or_else(|err| panic!("failed to read {path}: {err}"))
+        };
+        let provider_client_source = source("crates/novex-provider-client/src/lib.rs");
+        let backend_http_source =
+            source("backend/src/application/ai/model_provider_transport/http.rs");
+        let backend_native_source =
+            source("backend/src/application/ai/model_provider_transport/native_cancel.rs");
+
+        assert!(provider_client_source.contains("pub struct ModelProviderNativeCancelRequest"));
+        assert!(provider_client_source
+            .contains("pub async fn send_model_provider_native_cancel_request"));
+        assert!(provider_client_source.contains(".post(request.endpoint)"));
+        assert!(provider_client_source.contains(".bearer_auth(request.api_key)"));
+        assert!(provider_client_source.contains("model_provider_http_client(request.timeout)"));
+        assert!(provider_client_source.contains("Provider native cancel failed"));
+        assert!(provider_client_source.contains("ModelProviderClientError::HttpStatus"));
+        assert!(
+            backend_http_source.contains("pub(super) fn model_provider_client_error_to_app_error")
+        );
+        assert!(backend_native_source.contains(
+            "pub(in crate::application::ai) use novex_provider_client::ModelProviderNativeCancelRequest",
+        ));
+        assert!(backend_native_source
+            .contains("novex_provider_client::send_model_provider_native_cancel_request(request)"));
+        assert!(backend_native_source.contains("model_provider_client_error_to_app_error"));
+        assert!(!backend_native_source.contains("model_provider_http_client(request.timeout)"));
+        assert!(!backend_native_source.contains(".post(request.endpoint)"));
+        assert!(!backend_native_source.contains(".bearer_auth(request.api_key)"));
+        assert!(!backend_native_source.contains("Provider native cancel failed: HTTP"));
     }
 
     #[test]
