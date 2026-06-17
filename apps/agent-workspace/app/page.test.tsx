@@ -177,4 +177,51 @@ describe("Agent workspace page", () => {
     expect(link.getAttribute("href")).toBe("https://cdn.example.com/training-poster.png");
     expect((await screen.findAllByText(/media\.image\.generate/)).length).toBeGreaterThan(0);
   });
+
+  it("renders provider model deltas as live model output", async () => {
+    listAgentRunEventsMock.mockResolvedValueOnce({
+      list: [
+        event({
+          id: 201,
+          eventType: "thought",
+          sequenceNo: 6,
+          status: "running",
+          payload: {
+            item: {
+              type: "model_delta",
+              routeId: "runtime.llm.code_agent",
+              provider: "openai-compatible",
+              model: "gpt-compatible",
+              deltaIndex: 1,
+              content: " world"
+            }
+          }
+        }),
+        event({
+          id: 202,
+          eventType: "thought",
+          sequenceNo: 5,
+          status: "running",
+          payload: {
+            item: {
+              type: "model_delta",
+              routeId: "runtime.llm.code_agent",
+              provider: "openai-compatible",
+              model: "gpt-compatible",
+              deltaIndex: 0,
+              content: "Hello"
+            }
+          }
+        })
+      ],
+      total: 2
+    });
+
+    render(<Page />);
+
+    expect(await screen.findByText("Live model output")).toBeTruthy();
+    expect(await screen.findByText("Hello world")).toBeTruthy();
+    expect(await screen.findByText("2 chunks")).toBeTruthy();
+    expect(await screen.findByText("runtime.llm.code_agent")).toBeTruthy();
+  });
 });

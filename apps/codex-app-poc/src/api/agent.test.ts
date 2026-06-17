@@ -4,7 +4,8 @@ import {
   createAgentRun,
   createAgentRunEventWebSocketTicket,
   createConfiguredModelAgentRun,
-  fetchAgentRunEventStream
+  fetchAgentRunEventStream,
+  listAgentRunEvents
 } from "./agent";
 
 describe("codex poc agent api", () => {
@@ -115,6 +116,45 @@ describe("codex poc agent api", () => {
         headers: expect.objectContaining({
           Accept: "text/event-stream"
         })
+      })
+    );
+  });
+
+  it("lists agent run events for a POC run snapshot", async () => {
+    const fetchMock = vi.fn(async () => ({
+      ok: true,
+      json: async () => ({
+        code: "200",
+        data: {
+          list: [
+            {
+              id: 11,
+              runId: 7,
+              eventType: "thought",
+              sequenceNo: 5,
+              status: "running",
+              payload: {
+                item: {
+                  type: "model_delta",
+                  content: "Hello"
+                }
+              },
+              createTime: "2026-06-17 12:00:00"
+            }
+          ],
+          total: 1
+        }
+      })
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const page = await listAgentRunEvents(7, { page: 1, size: 100 });
+
+    expect(page.total).toBe(1);
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://localhost:4398/ai/agents/runs/7/events?page=1&size=100",
+      expect.objectContaining({
+        method: "GET"
       })
     );
   });
