@@ -33,7 +33,7 @@
 - Adds: `GET /ai/agents/runs/:run_id/events/ws`
 - Adds: `stream_events_ws(...)`
 
-- [ ] **Step 1: Write failing tests**
+- [x] **Step 1: Write failing tests**
 
 Add tests proving the route contract includes:
 
@@ -45,7 +45,7 @@ assert!(source.contains("AGENT_EVENT_LIST_PERMISSION"));
 assert!(source.contains("agent_run_event_ws_loop"));
 ```
 
-- [ ] **Step 2: Run red test**
+- [x] **Step 2: Run red test**
 
 Run:
 
@@ -55,11 +55,13 @@ cargo test -p backend-rust agent_event_websocket --offline
 
 Expected: FAIL because the route, handler, and helper names do not exist.
 
-- [ ] **Step 3: Implement minimal route**
+Actual: FAIL because `agent_run_event_ws_message` and `agent_run_event_ws_error_message` were missing.
+
+- [x] **Step 3: Implement minimal route**
 
 Enable axum `ws`, import `WebSocketUpgrade`, add the route, check permission, construct tenant-scoped `AgentService`, and call `ws.on_upgrade(...)`.
 
-- [ ] **Step 4: Run green route test**
+- [x] **Step 4: Run green route test**
 
 Run:
 
@@ -68,6 +70,8 @@ cargo test -p backend-rust agent_event_websocket_route --offline
 ```
 
 Expected: PASS.
+
+Actual: PASS via `cargo test -p backend-rust agent_event_websocket --offline`.
 
 ### Task 2: WebSocket Frame Contract
 
@@ -78,7 +82,7 @@ Expected: PASS.
 - Adds: `agent_run_event_ws_message(event) -> String`
 - Adds: `agent_run_event_ws_error_message(err) -> String`
 
-- [ ] **Step 1: Write failing tests**
+- [x] **Step 1: Write failing tests**
 
 Add tests proving:
 
@@ -99,7 +103,7 @@ assert_eq!(body["type"], "error");
 assert!(body["message"].is_string());
 ```
 
-- [ ] **Step 2: Run red test**
+- [x] **Step 2: Run red test**
 
 Run:
 
@@ -109,11 +113,13 @@ cargo test -p backend-rust agent_event_websocket_message --offline
 
 Expected: FAIL because message helpers do not exist.
 
-- [ ] **Step 3: Implement message helpers**
+Actual: FAIL because message helpers did not exist.
+
+- [x] **Step 3: Implement message helpers**
 
 Serialize typed text JSON frames with `type`, top-level `sequenceNo`, and full event payload.
 
-- [ ] **Step 4: Run green message test**
+- [x] **Step 4: Run green message test**
 
 Run:
 
@@ -123,16 +129,18 @@ cargo test -p backend-rust agent_event_websocket_message --offline
 
 Expected: PASS.
 
+Actual: PASS via `cargo test -p backend-rust agent_event_websocket --offline`.
+
 ### Task 3: WebSocket Poll Loop
 
 **Files:**
 - Modify: `backend/src/interfaces/http/ai/agent.rs`
-- Modify: `docs/development/CODEX_AGENT_MIGRATION_MATRIX.md`
+- Modify: `docs/plans/2026-06-16-codex-migration-matrix.md`
 
 **Interfaces:**
 - Adds: `agent_run_event_ws_loop(socket, service, run_id, settings)`
 
-- [ ] **Step 1: Implement polling loop**
+- [x] **Step 1: Implement polling loop**
 
 Use the same behavior as SSE:
 
@@ -143,7 +151,7 @@ Use the same behavior as SSE:
 - Close after `max_idle_ms`.
 - Send a typed error frame and close on service errors.
 
-- [ ] **Step 2: Run focused verification**
+- [x] **Step 2: Run focused verification**
 
 Run:
 
@@ -154,7 +162,9 @@ cargo test -p backend-rust agent_event_stream --offline
 
 Expected: PASS.
 
-- [ ] **Step 3: Update migration matrix**
+Actual: PASS for both focused commands.
+
+- [x] **Step 3: Update migration matrix**
 
 Mark the Runtime loop streaming transport slice as implemented for durable run events, while keeping provider token-delta streaming and browser-specific WebSocket auth as follow-up work.
 
@@ -163,7 +173,7 @@ Mark the Runtime loop streaming transport slice as implemented for durable run e
 **Files:**
 - All changed files.
 
-- [ ] **Step 1: Run full verification**
+- [x] **Step 1: Run full verification**
 
 Run:
 
@@ -174,6 +184,8 @@ git diff --check
 ```
 
 Expected: PASS.
+
+Actual: PASS for `cargo fmt -- --check`, `cargo test --workspace --offline`, and `git diff --check`.
 
 - [ ] **Step 2: Commit feature branch**
 

@@ -5,8 +5,14 @@ use std::{
 };
 
 use axum::{
-    extract::{Path, Query, State},
-    response::sse::{Event, KeepAlive, Sse},
+    extract::{
+        ws::{Message, WebSocket, WebSocketUpgrade},
+        Path, Query, State,
+    },
+    response::{
+        sse::{Event, KeepAlive, Sse},
+        Response,
+    },
     routing::{get, post},
     Json, Router,
 };
@@ -38,6 +44,7 @@ pub fn routes() -> Router<AppState> {
         .route("/ai/agents/runs/:run_id", get(get_run))
         .route("/ai/agents/runs/:run_id/events", get(list_events))
         .route("/ai/agents/runs/:run_id/events/stream", get(stream_events))
+        .route("/ai/agents/runs/:run_id/events/ws", get(stream_events_ws))
         .route("/ai/agents/runs/:run_id/trace", get(get_run_trace))
         .route("/ai/agents/runs/:run_id/resume", post(resume_run))
         .route("/ai/agents/runs/:run_id/cancel", post(cancel_run))
@@ -126,6 +133,24 @@ async fn stream_events(
         Sse::new(agent_run_event_stream(service, run_id, query.settings()))
             .keep_alive(KeepAlive::default()),
     )
+}
+
+async fn stream_events_ws(
+    State(state): State<AppState>,
+    current_user: CurrentUser,
+    Path(run_id): Path<i64>,
+    Query(query): Query<AgentRunEventStreamQuery>,
+    ws: WebSocketUpgrade,
+) -> Result<Response, AppError> {
+    require_permission(&current_user, AGENT_EVENT_LIST_PERMISSION)?;
+    let service = AgentService::for_tenant_with_runtime(
+        state.db,
+        current_user.tenant_id,
+        state.agent_runtime,
+    );
+    let settings = query.settings();
+
+    Ok(ws.on_upgrade(move |socket| agent_run_event_ws_loop(socket, service, run_id, settings)))
 }
 
 async fn get_run_trace(
@@ -250,6 +275,86 @@ fn agent_run_event_stream(
             }
         }
     })
+}
+
+async fn agent_run_event_ws_loop(
+    mut socket: WebSocket,
+    service: AgentService,
+    run_id: i64,
+    settings: AgentRunEventStreamSettings,
+) {
+    let mut after_sequence_no = settings.after_sequence_no;
+    let mut pending = VecDeque::<AgentRunEventResp>::new();
+    let mut idle_since = Instant::now();
+
+    loop {
+        if let Some(event) = pending.pop_front() {
+            after_sequence_no = event.sequence_no;
+            idle_since = Instant::now();
+            if socket
+                .send(Message::Text(agent_run_event_ws_message(event)))
+                .await
+                .is_err()
+            {
+                return;
+            }
+            continue;
+        }
+
+        match service
+            .list_events_after_sequence(run_id, after_sequence_no, settings.batch_size)
+            .await
+        {
+            Ok(events) if !events.is_empty() => {
+                pending = events.into();
+            }
+            Ok(_) => match service.is_run_terminal(run_id).await {
+                Ok(true) => {
+                    let _ = socket.send(Message::Close(None)).await;
+                    return;
+                }
+                Ok(false) => {
+                    if idle_since.elapsed() >= Duration::from_millis(settings.max_idle_ms) {
+                        let _ = socket.send(Message::Close(None)).await;
+                        return;
+                    }
+                    tokio::time::sleep(Duration::from_millis(settings.poll_ms)).await;
+                }
+                Err(err) => {
+                    let _ = socket
+                        .send(Message::Text(agent_run_event_ws_error_message(err)))
+                        .await;
+                    let _ = socket.send(Message::Close(None)).await;
+                    return;
+                }
+            },
+            Err(err) => {
+                let _ = socket
+                    .send(Message::Text(agent_run_event_ws_error_message(err)))
+                    .await;
+                let _ = socket.send(Message::Close(None)).await;
+                return;
+            }
+        }
+    }
+}
+
+fn agent_run_event_ws_message(event: AgentRunEventResp) -> String {
+    let sequence_no = event.sequence_no;
+    json!({
+        "type": AGENT_RUN_EVENT_STREAM_NAME,
+        "sequenceNo": sequence_no,
+        "event": event,
+    })
+    .to_string()
+}
+
+fn agent_run_event_ws_error_message(err: AppError) -> String {
+    json!({
+        "type": "error",
+        "message": err.to_string(),
+    })
+    .to_string()
 }
 
 fn agent_run_event_sse(event: AgentRunEventResp) -> Event {
@@ -444,6 +549,51 @@ mod tests {
         assert!(source.contains(".id(sequence_no.to_string())"));
     }
 
+    #[test]
+    fn agent_event_websocket_route_uses_ws_upgrade_and_permission() {
+        let source = include_str!("agent.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+
+        assert!(source.contains("/ai/agents/runs/:run_id/events/ws"));
+        assert!(source.contains("WebSocketUpgrade"));
+        assert!(source.contains("stream_events_ws"));
+        assert!(source.contains("AGENT_EVENT_LIST_PERMISSION"));
+        assert!(source.contains("agent_run_event_ws_loop"));
+    }
+
+    #[test]
+    fn agent_event_websocket_message_uses_sequence_cursor() {
+        let event = AgentRunEventResp {
+            id: 7,
+            run_id: 42,
+            step_id: None,
+            event_type: "thought".to_owned(),
+            sequence_no: 9,
+            status: "running".to_owned(),
+            payload: serde_json::json!({ "message": "thinking" }),
+            create_time: "2026-06-17 12:00:00".to_owned(),
+        };
+
+        let message = agent_run_event_ws_message(event);
+        let body = serde_json::from_str::<Value>(&message).unwrap();
+
+        assert_eq!(body["type"], "agent_run_event");
+        assert_eq!(body["sequenceNo"], 9);
+        assert_eq!(body["event"]["eventType"], "thought");
+        assert_eq!(body["event"]["sequenceNo"], 9);
+    }
+
+    #[test]
+    fn agent_event_websocket_error_message_is_typed() {
+        let message = agent_run_event_ws_error_message(AppError::NotFound);
+        let body = serde_json::from_str::<Value>(&message).unwrap();
+
+        assert_eq!(body["type"], "error");
+        assert!(body["message"].is_string());
+    }
+
     #[tokio::test]
     async fn agent_trace_handler_rejects_missing_permission() {
         let err = get_run_trace(State(test_state()), user_with_permissions(vec![]), Path(42))
@@ -544,6 +694,34 @@ mod tests {
                 Request::builder()
                     .uri("/ai/agents/runs/42/events/stream")
                     .header(header::ACCEPT, "text/event-stream")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let body = serde_json::from_slice::<Value>(&body).unwrap();
+        assert_eq!(body["code"], "401");
+    }
+
+    #[tokio::test]
+    async fn agent_event_websocket_route_is_registered_and_requires_auth() {
+        let db = PgPoolOptions::new()
+            .connect_lazy("postgres://postgres:postgres@localhost:5432/avalon_admin")
+            .unwrap();
+        let jwt = JwtService::new("test-secret".to_owned(), 24);
+        let app = build_router(db, &["http://localhost:4399".to_owned()], jwt).unwrap();
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/ai/agents/runs/42/events/ws")
+                    .header(header::CONNECTION, "upgrade")
+                    .header(header::UPGRADE, "websocket")
+                    .header("sec-websocket-version", "13")
+                    .header("sec-websocket-key", "dGhlIHNhbXBsZSBub25jZQ==")
                     .body(Body::empty())
                     .unwrap(),
             )
