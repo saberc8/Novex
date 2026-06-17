@@ -1,7 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  agentRunEventWebSocketUrl,
   cancelAgentRun,
   createAgentRun,
+  createAgentRunEventWebSocketTicket,
   fetchAgentRunEventStream,
   listAgentRunEvents,
   listAgentRuns,
@@ -136,5 +138,40 @@ describe("agent workspace api", () => {
         Authorization: "Bearer token-1"
       })
     });
+  });
+
+  it("requests an agent event websocket ticket with bearer auth", async () => {
+    window.localStorage.setItem("novex_token", "token-1");
+    fetchMock.mockImplementationOnce(() =>
+      okResponse({
+        ticket: "ws-ticket-1",
+        expiresInSeconds: 60
+      })
+    );
+
+    const ticket = await createAgentRunEventWebSocketTicket(42);
+
+    expect(ticket).toEqual({
+      ticket: "ws-ticket-1",
+      expiresInSeconds: 60
+    });
+    expect(fetchMock.mock.calls[0]?.[0]).toBe("http://localhost:4398/ai/agents/runs/42/events/ws-ticket");
+    expect(fetchMock.mock.calls[0]?.[1]).toMatchObject({
+      method: "POST",
+      headers: expect.objectContaining({
+        Authorization: "Bearer token-1"
+      })
+    });
+  });
+
+  it("builds an agent event websocket url with cursor query and ticket", () => {
+    const url = agentRunEventWebSocketUrl(42, "ws-ticket-1", {
+      afterSequenceNo: 9,
+      batchSize: 25
+    });
+
+    expect(url).toBe(
+      "ws://localhost:4398/ai/agents/runs/42/events/ws?afterSequenceNo=9&batchSize=25&ticket=ws-ticket-1"
+    );
   });
 });

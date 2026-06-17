@@ -13,6 +13,11 @@ import type {
 
 const AGENT_RUN_URL = "/ai/agents/runs";
 
+export interface AgentRunEventWebSocketTicketResp {
+  ticket: string;
+  expiresInSeconds: number;
+}
+
 export function createAgentRun(data: AgentRunCommand) {
   return apiRequest<AgentRunResp>(AGENT_RUN_URL, {
     method: "POST",
@@ -52,6 +57,22 @@ export function fetchAgentRunEventStream(
     method: "GET",
     headers
   });
+}
+
+export function createAgentRunEventWebSocketTicket(runId: number) {
+  return apiRequest<AgentRunEventWebSocketTicketResp>(`${AGENT_RUN_URL}/${runId}/events/ws-ticket`, {
+    method: "POST"
+  });
+}
+
+export function agentRunEventWebSocketUrl(
+  runId: number,
+  ticket: string,
+  query: AgentRunEventStreamQuery = {}
+) {
+  const url = new URL(apiUrl(`${AGENT_RUN_URL}/${runId}/events/ws`, { ...query, ticket }));
+  url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
+  return url.toString();
 }
 
 export function resumeAgentRun(runId: number, data: AgentRunResumeCommand) {

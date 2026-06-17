@@ -33,11 +33,11 @@
 - Adds: `JwtService::issue_agent_run_event_ws_ticket(user_id, username, run_id, ttl_seconds) -> Result<IssuedToken>`
 - Adds: `JwtService::parse_agent_run_event_ws_ticket(ticket, expected_run_id) -> Result<AgentRunEventWsTicketClaims>`
 
-- [ ] **Step 1: Write failing tests**
+- [x] **Step 1: Write failing tests**
 
 Add tests proving a ticket round-trips and is rejected for a different run id.
 
-- [ ] **Step 2: Run red test**
+- [x] **Step 2: Run red test**
 
 Run:
 
@@ -47,11 +47,13 @@ cargo test -p backend-rust agent_event_ws_ticket --offline
 
 Expected: FAIL because the ticket methods do not exist.
 
-- [ ] **Step 3: Implement minimal ticket claims and methods**
+Actual: FAIL because `issue_agent_run_event_ws_ticket` and `parse_agent_run_event_ws_ticket` were missing.
+
+- [x] **Step 3: Implement minimal ticket claims and methods**
 
 Use the existing JWT secret, include `purpose`, `user_id`, `username`, `run_id`, `iat`, and `exp`, and validate purpose plus run id when parsing.
 
-- [ ] **Step 4: Run green test**
+- [x] **Step 4: Run green test**
 
 Run:
 
@@ -60,6 +62,8 @@ cargo test -p backend-rust agent_event_ws_ticket --offline
 ```
 
 Expected: PASS.
+
+Actual: PASS.
 
 ### Task 2: Backend Ticket Endpoint and WebSocket Principal
 
@@ -71,7 +75,7 @@ Expected: PASS.
 - Adds: `AgentRunEventWsTicketResp { ticket, expiresInSeconds }`
 - Adds: `AgentRunEventWsPrincipal`
 
-- [ ] **Step 1: Write failing tests**
+- [x] **Step 1: Write failing tests**
 
 Add tests proving:
 
@@ -80,7 +84,7 @@ Add tests proving:
 - Source contract includes `AgentRunEventWsPrincipal` before `WebSocketUpgrade`.
 - Source contract includes `parse_agent_run_event_ws_ticket`.
 
-- [ ] **Step 2: Run red test**
+- [x] **Step 2: Run red test**
 
 Run:
 
@@ -90,11 +94,13 @@ cargo test -p backend-rust agent_event_websocket_ticket --offline
 
 Expected: FAIL because the route, response, and principal extractor do not exist.
 
-- [ ] **Step 3: Implement endpoint and extractor**
+Actual: FAIL because `create_event_ws_ticket` was missing.
+
+- [x] **Step 3: Implement endpoint and extractor**
 
 Add the route and handler. The extractor reads `Authorization` first, then query `ticket`; ticket auth carries a `ticket_run_id` that must match the path `run_id`.
 
-- [ ] **Step 4: Run green backend tests**
+- [x] **Step 4: Run green backend tests**
 
 Run:
 
@@ -104,6 +110,8 @@ cargo test -p backend-rust agent_event_websocket --offline
 ```
 
 Expected: PASS.
+
+Actual: PASS.
 
 ### Task 3: Browser API Helpers
 
@@ -119,11 +127,11 @@ Expected: PASS.
 - Adds: `createAgentRunEventWebSocketTicket(runId)`
 - Adds: `agentRunEventWebSocketUrl(runId, ticket, query)`
 
-- [ ] **Step 1: Write failing frontend tests**
+- [x] **Step 1: Write failing frontend tests**
 
 Add tests proving ticket requests use normal HTTP bearer auth and WS URL helpers convert protocol and include cursor query plus ticket.
 
-- [ ] **Step 2: Run red frontend tests**
+- [x] **Step 2: Run red frontend tests**
 
 Run:
 
@@ -134,11 +142,13 @@ cd ../codex-app-poc && pnpm test -- src/api/agent.test.ts
 
 Expected: FAIL because helpers do not exist.
 
-- [ ] **Step 3: Implement helpers**
+Actual: FAIL because `createAgentRunEventWebSocketTicket` and `agentRunEventWebSocketUrl` were missing.
+
+- [x] **Step 3: Implement helpers**
 
 Reuse each app's `apiUrl` helper. In `codex-app-poc`, add the same `novex_token` localStorage helper and attach `Authorization` in `apiRequest`.
 
-- [ ] **Step 4: Run green frontend tests**
+- [x] **Step 4: Run green frontend tests**
 
 Run:
 
@@ -149,17 +159,19 @@ cd ../codex-app-poc && pnpm test -- src/api/agent.test.ts
 
 Expected: PASS.
 
+Actual: PASS.
+
 ### Task 4: Matrix, Verification, Merge
 
 **Files:**
 - Modify: `docs/plans/2026-06-16-codex-migration-matrix.md`
 - Modify: `docs/plans/2026-06-17-agent-event-websocket-browser-auth.md`
 
-- [ ] **Step 1: Update migration matrix**
+- [x] **Step 1: Update migration matrix**
 
 Move browser WebSocket token handoff into Runtime loop implemented evidence. Keep provider token-delta streaming as remaining work.
 
-- [ ] **Step 2: Run full verification**
+- [x] **Step 2: Run full verification**
 
 Run:
 
@@ -172,6 +184,8 @@ git diff --check
 ```
 
 Expected: PASS.
+
+Actual: PASS for `cargo fmt -- --check`, `cargo test --workspace --offline`, both frontend API test commands, both frontend `pnpm typecheck` commands, and `git diff --check`.
 
 - [ ] **Step 3: Commit feature branch**
 

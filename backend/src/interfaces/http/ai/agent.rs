@@ -4,11 +4,13 @@ use std::{
     time::{Duration, Instant},
 };
 
+use async_trait::async_trait;
 use axum::{
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
-        Path, Query, State,
+        FromRequestParts, Path, Query, State,
     },
+    http::{header, request::Parts},
     response::{
         sse::{Event, KeepAlive, Sse},
         Response,
@@ -26,9 +28,11 @@ use crate::{
         AgentService, AgentTraceReplayResp,
     },
     domain::auth::model::CurrentUser,
+    infrastructure::persistence::user_repository::UserRepository,
     interfaces::http::{middleware::permission::require_permission, AppState},
     shared::{error::AppError, pagination::PageResult, response::ApiResponse},
 };
+use serde::Serialize;
 
 const AGENT_LIST_PERMISSION: &str = "ai:agent:list";
 const AGENT_RUN_PERMISSION: &str = "ai:agent:run";
@@ -37,6 +41,62 @@ const AGENT_RESUME_PERMISSION: &str = "ai:agent:resume";
 const AGENT_CANCEL_PERMISSION: &str = "ai:agent:cancel";
 const AGENT_RUN_EVENT_STREAM_NAME: &str = "agent_run_event";
 const AGENT_RUN_EVENT_STREAM_CONTENT_TYPE: &str = "text/event-stream";
+const AGENT_RUN_EVENT_WS_TICKET_TTL_SECONDS: i64 = 60;
+
+struct AgentRunEventWsPrincipal {
+    current_user: CurrentUser,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AgentRunEventWsTicketResp {
+    ticket: String,
+    expires_in_seconds: i64,
+}
+
+#[async_trait]
+impl FromRequestParts<AppState> for AgentRunEventWsPrincipal {
+    type Rejection = AppError;
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &AppState,
+    ) -> Result<Self, Self::Rejection> {
+        let claims = if let Some(authorization) = parts
+            .headers
+            .get(header::AUTHORIZATION)
+            .and_then(|value| value.to_str().ok())
+        {
+            state
+                .jwt
+                .parse(authorization)
+                .map_err(|_| AppError::Unauthorized)?
+        } else {
+            let ticket = agent_run_event_ws_ticket_from_query(parts.uri.query())
+                .ok_or(AppError::Unauthorized)?;
+            let run_id =
+                agent_run_id_from_event_ws_path(parts.uri.path()).ok_or(AppError::Unauthorized)?;
+            let ticket_claims = state
+                .jwt
+                .parse_agent_run_event_ws_ticket(&ticket, run_id)
+                .map_err(|_| AppError::Unauthorized)?;
+            crate::infrastructure::security::jwt::TokenClaims {
+                user_id: ticket_claims.user_id,
+                username: ticket_claims.username,
+                exp: ticket_claims.exp,
+                iat: ticket_claims.iat,
+            }
+        };
+
+        let users = UserRepository::new(state.db.clone());
+        let current_user = users
+            .current_user_context(claims.user_id)
+            .await?
+            .ok_or(AppError::Unauthorized)?;
+
+        Ok(Self { current_user })
+    }
+}
 
 pub fn routes() -> Router<AppState> {
     Router::new()
@@ -45,6 +105,10 @@ pub fn routes() -> Router<AppState> {
         .route("/ai/agents/runs/:run_id/events", get(list_events))
         .route("/ai/agents/runs/:run_id/events/stream", get(stream_events))
         .route("/ai/agents/runs/:run_id/events/ws", get(stream_events_ws))
+        .route(
+            "/ai/agents/runs/:run_id/events/ws-ticket",
+            post(create_event_ws_ticket),
+        )
         .route("/ai/agents/runs/:run_id/trace", get(get_run_trace))
         .route("/ai/agents/runs/:run_id/resume", post(resume_run))
         .route("/ai/agents/runs/:run_id/cancel", post(cancel_run))
@@ -137,11 +201,12 @@ async fn stream_events(
 
 async fn stream_events_ws(
     State(state): State<AppState>,
-    current_user: CurrentUser,
+    principal: AgentRunEventWsPrincipal,
     Path(run_id): Path<i64>,
     Query(query): Query<AgentRunEventStreamQuery>,
     ws: WebSocketUpgrade,
 ) -> Result<Response, AppError> {
+    let current_user = principal.current_user;
     require_permission(&current_user, AGENT_EVENT_LIST_PERMISSION)?;
     let service = AgentService::for_tenant_with_runtime(
         state.db,
@@ -151,6 +216,25 @@ async fn stream_events_ws(
     let settings = query.settings();
 
     Ok(ws.on_upgrade(move |socket| agent_run_event_ws_loop(socket, service, run_id, settings)))
+}
+
+async fn create_event_ws_ticket(
+    State(state): State<AppState>,
+    current_user: CurrentUser,
+    Path(run_id): Path<i64>,
+) -> Result<Json<ApiResponse<AgentRunEventWsTicketResp>>, AppError> {
+    require_permission(&current_user, AGENT_EVENT_LIST_PERMISSION)?;
+    let issued = state.jwt.issue_agent_run_event_ws_ticket(
+        current_user.id,
+        &current_user.username,
+        run_id,
+        AGENT_RUN_EVENT_WS_TICKET_TTL_SECONDS,
+    )?;
+
+    Ok(Json(ApiResponse::ok(AgentRunEventWsTicketResp {
+        ticket: issued.token,
+        expires_in_seconds: AGENT_RUN_EVENT_WS_TICKET_TTL_SECONDS,
+    })))
 }
 
 async fn get_run_trace(
@@ -339,6 +423,20 @@ async fn agent_run_event_ws_loop(
     }
 }
 
+fn agent_run_event_ws_ticket_from_query(query: Option<&str>) -> Option<String> {
+    url::form_urlencoded::parse(query?.as_bytes())
+        .find_map(|(key, value)| (key == "ticket").then(|| value.trim().to_owned()))
+        .filter(|value| !value.is_empty())
+}
+
+fn agent_run_id_from_event_ws_path(path: &str) -> Option<i64> {
+    let parts = path.trim_matches('/').split('/').collect::<Vec<_>>();
+    match parts.as_slice() {
+        ["ai", "agents", "runs", run_id, "events", "ws"] => run_id.parse::<i64>().ok(),
+        _ => None,
+    }
+}
+
 fn agent_run_event_ws_message(event: AgentRunEventResp) -> String {
     let sequence_no = event.sequence_no;
     json!({
@@ -512,6 +610,16 @@ mod tests {
         assert!(matches!(err, AppError::Forbidden));
     }
 
+    #[tokio::test]
+    async fn agent_event_websocket_ticket_handler_rejects_missing_permission() {
+        let err =
+            create_event_ws_ticket(State(test_state()), user_with_permissions(vec![]), Path(42))
+                .await
+                .unwrap_err();
+
+        assert!(matches!(err, AppError::Forbidden));
+    }
+
     #[test]
     fn agent_event_stream_route_uses_sse_and_keepalive() {
         let source = include_str!("agent.rs")
@@ -561,6 +669,29 @@ mod tests {
         assert!(source.contains("stream_events_ws"));
         assert!(source.contains("AGENT_EVENT_LIST_PERMISSION"));
         assert!(source.contains("agent_run_event_ws_loop"));
+    }
+
+    #[test]
+    fn agent_event_websocket_ticket_contract_uses_pre_upgrade_principal() {
+        let source = include_str!("agent.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+        let signature = source
+            .split("async fn stream_events_ws")
+            .nth(1)
+            .unwrap()
+            .split(") ->")
+            .next()
+            .unwrap();
+        let principal_index = signature.find("AgentRunEventWsPrincipal").unwrap();
+        let upgrade_index = signature.find("WebSocketUpgrade").unwrap();
+
+        assert!(source.contains("/ai/agents/runs/:run_id/events/ws-ticket"));
+        assert!(source.contains("AgentRunEventWsTicketResp"));
+        assert!(source.contains("parse_agent_run_event_ws_ticket"));
+        assert!(source.contains("issue_agent_run_event_ws_ticket"));
+        assert!(principal_index < upgrade_index);
     }
 
     #[test]
@@ -722,6 +853,32 @@ mod tests {
                     .header(header::UPGRADE, "websocket")
                     .header("sec-websocket-version", "13")
                     .header("sec-websocket-key", "dGhlIHNhbXBsZSBub25jZQ==")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let body = serde_json::from_slice::<Value>(&body).unwrap();
+        assert_eq!(body["code"], "401");
+    }
+
+    #[tokio::test]
+    async fn agent_event_websocket_ticket_route_is_registered_and_requires_auth() {
+        let db = PgPoolOptions::new()
+            .connect_lazy("postgres://postgres:postgres@localhost:5432/avalon_admin")
+            .unwrap();
+        let jwt = JwtService::new("test-secret".to_owned(), 24);
+        let app = build_router(db, &["http://localhost:4399".to_owned()], jwt).unwrap();
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/ai/agents/runs/42/events/ws-ticket")
+                    .method("POST")
+                    .header(header::ACCEPT, "application/json")
                     .body(Body::empty())
                     .unwrap(),
             )

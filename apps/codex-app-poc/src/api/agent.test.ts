@@ -1,9 +1,16 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { createAgentRun, createConfiguredModelAgentRun, fetchAgentRunEventStream } from "./agent";
+import {
+  agentRunEventWebSocketUrl,
+  createAgentRun,
+  createAgentRunEventWebSocketTicket,
+  createConfiguredModelAgentRun,
+  fetchAgentRunEventStream
+} from "./agent";
 
 describe("codex poc agent api", () => {
   afterEach(() => {
     vi.unstubAllGlobals();
+    window.localStorage.clear();
   });
 
   it("sends model loop runtime mode", async () => {
@@ -109,6 +116,48 @@ describe("codex poc agent api", () => {
           Accept: "text/event-stream"
         })
       })
+    );
+  });
+
+  it("requests an agent event websocket ticket with bearer auth", async () => {
+    window.localStorage.setItem("novex_token", "token-1");
+    const fetchMock = vi.fn(async () => ({
+      ok: true,
+      json: async () => ({
+        code: "200",
+        data: {
+          ticket: "ws-ticket-1",
+          expiresInSeconds: 60
+        }
+      })
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const ticket = await createAgentRunEventWebSocketTicket(7);
+
+    expect(ticket).toEqual({
+      ticket: "ws-ticket-1",
+      expiresInSeconds: 60
+    });
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://localhost:4398/ai/agents/runs/7/events/ws-ticket",
+      expect.objectContaining({
+        method: "POST",
+        headers: expect.objectContaining({
+          Authorization: "Bearer token-1"
+        })
+      })
+    );
+  });
+
+  it("builds an agent event websocket url with cursor query and ticket", () => {
+    const url = agentRunEventWebSocketUrl(7, "ws-ticket-1", {
+      afterSequenceNo: 4,
+      batchSize: 10
+    });
+
+    expect(url).toBe(
+      "ws://localhost:4398/ai/agents/runs/7/events/ws?afterSequenceNo=4&batchSize=10&ticket=ws-ticket-1"
     );
   });
 });
