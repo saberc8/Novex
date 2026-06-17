@@ -134,7 +134,7 @@ cargo test -p backend-rust agent_queue_runtime --offline
 
 ### Task 5: Docs, Full Verification, Merge
 
-Status: In progress.
+Status: Completed.
 
 **Files:**
 - Modify: `docs/plans/2026-06-16-codex-migration-matrix.md`
