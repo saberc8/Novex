@@ -1128,16 +1128,6 @@ impl AgentService {
 
         let tool_router = build_model_loop_tool_router().map_err(tool_route_error_to_app_error)?;
         let tool_codes = tool_router.tool_codes();
-        let mut messages = vec![
-            ModelChatMessage {
-                role: "system".to_owned(),
-                content: build_model_loop_system_prompt(&tool_codes),
-            },
-            ModelChatMessage {
-                role: "user".to_owned(),
-                content: command.input.clone(),
-            },
-        ];
         let mut last_tool_terminal_status = RunStatus::Succeeded;
 
         for _turn_index in 0..runtime_state.budget.max_turns {
@@ -1153,6 +1143,11 @@ impl AgentService {
             for attempt in 1..=model_retry_policy.max_attempts() {
                 let model_call_started = Instant::now();
                 let provider_attempt_kind = if attempt == 1 { "primary" } else { "retry" };
+                let messages = build_model_loop_messages_from_history(
+                    &command.input,
+                    &tool_codes,
+                    &runtime_state.items,
+                );
                 let model_call_result = await_model_loop_provider_future_or_cancelled(
                     cancel_token.clone(),
                     self.wait_for_model_loop_persistent_cancel(run_id),
@@ -1588,7 +1583,6 @@ impl AgentService {
                         prepared_calls.push(prepared_call);
                     }
 
-                    let mut batch_observations = Vec::new();
                     let mut last_recorded_step_id = None;
 
                     for prepared_call in &prepared_calls {
@@ -1716,10 +1710,6 @@ impl AgentService {
                             observation_payload,
                         )
                         .await?;
-                        batch_observations.push((
-                            prepared.tool.code.clone(),
-                            recorded.execution.response_payload.clone(),
-                        ));
                     }
 
                     if self
@@ -1848,12 +1838,6 @@ impl AgentService {
                                 compaction_payload,
                             )
                             .await?;
-                            let summary = compaction.summary.as_str();
-                            messages = build_compacted_model_loop_messages(
-                                &command.input,
-                                summary,
-                                &tool_codes,
-                            );
                             if self
                                 .check_model_loop_cancelled(user_id, run_id, "before_next_turn")
                                 .await?
@@ -1873,14 +1857,6 @@ impl AgentService {
                         return self.get_run(run_id).await;
                     }
 
-                    messages.push(ModelChatMessage {
-                        role: "assistant".to_owned(),
-                        content: model_response.answer.clone(),
-                    });
-                    messages.push(ModelChatMessage {
-                        role: "user".to_owned(),
-                        content: build_observation_batch_follow_up_prompt(&batch_observations),
-                    });
                     continue;
                 }
                 _ => {
@@ -4641,35 +4617,6 @@ fn agent_runtime_budget_from_task_budget(budget: TaskBudget) -> AgentRuntimeBudg
     }
 }
 
-fn build_observation_follow_up_prompt(tool_code: &str, observation: &Value) -> String {
-    format!(
-        "Tool `{tool_code}` returned this observation:\n{}\nUse it to produce the final answer. If the observation is insufficient, say what is missing.",
-        serde_json::to_string_pretty(observation).unwrap_or_else(|_| "{}".to_owned())
-    )
-}
-
-fn build_observation_batch_follow_up_prompt(observations: &[(String, Value)]) -> String {
-    if observations.len() == 1 {
-        if let Some((tool_code, observation)) = observations.first() {
-            return build_observation_follow_up_prompt(tool_code, observation);
-        }
-    }
-
-    let payload = observations
-        .iter()
-        .map(|(tool_code, observation)| {
-            json!({
-                "toolCode": tool_code,
-                "observation": observation,
-            })
-        })
-        .collect::<Vec<_>>();
-    format!(
-        "The requested tool batch returned these observations:\n{}\nUse them to produce the final answer. If the observations are insufficient, say what is missing.",
-        serde_json::to_string_pretty(&payload).unwrap_or_else(|_| "[]".to_owned())
-    )
-}
-
 fn tool_observation_status_for_execution(execution: &AgentToolExecution) -> ToolObservationStatus {
     if execution.succeeded_status() {
         return ToolObservationStatus::Succeeded;
@@ -4881,27 +4828,219 @@ fn u128_to_i64(value: u128) -> i64 {
     value.min(i64::MAX as u128) as i64
 }
 
-fn build_compacted_model_loop_messages(
+#[derive(Debug, Clone)]
+struct ModelLoopToolCallProjection {
+    call_id: String,
+    tool_code: String,
+    arguments: Value,
+}
+
+#[derive(Debug, Clone)]
+struct ModelLoopToolObservationProjection {
+    call_id: String,
+    tool_code: Option<String>,
+    status: ToolObservationStatus,
+    output: Value,
+}
+
+fn build_model_loop_messages_from_history(
     original_input: &str,
-    summary: &str,
     tool_codes: &[String],
+    history: &[AgentTurnItem],
 ) -> Vec<ModelChatMessage> {
-    vec![
-        ModelChatMessage {
-            role: "system".to_owned(),
-            content: build_model_loop_system_prompt(tool_codes),
-        },
-        ModelChatMessage {
+    let mut messages = vec![ModelChatMessage {
+        role: "system".to_owned(),
+        content: build_model_loop_system_prompt(tool_codes),
+    }];
+    let original_user_input = history
+        .iter()
+        .find_map(|item| match item {
+            AgentTurnItem::UserMessage { content } => Some(content.as_str()),
+            _ => None,
+        })
+        .unwrap_or(original_input);
+
+    if let Some(compaction_index) = history
+        .iter()
+        .rposition(|item| matches!(item, AgentTurnItem::ContextCompaction { .. }))
+    {
+        messages.push(ModelChatMessage {
             role: "user".to_owned(),
-            content: original_input.to_owned(),
-        },
-        ModelChatMessage {
+            content: original_user_input.to_owned(),
+        });
+        append_model_loop_history_messages(&mut messages, &history[compaction_index..]);
+        return messages;
+    }
+
+    if !history
+        .iter()
+        .any(|item| matches!(item, AgentTurnItem::UserMessage { .. }))
+    {
+        messages.push(ModelChatMessage {
             role: "user".to_owned(),
-            content: format!(
-                "Prior agent context was compacted to keep the run inside the model context window:\n{summary}\nContinue from this compacted context. You may call another available tool if needed, otherwise produce the final answer."
-            ),
-        },
-    ]
+            content: original_user_input.to_owned(),
+        });
+    }
+    append_model_loop_history_messages(&mut messages, history);
+    messages
+}
+
+fn append_model_loop_history_messages(
+    messages: &mut Vec<ModelChatMessage>,
+    history: &[AgentTurnItem],
+) {
+    let mut tool_code_by_call_id = HashMap::new();
+    let mut index = 0;
+
+    while index < history.len() {
+        match &history[index] {
+            AgentTurnItem::UserMessage { content } => {
+                messages.push(ModelChatMessage {
+                    role: "user".to_owned(),
+                    content: content.clone(),
+                });
+                index += 1;
+            }
+            AgentTurnItem::AssistantMessage { content }
+            | AgentTurnItem::FinalAnswer { content } => {
+                messages.push(ModelChatMessage {
+                    role: "assistant".to_owned(),
+                    content: content.clone(),
+                });
+                index += 1;
+            }
+            AgentTurnItem::Reasoning { summary } => {
+                messages.push(ModelChatMessage {
+                    role: "assistant".to_owned(),
+                    content: format!("Reasoning summary:\n{summary}"),
+                });
+                index += 1;
+            }
+            AgentTurnItem::ToolCall { .. } => {
+                let mut calls = Vec::new();
+                while let Some(AgentTurnItem::ToolCall {
+                    call_id,
+                    tool_code,
+                    arguments,
+                }) = history.get(index)
+                {
+                    tool_code_by_call_id.insert(call_id.clone(), tool_code.clone());
+                    calls.push(ModelLoopToolCallProjection {
+                        call_id: call_id.clone(),
+                        tool_code: tool_code.clone(),
+                        arguments: arguments.clone(),
+                    });
+                    index += 1;
+                }
+                messages.push(ModelChatMessage {
+                    role: "assistant".to_owned(),
+                    content: serialize_model_loop_tool_calls(&calls),
+                });
+            }
+            AgentTurnItem::ToolObservation { .. } => {
+                let mut observations = Vec::new();
+                while let Some(AgentTurnItem::ToolObservation {
+                    call_id,
+                    status,
+                    output,
+                }) = history.get(index)
+                {
+                    observations.push(ModelLoopToolObservationProjection {
+                        call_id: call_id.clone(),
+                        tool_code: tool_code_by_call_id.get(call_id).cloned(),
+                        status: *status,
+                        output: output.clone(),
+                    });
+                    index += 1;
+                }
+                messages.push(ModelChatMessage {
+                    role: "user".to_owned(),
+                    content: build_model_loop_observation_history_prompt(&observations),
+                });
+            }
+            AgentTurnItem::ContextCompaction { summary } => {
+                messages.push(ModelChatMessage {
+                    role: "user".to_owned(),
+                    content: build_model_loop_compaction_history_prompt(summary),
+                });
+                index += 1;
+            }
+        }
+    }
+}
+
+fn serialize_model_loop_tool_calls(calls: &[ModelLoopToolCallProjection]) -> String {
+    let payload = if calls.len() == 1 {
+        let call = &calls[0];
+        json!({
+            "type": "tool_call",
+            "callId": call.call_id,
+            "toolCode": call.tool_code,
+            "arguments": call.arguments,
+        })
+    } else {
+        let calls = calls
+            .iter()
+            .map(|call| {
+                json!({
+                    "callId": call.call_id,
+                    "toolCode": call.tool_code,
+                    "arguments": call.arguments,
+                })
+            })
+            .collect::<Vec<_>>();
+        json!({
+            "type": "tool_calls",
+            "calls": calls,
+        })
+    };
+
+    serde_json::to_string(&payload).unwrap_or_else(|_| "{\"type\":\"tool_calls\"}".to_owned())
+}
+
+fn build_model_loop_observation_history_prompt(
+    observations: &[ModelLoopToolObservationProjection],
+) -> String {
+    if observations.len() == 1 {
+        let observation = &observations[0];
+        let tool_code = observation.tool_code.as_deref().unwrap_or("unknown_tool");
+        return format!(
+            "Tool observation for call `{}` (`{}`, status: {}):\n{}\nUse it to produce the final answer. If the observation is insufficient, say what is missing.",
+            observation.call_id,
+            tool_code,
+            model_loop_tool_observation_status_code(observation.status),
+            serde_json::to_string_pretty(&observation.output).unwrap_or_else(|_| "{}".to_owned())
+        );
+    }
+
+    let payload = observations
+        .iter()
+        .map(|observation| {
+            json!({
+                "callId": observation.call_id,
+                "toolCode": observation.tool_code.as_deref().unwrap_or("unknown_tool"),
+                "status": model_loop_tool_observation_status_code(observation.status),
+                "observation": observation.output,
+            })
+        })
+        .collect::<Vec<_>>();
+    format!(
+        "The requested tool batch returned these observations:\n{}\nUse them to produce the final answer. If the observations are insufficient, say what is missing.",
+        serde_json::to_string_pretty(&payload).unwrap_or_else(|_| "[]".to_owned())
+    )
+}
+
+fn model_loop_tool_observation_status_code(status: ToolObservationStatus) -> String {
+    serde_json::to_value(status)
+        .ok()
+        .and_then(|value| value.as_str().map(str::to_owned))
+        .unwrap_or_else(|| format!("{status:?}").to_ascii_lowercase())
+}
+
+fn build_model_loop_compaction_history_prompt(summary: &str) -> String {
+    format!(
+        "Prior agent context was compacted to keep the run inside the model context window:\n{summary}\nContinue from this compacted context. You may call another available tool if needed, otherwise produce the final answer."
+    )
 }
 
 #[cfg(test)]
@@ -6616,15 +6755,25 @@ mod tests {
     }
 
     #[test]
-    fn agent_service_model_loop_uses_compacted_messages_for_next_sample() {
+    fn agent_service_model_loop_installs_response_item_history_for_sampling() {
         let source = include_str!("agent_service.rs")
             .split("#[cfg(test)]")
             .next()
             .unwrap();
         let normalized_source = source.split_whitespace().collect::<Vec<_>>().join(" ");
+        let model_loop = &source[source
+            .find("async fn execute_model_loop_existing_run")
+            .unwrap()
+            ..source
+                .find("async fn model_loop_context_compaction_outcome")
+                .unwrap()];
 
-        assert!(source.contains("build_compacted_model_loop_messages"));
-        assert!(normalized_source.contains("messages = build_compacted_model_loop_messages"));
+        assert!(source.contains("build_model_loop_messages_from_history"));
+        assert!(normalized_source.contains(
+            "build_model_loop_messages_from_history( &command.input, &tool_codes, &runtime_state.items, )"
+        ));
+        assert!(!model_loop.contains("let mut messages = vec!"));
+        assert!(!model_loop.contains("messages.push(ModelChatMessage"));
     }
 
     #[test]
@@ -6642,18 +6791,58 @@ mod tests {
     }
 
     #[test]
-    fn compacted_model_loop_messages_preserve_prompt_input_and_summary() {
+    fn model_loop_history_messages_project_response_items_for_follow_up() {
         let tool_codes = build_model_loop_tool_router().unwrap().tool_codes();
-        let messages = build_compacted_model_loop_messages(
-            "Find refund policy",
-            "Observation for call-1: refund within 7 days",
-            &tool_codes,
-        );
+        let history = vec![
+            AgentTurnItem::user_message("Find refund policy"),
+            AgentTurnItem::tool_call("call-1", "rag.search", json!({ "query": "refund policy" })),
+            AgentTurnItem::tool_observation(
+                "call-1",
+                ToolObservationStatus::Succeeded,
+                json!({ "answer": "refund within 7 days" }),
+            ),
+        ];
 
-        assert_eq!(messages.len(), 3);
+        let messages =
+            build_model_loop_messages_from_history("Find refund policy", &tool_codes, &history);
+
+        assert_eq!(messages.len(), 4);
         assert_eq!(messages[0].role, "system");
         assert!(messages[0].content.contains("Novex Agent Runtime"));
         assert!(messages[0].content.contains("github.repo.read"));
+        assert_eq!(messages[1].role, "user");
+        assert_eq!(messages[1].content, "Find refund policy");
+        assert_eq!(messages[2].role, "assistant");
+        assert!(messages[2].content.contains(r#""type":"tool_call""#));
+        assert!(messages[2].content.contains(r#""toolCode":"rag.search""#));
+        assert_eq!(messages[3].role, "user");
+        assert!(messages[3].content.contains("call-1"));
+        assert!(messages[3].content.contains("rag.search"));
+        assert!(messages[3].content.contains("refund within 7 days"));
+        assert!(messages[3].content.contains("final answer"));
+    }
+
+    #[test]
+    fn model_loop_history_messages_resume_from_latest_compaction_window() {
+        let tool_codes = build_model_loop_tool_router().unwrap().tool_codes();
+        let history = vec![
+            AgentTurnItem::user_message("Find refund policy"),
+            AgentTurnItem::tool_call("call-1", "rag.search", json!({ "query": "refund policy" })),
+            AgentTurnItem::tool_observation(
+                "call-1",
+                ToolObservationStatus::Succeeded,
+                json!({ "answer": "old evidence" }),
+            ),
+            AgentTurnItem::ContextCompaction {
+                summary: "Observation for call-1: refund within 7 days".to_owned(),
+            },
+            AgentTurnItem::tool_call("call-2", "github.repo.read", json!({ "path": "README.md" })),
+        ];
+
+        let messages =
+            build_model_loop_messages_from_history("Find refund policy", &tool_codes, &history);
+
+        assert_eq!(messages[0].role, "system");
         assert_eq!(messages[1].role, "user");
         assert_eq!(messages[1].content, "Find refund policy");
         assert_eq!(messages[2].role, "user");
@@ -6661,6 +6850,11 @@ mod tests {
         assert!(messages[2]
             .content
             .contains("Continue from this compacted context"));
+        assert_eq!(messages[3].role, "assistant");
+        assert!(messages[3].content.contains(r#""callId":"call-2""#));
+        assert!(!messages
+            .iter()
+            .any(|message| message.content.contains("old evidence")));
     }
 
     #[test]
@@ -6783,12 +6977,16 @@ mod tests {
 
     #[test]
     fn observation_prompt_includes_tool_result_and_final_answer_instruction() {
-        let prompt = build_observation_follow_up_prompt(
-            "rag.search",
-            &serde_json::json!({"hits":[{"title":"Policy"}]}),
-        );
+        let prompt =
+            build_model_loop_observation_history_prompt(&[ModelLoopToolObservationProjection {
+                call_id: "call-1".to_owned(),
+                tool_code: Some("rag.search".to_owned()),
+                status: ToolObservationStatus::Succeeded,
+                output: serde_json::json!({"hits":[{"title":"Policy"}]}),
+            }]);
 
         assert!(prompt.contains("rag.search"));
+        assert!(prompt.contains("call-1"));
         assert!(prompt.contains("Policy"));
         assert!(prompt.contains("final answer"));
     }
@@ -7157,7 +7355,7 @@ mod tests {
             .next()
             .unwrap();
         let batch_branch = &source[source.find("if batch_policy.requires_approval").unwrap()
-            ..source.find("let mut batch_observations").unwrap()];
+            ..source.find("let mut last_recorded_step_id").unwrap()];
         let normalized_batch_branch = batch_branch.split_whitespace().collect::<String>();
         let execution_index = source.find("execute_agent_tool_io_batch").unwrap();
         let gate_index = source
