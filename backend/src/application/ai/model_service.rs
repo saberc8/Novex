@@ -10,10 +10,9 @@ use chrono::{NaiveDateTime, Utc};
 use novex_connectors::FeishuTextMessage;
 use novex_model::{
     estimate_model_cost_cents, estimate_model_text_tokens, evaluate_model_route_policy,
-    mask_api_key, normalize_model_provider_usage, ModelKind, ModelProviderType,
-    ModelRoutePolicyInput, ModelRoutePolicyStatus, ModelRoutePurpose, ModelRuntimeConfig,
-    ModelRuntimeRoute, ModelRuntimeRouteSummary, ModelRuntimeSummary, ModelRuntimeTarget,
-    ModelTokenUsage, ModelUsageCostInput,
+    mask_api_key, ModelKind, ModelProviderType, ModelRoutePolicyInput, ModelRoutePolicyStatus,
+    ModelRoutePurpose, ModelRuntimeConfig, ModelRuntimeRoute, ModelRuntimeRouteSummary,
+    ModelRuntimeSummary, ModelRuntimeTarget, ModelTokenUsage, ModelUsageCostInput,
 };
 use novex_tools::{parse_media_image_generation_response, MediaImageGenerationRequest};
 use serde::{Deserialize, Serialize};
@@ -21,7 +20,13 @@ use serde_json::{json, Value};
 use sqlx::{FromRow, PgPool};
 use tokio::sync::mpsc;
 
-use super::model_provider_transport::{send_model_provider_http_request, ModelProviderHttpRequest};
+use super::model_provider_transport::{
+    model_chat_sse_record_data_payload, model_provider_response_id_from_payloads,
+    normalize_model_provider_response_id, parse_model_chat_compaction_provider_output_from_text,
+    parse_model_chat_provider_output_from_body, parse_model_chat_provider_output_from_text,
+    read_model_provider_response_text, send_model_provider_http_request, ModelChatProviderOutput,
+    ModelChatStreamCompletionBuilder, ModelProviderHttpRequest,
+};
 
 use crate::{
     application::system::{ensure_max_chars, format_datetime},
@@ -2865,7 +2870,7 @@ async fn execute_normalized_chat_completion_with_route(
         ));
     }
 
-    let body_text = response.text().await.unwrap_or_default();
+    let body_text = read_model_provider_response_text(response).await?;
     match provider_request.transport {
         ModelChatProviderTransport::ChatCompletions
         | ModelChatProviderTransport::ResponsesCodeAgent => {
@@ -3306,96 +3311,6 @@ fn model_chat_file_context_prompt(files: &[ModelChatFileContext]) -> String {
     sections.join("\n\n")
 }
 
-#[derive(Debug, Clone, PartialEq)]
-struct ModelChatProviderOutput {
-    answer: String,
-    usage: ModelChatUsage,
-    provider_response_id: Option<String>,
-    provider_response_status: Option<String>,
-    delta_chunks: Vec<ModelProviderStreamChunk>,
-}
-
-#[derive(Debug, Clone, Default, PartialEq)]
-struct ModelChatStreamCompletionBuilder {
-    completed: bool,
-    completed_answer: Option<String>,
-    usage: ModelChatUsage,
-    provider_response_id: Option<String>,
-    provider_response_status: Option<String>,
-    delta_chunks: Vec<ModelProviderStreamChunk>,
-    next_chunk_index: usize,
-}
-
-impl ModelChatStreamCompletionBuilder {
-    fn observe_done(&mut self) {
-        self.completed = true;
-    }
-
-    fn observe_sse_value(&mut self, value: &Value) -> Vec<ModelProviderStreamChunk> {
-        let response_payload = model_chat_response_payload_from_sse_value(value);
-        if let Some(response_id) = model_provider_response_id_from_payload(response_payload) {
-            self.provider_response_id = Some(response_id);
-        }
-        if let Some(response_status) = model_provider_response_status_from_payload(response_payload)
-        {
-            self.provider_response_status = Some(response_status);
-        }
-        let usage_payload = if response_payload.get("usage").is_some() {
-            response_payload
-        } else {
-            value
-        };
-        if usage_payload.get("usage").is_some() {
-            self.usage = normalize_model_provider_usage(usage_payload);
-        }
-        let (chunks, next_index) =
-            model_chat_provider_delta_chunks_from_sse_value(value, self.next_chunk_index);
-        self.next_chunk_index = next_index;
-        self.delta_chunks.extend(chunks.iter().cloned());
-        if model_chat_sse_value_is_terminal(value) {
-            self.completed = true;
-            self.completed_answer = model_chat_answer_from_provider_body(response_payload);
-        }
-        chunks
-    }
-
-    fn finish(self) -> Result<ModelChatProviderOutput, AppError> {
-        if !self.completed {
-            return Err(AppError::bad_request("LLM chat SSE 响应在完成前结束"));
-        }
-
-        let answer = self
-            .delta_chunks
-            .iter()
-            .map(|chunk| chunk.content.as_str())
-            .collect::<String>();
-        let answer = if answer.is_empty() {
-            self.completed_answer.unwrap_or_default()
-        } else {
-            answer
-        };
-        if answer.is_empty() {
-            return Err(AppError::bad_request("LLM chat SSE 响应为空"));
-        }
-
-        Ok(ModelChatProviderOutput {
-            answer,
-            usage: self.usage,
-            provider_response_id: self.provider_response_id,
-            provider_response_status: self.provider_response_status,
-            delta_chunks: self.delta_chunks,
-        })
-    }
-
-    fn provider_response_id(&self) -> Option<String> {
-        self.provider_response_id.clone()
-    }
-
-    fn provider_response_status(&self) -> Option<String> {
-        self.provider_response_status.clone()
-    }
-}
-
 async fn model_chat_streaming_provider_output(
     mut response: reqwest::Response,
     route: &ModelRuntimeRoute,
@@ -3468,12 +3383,7 @@ fn model_chat_response_from_chat_completion_text(
     latency_ms: u128,
     conversation_id: Option<i64>,
 ) -> Result<ModelChatResp, AppError> {
-    let trimmed = body_text.trim();
-    let output = if let Ok(body) = serde_json::from_str::<Value>(trimmed) {
-        model_chat_provider_output_from_body(&body)?
-    } else {
-        model_chat_provider_output_from_sse_text(trimmed)?
-    };
+    let output = parse_model_chat_provider_output_from_text(body_text)?;
     Ok(model_chat_response_from_provider_output(
         route,
         output,
@@ -3514,7 +3424,7 @@ fn model_chat_response_from_provider(
     latency_ms: u128,
     conversation_id: Option<i64>,
 ) -> Result<ModelChatResp, AppError> {
-    let output = model_chat_provider_output_from_body(&body)?;
+    let output = parse_model_chat_provider_output_from_body(&body)?;
     Ok(ModelChatResp {
         conversation_id,
         answer: output.answer,
@@ -3534,60 +3444,13 @@ fn model_chat_response_from_provider(
     })
 }
 
-fn model_chat_provider_output_from_body(body: &Value) -> Result<ModelChatProviderOutput, AppError> {
-    let answer = model_chat_answer_from_provider_body(body)
-        .ok_or_else(|| AppError::bad_request("LLM 响应为空"))?;
-    Ok(ModelChatProviderOutput {
-        answer,
-        usage: normalize_model_provider_usage(body),
-        provider_response_id: model_provider_response_id_from_payload(body),
-        provider_response_status: model_provider_response_status_from_payload(body),
-        delta_chunks: vec![],
-    })
-}
-
-fn model_chat_provider_output_from_sse_text(
-    body_text: &str,
-) -> Result<ModelChatProviderOutput, AppError> {
-    let mut builder = ModelChatStreamCompletionBuilder::default();
-
-    for data in model_chat_sse_data_payloads(body_text) {
-        if data == "[DONE]" {
-            builder.observe_done();
-            continue;
-        }
-        let value = serde_json::from_str::<Value>(&data)
-            .map_err(|_| AppError::bad_request("LLM chat SSE 响应不是合法 JSON"))?;
-        builder.observe_sse_value(&value);
-    }
-
-    builder.finish()
-}
-
-fn model_chat_response_payload_from_sse_value(value: &Value) -> &Value {
-    value.get("response").unwrap_or(value)
-}
-
-#[derive(Debug, Clone, PartialEq)]
-struct ModelChatCompactionProviderOutput {
-    answer: String,
-    usage: ModelChatUsage,
-    provider_response_id: Option<String>,
-    provider_response_status: Option<String>,
-}
-
 fn model_chat_response_from_responses_compaction_text(
     route: &ModelRuntimeRoute,
     body_text: &str,
     latency_ms: u128,
     conversation_id: Option<i64>,
 ) -> Result<ModelChatResp, AppError> {
-    let trimmed = body_text.trim();
-    let output = if let Ok(body) = serde_json::from_str::<Value>(trimmed) {
-        model_chat_compaction_provider_output_from_body(&body)?
-    } else {
-        model_chat_compaction_provider_output_from_sse_text(trimmed)?
-    };
+    let output = parse_model_chat_compaction_provider_output_from_text(body_text)?;
     Ok(ModelChatResp {
         conversation_id,
         answer: output.answer,
@@ -3605,231 +3468,6 @@ fn model_chat_response_from_responses_compaction_text(
         provider_response_status: output.provider_response_status,
         provider_delta_chunks: vec![],
     })
-}
-
-fn model_chat_compaction_provider_output_from_body(
-    body: &Value,
-) -> Result<ModelChatCompactionProviderOutput, AppError> {
-    let output_items = body
-        .get("output")
-        .and_then(Value::as_array)
-        .ok_or_else(|| AppError::bad_request("LLM compaction 响应缺少 output"))?;
-    let answer = model_chat_compaction_output_from_items(output_items.iter())?;
-    Ok(ModelChatCompactionProviderOutput {
-        answer,
-        usage: normalize_model_provider_usage(body),
-        provider_response_id: model_provider_response_id_from_payload(body),
-        provider_response_status: model_provider_response_status_from_payload(body),
-    })
-}
-
-fn model_chat_compaction_provider_output_from_sse_text(
-    body_text: &str,
-) -> Result<ModelChatCompactionProviderOutput, AppError> {
-    let mut output_items = Vec::new();
-    let mut completed = false;
-    let mut usage = ModelChatUsage::default();
-    let mut provider_response_id = None;
-    let mut provider_response_status = None;
-    for data in model_chat_sse_data_payloads(body_text) {
-        if data == "[DONE]" {
-            continue;
-        }
-        let value = serde_json::from_str::<Value>(&data)
-            .map_err(|_| AppError::bad_request("LLM compaction SSE 响应不是合法 JSON"))?;
-        if let Some(response) = value.get("response") {
-            if let Some(response_id) = model_provider_response_id_from_payload(response) {
-                provider_response_id = Some(response_id);
-            }
-            if let Some(response_status) = model_provider_response_status_from_payload(response) {
-                provider_response_status = Some(response_status);
-            }
-        }
-        match value.get("type").and_then(Value::as_str) {
-            Some("response.output_item.done") => {
-                if let Some(item) = value.get("item") {
-                    output_items.push(item.clone());
-                }
-            }
-            Some("response.completed") => {
-                completed = true;
-                usage = value
-                    .pointer("/response/usage")
-                    .map(normalize_model_provider_usage)
-                    .unwrap_or_else(|| normalize_model_provider_usage(&value));
-            }
-            _ => {}
-        }
-    }
-
-    if !completed {
-        return Err(AppError::bad_request(
-            "LLM compaction SSE 响应在 response.completed 前结束",
-        ));
-    }
-
-    let answer = model_chat_compaction_output_from_items(output_items.iter())?;
-    Ok(ModelChatCompactionProviderOutput {
-        answer,
-        usage,
-        provider_response_id,
-        provider_response_status,
-    })
-}
-
-fn model_chat_sse_data_payloads(body_text: &str) -> Vec<String> {
-    let normalized = body_text.replace("\r\n", "\n");
-    normalized
-        .split("\n\n")
-        .filter_map(model_chat_sse_record_data_payload)
-        .collect()
-}
-
-fn model_chat_sse_record_data_payload(record: &str) -> Option<String> {
-    let data = record
-        .lines()
-        .filter_map(|line| line.strip_prefix("data:"))
-        .map(str::trim)
-        .collect::<Vec<_>>()
-        .join("\n");
-    (!data.trim().is_empty()).then(|| data.trim().to_owned())
-}
-
-fn model_chat_provider_delta_chunks_from_sse_value(
-    value: &Value,
-    next_chunk_index: usize,
-) -> (Vec<ModelProviderStreamChunk>, usize) {
-    let provider_event = model_chat_provider_event_name(value);
-    if let Some(content) = model_chat_responses_delta_content_from_value(value) {
-        return (
-            vec![ModelProviderStreamChunk {
-                index: next_chunk_index,
-                content,
-                provider_event,
-            }],
-            next_chunk_index + 1,
-        );
-    }
-
-    let Some(choices) = value.get("choices").and_then(Value::as_array) else {
-        return (vec![], next_chunk_index);
-    };
-
-    let mut chunks = Vec::new();
-    let mut index = next_chunk_index;
-    for choice in choices {
-        if let Some(content) = model_chat_delta_content_from_choice(choice) {
-            chunks.push(ModelProviderStreamChunk {
-                index,
-                content,
-                provider_event: provider_event.clone(),
-            });
-            index += 1;
-        }
-    }
-
-    (chunks, index)
-}
-
-fn model_chat_responses_delta_content_from_value(value: &Value) -> Option<String> {
-    if value.get("type").and_then(Value::as_str) != Some("response.output_text.delta") {
-        return None;
-    }
-    value
-        .get("delta")
-        .and_then(model_chat_delta_text_from_value)
-}
-
-fn model_chat_delta_content_from_choice(choice: &Value) -> Option<String> {
-    ["/delta/content", "/message/content", "/text"]
-        .into_iter()
-        .filter_map(|pointer| choice.pointer(pointer))
-        .find_map(model_chat_delta_text_from_value)
-}
-
-fn model_chat_delta_text_from_value(value: &Value) -> Option<String> {
-    match value {
-        Value::String(text) if !text.is_empty() => Some(text.to_owned()),
-        Value::Array(items) => {
-            let text = items
-                .iter()
-                .filter_map(|item| {
-                    item.get("text")
-                        .or_else(|| item.get("content"))
-                        .and_then(Value::as_str)
-                })
-                .collect::<String>();
-            (!text.is_empty()).then_some(text)
-        }
-        _ => None,
-    }
-}
-
-fn model_chat_provider_event_name(value: &Value) -> Option<String> {
-    ["object", "type"]
-        .into_iter()
-        .filter_map(|key| value.get(key))
-        .filter_map(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_owned)
-        .next()
-}
-
-fn model_chat_sse_value_is_terminal(value: &Value) -> bool {
-    if value.get("type").and_then(Value::as_str) == Some("response.completed") {
-        return true;
-    }
-
-    value
-        .get("choices")
-        .and_then(Value::as_array)
-        .is_some_and(|choices| {
-            choices.iter().any(|choice| {
-                choice
-                    .get("finish_reason")
-                    .is_some_and(|finish_reason| !finish_reason.is_null())
-            })
-        })
-}
-
-fn model_chat_compaction_output_from_items<'a, I>(items: I) -> Result<String, AppError>
-where
-    I: IntoIterator<Item = &'a Value>,
-{
-    let mut output_item_count = 0usize;
-    let mut compaction_count = 0usize;
-    let mut answer = None;
-    for item in items {
-        output_item_count += 1;
-        if let Some(compaction) = model_chat_compaction_output_item_text(item)? {
-            compaction_count += 1;
-            if answer.is_none() {
-                answer = Some(compaction);
-            }
-        }
-    }
-
-    if compaction_count != 1 {
-        return Err(AppError::bad_request(format!(
-            "LLM compaction 响应应包含 1 个 compaction 输出，实际 {compaction_count}/{output_item_count}"
-        )));
-    }
-
-    answer.ok_or_else(|| AppError::bad_request("LLM compaction 响应为空"))
-}
-
-fn model_chat_compaction_output_item_text(item: &Value) -> Result<Option<String>, AppError> {
-    match item.get("type").and_then(Value::as_str) {
-        Some("compaction" | "compaction_summary") => item
-            .get("encrypted_content")
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|content| !content.is_empty())
-            .map(|content| Some(content.to_owned()))
-            .ok_or_else(|| AppError::bad_request("LLM compaction 输出缺少 encrypted_content")),
-        _ => Ok(None),
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -4259,47 +3897,6 @@ fn model_provider_supports_responses_native_cancel(provider: ModelProviderType) 
         provider,
         ModelProviderType::OpenAiCompatible | ModelProviderType::LocalRuntime
     )
-}
-
-fn model_provider_response_id_from_payloads(request: &Value, response: &Value) -> Option<String> {
-    [request, response]
-        .into_iter()
-        .find_map(model_provider_response_id_from_payload)
-}
-
-fn model_provider_response_id_from_payload(payload: &Value) -> Option<String> {
-    [
-        payload.get("providerResponseId"),
-        payload.get("responseId"),
-        payload.get("id"),
-    ]
-    .into_iter()
-    .flatten()
-    .filter_map(Value::as_str)
-    .find_map(normalize_model_provider_response_id)
-}
-
-fn normalize_model_provider_response_id(value: &str) -> Option<String> {
-    let value = value.trim();
-    if value.is_empty() || value.contains('/') || value.contains('?') || value.contains('#') {
-        return None;
-    }
-    Some(value.to_owned())
-}
-
-fn model_provider_response_status_from_payload(payload: &Value) -> Option<String> {
-    [
-        payload.get("providerResponseStatus"),
-        payload.get("responseStatus"),
-        payload.get("status"),
-    ]
-    .into_iter()
-    .flatten()
-    .filter_map(Value::as_str)
-    .map(str::trim)
-    .filter(|value| !value.is_empty())
-    .map(str::to_owned)
-    .next()
 }
 
 fn model_provider_native_cancel_resp_from_plan(
@@ -4831,65 +4428,6 @@ fn model_provider_error_http_status(message: &str) -> Option<u16> {
 fn model_provider_error_is_timeout(message: &str) -> bool {
     let message = message.to_ascii_lowercase();
     message.contains("timeout") || message.contains("timed out") || message.contains("超时")
-}
-
-fn model_chat_answer_from_provider_body(body: &Value) -> Option<String> {
-    for pointer in [
-        "/choices/0/message/content",
-        "/choices/0/text",
-        "/output_text",
-    ] {
-        if let Some(value) = body.pointer(pointer) {
-            if let Some(answer) = model_chat_text_from_value(value) {
-                return Some(answer);
-            }
-        }
-    }
-    model_chat_responses_output_text_from_body(body)
-}
-
-fn model_chat_responses_output_text_from_body(body: &Value) -> Option<String> {
-    let output_items = body.get("output").and_then(Value::as_array)?;
-    let text = output_items
-        .iter()
-        .filter_map(|item| {
-            item.get("content")
-                .and_then(model_chat_text_from_value)
-                .or_else(|| item.get("text").and_then(model_chat_text_from_value))
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
-    non_empty_model_chat_text(&text)
-}
-
-fn model_chat_text_from_value(value: &Value) -> Option<String> {
-    match value {
-        Value::String(text) => non_empty_model_chat_text(text),
-        Value::Array(items) => {
-            let text = items
-                .iter()
-                .filter_map(|item| {
-                    item.get("text")
-                        .or_else(|| item.get("content"))
-                        .and_then(Value::as_str)
-                        .map(str::trim)
-                        .filter(|part| !part.is_empty())
-                })
-                .collect::<Vec<_>>()
-                .join("\n");
-            non_empty_model_chat_text(&text)
-        }
-        _ => None,
-    }
-}
-
-fn non_empty_model_chat_text(text: &str) -> Option<String> {
-    let trimmed = text.trim();
-    if trimmed.is_empty() {
-        None
-    } else {
-        Some(trimmed.to_owned())
-    }
 }
 
 impl From<ModelChatConversationRow> for ModelChatConversationResp {
@@ -6400,6 +5938,10 @@ mod tests {
         ModelKind, ModelProviderType, ModelRoutePurpose, ModelRuntimeConfig, ModelRuntimeTarget,
     };
 
+    use super::super::model_provider_transport::{
+        parse_model_chat_compaction_provider_output_from_body,
+        parse_model_chat_compaction_provider_output_from_sse_text,
+    };
     use super::*;
 
     fn model_chat_response_from_responses_compaction_body(
@@ -6408,7 +5950,7 @@ mod tests {
         latency_ms: u128,
         conversation_id: Option<i64>,
     ) -> Result<ModelChatResp, AppError> {
-        let output = model_chat_compaction_provider_output_from_body(&body)?;
+        let output = parse_model_chat_compaction_provider_output_from_body(&body)?;
         Ok(ModelChatResp {
             conversation_id,
             answer: output.answer,
@@ -6429,11 +5971,12 @@ mod tests {
     }
 
     fn model_chat_compaction_output_from_provider_body(body: &Value) -> Result<String, AppError> {
-        model_chat_compaction_provider_output_from_body(body).map(|output| output.answer)
+        parse_model_chat_compaction_provider_output_from_body(body).map(|output| output.answer)
     }
 
     fn model_chat_compaction_output_from_sse_text(body_text: &str) -> Result<String, AppError> {
-        model_chat_compaction_provider_output_from_sse_text(body_text).map(|output| output.answer)
+        parse_model_chat_compaction_provider_output_from_sse_text(body_text)
+            .map(|output| output.answer)
     }
 
     #[tokio::test]
@@ -6810,7 +6353,8 @@ mod tests {
         assert!(normalized_runtime_path.contains(
             "if stream_dispatch && model_chat_provider_request_streams_chat_completion(&provider_request)"
         ));
-        assert!(normalized_runtime_path.contains("let body_text = response.text().await"));
+        assert!(normalized_runtime_path
+            .contains("let body_text = read_model_provider_response_text(response).await?;"));
         assert!(normalized_runtime_path.contains(
             "ModelChatProviderTransport::ChatCompletions | ModelChatProviderTransport::ResponsesCodeAgent"
         ));
@@ -6835,6 +6379,37 @@ mod tests {
         assert!(!route_path.contains(".post(&provider_request.endpoint)"));
         assert!(!route_path.contains(".bearer_auth(route.api_key())"));
         assert!(!route_path.contains("LLM 模型调用失败: HTTP {}"));
+    }
+
+    #[test]
+    fn model_provider_response_transport_adapter_source_contract() {
+        let service_source = include_str!("model_service.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+        let transport_source = include_str!("model_provider_transport.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+        let route_path = &service_source[service_source
+            .find("async fn execute_normalized_chat_completion_with_route")
+            .unwrap()
+            ..service_source
+                .find("fn normalize_model_chat_command")
+                .unwrap()];
+
+        assert!(service_source.contains("read_model_provider_response_text"));
+        assert!(service_source.contains("ModelChatStreamCompletionBuilder"));
+        assert!(transport_source.contains("pub(super) async fn read_model_provider_response_text"));
+        assert!(transport_source.contains("pub(super) struct ModelChatProviderOutput"));
+        assert!(transport_source.contains("pub(super) struct ModelChatCompactionProviderOutput"));
+        assert!(transport_source.contains("pub(super) struct ModelChatStreamCompletionBuilder"));
+        assert!(route_path.contains("read_model_provider_response_text(response).await?"));
+        assert!(!route_path.contains("response.text().await.unwrap_or_default()"));
+        assert!(!service_source.contains("fn model_chat_provider_output_from_body"));
+        assert!(!service_source.contains("fn model_chat_provider_output_from_sse_text"));
+        assert!(!service_source.contains("fn model_chat_compaction_provider_output_from_body"));
+        assert!(!service_source.contains("fn model_chat_compaction_provider_output_from_sse_text"));
     }
 
     #[test]
@@ -8716,7 +8291,7 @@ mod tests {
             }
         });
 
-        let output = model_chat_compaction_provider_output_from_body(&body).unwrap();
+        let output = parse_model_chat_compaction_provider_output_from_body(&body).unwrap();
 
         assert_eq!(output.answer, "compact summary");
         assert_eq!(output.provider_response_id.as_deref(), Some("resp_bg_123"));
@@ -8771,7 +8346,7 @@ mod tests {
             "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_bg_123\",\"status\":\"completed\",\"usage\":{\"input_tokens\":14,\"output_tokens\":3,\"total_tokens\":17}}}\n\n",
         );
 
-        let output = model_chat_compaction_provider_output_from_sse_text(sse).unwrap();
+        let output = parse_model_chat_compaction_provider_output_from_sse_text(sse).unwrap();
 
         assert_eq!(output.answer, "sse summary");
         assert_eq!(output.provider_response_id.as_deref(), Some("resp_bg_123"));
