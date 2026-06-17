@@ -6270,6 +6270,10 @@ mod tests {
             .split("#[cfg(test)]")
             .next()
             .unwrap();
+        let native_cancel_source = include_str!("model_provider_transport/native_cancel.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
         let cancel_path = &service_source[service_source
             .find("async fn execute_model_provider_native_cancel")
             .unwrap()
@@ -6279,9 +6283,13 @@ mod tests {
 
         assert!(service_source.contains("ModelProviderNativeCancelRequest"));
         assert!(service_source.contains("send_model_provider_native_cancel_request"));
-        assert!(transport_source.contains("pub(super) struct ModelProviderNativeCancelRequest"));
-        assert!(transport_source
-            .contains("pub(super) async fn send_model_provider_native_cancel_request"));
+        assert!(transport_source.contains("pub(super) use native_cancel::{"));
+        assert!(native_cancel_source
+            .contains("pub(in crate::application::ai) struct ModelProviderNativeCancelRequest"));
+        assert!(native_cancel_source.contains(
+            "pub(in crate::application::ai) async fn send_model_provider_native_cancel_request"
+        ));
+        assert!(native_cancel_source.contains("model_provider_http_client(request.timeout)"));
         assert!(cancel_path.contains(
             "send_model_provider_native_cancel_request(ModelProviderNativeCancelRequest"
         ));
@@ -6298,6 +6306,10 @@ mod tests {
             .next()
             .unwrap();
         let transport_source = include_str!("model_provider_transport.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+        let rag_source = include_str!("model_provider_transport/rag.rs")
             .split("#[cfg(test)]")
             .next()
             .unwrap();
@@ -6318,14 +6330,23 @@ mod tests {
         assert!(service_source.contains("send_model_provider_rerank_request"));
         assert!(service_source.contains("parse_model_provider_embedding_vectors"));
         assert!(service_source.contains("parse_model_provider_rerank_scores"));
-        assert!(transport_source.contains("pub(super) struct ModelProviderEmbeddingRequest"));
-        assert!(transport_source.contains("pub(super) struct ModelProviderRerankRequest"));
+        assert!(transport_source.contains("pub(super) use rag::{"));
+        assert!(rag_source
+            .contains("pub(in crate::application::ai) struct ModelProviderEmbeddingRequest"));
         assert!(
-            transport_source.contains("pub(super) async fn send_model_provider_embedding_request")
+            rag_source.contains("pub(in crate::application::ai) struct ModelProviderRerankRequest")
         );
-        assert!(transport_source.contains("pub(super) async fn send_model_provider_rerank_request"));
-        assert!(transport_source.contains("pub(super) fn parse_model_provider_embedding_vectors"));
-        assert!(transport_source.contains("pub(super) fn parse_model_provider_rerank_scores"));
+        assert!(rag_source.contains(
+            "pub(in crate::application::ai) async fn send_model_provider_embedding_request"
+        ));
+        assert!(rag_source.contains(
+            "pub(in crate::application::ai) async fn send_model_provider_rerank_request"
+        ));
+        assert!(rag_source
+            .contains("pub(in crate::application::ai) fn parse_model_provider_embedding_vectors"));
+        assert!(rag_source
+            .contains("pub(in crate::application::ai) fn parse_model_provider_rerank_scores"));
+        assert!(rag_source.contains("model_provider_http_client(request.timeout)"));
         assert!(embed_path
             .contains("send_model_provider_embedding_request(ModelProviderEmbeddingRequest"));
         assert!(
@@ -6353,6 +6374,10 @@ mod tests {
             .split("#[cfg(test)]")
             .next()
             .unwrap();
+        let media_source = include_str!("model_provider_transport/media.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
         let media_path = &service_source[service_source
             .find("pub async fn generate_media_image")
             .unwrap()
@@ -6362,9 +6387,13 @@ mod tests {
 
         assert!(service_source.contains("ModelProviderMediaImageRequest"));
         assert!(service_source.contains("send_model_provider_media_image_request"));
-        assert!(transport_source.contains("pub(super) struct ModelProviderMediaImageRequest"));
-        assert!(transport_source
-            .contains("pub(super) async fn send_model_provider_media_image_request"));
+        assert!(transport_source.contains("pub(super) use media::{"));
+        assert!(media_source
+            .contains("pub(in crate::application::ai) struct ModelProviderMediaImageRequest"));
+        assert!(media_source.contains(
+            "pub(in crate::application::ai) async fn send_model_provider_media_image_request"
+        ));
+        assert!(media_source.contains("model_provider_http_client(request.timeout)"));
         assert!(media_path
             .contains("send_model_provider_media_image_request(ModelProviderMediaImageRequest"));
         assert!(!media_path.contains("reqwest::Client::builder()"));
@@ -6401,6 +6430,64 @@ mod tests {
         assert!(!service_source.contains("pub struct ModelMediaImageGenerationResp"));
         assert!(transport_source.contains("use novex_model::{"));
         assert!(!transport_source.contains("use super::model_service::{"));
+    }
+
+    #[test]
+    fn model_provider_transport_splits_provider_client_modules() {
+        let backend_ai_dir =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/application/ai");
+        let source = |path: &str| {
+            std::fs::read_to_string(backend_ai_dir.join(path))
+                .unwrap_or_else(|err| panic!("failed to read {path}: {err}"))
+        };
+        let transport_source = source("model_provider_transport.rs");
+        let http_source = source("model_provider_transport/http.rs");
+        let native_cancel_source = source("model_provider_transport/native_cancel.rs");
+        let rag_source = source("model_provider_transport/rag.rs");
+        let media_source = source("model_provider_transport/media.rs");
+
+        assert!(transport_source.contains("mod http;"));
+        assert!(transport_source.contains("mod media;"));
+        assert!(transport_source.contains("mod native_cancel;"));
+        assert!(transport_source.contains("mod rag;"));
+        assert!(transport_source.contains("pub(super) use http::{"));
+        assert!(transport_source.contains("pub(super) use media::{"));
+        assert!(transport_source.contains("pub(super) use native_cancel::{"));
+        assert!(transport_source.contains("pub(super) use rag::{"));
+        assert!(
+            !transport_source.contains("pub(super) async fn send_model_provider_embedding_request")
+        );
+        assert!(
+            !transport_source.contains("pub(super) async fn send_model_provider_rerank_request")
+        );
+        assert!(!transport_source
+            .contains("pub(super) async fn send_model_provider_media_image_request"));
+        assert!(!transport_source
+            .contains("pub(super) async fn send_model_provider_native_cancel_request"));
+        assert!(!transport_source.contains("fn parse_rerank_score("));
+        assert!(!transport_source.contains("fn parse_embedding_vector("));
+        assert!(http_source.contains("pub(super) fn model_provider_http_client"));
+        assert!(http_source
+            .contains("pub(in crate::application::ai) async fn send_model_provider_http_request"));
+        assert!(native_cancel_source.contains(
+            "pub(in crate::application::ai) async fn send_model_provider_native_cancel_request",
+        ));
+        assert!(native_cancel_source.contains("model_provider_http_client(request.timeout)"));
+        assert!(rag_source.contains(
+            "pub(in crate::application::ai) async fn send_model_provider_embedding_request"
+        ));
+        assert!(rag_source.contains(
+            "pub(in crate::application::ai) async fn send_model_provider_rerank_request"
+        ));
+        assert!(rag_source
+            .contains("pub(in crate::application::ai) fn parse_model_provider_embedding_vectors"));
+        assert!(rag_source
+            .contains("pub(in crate::application::ai) fn parse_model_provider_rerank_scores"));
+        assert!(rag_source.contains("model_provider_http_client(request.timeout)"));
+        assert!(media_source.contains(
+            "pub(in crate::application::ai) async fn send_model_provider_media_image_request"
+        ));
+        assert!(media_source.contains("model_provider_http_client(request.timeout)"));
     }
 
     #[test]

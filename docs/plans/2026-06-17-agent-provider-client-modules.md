@@ -54,15 +54,15 @@ assert!(!transport_source.contains("pub(super) async fn send_model_provider_nati
 assert!(!transport_source.contains("fn parse_rerank_score("));
 assert!(!transport_source.contains("fn parse_embedding_vector("));
 assert!(http_source.contains("pub(super) fn model_provider_http_client"));
-assert!(http_source.contains("pub(super) async fn send_model_provider_http_request"));
-assert!(native_cancel_source.contains("pub(super) async fn send_model_provider_native_cancel_request"));
+assert!(http_source.contains("pub(in crate::application::ai) async fn send_model_provider_http_request"));
+assert!(native_cancel_source.contains("pub(in crate::application::ai) async fn send_model_provider_native_cancel_request"));
 assert!(native_cancel_source.contains("model_provider_http_client(request.timeout)"));
-assert!(rag_source.contains("pub(super) async fn send_model_provider_embedding_request"));
-assert!(rag_source.contains("pub(super) async fn send_model_provider_rerank_request"));
-assert!(rag_source.contains("pub(super) fn parse_model_provider_embedding_vectors"));
-assert!(rag_source.contains("pub(super) fn parse_model_provider_rerank_scores"));
+assert!(rag_source.contains("pub(in crate::application::ai) async fn send_model_provider_embedding_request"));
+assert!(rag_source.contains("pub(in crate::application::ai) async fn send_model_provider_rerank_request"));
+assert!(rag_source.contains("pub(in crate::application::ai) fn parse_model_provider_embedding_vectors"));
+assert!(rag_source.contains("pub(in crate::application::ai) fn parse_model_provider_rerank_scores"));
 assert!(rag_source.contains("model_provider_http_client(request.timeout)"));
-assert!(media_source.contains("pub(super) async fn send_model_provider_media_image_request"));
+assert!(media_source.contains("pub(in crate::application::ai) async fn send_model_provider_media_image_request"));
 assert!(media_source.contains("model_provider_http_client(request.timeout)"));
 ```
 

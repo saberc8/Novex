@@ -1,201 +1,22 @@
-use std::time::Duration;
+mod http;
+mod media;
+mod native_cancel;
+mod rag;
 
-use novex_model::{
-    normalize_model_provider_usage, ModelEmbeddingVector, ModelMediaImageGenerationResp,
-    ModelProviderStreamChunk, ModelRerankScore, ModelTokenUsage,
+pub(super) use http::{send_model_provider_http_request, ModelProviderHttpRequest};
+pub(super) use media::{send_model_provider_media_image_request, ModelProviderMediaImageRequest};
+pub(super) use native_cancel::{
+    send_model_provider_native_cancel_request, ModelProviderNativeCancelRequest,
 };
-use novex_tools::{parse_media_image_generation_response, MediaImageGenerationRequest};
-use serde_json::{json, Value};
+use novex_model::{normalize_model_provider_usage, ModelProviderStreamChunk, ModelTokenUsage};
+pub(super) use rag::{
+    parse_model_provider_embedding_vectors, parse_model_provider_rerank_scores,
+    send_model_provider_embedding_request, send_model_provider_rerank_request,
+    ModelProviderEmbeddingRequest, ModelProviderRerankRequest,
+};
+use serde_json::Value;
 
 use crate::shared::error::AppError;
-
-pub(super) struct ModelProviderHttpRequest<'a> {
-    pub endpoint: &'a str,
-    pub api_key: &'a str,
-    pub payload: &'a Value,
-    pub timeout: Duration,
-    pub failure_message: &'a str,
-}
-
-pub(super) struct ModelProviderNativeCancelRequest<'a> {
-    pub endpoint: &'a str,
-    pub api_key: &'a str,
-    pub timeout: Duration,
-}
-
-pub(super) struct ModelProviderEmbeddingRequest<'a> {
-    pub endpoint: &'a str,
-    pub api_key: &'a str,
-    pub model: Option<&'a str>,
-    pub texts: &'a [String],
-    pub timeout: Duration,
-}
-
-pub(super) struct ModelProviderRerankRequest<'a> {
-    pub endpoint: &'a str,
-    pub api_key: &'a str,
-    pub model: Option<&'a str>,
-    pub query: &'a str,
-    pub documents: &'a [String],
-    pub timeout: Duration,
-}
-
-pub(super) struct ModelProviderMediaImageRequest<'a> {
-    pub endpoint: &'a str,
-    pub api_key: &'a str,
-    pub request: &'a MediaImageGenerationRequest,
-    pub timeout: Duration,
-}
-
-pub(super) async fn send_model_provider_http_request(
-    request: ModelProviderHttpRequest<'_>,
-) -> Result<reqwest::Response, AppError> {
-    let client = reqwest::Client::builder()
-        .timeout(request.timeout)
-        .build()
-        .map_err(|err| AppError::Anyhow(err.into()))?;
-    let response = client
-        .post(request.endpoint)
-        .bearer_auth(request.api_key)
-        .json(request.payload)
-        .send()
-        .await
-        .map_err(|err| AppError::Anyhow(err.into()))?;
-    let status = response.status();
-
-    if !status.is_success() {
-        return Err(AppError::bad_request(format!(
-            "{}: HTTP {}",
-            request.failure_message,
-            status.as_u16()
-        )));
-    }
-
-    Ok(response)
-}
-
-pub(super) async fn send_model_provider_native_cancel_request(
-    request: ModelProviderNativeCancelRequest<'_>,
-) -> Result<u16, AppError> {
-    let client = reqwest::Client::builder()
-        .timeout(request.timeout)
-        .build()
-        .map_err(|err| AppError::Anyhow(err.into()))?;
-    let response = client
-        .post(request.endpoint)
-        .bearer_auth(request.api_key)
-        .send()
-        .await
-        .map_err(|err| AppError::Anyhow(err.into()))?;
-    let status = response.status();
-
-    if !status.is_success() {
-        return Err(AppError::bad_request(format!(
-            "Provider native cancel failed: HTTP {}",
-            status.as_u16()
-        )));
-    }
-
-    Ok(status.as_u16())
-}
-
-pub(super) async fn send_model_provider_embedding_request(
-    request: ModelProviderEmbeddingRequest<'_>,
-) -> Result<Vec<ModelEmbeddingVector>, AppError> {
-    let client = reqwest::Client::builder()
-        .timeout(request.timeout)
-        .build()
-        .map_err(|err| AppError::Anyhow(err.into()))?;
-    let response = client
-        .post(request.endpoint)
-        .bearer_auth(request.api_key)
-        .json(&json!({
-            "model": request.model.unwrap_or_default(),
-            "input": request.texts,
-        }))
-        .send()
-        .await
-        .map_err(|err| AppError::Anyhow(err.into()))?;
-    let status = response.status();
-    let body = response.json::<Value>().await.unwrap_or(Value::Null);
-    if !status.is_success() {
-        return Err(AppError::bad_request(format!(
-            "Embedding 模型调用失败: {status}"
-        )));
-    }
-    let vectors = parse_model_provider_embedding_vectors(&body);
-    if vectors.is_empty() {
-        return Err(AppError::bad_request("Embedding 模型响应为空"));
-    }
-    Ok(vectors)
-}
-
-pub(super) async fn send_model_provider_rerank_request(
-    request: ModelProviderRerankRequest<'_>,
-) -> Result<Vec<ModelRerankScore>, AppError> {
-    let client = reqwest::Client::builder()
-        .timeout(request.timeout)
-        .build()
-        .map_err(|err| AppError::Anyhow(err.into()))?;
-    let response = client
-        .post(request.endpoint)
-        .bearer_auth(request.api_key)
-        .json(&json!({
-            "model": request.model.unwrap_or_default(),
-            "query": request.query,
-            "documents": request.documents,
-        }))
-        .send()
-        .await
-        .map_err(|err| AppError::Anyhow(err.into()))?;
-    let status = response.status();
-    let body = response.json::<Value>().await.unwrap_or(Value::Null);
-    if !status.is_success() {
-        return Err(AppError::bad_request(format!(
-            "Rerank 模型调用失败: {status}"
-        )));
-    }
-    let scores = parse_model_provider_rerank_scores(&body);
-    if scores.is_empty() {
-        return Err(AppError::bad_request("Rerank 模型响应为空"));
-    }
-    Ok(scores)
-}
-
-pub(super) async fn send_model_provider_media_image_request(
-    request: ModelProviderMediaImageRequest<'_>,
-) -> Result<ModelMediaImageGenerationResp, AppError> {
-    let request_payload = request.request.to_provider_payload();
-    let client = reqwest::Client::builder()
-        .timeout(request.timeout)
-        .build()
-        .map_err(|err| AppError::bad_request(format!("图片生成客户端初始化失败: {err}")))?;
-    let response = client
-        .post(request.endpoint)
-        .bearer_auth(request.api_key)
-        .header("x-api-key", request.api_key)
-        .json(&request_payload)
-        .send()
-        .await
-        .map_err(|err| AppError::bad_request(format!("图片生成请求失败: {err}")))?;
-    let status = response.status();
-    let provider_payload = response.json::<Value>().await.unwrap_or_else(|_| json!({}));
-    if !status.is_success() {
-        return Err(AppError::bad_request(format!(
-            "图片生成请求失败: HTTP {}",
-            status.as_u16()
-        )));
-    }
-    let Some(result) = parse_media_image_generation_response(&provider_payload) else {
-        return Err(AppError::bad_request("图片生成响应缺少资产 URL"));
-    };
-
-    Ok(ModelMediaImageGenerationResp {
-        provider_payload,
-        asset_url: result.asset_url,
-        provider_asset_id: result.provider_asset_id,
-    })
-}
 
 pub(super) async fn read_model_provider_response_text(
     response: reqwest::Response,
@@ -302,25 +123,6 @@ impl ModelChatStreamCompletionBuilder {
     pub(super) fn provider_response_status(&self) -> Option<String> {
         self.provider_response_status.clone()
     }
-}
-
-pub(super) fn parse_model_provider_rerank_scores(body: &Value) -> Vec<ModelRerankScore> {
-    body.get("results")
-        .or_else(|| body.get("data"))
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(parse_rerank_score)
-        .collect()
-}
-
-pub(super) fn parse_model_provider_embedding_vectors(body: &Value) -> Vec<ModelEmbeddingVector> {
-    body.get("data")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(parse_embedding_vector)
-        .collect()
 }
 
 pub(super) fn parse_model_chat_provider_output_from_text(
@@ -663,56 +465,6 @@ fn non_empty_model_chat_text(text: &str) -> Option<String> {
     } else {
         Some(trimmed.to_owned())
     }
-}
-
-fn parse_rerank_score(value: &Value) -> Option<ModelRerankScore> {
-    let index = value
-        .get("index")
-        .and_then(json_usize)
-        .or_else(|| value.get("document_index").and_then(json_usize))
-        .or_else(|| value.get("documentIndex").and_then(json_usize))?;
-    let score = value
-        .get("relevance_score")
-        .or_else(|| value.get("relevanceScore"))
-        .or_else(|| value.get("score"))
-        .and_then(json_f32)?;
-    if !score.is_finite() {
-        return None;
-    }
-    Some(ModelRerankScore { index, score })
-}
-
-fn parse_embedding_vector(value: &Value) -> Option<ModelEmbeddingVector> {
-    let index = value.get("index").and_then(json_usize).unwrap_or(0);
-    let vector = value
-        .get("embedding")?
-        .as_array()?
-        .iter()
-        .filter_map(json_f32)
-        .filter(|value| value.is_finite())
-        .collect::<Vec<_>>();
-    if vector.is_empty() {
-        return None;
-    }
-    Some(ModelEmbeddingVector { index, vector })
-}
-
-fn json_usize(value: &Value) -> Option<usize> {
-    if let Some(value) = value.as_u64() {
-        return usize::try_from(value).ok();
-    }
-    value
-        .as_str()
-        .and_then(|text| text.trim().parse::<usize>().ok())
-}
-
-fn json_f32(value: &Value) -> Option<f32> {
-    if let Some(value) = value.as_f64() {
-        return Some(value as f32);
-    }
-    value
-        .as_str()
-        .and_then(|text| text.trim().parse::<f32>().ok())
 }
 
 pub(super) fn model_provider_response_id_from_payloads(
