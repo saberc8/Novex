@@ -518,6 +518,39 @@ RETURNING q.id, q.tenant_id, q.run_id, q.attempt_count, q.max_attempts, q.payloa
         .await
     }
 
+    pub async fn cancel_agent_run_queue_for_run(
+        &self,
+        tenant_id: i64,
+        run_id: i64,
+        user_id: i64,
+        now: NaiveDateTime,
+    ) -> Result<u64, AppError> {
+        let result = sqlx::query(
+            r#"
+UPDATE ai_agent_run_queue
+SET queue_status = $3,
+    locked_by = NULL,
+    locked_until = NULL,
+    last_error = COALESCE(last_error, $4),
+    finished_at = $6,
+    update_user = $5,
+    update_time = $6
+WHERE tenant_id = $1
+  AND run_id = $2
+  AND queue_status IN ('pending', 'retrying');
+"#,
+        )
+        .bind(tenant_id)
+        .bind(run_id)
+        .bind(AGENT_RUN_QUEUE_STATUS_CANCELLED)
+        .bind("run cancelled before claim")
+        .bind(user_id)
+        .bind(now)
+        .execute(&self.db)
+        .await?;
+        Ok(result.rows_affected())
+    }
+
     pub async fn mark_agent_run_queue_retrying(
         &self,
         queue_id: i64,
@@ -1013,5 +1046,22 @@ mod tests {
         assert!(source.contains("mark_agent_run_queue_retrying"));
         assert!(source.contains("mark_agent_run_queue_failed"));
         assert!(source.contains("mark_agent_run_queue_cancelled"));
+    }
+
+    #[test]
+    fn agent_queue_cancel_sync_repository_cancels_unclaimed_rows_by_run() {
+        let source = include_str!("ai_agent_repository.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+
+        assert!(source.contains("cancel_agent_run_queue_for_run"));
+        assert!(source.contains("queue_status = $3"));
+        assert!(source.contains("AGENT_RUN_QUEUE_STATUS_CANCELLED"));
+        assert!(source.contains("queue_status IN ('pending', 'retrying')"));
+        assert!(source.contains("locked_by = NULL"));
+        assert!(source.contains("locked_until = NULL"));
+        assert!(source.contains("finished_at ="));
+        assert!(source.contains("rows_affected"));
     }
 }

@@ -2128,6 +2128,9 @@ impl AgentService {
         self.repo
             .cancel_active_pauses(self.tenant_id, run_id, user_id, now)
             .await?;
+        self.repo
+            .cancel_agent_run_queue_for_run(self.tenant_id, run_id, user_id, now)
+            .await?;
         ensure_agent_run_transition(
             &run_status_code(RunStatus::Cancelling),
             RunStatus::Cancelled,
@@ -5491,6 +5494,23 @@ mod tests {
         assert!(source.contains("ensure_agent_run_transition(&run.status, RunStatus::Running)"));
         assert!(source.contains("execute_deterministic_plan"));
         assert!(source.contains("create_run_records_with_status"));
+    }
+
+    #[test]
+    fn agent_queue_cancel_sync_service_updates_unclaimed_queue_rows() {
+        let source = include_str!("agent_service.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+
+        let cancel_run = &source[source.find("pub async fn cancel_run").unwrap()
+            ..source.find("async fn check_model_loop_cancelled").unwrap()];
+
+        assert!(cancel_run.contains("cancel_agent_run_queue_for_run"));
+        assert!(cancel_run.contains("self.tenant_id"));
+        assert!(cancel_run.contains("run_id"));
+        assert!(cancel_run.contains("user_id"));
+        assert!(cancel_run.contains("now"));
     }
 
     #[test]

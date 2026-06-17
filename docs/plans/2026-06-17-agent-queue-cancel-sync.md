@@ -4,6 +4,8 @@
 
 **Goal:** Synchronize queued Agent run cancellation with the durable queue so `pending` and `retrying` queue rows become terminal `cancelled` before a worker claims them.
 
+**Progress 2026-06-17:** Implemented `cancel_agent_run_queue_for_run`, wired `AgentService::cancel_run` to call it, and added source-contract tests covering the queue SQL and service orchestration.
+
 **Architecture:** Keep worker ownership of `running` queue rows. Add a narrow repository method that terminalizes not-yet-running queue rows by `tenant_id + run_id`, and call it from `AgentService::cancel_run` after the cancel request event is written.
 
 **Tech Stack:** Rust, SQLx/Postgres, existing Agent service cancellation flow, existing `ai_agent_run_queue`.
@@ -12,7 +14,7 @@
 
 ### Task 1: Source Contract And Red Tests
 
-Status: Planned.
+Status: Completed.
 
 **Files:**
 - Modify: `backend/src/infrastructure/persistence/ai_agent_repository.rs`
@@ -40,7 +42,7 @@ Expected: FAIL until the repository method and service wiring exist.
 
 ### Task 2: Implement Queue Cancel Repository Method
 
-Status: Planned.
+Status: Completed.
 
 **Files:**
 - Modify: `backend/src/infrastructure/persistence/ai_agent_repository.rs`
@@ -70,7 +72,7 @@ cargo test -p backend-rust agent_run_queue --offline
 
 ### Task 3: Wire Cancel API To Queue Sync
 
-Status: Planned.
+Status: Completed.
 
 **Files:**
 - Modify: `backend/src/application/ai/agent_service.rs`
@@ -97,7 +99,7 @@ cargo test -p backend-rust runtime_supervisor --offline
 
 ### Task 4: Update Docs, Verify, Merge
 
-Status: Planned.
+Status: In progress.
 
 **Files:**
 - Modify: `docs/plans/2026-06-16-codex-migration-matrix.md`
@@ -120,4 +122,3 @@ cd apps/codex-app-poc && pnpm test -- src/api/agent.test.ts
 **Step 3: Merge and verify main**
 
 Merge `feat/enterprise-agent-foundation` into `main`, then rerun the same verification commands on `main`.
-
