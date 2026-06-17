@@ -88,6 +88,55 @@ pub struct ModelChatCommand {
     pub temperature: Option<f64>,
     #[serde(default, rename = "maxTokens")]
     pub max_tokens: Option<u32>,
+    #[serde(default, rename = "requestMetadata")]
+    pub request_metadata: Option<ModelChatRequestMetadata>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelChatRequestKind {
+    Compaction,
+}
+
+impl ModelChatRequestKind {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Compaction => "compaction",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelChatCompactionMetadata {
+    pub implementation: String,
+    pub trigger: String,
+    pub reason: String,
+    pub phase: String,
+    pub strategy: String,
+    pub window_id: u64,
+    pub input_history_count: usize,
+    pub retained_history_count: usize,
+    pub compacted_item_count: usize,
+    pub retained_item_count: usize,
+    pub tool_codes: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelChatRequestMetadata {
+    pub request_kind: ModelChatRequestKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compaction: Option<ModelChatCompactionMetadata>,
+}
+
+impl ModelChatRequestMetadata {
+    pub fn remote_compaction(compaction: ModelChatCompactionMetadata) -> Self {
+        Self {
+            request_kind: ModelChatRequestKind::Compaction,
+            compaction: Some(compaction),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -2162,7 +2211,71 @@ fn model_chat_request_payload(route: &ModelRuntimeRoute, command: &ModelChatComm
     if let Some(response_format) = &command.response_format {
         payload["response_format"] = response_format.clone();
     }
+    if let Some(metadata) = model_chat_provider_metadata(route, command) {
+        payload["metadata"] = metadata;
+    }
     payload
+}
+
+fn model_chat_provider_metadata(
+    route: &ModelRuntimeRoute,
+    command: &ModelChatCommand,
+) -> Option<Value> {
+    if !model_chat_route_supports_provider_metadata(route) {
+        return None;
+    }
+
+    let metadata = command.request_metadata.as_ref()?;
+    let mut payload = serde_json::Map::from_iter([(
+        "request_kind".to_owned(),
+        json!(metadata.request_kind.as_str()),
+    )]);
+
+    if let Some(compaction) = &metadata.compaction {
+        payload.insert(
+            "compaction_implementation".to_owned(),
+            json!(compaction.implementation),
+        );
+        payload.insert("compaction_trigger".to_owned(), json!(compaction.trigger));
+        payload.insert("compaction_reason".to_owned(), json!(compaction.reason));
+        payload.insert("compaction_phase".to_owned(), json!(compaction.phase));
+        payload.insert("compaction_strategy".to_owned(), json!(compaction.strategy));
+        payload.insert(
+            "compaction_window_id".to_owned(),
+            json!(compaction.window_id.to_string()),
+        );
+        payload.insert(
+            "input_history_count".to_owned(),
+            json!(compaction.input_history_count.to_string()),
+        );
+        payload.insert(
+            "retained_history_count".to_owned(),
+            json!(compaction.retained_history_count.to_string()),
+        );
+        payload.insert(
+            "compacted_item_count".to_owned(),
+            json!(compaction.compacted_item_count.to_string()),
+        );
+        payload.insert(
+            "retained_item_count".to_owned(),
+            json!(compaction.retained_item_count.to_string()),
+        );
+        payload.insert(
+            "tool_codes".to_owned(),
+            json!(compaction.tool_codes.join(",")),
+        );
+    }
+
+    Some(Value::Object(payload))
+}
+
+fn model_chat_route_supports_provider_metadata(route: &ModelRuntimeRoute) -> bool {
+    matches!(
+        route.provider(),
+        ModelProviderType::OpenAiCompatible
+            | ModelProviderType::AzureOpenAi
+            | ModelProviderType::LocalRuntime
+    )
 }
 
 fn model_chat_file_context_prompt(files: &[ModelChatFileContext]) -> String {
@@ -5025,6 +5138,79 @@ mod tests {
     }
 
     #[test]
+    fn model_chat_payload_omits_provider_metadata_for_regular_chat() {
+        let route = openai_compatible_llm_route();
+        let command = normalize_model_chat_command(ModelChatCommand {
+            messages: vec![ModelChatMessage {
+                role: "user".to_owned(),
+                content: "hello".to_owned(),
+            }],
+            ..ModelChatCommand::default()
+        })
+        .unwrap();
+
+        let payload = model_chat_request_payload(&route, &command);
+
+        assert!(payload.get("metadata").is_none());
+    }
+
+    #[test]
+    fn model_chat_payload_serializes_compaction_transport_metadata_for_openai_compatible_route() {
+        let route = openai_compatible_llm_route();
+        let command = normalize_model_chat_command(ModelChatCommand {
+            messages: vec![ModelChatMessage {
+                role: "user".to_owned(),
+                content: "compact this agent context".to_owned(),
+            }],
+            request_metadata: Some(test_compaction_request_metadata()),
+            ..ModelChatCommand::default()
+        })
+        .unwrap();
+
+        let payload = model_chat_request_payload(&route, &command);
+
+        assert_eq!(payload["metadata"]["request_kind"], "compaction");
+        assert_eq!(
+            payload["metadata"]["compaction_implementation"],
+            "responses_compaction_v2"
+        );
+        assert_eq!(
+            payload["metadata"]["compaction_reason"],
+            "observation_threshold"
+        );
+        assert_eq!(
+            payload["metadata"]["compaction_phase"],
+            "model_loop_follow_up"
+        );
+        assert_eq!(payload["metadata"]["compaction_window_id"], "1");
+        assert_eq!(payload["metadata"]["input_history_count"], "2");
+        assert_eq!(payload["metadata"]["retained_history_count"], "1");
+        assert_eq!(payload["metadata"]["tool_codes"], "rag.search");
+    }
+
+    #[test]
+    fn model_chat_payload_omits_provider_metadata_for_unsupported_provider() {
+        let route = llm_test_config()
+            .route(ModelRuntimeTarget::Llm)
+            .unwrap()
+            .clone();
+        let command = normalize_model_chat_command(ModelChatCommand {
+            messages: vec![ModelChatMessage {
+                role: "user".to_owned(),
+                content: "compact this agent context".to_owned(),
+            }],
+            request_metadata: Some(test_compaction_request_metadata()),
+            ..ModelChatCommand::default()
+        })
+        .unwrap();
+
+        let payload = model_chat_request_payload(&route, &command);
+
+        assert_eq!(route.provider(), ModelProviderType::DeepSeek);
+        assert!(payload.get("metadata").is_none());
+    }
+
+    #[test]
     fn model_chat_command_accepts_existing_conversation_id() {
         let command = normalize_model_chat_command(ModelChatCommand {
             conversation_id: Some(88),
@@ -5441,6 +5627,38 @@ mod tests {
             "LLM_BASE_URL" => Some("https://api.deepseek.com".to_owned()),
             "LLM_MODEL" => Some("deepseek-v4-flash".to_owned()),
             _ => None,
+        })
+    }
+
+    fn openai_compatible_llm_route() -> ModelRuntimeRoute {
+        ModelRuntimeRoute::new(
+            "tenant42.code_agent",
+            ModelRuntimeTarget::Llm,
+            ModelKind::Llm,
+            ModelProviderType::OpenAiCompatible,
+            Some("gpt-compatible".to_owned()),
+            "https://llm.internal/v1",
+            "https://llm.internal/v1/chat/completions",
+            "sk-fake-private-secret-0001",
+            vec![ModelRoutePurpose::CodeAgent],
+            vec!["LLM_PRIVATE_KEY".to_owned()],
+        )
+        .unwrap()
+    }
+
+    fn test_compaction_request_metadata() -> ModelChatRequestMetadata {
+        ModelChatRequestMetadata::remote_compaction(ModelChatCompactionMetadata {
+            implementation: "responses_compaction_v2".to_owned(),
+            trigger: "auto".to_owned(),
+            reason: "observation_threshold".to_owned(),
+            phase: "model_loop_follow_up".to_owned(),
+            strategy: "memento".to_owned(),
+            window_id: 1,
+            input_history_count: 2,
+            retained_history_count: 1,
+            compacted_item_count: 2,
+            retained_item_count: 1,
+            tool_codes: vec!["rag.search".to_owned()],
         })
     }
 

@@ -723,6 +723,7 @@ fn studio_mind_map_chat_command(
         response_format: Some(json!({ "type": "json_object" })),
         temperature: Some(0.0),
         max_tokens: Some(3200),
+        request_metadata: None,
     }
 }
 

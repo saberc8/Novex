@@ -3575,6 +3575,7 @@ fn retrieval_plan_chat_command(
         response_format: None,
         temperature: Some(0.0),
         max_tokens: Some(1200),
+        request_metadata: None,
     }
 }
 
@@ -4544,6 +4545,7 @@ fn large_document_notes_chat_command(
         response_format: None,
         temperature: Some(0.1),
         max_tokens: Some(1200),
+        request_metadata: None,
     }
 }
 
@@ -4581,6 +4583,7 @@ fn large_document_final_answer_chat_command(
         response_format: None,
         temperature: Some(0.2),
         max_tokens: Some(DEFAULT_RAG_ANSWER_MAX_TOKENS),
+        request_metadata: None,
     }
 }
 
@@ -4631,6 +4634,7 @@ fn rag_answer_chat_command(
         response_format: None,
         temperature: Some(0.2),
         max_tokens: Some(max_tokens),
+        request_metadata: None,
     }
 }
 
