@@ -264,21 +264,21 @@ Expected: all pass with exit code 0.
 **Files:**
 - No code edits unless verification exposes a defect.
 
-- [ ] **Step 1: Commit feature branch**
+- [x] **Step 1: Commit feature branch**
 
 ```bash
 git add backend/src/application/ai/model_service.rs backend/src/interfaces/http/ai/model.rs backend/migrations/202606170010_seed_ai_model_provider_call_lease_cancel_permission.sql docs/plans/2026-06-16-codex-migration-matrix.md docs/plans/2026-06-17-agent-provider-native-cancel-design.md docs/plans/2026-06-17-agent-provider-native-cancel.md
 git commit -m "feat: add provider call lease cancellation control"
 ```
 
-- [ ] **Step 2: Merge to main**
+- [x] **Step 2: Merge to main**
 
 ```bash
 cd /Users/yusenlin/Avalon/freedom/github/zm-agent/Novex
 git merge --no-ff feat/enterprise-agent-foundation -m "merge: enterprise agent foundation provider native cancel"
 ```
 
-- [ ] **Step 3: Verify on main**
+- [x] **Step 3: Verify on main**
 
 ```bash
 cargo fmt -- --check
@@ -286,7 +286,7 @@ cargo test --workspace --offline
 git diff --check
 ```
 
-- [ ] **Step 4: Clean and align**
+- [x] **Step 4: Clean and align**
 
 ```bash
 cargo clean
@@ -294,3 +294,10 @@ cd /Users/yusenlin/Avalon/freedom/github/zm-agent/Novex/.worktrees/enterprise-ag
 cargo clean
 git merge --ff-only main
 ```
+
+**Evidence:**
+- Feature commit: `abbd19e feat: add provider call lease cancellation control`.
+- Main merge: `e898e1e merge: enterprise agent foundation provider native cancel`.
+- Main verification: `cargo fmt -- --check`, `cargo test --workspace --offline`, and `git diff --check` passed.
+- Clean: `cargo clean` removed `3.3GiB` in main and `7.0GiB` in the feature worktree.
+- Alignment: feature worktree fast-forwarded to main after the final documentation update.
