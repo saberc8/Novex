@@ -195,6 +195,10 @@ pub struct ModelChatResp {
     pub provider_attempts: Vec<ModelProviderAttempt>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_call_lease_id: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_response_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_response_status: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -2899,6 +2903,8 @@ fn model_chat_responses_compaction_payload(
         "input": input,
         "temperature": command.temperature.unwrap_or(DEFAULT_MODEL_CHAT_TEMPERATURE),
         "max_output_tokens": command.max_tokens.unwrap_or(DEFAULT_MODEL_CHAT_MAX_TOKENS),
+        "background": true,
+        "store": true,
         "stream": true,
     });
     if let Some(metadata) = model_chat_provider_metadata(route, command) {
@@ -3074,6 +3080,8 @@ fn model_chat_response_from_provider(
             "primary", route, latency_ms,
         )],
         provider_call_lease_id: None,
+        provider_response_id: None,
+        provider_response_status: None,
     })
 }
 
@@ -3081,6 +3089,8 @@ fn model_chat_response_from_provider(
 struct ModelChatCompactionProviderOutput {
     answer: String,
     usage: ModelChatUsage,
+    provider_response_id: Option<String>,
+    provider_response_status: Option<String>,
 }
 
 fn model_chat_response_from_responses_compaction_text(
@@ -3108,6 +3118,8 @@ fn model_chat_response_from_responses_compaction_text(
             "primary", route, latency_ms,
         )],
         provider_call_lease_id: None,
+        provider_response_id: output.provider_response_id,
+        provider_response_status: output.provider_response_status,
     })
 }
 
@@ -3122,6 +3134,8 @@ fn model_chat_compaction_provider_output_from_body(
     Ok(ModelChatCompactionProviderOutput {
         answer,
         usage: normalize_model_provider_usage(body),
+        provider_response_id: model_provider_response_id_from_payload(body),
+        provider_response_status: model_provider_response_status_from_payload(body),
     })
 }
 
@@ -3131,12 +3145,22 @@ fn model_chat_compaction_provider_output_from_sse_text(
     let mut output_items = Vec::new();
     let mut completed = false;
     let mut usage = ModelChatUsage::default();
+    let mut provider_response_id = None;
+    let mut provider_response_status = None;
     for data in model_chat_sse_data_payloads(body_text) {
         if data == "[DONE]" {
             continue;
         }
         let value = serde_json::from_str::<Value>(&data)
             .map_err(|_| AppError::bad_request("LLM compaction SSE 响应不是合法 JSON"))?;
+        if let Some(response) = value.get("response") {
+            if let Some(response_id) = model_provider_response_id_from_payload(response) {
+                provider_response_id = Some(response_id);
+            }
+            if let Some(response_status) = model_provider_response_status_from_payload(response) {
+                provider_response_status = Some(response_status);
+            }
+        }
         match value.get("type").and_then(Value::as_str) {
             Some("response.output_item.done") => {
                 if let Some(item) = value.get("item") {
@@ -3161,7 +3185,12 @@ fn model_chat_compaction_provider_output_from_sse_text(
     }
 
     let answer = model_chat_compaction_output_from_items(output_items.iter())?;
-    Ok(ModelChatCompactionProviderOutput { answer, usage })
+    Ok(ModelChatCompactionProviderOutput {
+        answer,
+        usage,
+        provider_response_id,
+        provider_response_status,
+    })
 }
 
 fn model_chat_sse_data_payloads(body_text: &str) -> Vec<String> {
@@ -3440,6 +3469,32 @@ fn model_provider_call_lease_completion_from_response(
         .usage
         .total_tokens
         .unwrap_or(prompt_tokens + completion_tokens);
+    let mut response_payload = json!({
+        "routeId": response.route_id,
+        "provider": response.provider,
+        "model": response.model,
+        "latencyMs": u128_to_i64(latency_ms),
+        "usage": response.usage,
+        "costCents": response.cost_cents,
+        "providerAttempts": response.provider_attempts,
+    });
+    if let Some(provider_response_id) = response
+        .provider_response_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        response_payload["providerResponseId"] = json!(provider_response_id);
+    }
+    if let Some(provider_response_status) = response
+        .provider_response_status
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        response_payload["providerResponseStatus"] = json!(provider_response_status);
+    }
+
     ModelProviderCallLeaseCompletion {
         status: "succeeded".to_owned(),
         completed_at,
@@ -3451,15 +3506,7 @@ fn model_provider_call_lease_completion_from_response(
         error_kind: None,
         http_status: None,
         error_message: None,
-        response_payload: json!({
-            "routeId": response.route_id,
-            "provider": response.provider,
-            "model": response.model,
-            "latencyMs": u128_to_i64(latency_ms),
-            "usage": response.usage,
-            "costCents": response.cost_cents,
-            "providerAttempts": response.provider_attempts,
-        }),
+        response_payload,
     }
 }
 
@@ -3635,6 +3682,21 @@ fn model_provider_response_id_from_payload(payload: &Value) -> Option<String> {
     .filter(|value| {
         !value.is_empty() && !value.contains('/') && !value.contains('?') && !value.contains('#')
     })
+    .map(str::to_owned)
+    .next()
+}
+
+fn model_provider_response_status_from_payload(payload: &Value) -> Option<String> {
+    [
+        payload.get("providerResponseStatus"),
+        payload.get("responseStatus"),
+        payload.get("status"),
+    ]
+    .into_iter()
+    .flatten()
+    .filter_map(Value::as_str)
+    .map(str::trim)
+    .filter(|value| !value.is_empty())
     .map(str::to_owned)
     .next()
 }
@@ -5745,6 +5807,8 @@ mod tests {
                 "primary", route, latency_ms,
             )],
             provider_call_lease_id: None,
+            provider_response_id: output.provider_response_id,
+            provider_response_status: output.provider_response_status,
         })
     }
 
@@ -7347,6 +7411,23 @@ mod tests {
     }
 
     #[test]
+    fn provider_background_response_capture_payload_marks_responses_background() {
+        let route = openai_compatible_llm_route();
+        let command = test_compaction_chat_command();
+
+        let request = model_chat_provider_request(&route, &command);
+
+        assert_eq!(
+            request.transport,
+            ModelChatProviderTransport::ResponsesCompactionV2
+        );
+        assert_eq!(request.payload["background"], true);
+        assert_eq!(request.payload["store"], true);
+        assert_eq!(request.payload["stream"], true);
+        assert_eq!(request.payload["metadata"]["request_kind"], "compaction");
+    }
+
+    #[test]
     fn provider_compact_unary_uses_responses_compact_endpoint_for_unary_implementation() {
         let route = openai_compatible_llm_route();
         let command = test_unary_compaction_chat_command();
@@ -7448,6 +7529,31 @@ mod tests {
     }
 
     #[test]
+    fn provider_background_response_capture_parses_json_response_metadata() {
+        let body = json!({
+            "id": "resp_bg_123",
+            "status": "completed",
+            "output": [
+                { "type": "compaction", "encrypted_content": "compact summary" }
+            ],
+            "usage": {
+                "input_tokens": 10,
+                "output_tokens": 2,
+                "total_tokens": 12
+            }
+        });
+
+        let output = model_chat_compaction_provider_output_from_body(&body).unwrap();
+
+        assert_eq!(output.answer, "compact summary");
+        assert_eq!(output.provider_response_id.as_deref(), Some("resp_bg_123"));
+        assert_eq!(
+            output.provider_response_status.as_deref(),
+            Some("completed")
+        );
+    }
+
+    #[test]
     fn provider_compact_transport_accepts_compaction_summary_alias() {
         let body = json!({
             "output": [
@@ -7479,6 +7585,27 @@ mod tests {
         assert_eq!(response.usage.prompt_tokens, Some(14));
         assert_eq!(response.usage.completion_tokens, Some(3));
         assert_eq!(response.usage.total_tokens, Some(17));
+    }
+
+    #[test]
+    fn provider_background_response_capture_parses_sse_response_metadata() {
+        let sse = concat!(
+            "event: response.created\n",
+            "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_bg_123\",\"status\":\"in_progress\"}}\n\n",
+            "event: response.output_item.done\n",
+            "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"compaction\",\"encrypted_content\":\"sse summary\"}}\n\n",
+            "event: response.completed\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_bg_123\",\"status\":\"completed\",\"usage\":{\"input_tokens\":14,\"output_tokens\":3,\"total_tokens\":17}}}\n\n",
+        );
+
+        let output = model_chat_compaction_provider_output_from_sse_text(sse).unwrap();
+
+        assert_eq!(output.answer, "sse summary");
+        assert_eq!(output.provider_response_id.as_deref(), Some("resp_bg_123"));
+        assert_eq!(
+            output.provider_response_status.as_deref(),
+            Some("completed")
+        );
     }
 
     #[test]
@@ -7620,6 +7747,8 @@ mod tests {
             cost_cents: Some(0.42),
             provider_attempts: vec![],
             provider_call_lease_id: None,
+            provider_response_id: None,
+            provider_response_status: None,
         };
 
         let completion = model_provider_call_lease_completion_from_response(&response, 42, now);
@@ -7636,6 +7765,45 @@ mod tests {
             "tenant42.code_agent"
         );
         assert_eq!(completion.response_payload["usage"]["totalTokens"], 18);
+        assert!(!completion
+            .response_payload
+            .to_string()
+            .contains("sensitive-user-content-needle"));
+    }
+
+    #[test]
+    fn provider_background_response_capture_persists_provider_id_for_cancel() {
+        let now =
+            NaiveDateTime::parse_from_str("2026-06-17 10:00:05", "%Y-%m-%d %H:%M:%S").unwrap();
+        let response = ModelChatResp {
+            conversation_id: None,
+            answer: "sensitive-user-content-needle".to_owned(),
+            route_id: "tenant42.code_agent".to_owned(),
+            provider: "openai-compatible".to_owned(),
+            model: Some("gpt-compatible".to_owned()),
+            latency_ms: 42,
+            usage: ModelChatUsage {
+                prompt_tokens: Some(11),
+                completion_tokens: Some(7),
+                total_tokens: Some(18),
+            },
+            cost_cents: Some(0.42),
+            provider_attempts: vec![],
+            provider_call_lease_id: None,
+            provider_response_id: Some("resp_bg_123".to_owned()),
+            provider_response_status: Some("completed".to_owned()),
+        };
+
+        let completion = model_provider_call_lease_completion_from_response(&response, 42, now);
+
+        assert_eq!(
+            completion.response_payload["providerResponseId"],
+            "resp_bg_123"
+        );
+        assert_eq!(
+            completion.response_payload["providerResponseStatus"],
+            "completed"
+        );
         assert!(!completion
             .response_payload
             .to_string()
@@ -8013,6 +8181,8 @@ mod tests {
             cost_cents: None,
             provider_attempts: vec![],
             provider_call_lease_id: None,
+            provider_response_id: None,
+            provider_response_status: None,
         };
 
         let records = model_chat_history_records(1, 9, &command, &response, now).unwrap();
@@ -8086,6 +8256,8 @@ mod tests {
             cost_cents: None,
             provider_attempts: vec![],
             provider_call_lease_id: None,
+            provider_response_id: None,
+            provider_response_status: None,
         };
 
         let record = model_chat_usage_record(1, 99, &response, now, "ai.models.chat");
@@ -8149,6 +8321,8 @@ mod tests {
             cost_cents: None,
             provider_attempts: vec![],
             provider_call_lease_id: None,
+            provider_response_id: None,
+            provider_response_status: None,
         };
 
         let record = model_chat_usage_record(42, 99, &response, now, "ai.chatFlow.model");
@@ -8373,6 +8547,8 @@ mod tests {
             cost_cents: None,
             provider_attempts: vec![],
             provider_call_lease_id: None,
+            provider_response_id: None,
+            provider_response_status: None,
         }
     }
 }

@@ -6427,6 +6427,8 @@ mod tests {
             cost_cents: None,
             provider_attempts: vec![],
             provider_call_lease_id: None,
+            provider_response_id: None,
+            provider_response_status: None,
         };
 
         let answer = rag_answer_from_model_chat(chat, &hits, "llm_grounded");

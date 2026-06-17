@@ -6547,6 +6547,8 @@ mod tests {
             cost_cents: Some(0.65),
             provider_attempts: vec![],
             provider_call_lease_id: None,
+            provider_response_id: None,
+            provider_response_status: None,
         };
 
         let payload = model_inference_event_payload(&response);
@@ -6567,6 +6569,8 @@ mod tests {
             cost_cents: None,
             provider_attempts: vec![],
             provider_call_lease_id: Some(123),
+            provider_response_id: None,
+            provider_response_status: None,
         };
 
         let payload = model_inference_event_payload(&response);
@@ -6590,6 +6594,8 @@ mod tests {
                 test_provider_attempt("fallback", "runtime.llm.backup", "succeeded"),
             ],
             provider_call_lease_id: None,
+            provider_response_id: None,
+            provider_response_status: None,
         };
 
         let payload = model_inference_event_payload(&response);
@@ -6623,6 +6629,8 @@ mod tests {
                 test_provider_attempt("fallback", "runtime.llm.backup", "succeeded"),
             ],
             provider_call_lease_id: None,
+            provider_response_id: None,
+            provider_response_status: None,
         };
 
         let payload = model_inference_event_payload(&response);
@@ -7370,6 +7378,8 @@ mod tests {
             cost_cents: None,
             provider_attempts: vec![],
             provider_call_lease_id: None,
+            provider_response_id: None,
+            provider_response_status: None,
         };
 
         let decision = guardian_review_decision_with_model_metadata(decision, &response, 19);
