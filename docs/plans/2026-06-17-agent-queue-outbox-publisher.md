@@ -4,7 +4,7 @@
 
 **Goal:** Add a durable Agent queue outbox and publisher loop so queued Agent runs reliably emit RabbitMQ wake-up messages.
 
-**Progress 2026-06-17:** Implemented durable Agent queue outbox migration, repository transaction APIs, outbox-to-message mapping, publish outcome handling, pending outbox publisher loop, queued create/resume service wiring, `AGENT_QUEUE_PUBLISHER_ENABLED`, startup wiring, and focused verification.
+**Progress 2026-06-17:** Implemented durable Agent queue outbox migration, repository transaction APIs, outbox-to-message mapping, publish outcome handling, pending outbox publisher loop, queued create/resume service wiring, `AGENT_QUEUE_PUBLISHER_ENABLED`, startup wiring, focused verification, and full feature-branch verification.
 
 **Architecture:** Mirror the parser outbox pattern while using Agent queue identity as the broker consumer's concurrency gate. Queue creation and queued resume write queue state and outbox state in one repository transaction; a config-gated publisher loop emits `AgentQueueMessage` and records publish state.
 
@@ -147,7 +147,7 @@ cargo test -p backend-rust foundation --offline
 
 ### Task 5: Docs, Full Verification, Merge, Clean
 
-Status: In progress.
+Status: Completed.
 
 **Files:**
 - Modify: `docs/plans/2026-06-16-codex-migration-matrix.md`
