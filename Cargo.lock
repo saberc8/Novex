@@ -403,6 +403,7 @@ dependencies = [
  "novex-memory",
  "novex-model",
  "novex-plugin",
+ "novex-provider-client",
  "novex-rag",
  "novex-skill",
  "novex-tools",
@@ -1880,6 +1881,14 @@ dependencies = [
  "novex-tools",
  "novex-trigger",
  "serde",
+]
+
+[[package]]
+name = "novex-provider-client"
+version = "0.1.0"
+dependencies = [
+ "novex-model",
+ "serde_json",
 ]
 
 [[package]]

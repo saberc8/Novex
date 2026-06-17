@@ -6,6 +6,7 @@ members = [
     "crates/novex-agent-runtime",
     "crates/novex-approval-review",
     "crates/novex-model",
+    "crates/novex-provider-client",
     "crates/novex-rag",
     "crates/novex-agent",
     "crates/novex-tools",
@@ -36,6 +37,7 @@ novex-mcp = { path = "crates/novex-mcp" }
 novex-memory = { path = "crates/novex-memory" }
 novex-model = { path = "crates/novex-model" }
 novex-plugin = { path = "crates/novex-plugin" }
+novex-provider-client = { path = "crates/novex-provider-client" }
 novex-rag = { path = "crates/novex-rag" }
 novex-skill = { path = "crates/novex-skill" }
 novex-tools = { path = "crates/novex-tools" }

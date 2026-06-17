@@ -1,0 +1,8 @@
+[package]
+name = "novex-provider-client"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+novex-model.workspace = true
+serde_json = "1"
