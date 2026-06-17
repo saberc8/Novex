@@ -187,7 +187,7 @@ Expected: PASS.
 
 Actual: PASS for `cargo fmt -- --check`, `cargo test --workspace --offline`, and `git diff --check`.
 
-- [ ] **Step 2: Commit feature branch**
+- [x] **Step 2: Commit feature branch**
 
 Commit with:
 
@@ -195,7 +195,9 @@ Commit with:
 git commit -m "feat: add agent run event websocket transport"
 ```
 
-- [ ] **Step 3: Merge to main**
+Actual: `a3c53a2 feat: add agent run event websocket transport`.
+
+- [x] **Step 3: Merge to main**
 
 Merge with:
 
@@ -203,6 +205,20 @@ Merge with:
 git merge --no-ff feat/enterprise-agent-foundation -m "merge: enterprise agent foundation event websocket"
 ```
 
-- [ ] **Step 4: Verify main and clean**
+Actual: `51d2a38 merge: enterprise agent foundation event websocket`.
+
+- [x] **Step 4: Verify main and clean**
 
 Run the full verification on main, then run `cargo clean` in both main and feature worktrees and fast-forward the feature branch to main.
+
+Actual: PASS for `cargo fmt -- --check`, `cargo test --workspace --offline`, and `git diff --check` on main. `cargo clean` removed main and feature build artifacts.
+
+## Completion Evidence
+
+- Planning commit: `c224087 docs: plan agent event websocket transport`.
+- Feature commit: `a3c53a2 feat: add agent run event websocket transport`.
+- Main merge: `51d2a38 merge: enterprise agent foundation event websocket`.
+- Red test: `cargo test -p backend-rust agent_event_websocket --offline` failed before implementation because WebSocket frame helpers were missing.
+- Focused green tests: `cargo test -p backend-rust agent_event_websocket --offline` and `cargo test -p backend-rust agent_event_stream --offline`.
+- Full verification: `cargo fmt -- --check`, `cargo test --workspace --offline`, and `git diff --check`.
+- Cleanup: `cargo clean` ran in both main and feature worktrees.
