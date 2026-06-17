@@ -1,7 +1,10 @@
 use std::net::SocketAddr;
 
 use backend_rust::{
-    application::ai::agent_queue_runtime::{agent_queue_from_config, spawn_agent_queue_worker},
+    application::ai::agent_queue_runtime::{
+        agent_queue_from_config, agent_rabbitmq_from_config, spawn_agent_queue_broker_consumer,
+        spawn_agent_queue_worker,
+    },
     application::ai::agent_service::AgentRuntimeRegistry,
     application::ai::parser_queue_runtime::{
         parser_queue_from_config, parser_rabbitmq_from_config, spawn_parser_queue_publisher,
@@ -31,6 +34,7 @@ async fn main() -> anyhow::Result<()> {
     let jwt = JwtService::new(config.auth_jwt_secret.clone(), config.auth_jwt_ttl_hours);
     let scheduler_http_safety = http_safety_from_config(&config)?;
     let agent_runtime = AgentRuntimeRegistry::default();
+    let agent_queue_runtime = agent_queue_from_config(&config);
     if config.scheduler_embedded {
         spawn_scheduler_runtime(
             db.clone(),
@@ -43,7 +47,13 @@ async fn main() -> anyhow::Result<()> {
     }
     spawn_agent_queue_worker(
         db.clone(),
-        agent_queue_from_config(&config),
+        agent_queue_runtime.clone(),
+        agent_runtime.clone(),
+    );
+    spawn_agent_queue_broker_consumer(
+        db.clone(),
+        agent_queue_runtime,
+        agent_rabbitmq_from_config(&config),
         agent_runtime.clone(),
     );
     spawn_parser_queue_publisher(

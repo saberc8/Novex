@@ -4,9 +4,9 @@
 
 **Goal:** Add durable Agent run queueing so HTTP can create queued Agent runs and a background worker can claim and execute them using the same Agent runtime code.
 
-**Progress 2026-06-17:** Implemented the durable queue table/repository, `executionMode=queued` API contract, queued Run Graph creation, replayable queued events, config-gated embedded worker, Postgres `FOR UPDATE SKIP LOCKED` claim/lease polling, shared HTTP/worker `AgentRuntimeRegistry`, deterministic existing-run execution, model-loop existing-run execution, pending/retrying queue-row cancellation sync, queued approval-resume requeue, and Agent RabbitMQ wake-up topology/message publisher contract.
+**Progress 2026-06-17:** Implemented the durable queue table/repository, `executionMode=queued` API contract, queued Run Graph creation, replayable queued events, config-gated embedded worker, Postgres `FOR UPDATE SKIP LOCKED` claim/lease polling, shared HTTP/worker `AgentRuntimeRegistry`, deterministic existing-run execution, model-loop existing-run execution, pending/retrying queue-row cancellation sync, queued approval-resume requeue, Agent RabbitMQ wake-up topology/message publisher contract, and Agent broker execute consumer with exact queue/tenant/run claim plus retry/dead routing.
 
-**Architecture:** A Postgres-backed `ai_agent_run_queue` owns durable queue state and leases. `AgentService` creates queued runs, exposes an existing-run execution entrypoint, terminalizes not-yet-claimed queue rows when a queued run is cancelled, and requeues queued approval resumes instead of executing tools in the HTTP request. `agent_queue_runtime.rs` polls/claims queue rows and calls the service; the Agent RabbitMQ contract defines broker wake-up messages for future external workers while SSE over `ai_run_event` remains the client progress API.
+**Architecture:** A Postgres-backed `ai_agent_run_queue` owns durable queue state and leases. `AgentService` creates queued runs, exposes an existing-run execution entrypoint, terminalizes not-yet-claimed queue rows when a queued run is cancelled, and requeues queued approval resumes instead of executing tools in the HTTP request. `agent_queue_runtime.rs` polls/claims queue rows and can consume Agent RabbitMQ execute messages by exact queue/tenant/run identity; SSE over `ai_run_event` remains the client progress API.
 
 **Tech Stack:** Rust, Axum service layer, SQLx/Postgres, existing Run Graph tables, existing Agent runtime/model/tool crates.
 
@@ -177,7 +177,8 @@ Record:
 - Current evidence includes pending/retrying queue-row cancellation sync.
 - Current evidence includes waiting-approval queue rows and queued approval-resume requeue.
 - Current evidence includes Agent RabbitMQ wake-up topology/message publisher contract.
-- Remaining gaps: live Agent RabbitMQ consumer, queue outbox integration, and active cross-process provider abort.
+- Current evidence includes live Agent RabbitMQ execute consumer, exact message-row claim, retry routing, and dead-letter routing.
+- Remaining gaps: queue outbox integration and active cross-process provider abort.
 
 **Step 2: Verify**
 

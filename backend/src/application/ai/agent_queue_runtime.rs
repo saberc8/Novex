@@ -1,13 +1,17 @@
 use std::time::Duration;
 
 use chrono::Utc;
+use futures_lite::StreamExt;
+use lapin::options::{BasicAckOptions, BasicConsumeOptions};
 use sqlx::PgPool;
 
 use crate::{
     application::ai::agent_service::{AgentRuntimeRegistry, AgentService},
     infrastructure::{
         mq::rabbitmq::{AgentQueueMessage, AgentRabbitMqClient, AgentRabbitMqConfig},
-        persistence::ai_agent_repository::{AgentRunQueueSaveRecord, AiAgentRepository},
+        persistence::ai_agent_repository::{
+            AgentRunQueueClaimRecord, AgentRunQueueSaveRecord, AiAgentRepository,
+        },
     },
     shared::{config::AppConfig, error::AppError},
 };
@@ -76,6 +80,33 @@ pub fn agent_queue_message_from_save_record(record: &AgentRunQueueSaveRecord) ->
     }
 }
 
+fn agent_queue_message_from_claim_record(
+    claim: &AgentRunQueueClaimRecord,
+    event: &str,
+) -> AgentQueueMessage {
+    AgentQueueMessage {
+        queue_id: claim.id,
+        tenant_id: claim.tenant_id,
+        run_id: claim.run_id,
+        event: event.to_owned(),
+        attempt: claim.attempt_count,
+        max_attempts: claim.max_attempts,
+        source: claim
+            .payload
+            .get("source")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("agent.queue")
+            .to_owned(),
+    }
+}
+
+#[derive(Debug, Clone)]
+enum AgentQueueClaimOutcome {
+    Completed,
+    Retry(AgentQueueMessage),
+    Dead(AgentQueueMessage),
+}
+
 pub fn spawn_agent_queue_worker(
     db: PgPool,
     runtime: AgentQueueRuntimeConfig,
@@ -90,6 +121,120 @@ pub fn spawn_agent_queue_worker(
             tracing::error!(error = ?error, "agent queue worker stopped");
         }
     });
+}
+
+pub fn spawn_agent_queue_broker_consumer(
+    db: PgPool,
+    runtime: AgentQueueRuntimeConfig,
+    rabbitmq: AgentRabbitMqConfig,
+    agent_runtime: AgentRuntimeRegistry,
+) {
+    if !runtime.enabled {
+        return;
+    }
+
+    tokio::spawn(async move {
+        if let Err(error) =
+            run_agent_queue_broker_consumer(db, runtime, rabbitmq, agent_runtime).await
+        {
+            tracing::error!(error = ?error, "agent queue broker consumer stopped");
+        }
+    });
+}
+
+pub async fn run_agent_queue_broker_consumer(
+    db: PgPool,
+    runtime: AgentQueueRuntimeConfig,
+    rabbitmq: AgentRabbitMqConfig,
+    agent_runtime: AgentRuntimeRegistry,
+) -> Result<(), AppError> {
+    if !runtime.enabled {
+        return Ok(());
+    }
+
+    let mq = AgentRabbitMqClient::connect(rabbitmq).await?;
+    consume_agent_execute_queue(db, runtime, mq, agent_runtime).await
+}
+
+async fn consume_agent_execute_queue(
+    db: PgPool,
+    runtime: AgentQueueRuntimeConfig,
+    mq: AgentRabbitMqClient,
+    agent_runtime: AgentRuntimeRegistry,
+) -> Result<(), AppError> {
+    let mut consumer = mq
+        .channel()
+        .basic_consume(
+            &mq.config().execute_queue,
+            &runtime.worker_id,
+            BasicConsumeOptions::default(),
+            lapin::types::FieldTable::default(),
+        )
+        .await
+        .map_err(|error| AppError::Anyhow(anyhow::anyhow!("consume agent queue: {error}")))?;
+
+    while let Some(delivery) = consumer.next().await {
+        let delivery = delivery
+            .map_err(|error| AppError::Anyhow(anyhow::anyhow!("receive agent message: {error}")))?;
+        let message = match serde_json::from_slice::<AgentQueueMessage>(&delivery.data) {
+            Ok(message) => message,
+            Err(error) => {
+                tracing::error!(error = ?error, "decode agent message failed");
+                delivery
+                    .ack(BasicAckOptions::default())
+                    .await
+                    .map_err(|error| {
+                        AppError::Anyhow(anyhow::anyhow!("ack invalid agent message: {error}"))
+                    })?;
+                continue;
+            }
+        };
+
+        let repo = AiAgentRepository::new(db.clone());
+        let now = Utc::now().naive_utc();
+        let lease_until = now + chrono::Duration::seconds(runtime.lease_seconds.max(1) as i64);
+        let claim = repo
+            .claim_agent_run_queue_by_message(
+                message.queue_id,
+                message.tenant_id,
+                message.run_id,
+                &runtime.worker_id,
+                lease_until,
+                0,
+                now,
+            )
+            .await?;
+
+        if let Some(claim) = claim {
+            match execute_agent_queue_claim(db.clone(), &repo, agent_runtime.clone(), claim).await?
+            {
+                AgentQueueClaimOutcome::Completed => {}
+                AgentQueueClaimOutcome::Retry(retry) => {
+                    if let Err(error) = mq.publish_agent_retry(&retry).await {
+                        tracing::error!(error = ?error, run_id = retry.run_id, "publish agent retry message failed");
+                    }
+                }
+                AgentQueueClaimOutcome::Dead(dead) => {
+                    if let Err(error) = mq.publish_agent_dead(&dead).await {
+                        tracing::error!(error = ?error, run_id = dead.run_id, "publish agent dead message failed");
+                    }
+                }
+            }
+        } else {
+            tracing::debug!(
+                queue_id = message.queue_id,
+                run_id = message.run_id,
+                "agent queue broker message is stale or already claimed"
+            );
+        }
+
+        delivery
+            .ack(BasicAckOptions::default())
+            .await
+            .map_err(|error| AppError::Anyhow(anyhow::anyhow!("ack agent message: {error}")))?;
+    }
+
+    Ok(())
 }
 
 pub async fn run_agent_queue_worker(
@@ -134,52 +279,65 @@ pub async fn run_agent_queue_tick(
         .await?;
     let mut executed = 0usize;
     for claim in claims {
-        let service = AgentService::for_tenant_with_runtime(
-            db.clone(),
-            claim.tenant_id,
-            agent_runtime.clone(),
-        );
-        match service
-            .execute_queued_run(0, claim.run_id, claim.payload.clone())
-            .await
-        {
-            Ok(run) if run.status == "cancelled" => {
-                repo.mark_agent_run_queue_cancelled(claim.id, 0, Utc::now().naive_utc())
-                    .await?;
-                executed += 1;
-            }
-            Ok(run) if run.status == "waiting_approval" => {
-                repo.mark_agent_run_queue_waiting_approval(claim.id, 0, Utc::now().naive_utc())
-                    .await?;
-                executed += 1;
-            }
-            Ok(_) => {
-                repo.mark_agent_run_queue_succeeded(claim.id, 0, Utc::now().naive_utc())
-                    .await?;
-                executed += 1;
-            }
-            Err(error) if claim.attempt_count < claim.max_attempts => {
-                repo.mark_agent_run_queue_retrying(
-                    claim.id,
-                    &error.to_string(),
-                    0,
-                    Utc::now().naive_utc(),
-                )
-                .await?;
-            }
-            Err(error) => {
-                repo.mark_agent_run_queue_failed(
-                    claim.id,
-                    &error.to_string(),
-                    0,
-                    Utc::now().naive_utc(),
-                )
-                .await?;
-                executed += 1;
-            }
+        match execute_agent_queue_claim(db.clone(), &repo, agent_runtime.clone(), claim).await? {
+            AgentQueueClaimOutcome::Completed | AgentQueueClaimOutcome::Dead(_) => executed += 1,
+            AgentQueueClaimOutcome::Retry(_) => {}
         }
     }
     Ok(executed)
+}
+
+async fn execute_agent_queue_claim(
+    db: PgPool,
+    repo: &AiAgentRepository,
+    agent_runtime: AgentRuntimeRegistry,
+    claim: AgentRunQueueClaimRecord,
+) -> Result<AgentQueueClaimOutcome, AppError> {
+    let service = AgentService::for_tenant_with_runtime(db, claim.tenant_id, agent_runtime.clone());
+    match service
+        .execute_queued_run(0, claim.run_id, claim.payload.clone())
+        .await
+    {
+        Ok(run) if run.status == "cancelled" => {
+            repo.mark_agent_run_queue_cancelled(claim.id, 0, Utc::now().naive_utc())
+                .await?;
+            Ok(AgentQueueClaimOutcome::Completed)
+        }
+        Ok(run) if run.status == "waiting_approval" => {
+            repo.mark_agent_run_queue_waiting_approval(claim.id, 0, Utc::now().naive_utc())
+                .await?;
+            Ok(AgentQueueClaimOutcome::Completed)
+        }
+        Ok(_) => {
+            repo.mark_agent_run_queue_succeeded(claim.id, 0, Utc::now().naive_utc())
+                .await?;
+            Ok(AgentQueueClaimOutcome::Completed)
+        }
+        Err(error) if claim.attempt_count < claim.max_attempts => {
+            repo.mark_agent_run_queue_retrying(
+                claim.id,
+                &error.to_string(),
+                0,
+                Utc::now().naive_utc(),
+            )
+            .await?;
+            Ok(AgentQueueClaimOutcome::Retry(
+                agent_queue_message_from_claim_record(&claim, "agent.run.retry"),
+            ))
+        }
+        Err(error) => {
+            repo.mark_agent_run_queue_failed(
+                claim.id,
+                &error.to_string(),
+                0,
+                Utc::now().naive_utc(),
+            )
+            .await?;
+            Ok(AgentQueueClaimOutcome::Dead(
+                agent_queue_message_from_claim_record(&claim, "agent.run.dead"),
+            ))
+        }
+    }
 }
 
 #[cfg(test)]
@@ -335,6 +493,32 @@ mod tests {
         publisher.publish_agent_execute(&message).await.unwrap();
 
         assert_eq!(publisher.published_run_ids(), vec![99]);
+    }
+
+    #[test]
+    fn agent_queue_broker_consumer_runtime_declares_execute_path() {
+        let source = include_str!("agent_queue_runtime.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+
+        for needle in [
+            "spawn_agent_queue_broker_consumer",
+            "run_agent_queue_broker_consumer",
+            "consume_agent_execute_queue",
+            "AgentRabbitMqClient::connect",
+            "basic_consume",
+            "AgentQueueMessage",
+            "claim_agent_run_queue_by_message",
+            "publish_agent_retry",
+            "publish_agent_dead",
+            "BasicAckOptions",
+        ] {
+            assert!(
+                source.contains(needle),
+                "{needle} missing from Agent queue broker consumer"
+            );
+        }
     }
 
     #[derive(Debug, Default)]
