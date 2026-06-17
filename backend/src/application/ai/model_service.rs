@@ -6410,12 +6410,18 @@ mod tests {
         assert!(service_source.contains("ModelProviderMediaImageRequest"));
         assert!(service_source.contains("send_model_provider_media_image_request"));
         assert!(transport_source.contains("pub(super) use media::{"));
-        assert!(media_source
-            .contains("pub(in crate::application::ai) struct ModelProviderMediaImageRequest"));
+        assert!(media_source.contains(
+            "pub(in crate::application::ai) use novex_provider_client::ModelProviderMediaImageRequest",
+        ));
         assert!(media_source.contains(
             "pub(in crate::application::ai) async fn send_model_provider_media_image_request"
         ));
-        assert!(media_source.contains("model_provider_http_client(request.timeout)"));
+        assert!(media_source
+            .contains("novex_provider_client::send_model_provider_media_image_request(request)"));
+        assert!(media_source.contains("model_provider_client_error_to_app_error"));
+        assert!(!media_source.contains("model_provider_http_client(request.timeout)"));
+        assert!(!media_source.contains(".post(request.endpoint)"));
+        assert!(!media_source.contains(".header(\"x-api-key\", request.api_key)"));
         assert!(media_path
             .contains("send_model_provider_media_image_request(ModelProviderMediaImageRequest"));
         assert!(!media_path.contains("reqwest::Client::builder()"));
@@ -6488,10 +6494,9 @@ mod tests {
             .contains("pub(super) async fn send_model_provider_native_cancel_request"));
         assert!(!transport_source.contains("fn parse_rerank_score("));
         assert!(!transport_source.contains("fn parse_embedding_vector("));
-        assert!(http_source
-            .contains("pub(super) use novex_provider_client::model_provider_http_client;"));
         assert!(http_source.contains("ModelProviderClientError"));
         assert!(!http_source.contains("reqwest::Client::builder()"));
+        assert!(!http_source.contains("model_provider_http_client"));
         assert!(http_source
             .contains("pub(in crate::application::ai) async fn send_model_provider_http_request"));
         assert!(native_cancel_source.contains(
@@ -6518,7 +6523,10 @@ mod tests {
         assert!(media_source.contains(
             "pub(in crate::application::ai) async fn send_model_provider_media_image_request"
         ));
-        assert!(media_source.contains("model_provider_http_client(request.timeout)"));
+        assert!(media_source
+            .contains("novex_provider_client::send_model_provider_media_image_request(request)"));
+        assert!(media_source.contains("model_provider_client_error_to_app_error"));
+        assert!(!media_source.contains("model_provider_http_client(request.timeout)"));
     }
 
     #[test]
@@ -6602,7 +6610,13 @@ mod tests {
         assert!(!native_cancel_source.contains("model_provider_http_client(request.timeout)"));
         assert!(rag_source.contains("model_provider_client_error_to_app_error"));
         assert!(!rag_source.contains("model_provider_http_client(request.timeout)"));
-        assert!(media_source.contains("model_provider_http_client(request.timeout)"));
+        assert!(media_source.contains(
+            "pub(in crate::application::ai) use novex_provider_client::ModelProviderMediaImageRequest",
+        ));
+        assert!(media_source
+            .contains("novex_provider_client::send_model_provider_media_image_request(request)"));
+        assert!(media_source.contains("model_provider_client_error_to_app_error"));
+        assert!(!media_source.contains("model_provider_http_client(request.timeout)"));
     }
 
     #[test]
@@ -6692,6 +6706,60 @@ mod tests {
         assert!(!backend_native_source.contains(".post(request.endpoint)"));
         assert!(!backend_native_source.contains(".bearer_auth(request.api_key)"));
         assert!(!backend_native_source.contains("Provider native cancel failed: HTTP"));
+    }
+
+    #[test]
+    fn provider_client_media_dispatch_lives_in_provider_client_crate() {
+        let workspace_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("backend manifest should live below workspace root");
+        let source = |path: &str| {
+            std::fs::read_to_string(workspace_root.join(path))
+                .unwrap_or_else(|err| panic!("failed to read {path}: {err}"))
+        };
+        let provider_cargo_source = source("crates/novex-provider-client/Cargo.toml");
+        let provider_client_source = source("crates/novex-provider-client/src/lib.rs");
+        let backend_http_source =
+            source("backend/src/application/ai/model_provider_transport/http.rs");
+        let backend_media_source =
+            source("backend/src/application/ai/model_provider_transport/media.rs");
+
+        assert!(provider_cargo_source.contains("novex-tools.workspace = true"));
+        assert!(provider_client_source.contains(
+            "use novex_tools::{parse_media_image_generation_response, MediaImageGenerationRequest};",
+        ));
+        assert!(provider_client_source.contains("pub struct ModelProviderMediaImageRequest"));
+        assert!(
+            provider_client_source.contains("pub async fn send_model_provider_media_image_request")
+        );
+        assert!(provider_client_source
+            .contains("let request_payload = request.request.to_provider_payload();"));
+        assert!(provider_client_source.contains("model_provider_http_client(request.timeout)"));
+        assert!(provider_client_source.contains(".post(request.endpoint)"));
+        assert!(provider_client_source.contains(".bearer_auth(request.api_key)"));
+        assert!(provider_client_source.contains(".header(\"x-api-key\", request.api_key)"));
+        assert!(provider_client_source.contains(".json(&request_payload)"));
+        assert!(provider_client_source
+            .contains("parse_media_image_generation_response(&provider_payload)"));
+        assert!(provider_client_source.contains("图片生成客户端初始化失败"));
+        assert!(provider_client_source.contains("图片生成请求失败"));
+        assert!(provider_client_source.contains("图片生成响应缺少资产 URL"));
+        assert!(
+            backend_http_source.contains("pub(super) fn model_provider_client_error_to_app_error")
+        );
+        assert!(backend_media_source.contains(
+            "pub(in crate::application::ai) use novex_provider_client::ModelProviderMediaImageRequest",
+        ));
+        assert!(backend_media_source
+            .contains("novex_provider_client::send_model_provider_media_image_request(request)"));
+        assert!(backend_media_source.contains("model_provider_client_error_to_app_error"));
+        assert!(!backend_media_source.contains("MediaImageGenerationRequest"));
+        assert!(!backend_media_source.contains("parse_media_image_generation_response"));
+        assert!(!backend_media_source.contains("serde_json::{json, Value}"));
+        assert!(!backend_media_source.contains("model_provider_http_client(request.timeout)"));
+        assert!(!backend_media_source.contains(".post(request.endpoint)"));
+        assert!(!backend_media_source.contains(".header(\"x-api-key\", request.api_key)"));
+        assert!(!backend_media_source.contains("图片生成请求失败: HTTP"));
     }
 
     #[test]

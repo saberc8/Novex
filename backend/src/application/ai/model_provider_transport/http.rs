@@ -1,4 +1,3 @@
-pub(super) use novex_provider_client::model_provider_http_client;
 pub(in crate::application::ai) use novex_provider_client::ModelProviderHttpRequest;
 use novex_provider_client::{self, ModelProviderClientError};
 
