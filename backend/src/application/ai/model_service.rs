@@ -45,6 +45,7 @@ const MAX_MODEL_CHAT_FILE_CONTEXTS: usize = 3;
 const MAX_MODEL_CHAT_FILE_CONTEXT_CHARS: usize = 20_000;
 const MAX_MODEL_RUNTIME_RETRIES: usize = 3;
 const MODEL_PROVIDER_CALL_LEASE_SECONDS: i64 = 150;
+const MODEL_PROVIDER_CALL_LEASE_HEARTBEAT_SECONDS: u64 = 30;
 const MODEL_PROVIDER_CALL_LEASE_LIST_DEFAULT_LIMIT: i64 = 50;
 const MODEL_PROVIDER_CALL_LEASE_LIST_MAX_LIMIT: i64 = 200;
 const MODEL_RUNTIME_SYSTEM_USER_ID: i64 = 0;
@@ -1983,11 +1984,18 @@ LIMIT 1;
             started_at,
         );
         let lease_id = begin_model_provider_call_lease(&self.db, &record).await?;
+        let heartbeat = start_model_provider_call_lease_heartbeat(
+            self.db.clone(),
+            self.tenant_id,
+            lease_id,
+            user_id,
+        );
         let started = Instant::now();
         let result =
             execute_normalized_chat_completion_with_route(route, &command, conversation_id).await;
         let latency_ms = started.elapsed().as_millis();
         let completed_at = Utc::now().naive_utc();
+        heartbeat.stop().await;
 
         match result {
             Ok(mut response) => {
@@ -2941,7 +2949,7 @@ fn model_provider_call_lease_record_from_command(
         attempt_kind: attempt_kind.clone(),
         status: "running".to_owned(),
         lease_owner: lease_owner.to_owned(),
-        lease_expires_at: started_at + chrono::Duration::seconds(MODEL_PROVIDER_CALL_LEASE_SECONDS),
+        lease_expires_at: model_provider_call_lease_expiry_from_heartbeat(started_at),
         heartbeat_at: started_at,
         started_at,
         request_payload: model_provider_call_lease_request_payload(
@@ -2952,6 +2960,10 @@ fn model_provider_call_lease_record_from_command(
             &attempt_kind,
         ),
     }
+}
+
+fn model_provider_call_lease_expiry_from_heartbeat(heartbeat_at: NaiveDateTime) -> NaiveDateTime {
+    heartbeat_at + chrono::Duration::seconds(MODEL_PROVIDER_CALL_LEASE_SECONDS)
 }
 
 fn model_provider_call_lease_request_payload(
@@ -3163,6 +3175,100 @@ VALUES (
     .await?;
 
     Ok(record.id)
+}
+
+struct ModelProviderCallLeaseHeartbeat {
+    stop: Option<tokio::sync::oneshot::Sender<()>>,
+    handle: tokio::task::JoinHandle<()>,
+}
+
+impl ModelProviderCallLeaseHeartbeat {
+    async fn stop(mut self) {
+        if let Some(stop) = self.stop.take() {
+            let _ = stop.send(());
+        }
+        self.handle.abort();
+        let _ = self.handle.await;
+    }
+}
+
+fn start_model_provider_call_lease_heartbeat(
+    db: PgPool,
+    tenant_id: i64,
+    lease_id: i64,
+    user_id: i64,
+) -> ModelProviderCallLeaseHeartbeat {
+    let (stop, mut stop_rx) = tokio::sync::oneshot::channel();
+    let handle = tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(
+            MODEL_PROVIDER_CALL_LEASE_HEARTBEAT_SECONDS,
+        ));
+        interval.tick().await;
+
+        loop {
+            tokio::select! {
+                _ = interval.tick() => {
+                    let heartbeat_at = Utc::now().naive_utc();
+                    match refresh_model_provider_call_lease_heartbeat(
+                        &db,
+                        lease_id,
+                        tenant_id,
+                        heartbeat_at,
+                        user_id,
+                    )
+                    .await
+                    {
+                        Ok(0) => break,
+                        Ok(_) => {}
+                        Err(err) => {
+                            tracing::warn!(
+                                error = %err,
+                                lease_id,
+                                "failed to refresh model provider call lease heartbeat"
+                            );
+                        }
+                    }
+                }
+                _ = &mut stop_rx => break,
+            }
+        }
+    });
+
+    ModelProviderCallLeaseHeartbeat {
+        stop: Some(stop),
+        handle,
+    }
+}
+
+async fn refresh_model_provider_call_lease_heartbeat(
+    db: &PgPool,
+    lease_id: i64,
+    tenant_id: i64,
+    heartbeat_at: NaiveDateTime,
+    user_id: i64,
+) -> Result<u64, AppError> {
+    let lease_expires_at = model_provider_call_lease_expiry_from_heartbeat(heartbeat_at);
+    let result = sqlx::query(
+        r#"
+UPDATE ai_model_provider_call_lease
+SET heartbeat_at = $3,
+    lease_expires_at = $4,
+    update_user = $5,
+    update_time = $3
+WHERE id = $1
+  AND tenant_id = $2
+  AND status = 'running';
+"#,
+    )
+    .bind(lease_id)
+    .bind(tenant_id)
+    .bind(heartbeat_at)
+    .bind(lease_expires_at)
+    .bind(user_id)
+    .execute(db)
+    .await?;
+
+    Ok(result.rows_affected())
 }
 
 async fn complete_model_provider_call_lease(
@@ -5241,6 +5347,37 @@ mod tests {
         assert!(source.contains("status = $2"));
         assert!(source.contains("request_payload"));
         assert!(source.contains("response_payload"));
+    }
+
+    #[test]
+    fn provider_call_lease_heartbeat_extends_expiry_from_heartbeat() {
+        let heartbeat_at =
+            NaiveDateTime::parse_from_str("2026-06-17 10:00:30", "%Y-%m-%d %H:%M:%S").unwrap();
+
+        let expires_at = model_provider_call_lease_expiry_from_heartbeat(heartbeat_at);
+
+        assert_eq!(
+            expires_at,
+            heartbeat_at + chrono::Duration::seconds(MODEL_PROVIDER_CALL_LEASE_SECONDS)
+        );
+    }
+
+    #[test]
+    fn provider_call_lease_heartbeat_source_contract_refreshes_running_rows() {
+        let source = include_str!("model_service.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+
+        assert!(source.contains("start_model_provider_call_lease_heartbeat"));
+        assert!(source.contains("refresh_model_provider_call_lease_heartbeat"));
+        assert!(source.contains("tokio::time::interval"));
+        assert!(source.contains("heartbeat.stop().await"));
+        assert!(source.contains("SET heartbeat_at = $3"));
+        assert!(source.contains("lease_expires_at = $4"));
+        assert!(source.contains("WHERE id = $1"));
+        assert!(source.contains("AND tenant_id = $2"));
+        assert!(source.contains("AND status = 'running'"));
     }
 
     #[test]
