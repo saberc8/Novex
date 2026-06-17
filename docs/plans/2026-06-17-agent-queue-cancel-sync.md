@@ -99,7 +99,7 @@ cargo test -p backend-rust runtime_supervisor --offline
 
 ### Task 4: Update Docs, Verify, Merge
 
-Status: In progress.
+Status: Completed.
 
 **Files:**
 - Modify: `docs/plans/2026-06-16-codex-migration-matrix.md`
