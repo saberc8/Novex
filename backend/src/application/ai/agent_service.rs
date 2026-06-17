@@ -1169,33 +1169,35 @@ impl AgentService {
                     &tool_codes,
                     &runtime_state.items,
                 );
-                let (provider_stream_sender, provider_stream_receiver) = provider_stream_channel();
+                let model_stream_call = self
+                    .model_runtime
+                    .chat_completion_stream_for_purpose(
+                        ModelRoutePurpose::CodeAgent,
+                        ModelChatCommand {
+                            route_id: command.model_route_id.clone(),
+                            messages: messages.clone(),
+                            temperature: Some(0.2),
+                            max_tokens: Some(1024),
+                            provider_call_context: Some(ModelProviderCallContext {
+                                run_id: Some(run_id),
+                                source: "agent.model_loop".to_owned(),
+                                route_purpose: Some(ModelRoutePurpose::CodeAgent),
+                                attempt_kind: provider_attempt_kind.to_owned(),
+                            }),
+                            ..ModelChatCommand::default()
+                        },
+                    )
+                    .await?;
                 let model_call_result =
                     await_model_loop_provider_future_or_cancelled_with_delta_events(
                         cancel_token.clone(),
                         self.wait_for_model_loop_persistent_cancel(run_id),
                         "model_call",
-                        provider_stream_receiver,
+                        model_stream_call.events,
                         self,
                         user_id,
                         run_id,
-                        self.model_runtime.chat_completion_for_purpose(
-                            ModelRoutePurpose::CodeAgent,
-                            ModelChatCommand {
-                                route_id: command.model_route_id.clone(),
-                                messages: messages.clone(),
-                                temperature: Some(0.2),
-                                max_tokens: Some(1024),
-                                provider_call_context: Some(ModelProviderCallContext {
-                                    run_id: Some(run_id),
-                                    source: "agent.model_loop".to_owned(),
-                                    route_purpose: Some(ModelRoutePurpose::CodeAgent),
-                                    attempt_kind: provider_attempt_kind.to_owned(),
-                                }),
-                                provider_stream_sender: Some(provider_stream_sender),
-                                ..ModelChatCommand::default()
-                            },
-                        ),
+                        model_stream_call.response,
                     )
                     .await;
                 match model_call_result {
@@ -3356,13 +3358,6 @@ where
         }
         result = future => result.map(ModelLoopFutureAwait::Completed),
     }
-}
-
-fn provider_stream_channel() -> (
-    mpsc::UnboundedSender<ModelProviderStreamEvent>,
-    mpsc::UnboundedReceiver<ModelProviderStreamEvent>,
-) {
-    mpsc::unbounded_channel()
 }
 
 #[derive(Debug, Clone)]
@@ -7355,7 +7350,7 @@ mod tests {
     }
 
     #[test]
-    fn agent_service_model_loop_attaches_provider_stream_channel() {
+    fn agent_model_stream_native_runtime_api_uses_runtime_facade() {
         let source = include_str!("agent_service.rs")
             .split("#[cfg(test)]")
             .next()
@@ -7367,8 +7362,9 @@ mod tests {
                 .find("async fn model_loop_context_compaction_outcome")
                 .unwrap()];
 
-        assert!(model_loop.contains("provider_stream_channel"));
-        assert!(model_loop.contains("provider_stream_sender"));
+        assert!(model_loop.contains("chat_completion_stream_for_purpose"));
+        assert!(!model_loop.contains("provider_stream_channel"));
+        assert!(!model_loop.contains("provider_stream_sender: Some"));
         assert!(
             model_loop.contains("await_model_loop_provider_future_or_cancelled_with_delta_events")
         );
