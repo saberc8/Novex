@@ -44,13 +44,14 @@ use novex_trace::{TraceBundle, TraceEvent, TraceReplaySummary};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sqlx::PgPool;
-use tokio::sync::{mpsc, watch};
+use tokio::sync::watch;
 
 use crate::{
     application::ai::model_service::{
         ModelChatCommand, ModelChatCompactionMetadata, ModelChatMessage, ModelChatRequestMetadata,
-        ModelChatResp, ModelChatUsage, ModelProviderCallContext, ModelProviderCallLeaseCancelResp,
-        ModelProviderStreamChunk, ModelProviderStreamEvent, ModelRetryPolicy, ModelRuntimeService,
+        ModelChatResp, ModelChatStreamCall, ModelChatUsage, ModelProviderCallContext,
+        ModelProviderCallLeaseCancelResp, ModelProviderStreamChunk, ModelProviderStreamEvent,
+        ModelRetryPolicy, ModelRuntimeService,
     },
     application::system::{ensure_max_chars, format_datetime},
     infrastructure::persistence::{
@@ -1189,15 +1190,14 @@ impl AgentService {
                     )
                     .await?;
                 let model_call_result =
-                    await_model_loop_provider_future_or_cancelled_with_delta_events(
+                    await_model_loop_stream_call_or_cancelled_with_delta_events(
                         cancel_token.clone(),
                         self.wait_for_model_loop_persistent_cancel(run_id),
                         "model_call",
-                        model_stream_call.events,
                         self,
                         user_id,
                         run_id,
-                        model_stream_call.response,
+                        model_stream_call,
                     )
                     .await;
                 match model_call_result {
@@ -3449,20 +3449,24 @@ fn model_loop_streamed_tool_call_completion<T>(
         })
 }
 
-async fn await_model_loop_provider_future_or_cancelled_with_delta_events<F, C, T>(
+async fn await_model_loop_stream_call_or_cancelled_with_delta_events<C>(
     cancel_token: AgentRunCancellationToken,
     persistent_cancel: C,
     _stage: &str,
-    mut provider_stream_receiver: mpsc::UnboundedReceiver<ModelProviderStreamEvent>,
     service: &AgentService,
     user_id: i64,
     run_id: i64,
-    future: F,
-) -> Result<ModelLoopFutureAwait<ModelLoopProviderCompletion<T>>, AppError>
+    model_stream_call: ModelChatStreamCall,
+) -> Result<ModelLoopFutureAwait<ModelLoopProviderCompletion<ModelChatResp>>, AppError>
 where
-    F: Future<Output = Result<T, AppError>>,
     C: Future<Output = Result<(), AppError>>,
 {
+    let ModelChatStreamCall {
+        lifecycle: _lifecycle,
+        response,
+        events: mut provider_stream_receiver,
+    } = model_stream_call;
+    let future = response;
     tokio::pin!(future);
     tokio::pin!(persistent_cancel);
     let mut stream_closed = false;
@@ -3479,7 +3483,7 @@ where
             maybe_event = provider_stream_receiver.recv(), if !stream_closed => {
                 if let Some(event) = maybe_event {
                     drain_model_delta_events(service, user_id, run_id, &mut stream_state, event).await?;
-                    if let Some(completion) = model_loop_streamed_tool_call_completion::<T>(&stream_state) {
+                    if let Some(completion) = model_loop_streamed_tool_call_completion::<ModelChatResp>(&stream_state) {
                         return Ok(ModelLoopFutureAwait::Completed(completion));
                     }
                 } else {
@@ -6992,7 +6996,7 @@ mod tests {
             .unwrap()
             ..source.find("pub async fn list_runs").unwrap()];
 
-        assert!(model_loop.contains("await_model_loop_provider_future_or_cancelled"));
+        assert!(model_loop.contains("await_model_loop_stream_call_or_cancelled_with_delta_events"));
         assert!(model_loop.contains("wait_for_model_loop_persistent_cancel"));
         assert!(compaction.contains("await_model_loop_provider_future_or_cancelled"));
         assert!(compaction.contains("wait_for_model_loop_persistent_cancel"));
@@ -7365,11 +7369,39 @@ mod tests {
         assert!(model_loop.contains("chat_completion_stream_for_purpose"));
         assert!(!model_loop.contains("provider_stream_channel"));
         assert!(!model_loop.contains("provider_stream_sender: Some"));
-        assert!(
-            model_loop.contains("await_model_loop_provider_future_or_cancelled_with_delta_events")
-        );
+        assert!(model_loop.contains("await_model_loop_stream_call_or_cancelled_with_delta_events"));
         assert!(source.contains("drain_model_delta_events"));
         assert!(source.contains("model_delta_event_payload"));
+    }
+
+    #[test]
+    fn agent_model_stream_call_lifecycle_owns_future_and_events() {
+        let source = include_str!("agent_service.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+        let model_loop = &source[source
+            .find("async fn execute_model_loop_existing_run")
+            .unwrap()
+            ..source
+                .find("async fn model_loop_context_compaction_outcome")
+                .unwrap()];
+        let provider_wait = &source[source
+            .find("async fn await_model_loop_stream_call_or_cancelled_with_delta_events")
+            .unwrap()
+            ..source.find("async fn drain_model_delta_events").unwrap()];
+        let normalized_model_loop = model_loop.split_whitespace().collect::<Vec<_>>().join(" ");
+        let normalized_provider_wait = provider_wait
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+
+        assert!(source.contains("ModelChatStreamCall"));
+        assert!(source.contains("await_model_loop_stream_call_or_cancelled_with_delta_events"));
+        assert!(normalized_model_loop.contains("run_id, model_stream_call, ) .await"));
+        assert!(!model_loop.contains("model_stream_call.events"));
+        assert!(!model_loop.contains("model_stream_call.response"));
+        assert!(normalized_provider_wait.contains("model_stream_call: ModelChatStreamCall"));
     }
 
     #[test]
@@ -7547,7 +7579,7 @@ mod tests {
             .next()
             .unwrap();
         let provider_wait = &source[source
-            .find("async fn await_model_loop_provider_future_or_cancelled_with_delta_events")
+            .find("async fn await_model_loop_stream_call_or_cancelled_with_delta_events")
             .unwrap()
             ..source.find("async fn drain_model_delta_events").unwrap()];
         let model_loop = &source[source
@@ -7562,7 +7594,7 @@ mod tests {
             .join(" ");
         let normalized_model_loop = model_loop.split_whitespace().collect::<Vec<_>>().join(" ");
 
-        assert!(provider_wait.contains("model_loop_streamed_tool_call_completion::<T>"));
+        assert!(provider_wait.contains("model_loop_streamed_tool_call_completion::<ModelChatResp>"));
         assert!(normalized_provider_wait
             .contains("completion_reason: ModelLoopProviderCompletionReason::ProviderCompleted"));
         assert!(model_loop.contains("model_response = completion.response"));

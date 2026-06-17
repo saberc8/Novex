@@ -99,7 +99,15 @@ pub struct ModelProviderStreamEvent {
 pub type ModelChatStreamFuture =
     Pin<Box<dyn Future<Output = Result<ModelChatResp, AppError>> + Send>>;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelChatStreamLifecycle {
+    pub purpose: ModelRoutePurpose,
+    pub requested_route_id: Option<String>,
+    pub source: String,
+}
+
 pub struct ModelChatStreamCall {
+    pub lifecycle: ModelChatStreamLifecycle,
     pub response: ModelChatStreamFuture,
     pub events: mpsc::UnboundedReceiver<ModelProviderStreamEvent>,
 }
@@ -2325,13 +2333,18 @@ LIMIT 1;
         purpose: ModelRoutePurpose,
         mut command: ModelChatCommand,
     ) -> Result<ModelChatStreamCall, AppError> {
+        let lifecycle = model_chat_stream_lifecycle(purpose, &command);
         let (sender, events) = mpsc::unbounded_channel();
         command.provider_stream_sender = Some(sender);
         let service = self.clone();
         let response =
             Box::pin(async move { service.chat_completion_for_purpose(purpose, command).await });
 
-        Ok(ModelChatStreamCall { response, events })
+        Ok(ModelChatStreamCall {
+            lifecycle,
+            response,
+            events,
+        })
     }
 
     async fn execute_normalized_chat_completion_with_provider_call_lease(
@@ -2893,6 +2906,25 @@ fn normalize_optional_runtime_route_id(
         ensure_max_chars("模型路由", route_id, 128)?;
     }
     Ok(route_id)
+}
+
+fn model_chat_stream_lifecycle(
+    purpose: ModelRoutePurpose,
+    command: &ModelChatCommand,
+) -> ModelChatStreamLifecycle {
+    let source = command
+        .provider_call_context
+        .as_ref()
+        .map(|context| context.source.trim())
+        .filter(|source| !source.is_empty())
+        .unwrap_or("model_runtime")
+        .to_owned();
+
+    ModelChatStreamLifecycle {
+        purpose,
+        requested_route_id: command.route_id.clone(),
+        source,
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -6589,6 +6621,22 @@ mod tests {
         assert!(source.contains("pub response: ModelChatStreamFuture"));
         assert!(source.contains("pub events: mpsc::UnboundedReceiver<ModelProviderStreamEvent>"));
         assert!(source.contains("pub async fn chat_completion_stream_for_purpose"));
+    }
+
+    #[test]
+    fn model_stream_call_lifecycle_exposes_purpose_route_and_source() {
+        let source = include_str!("model_service.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+
+        assert!(source.contains("pub struct ModelChatStreamLifecycle"));
+        assert!(source.contains("pub purpose: ModelRoutePurpose"));
+        assert!(source.contains("pub requested_route_id: Option<String>"));
+        assert!(source.contains("pub source: String"));
+        assert!(source.contains("pub lifecycle: ModelChatStreamLifecycle"));
+        assert!(source.contains("fn model_chat_stream_lifecycle"));
+        assert!(source.contains("model_chat_stream_lifecycle(purpose, &command)"));
     }
 
     #[test]
