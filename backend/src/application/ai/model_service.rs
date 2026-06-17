@@ -35,6 +35,7 @@ const MODEL_ALERT_DELIVERY_CHANNEL_FEISHU: &str = "feishu";
 const MODEL_ALERT_DELIVERY_TIMEOUT: Duration = Duration::from_secs(10);
 const MODEL_ALERT_DELIVERY_BATCH_LIMIT: i64 = 100;
 const MODEL_CHAT_TIMEOUT: Duration = Duration::from_secs(120);
+const MODEL_PROVIDER_NATIVE_CANCEL_TIMEOUT: Duration = Duration::from_secs(10);
 const MODEL_RERANK_TIMEOUT: Duration = Duration::from_secs(30);
 const MODEL_EMBEDDING_TIMEOUT: Duration = Duration::from_secs(30);
 const MODEL_MEDIA_IMAGE_TIMEOUT: Duration = Duration::from_secs(30);
@@ -408,6 +409,26 @@ pub struct ModelProviderCallLeaseResp {
 #[serde(rename_all = "camelCase")]
 pub struct ModelProviderCallLeaseSweepResp {
     pub expired_count: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelProviderNativeCancelResp {
+    pub attempted: bool,
+    pub supported: bool,
+    pub provider: String,
+    pub provider_response_id: Option<String>,
+    pub endpoint: Option<String>,
+    pub http_status: Option<u16>,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelProviderCallLeaseCancelResp {
+    pub lease_id: i64,
+    pub status: String,
+    pub native_cancel: ModelProviderNativeCancelResp,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -1102,6 +1123,57 @@ RETURNING id;
 
         Ok(ModelProviderCallLeaseSweepResp {
             expired_count: expired_ids.len() as u64,
+        })
+    }
+
+    pub async fn cancel_provider_call_lease(
+        &self,
+        user_id: i64,
+        lease_id: i64,
+    ) -> Result<ModelProviderCallLeaseCancelResp, AppError> {
+        if lease_id <= 0 {
+            return Err(AppError::bad_request("模型调用租约 ID 不合法"));
+        }
+
+        let row = find_model_provider_call_lease_control_row(&self.db, self.tenant_id, lease_id)
+            .await?
+            .ok_or(AppError::NotFound)?;
+        if row.status != "running" {
+            return Ok(ModelProviderCallLeaseCancelResp {
+                lease_id: row.id,
+                status: row.status.clone(),
+                native_cancel: model_provider_native_cancel_resp_for_terminal_row(&row),
+            });
+        }
+
+        let route = match ModelRoutePurpose::parse(&row.route_purpose) {
+            Some(purpose) => {
+                self.resolve_route_for_purpose_with_route_id(purpose, Some(&row.route_code))
+                    .await?
+            }
+            None => None,
+        };
+        let plan = model_provider_native_cancel_plan(&row, route.as_ref());
+        let started = Instant::now();
+        let native_cancel = if plan.supported {
+            let route = route
+                .as_ref()
+                .ok_or_else(|| AppError::bad_request("模型调用租约路由不可用"))?;
+            execute_model_provider_native_cancel(route, &plan).await?
+        } else {
+            model_provider_native_cancel_resp_from_plan(&plan, false, None, plan.message.clone())
+        };
+        let completion = model_provider_call_lease_completion_from_native_cancel(
+            &native_cancel,
+            started.elapsed().as_millis(),
+            Utc::now().naive_utc(),
+        );
+        complete_model_provider_call_lease(&self.db, row.id, user_id, &completion).await?;
+
+        Ok(ModelProviderCallLeaseCancelResp {
+            lease_id: row.id,
+            status: "cancelled".to_owned(),
+            native_cancel,
         })
     }
 
@@ -3190,6 +3262,15 @@ struct ModelProviderCallLeaseCompletion {
     response_payload: Value,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ModelProviderNativeCancelPlan {
+    supported: bool,
+    provider: String,
+    provider_response_id: Option<String>,
+    endpoint: Option<String>,
+    message: String,
+}
+
 fn model_provider_call_lease_record_from_command(
     tenant_id: i64,
     user_id: i64,
@@ -3429,6 +3510,31 @@ fn model_provider_call_lease_completion_from_provider_payload(
     }
 }
 
+fn model_provider_call_lease_completion_from_native_cancel(
+    native_cancel: &ModelProviderNativeCancelResp,
+    latency_ms: u128,
+    completed_at: NaiveDateTime,
+) -> ModelProviderCallLeaseCompletion {
+    ModelProviderCallLeaseCompletion {
+        status: "cancelled".to_owned(),
+        completed_at,
+        latency_ms: u128_to_i64(latency_ms),
+        prompt_tokens: 0,
+        completion_tokens: 0,
+        total_tokens: 0,
+        cost_cents: None,
+        error_kind: Some("provider_native_cancel".to_owned()),
+        http_status: native_cancel.http_status.map(i32::from),
+        error_message: Some(native_cancel.message.clone()),
+        response_payload: json!({
+            "status": "cancelled",
+            "cancelReason": "provider_native_cancel",
+            "latencyMs": u128_to_i64(latency_ms),
+            "nativeCancel": native_cancel,
+        }),
+    }
+}
+
 #[allow(dead_code)]
 fn model_provider_call_lease_completion_cancelled(
     latency_ms: u128,
@@ -3450,6 +3556,120 @@ fn model_provider_call_lease_completion_cancelled(
             "cancelReason": "external_cancel",
             "latencyMs": u128_to_i64(latency_ms),
         }),
+    }
+}
+
+fn model_provider_native_cancel_plan(
+    row: &ModelProviderCallLeaseControlRow,
+    route: Option<&ModelRuntimeRoute>,
+) -> ModelProviderNativeCancelPlan {
+    let provider = route
+        .map(|route| route.provider().as_str().to_owned())
+        .unwrap_or_else(|| row.provider_type.clone());
+    let Some(route) = route else {
+        return ModelProviderNativeCancelPlan {
+            supported: false,
+            provider,
+            provider_response_id: None,
+            endpoint: None,
+            message: "missing_route".to_owned(),
+        };
+    };
+    if !model_provider_supports_responses_native_cancel(route.provider()) {
+        return ModelProviderNativeCancelPlan {
+            supported: false,
+            provider,
+            provider_response_id: None,
+            endpoint: None,
+            message: "unsupported_provider".to_owned(),
+        };
+    }
+    let provider_response_id =
+        model_provider_response_id_from_payloads(&row.request_payload, &row.response_payload);
+    let Some(provider_response_id) = provider_response_id else {
+        return ModelProviderNativeCancelPlan {
+            supported: false,
+            provider,
+            provider_response_id: None,
+            endpoint: None,
+            message: "missing_provider_response_id".to_owned(),
+        };
+    };
+    let endpoint = join_model_endpoint(
+        route.base_url(),
+        Some(&format!("responses/{provider_response_id}/cancel")),
+    );
+
+    ModelProviderNativeCancelPlan {
+        supported: true,
+        provider,
+        provider_response_id: Some(provider_response_id),
+        endpoint: Some(endpoint),
+        message: "native_cancel_supported".to_owned(),
+    }
+}
+
+fn model_provider_supports_responses_native_cancel(provider: ModelProviderType) -> bool {
+    matches!(
+        provider,
+        ModelProviderType::OpenAiCompatible | ModelProviderType::LocalRuntime
+    )
+}
+
+fn model_provider_response_id_from_payloads(request: &Value, response: &Value) -> Option<String> {
+    [request, response]
+        .into_iter()
+        .find_map(model_provider_response_id_from_payload)
+}
+
+fn model_provider_response_id_from_payload(payload: &Value) -> Option<String> {
+    [
+        payload.get("providerResponseId"),
+        payload.get("responseId"),
+        payload.get("id"),
+    ]
+    .into_iter()
+    .flatten()
+    .filter_map(Value::as_str)
+    .map(str::trim)
+    .filter(|value| {
+        !value.is_empty() && !value.contains('/') && !value.contains('?') && !value.contains('#')
+    })
+    .map(str::to_owned)
+    .next()
+}
+
+fn model_provider_native_cancel_resp_from_plan(
+    plan: &ModelProviderNativeCancelPlan,
+    attempted: bool,
+    http_status: Option<u16>,
+    message: impl Into<String>,
+) -> ModelProviderNativeCancelResp {
+    ModelProviderNativeCancelResp {
+        attempted,
+        supported: plan.supported,
+        provider: plan.provider.clone(),
+        provider_response_id: plan.provider_response_id.clone(),
+        endpoint: plan.endpoint.clone(),
+        http_status,
+        message: message.into(),
+    }
+}
+
+fn model_provider_native_cancel_resp_for_terminal_row(
+    row: &ModelProviderCallLeaseControlRow,
+) -> ModelProviderNativeCancelResp {
+    ModelProviderNativeCancelResp {
+        attempted: false,
+        supported: false,
+        provider: row.provider_type.clone(),
+        provider_response_id: model_provider_response_id_from_payloads(
+            &row.request_payload,
+            &row.response_payload,
+        ),
+        endpoint: None,
+        http_status: None,
+        message: "lease_not_running".to_owned(),
     }
 }
 
@@ -3637,6 +3857,51 @@ WHERE id = $1
     Ok(result.rows_affected())
 }
 
+async fn find_model_provider_call_lease_control_row(
+    db: &PgPool,
+    tenant_id: i64,
+    lease_id: i64,
+) -> Result<Option<ModelProviderCallLeaseControlRow>, AppError> {
+    Ok(sqlx::query_as::<_, ModelProviderCallLeaseControlRow>(
+        r#"
+SELECT
+    id,
+    run_id,
+    route_code,
+    route_purpose,
+    provider_type,
+    model_name,
+    request_kind,
+    source,
+    attempt_kind,
+    status,
+    lease_owner,
+    lease_expires_at,
+    heartbeat_at,
+    started_at,
+    completed_at,
+    latency_ms,
+    prompt_tokens,
+    completion_tokens,
+    total_tokens,
+    cost_cents::float8 AS cost_cents,
+    error_kind,
+    http_status,
+    error_message,
+    request_payload,
+    response_payload
+FROM ai_model_provider_call_lease
+WHERE tenant_id = $1
+  AND id = $2
+LIMIT 1;
+"#,
+    )
+    .bind(tenant_id)
+    .bind(lease_id)
+    .fetch_optional(db)
+    .await?)
+}
+
 async fn complete_model_provider_call_lease(
     db: &PgPool,
     lease_id: i64,
@@ -3659,8 +3924,9 @@ SET status = $2,
     response_payload = $12,
     update_user = $13,
     update_time = $3
-WHERE id = $1;
-"#,
+WHERE id = $1
+  AND status = 'running';
+	"#,
     )
     .bind(lease_id)
     .bind(&completion.status)
@@ -3682,6 +3948,40 @@ WHERE id = $1;
         return Err(AppError::NotFound);
     }
     Ok(())
+}
+
+async fn execute_model_provider_native_cancel(
+    route: &ModelRuntimeRoute,
+    plan: &ModelProviderNativeCancelPlan,
+) -> Result<ModelProviderNativeCancelResp, AppError> {
+    let endpoint = plan
+        .endpoint
+        .as_deref()
+        .ok_or_else(|| AppError::bad_request("模型调用缺少 provider native cancel endpoint"))?;
+    let client = reqwest::Client::builder()
+        .timeout(MODEL_PROVIDER_NATIVE_CANCEL_TIMEOUT)
+        .build()
+        .map_err(|err| AppError::Anyhow(err.into()))?;
+    let response = client
+        .post(endpoint)
+        .bearer_auth(route.api_key())
+        .send()
+        .await
+        .map_err(|err| AppError::Anyhow(err.into()))?;
+    let status = response.status();
+    if !status.is_success() {
+        return Err(AppError::bad_request(format!(
+            "Provider native cancel failed: HTTP {}",
+            status.as_u16()
+        )));
+    }
+
+    Ok(model_provider_native_cancel_resp_from_plan(
+        plan,
+        true,
+        Some(status.as_u16()),
+        "native_cancel_sent",
+    ))
 }
 
 fn normalize_provider_call_lease_query(
@@ -7373,6 +7673,94 @@ mod tests {
     }
 
     #[test]
+    fn provider_call_lease_native_cancel_plan_uses_responses_cancel_endpoint() {
+        let route = openai_compatible_llm_route();
+        let row = test_provider_call_lease_control_row(
+            "running",
+            json!({"providerResponseId": "resp_123"}),
+            json!({}),
+        );
+
+        let plan = model_provider_native_cancel_plan(&row, Some(&route));
+
+        assert!(plan.supported);
+        assert_eq!(plan.provider_response_id.as_deref(), Some("resp_123"));
+        assert_eq!(
+            plan.endpoint.as_deref(),
+            Some("https://llm.internal/v1/responses/resp_123/cancel")
+        );
+    }
+
+    #[test]
+    fn provider_call_lease_native_cancel_plan_requires_provider_response_id() {
+        let route = openai_compatible_llm_route();
+        let row = test_provider_call_lease_control_row("running", json!({}), json!({}));
+
+        let plan = model_provider_native_cancel_plan(&row, Some(&route));
+
+        assert!(!plan.supported);
+        assert_eq!(plan.message, "missing_provider_response_id");
+        assert!(plan.endpoint.is_none());
+    }
+
+    #[test]
+    fn provider_call_lease_cancel_completion_records_native_cancel_evidence() {
+        let now =
+            NaiveDateTime::parse_from_str("2026-06-17 10:05:00", "%Y-%m-%d %H:%M:%S").unwrap();
+        let native = ModelProviderNativeCancelResp {
+            attempted: true,
+            supported: true,
+            provider: "openai-compatible".to_owned(),
+            provider_response_id: Some("resp_123".to_owned()),
+            endpoint: Some("https://llm.internal/v1/responses/resp_123/cancel".to_owned()),
+            http_status: Some(200),
+            message: "native_cancel_sent".to_owned(),
+        };
+
+        let completion = model_provider_call_lease_completion_from_native_cancel(&native, 32, now);
+
+        assert_eq!(completion.status, "cancelled");
+        assert_eq!(
+            completion.error_kind.as_deref(),
+            Some("provider_native_cancel")
+        );
+        assert_eq!(
+            completion.response_payload["nativeCancel"]["providerResponseId"],
+            "resp_123"
+        );
+    }
+
+    #[test]
+    fn provider_call_lease_cancel_source_contract_loads_tenant_row_and_marks_cancelled() {
+        let source = include_str!("model_service.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+
+        assert!(source.contains("pub async fn cancel_provider_call_lease"));
+        assert!(source.contains("WHERE tenant_id = $1"));
+        assert!(source.contains("AND id = $2"));
+        assert!(source.contains("model_provider_call_lease_completion_from_native_cancel"));
+        assert!(source.contains("model_provider_native_cancel_plan"));
+    }
+
+    #[test]
+    fn provider_call_lease_completion_only_updates_running_rows() {
+        let source = include_str!("model_service.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+        let complete_fn = &source[source
+            .find("async fn complete_model_provider_call_lease")
+            .unwrap()
+            ..source
+                .find("fn normalize_provider_call_lease_query")
+                .unwrap()];
+
+        assert!(complete_fn.contains("AND status = 'running'"));
+    }
+
+    #[test]
     fn model_chat_command_accepts_existing_conversation_id() {
         let command = normalize_model_chat_command(ModelChatCommand {
             conversation_id: Some(88),
@@ -7906,6 +8294,46 @@ mod tests {
             ..test_compaction_chat_command()
         })
         .unwrap()
+    }
+
+    fn test_provider_call_lease_control_row(
+        status: &str,
+        request_payload: Value,
+        response_payload: Value,
+    ) -> ModelProviderCallLeaseControlRow {
+        ModelProviderCallLeaseControlRow {
+            id: 123,
+            run_id: Some(88),
+            route_code: "tenant42.code_agent".to_owned(),
+            route_purpose: "code_agent".to_owned(),
+            provider_type: "openai-compatible".to_owned(),
+            model_name: Some("gpt-compatible".to_owned()),
+            request_kind: "model_call".to_owned(),
+            source: "agent.model_loop".to_owned(),
+            attempt_kind: "primary".to_owned(),
+            status: status.to_owned(),
+            lease_owner: "novex:test".to_owned(),
+            lease_expires_at: NaiveDateTime::parse_from_str(
+                "2026-06-17 10:10:00",
+                "%Y-%m-%d %H:%M:%S",
+            )
+            .unwrap(),
+            heartbeat_at: NaiveDateTime::parse_from_str("2026-06-17 10:00:10", "%Y-%m-%d %H:%M:%S")
+                .unwrap(),
+            started_at: NaiveDateTime::parse_from_str("2026-06-17 10:00:00", "%Y-%m-%d %H:%M:%S")
+                .unwrap(),
+            completed_at: None,
+            latency_ms: None,
+            prompt_tokens: 0,
+            completion_tokens: 0,
+            total_tokens: 0,
+            cost_cents: None,
+            error_kind: None,
+            http_status: None,
+            error_message: None,
+            request_payload,
+            response_payload,
+        }
     }
 
     fn dynamic_route_test_row(

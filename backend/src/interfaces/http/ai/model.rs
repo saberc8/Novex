@@ -7,9 +7,9 @@ use axum::{
 use crate::{
     application::ai::model_service::{
         ModelChatCommand, ModelChatConversationResp, ModelChatResp, ModelHealthCheckCommand,
-        ModelHealthCheckResp, ModelOpsSummaryResp, ModelProviderCallLeaseQuery,
-        ModelProviderCallLeaseResp, ModelProviderCallLeaseSweepResp, ModelRegistrySummary,
-        ModelRouteCircuitBreakerResp, ModelRuntimeService,
+        ModelHealthCheckResp, ModelOpsSummaryResp, ModelProviderCallLeaseCancelResp,
+        ModelProviderCallLeaseQuery, ModelProviderCallLeaseResp, ModelProviderCallLeaseSweepResp,
+        ModelRegistrySummary, ModelRouteCircuitBreakerResp, ModelRuntimeService,
     },
     domain::auth::model::CurrentUser,
     interfaces::http::{middleware::permission::require_permission, AppState},
@@ -24,6 +24,7 @@ pub const MODEL_CIRCUIT_BREAKER_CLEAR_PERMISSION: &str = "ai:model:circuitBreake
 pub const MODEL_OPS_SUMMARY_PERMISSION: &str = "ai:model:opsSummary";
 pub const MODEL_PROVIDER_CALL_LEASE_LIST_PERMISSION: &str = "ai:model:providerCallLease:list";
 pub const MODEL_PROVIDER_CALL_LEASE_EXPIRE_PERMISSION: &str = "ai:model:providerCallLease:expire";
+pub const MODEL_PROVIDER_CALL_LEASE_CANCEL_PERMISSION: &str = "ai:model:providerCallLease:cancel";
 
 pub fn routes() -> Router<AppState> {
     Router::new()
@@ -46,6 +47,10 @@ pub fn routes() -> Router<AppState> {
         .route(
             "/ai/models/provider-call-leases/expire-stale",
             post(expire_stale_provider_call_leases),
+        )
+        .route(
+            "/ai/models/provider-call-leases/:lease_id/cancel",
+            post(cancel_provider_call_lease),
         )
         .route(
             "/ai/models/chat/conversations",
@@ -148,6 +153,21 @@ async fn expire_stale_provider_call_leases(
     Ok(Json(ApiResponse::ok(
         service
             .expire_stale_provider_call_leases(current_user.id)
+            .await?,
+    )))
+}
+
+async fn cancel_provider_call_lease(
+    State(state): State<AppState>,
+    current_user: CurrentUser,
+    Path(lease_id): Path<i64>,
+) -> Result<Json<ApiResponse<ModelProviderCallLeaseCancelResp>>, AppError> {
+    require_permission(&current_user, MODEL_PROVIDER_CALL_LEASE_CANCEL_PERMISSION)?;
+    let service = ModelRuntimeService::for_tenant(state.db, current_user.tenant_id);
+
+    Ok(Json(ApiResponse::ok(
+        service
+            .cancel_provider_call_lease(current_user.id, lease_id)
             .await?,
     )))
 }
@@ -269,6 +289,15 @@ mod tests {
 
         assert!(seed.contains(MODEL_PROVIDER_CALL_LEASE_LIST_PERMISSION));
         assert!(seed.contains(MODEL_PROVIDER_CALL_LEASE_EXPIRE_PERMISSION));
+    }
+
+    #[test]
+    fn provider_call_lease_cancel_permission_seed_contains_control() {
+        let seed = include_str!(
+            "../../../../migrations/202606170010_seed_ai_model_provider_call_lease_cancel_permission.sql"
+        );
+
+        assert!(seed.contains(MODEL_PROVIDER_CALL_LEASE_CANCEL_PERMISSION));
     }
 
     #[test]
@@ -466,6 +495,19 @@ mod tests {
         assert!(matches!(err, AppError::Forbidden));
     }
 
+    #[tokio::test]
+    async fn provider_call_lease_cancel_handler_rejects_missing_permission() {
+        let err = cancel_provider_call_lease(
+            State(test_state()),
+            user_with_permissions(vec![]),
+            axum::extract::Path(123),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(matches!(err, AppError::Forbidden));
+    }
+
     #[test]
     fn model_circuit_breaker_routes_are_registered() {
         let source = include_str!("model.rs");
@@ -490,6 +532,14 @@ mod tests {
         assert!(source.contains("/ai/models/provider-call-leases/expire-stale"));
         assert!(source.contains("MODEL_PROVIDER_CALL_LEASE_LIST_PERMISSION"));
         assert!(source.contains("MODEL_PROVIDER_CALL_LEASE_EXPIRE_PERMISSION"));
+    }
+
+    #[test]
+    fn provider_call_lease_cancel_route_is_registered() {
+        let source = include_str!("model.rs");
+
+        assert!(source.contains("/ai/models/provider-call-leases/:lease_id/cancel"));
+        assert!(source.contains("MODEL_PROVIDER_CALL_LEASE_CANCEL_PERMISSION"));
     }
 
     #[tokio::test]
