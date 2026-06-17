@@ -6313,6 +6313,11 @@ mod tests {
             .split("#[cfg(test)]")
             .next()
             .unwrap();
+        let provider_client_source =
+            include_str!("../../../../crates/novex-provider-client/src/lib.rs")
+                .split("#[cfg(test)]")
+                .next()
+                .unwrap();
         let embed_path = &service_source[service_source.find("pub async fn embed_texts").unwrap()
             ..service_source
                 .find("pub async fn embed_texts_for_source")
@@ -6331,11 +6336,15 @@ mod tests {
         assert!(service_source.contains("parse_model_provider_embedding_vectors"));
         assert!(service_source.contains("parse_model_provider_rerank_scores"));
         assert!(transport_source.contains("pub(super) use rag::{"));
-        assert!(rag_source
-            .contains("pub(in crate::application::ai) struct ModelProviderEmbeddingRequest"));
+        assert!(provider_client_source.contains("pub struct ModelProviderEmbeddingRequest"));
+        assert!(provider_client_source.contains("pub struct ModelProviderRerankRequest"));
         assert!(
-            rag_source.contains("pub(in crate::application::ai) struct ModelProviderRerankRequest")
+            provider_client_source.contains("pub async fn send_model_provider_embedding_request")
         );
+        assert!(provider_client_source.contains("pub async fn send_model_provider_rerank_request"));
+        assert!(rag_source.contains("pub(in crate::application::ai) use novex_provider_client::{"));
+        assert!(rag_source.contains("ModelProviderEmbeddingRequest"));
+        assert!(rag_source.contains("ModelProviderRerankRequest"));
         assert!(rag_source.contains(
             "pub(in crate::application::ai) async fn send_model_provider_embedding_request"
         ));
@@ -6343,12 +6352,17 @@ mod tests {
             "pub(in crate::application::ai) async fn send_model_provider_rerank_request"
         ));
         assert!(transport_source.contains("pub(super) use novex_provider_client::{"));
-        assert!(rag_source.contains("use novex_provider_client::{"));
-        assert!(rag_source.contains("parse_model_provider_embedding_vectors"));
-        assert!(rag_source.contains("parse_model_provider_rerank_scores"));
+        assert!(provider_client_source.contains("parse_model_provider_embedding_vectors(&body)"));
+        assert!(provider_client_source.contains("parse_model_provider_rerank_scores(&body)"));
+        assert!(rag_source.contains("model_provider_client_error_to_app_error"));
+        assert!(rag_source
+            .contains("novex_provider_client::send_model_provider_embedding_request(request)"));
+        assert!(rag_source
+            .contains("novex_provider_client::send_model_provider_rerank_request(request)"));
         assert!(!rag_source.contains("fn parse_embedding_vector("));
         assert!(!rag_source.contains("fn parse_rerank_score("));
-        assert!(rag_source.contains("model_provider_http_client(request.timeout)"));
+        assert!(!rag_source.contains("serde_json::{json, Value}"));
+        assert!(!rag_source.contains("model_provider_http_client(request.timeout)"));
         assert!(embed_path
             .contains("send_model_provider_embedding_request(ModelProviderEmbeddingRequest"));
         assert!(
@@ -6478,6 +6492,9 @@ mod tests {
             "pub(in crate::application::ai) async fn send_model_provider_native_cancel_request",
         ));
         assert!(native_cancel_source.contains("model_provider_http_client(request.timeout)"));
+        assert!(rag_source.contains("pub(in crate::application::ai) use novex_provider_client::{"));
+        assert!(rag_source.contains("ModelProviderEmbeddingRequest"));
+        assert!(rag_source.contains("ModelProviderRerankRequest"));
         assert!(rag_source.contains(
             "pub(in crate::application::ai) async fn send_model_provider_embedding_request"
         ));
@@ -6485,12 +6502,10 @@ mod tests {
             "pub(in crate::application::ai) async fn send_model_provider_rerank_request"
         ));
         assert!(transport_source.contains("pub(super) use novex_provider_client::{"));
-        assert!(rag_source.contains("use novex_provider_client::{"));
-        assert!(rag_source.contains("parse_model_provider_embedding_vectors"));
-        assert!(rag_source.contains("parse_model_provider_rerank_scores"));
+        assert!(rag_source.contains("model_provider_client_error_to_app_error"));
         assert!(!rag_source.contains("fn parse_embedding_vector("));
         assert!(!rag_source.contains("fn parse_rerank_score("));
-        assert!(rag_source.contains("model_provider_http_client(request.timeout)"));
+        assert!(!rag_source.contains("model_provider_http_client(request.timeout)"));
         assert!(media_source.contains(
             "pub(in crate::application::ai) async fn send_model_provider_media_image_request"
         ));
@@ -6519,9 +6534,15 @@ mod tests {
         assert!(provider_client_source.contains("pub fn parse_model_provider_rerank_scores"));
         assert!(provider_client_source.contains("fn parse_embedding_vector("));
         assert!(provider_client_source.contains("fn parse_rerank_score("));
-        assert!(rag_source.contains("use novex_provider_client::{"));
-        assert!(rag_source.contains("parse_model_provider_embedding_vectors"));
-        assert!(rag_source.contains("parse_model_provider_rerank_scores"));
+        assert!(provider_client_source.contains("pub struct ModelProviderEmbeddingRequest"));
+        assert!(provider_client_source.contains("pub struct ModelProviderRerankRequest"));
+        assert!(
+            provider_client_source.contains("pub async fn send_model_provider_embedding_request")
+        );
+        assert!(provider_client_source.contains("pub async fn send_model_provider_rerank_request"));
+        assert!(rag_source.contains("pub(in crate::application::ai) use novex_provider_client::{"));
+        assert!(rag_source.contains("ModelProviderEmbeddingRequest"));
+        assert!(rag_source.contains("ModelProviderRerankRequest"));
         assert!(!rag_source.contains("fn parse_embedding_vector("));
         assert!(!rag_source.contains("fn parse_rerank_score("));
         assert!(!rag_source.contains("fn json_usize("));
@@ -6564,8 +6585,60 @@ mod tests {
         assert!(!backend_http_source.contains("reqwest::Client::builder()"));
         assert!(!backend_http_source.contains(".post(request.endpoint)"));
         assert!(native_cancel_source.contains("model_provider_http_client(request.timeout)"));
-        assert!(rag_source.contains("model_provider_http_client(request.timeout)"));
+        assert!(rag_source.contains("model_provider_client_error_to_app_error"));
+        assert!(!rag_source.contains("model_provider_http_client(request.timeout)"));
         assert!(media_source.contains("model_provider_http_client(request.timeout)"));
+    }
+
+    #[test]
+    fn provider_client_rag_dispatch_lives_in_provider_client_crate() {
+        let workspace_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("backend manifest should live below workspace root");
+        let source = |path: &str| {
+            std::fs::read_to_string(workspace_root.join(path))
+                .unwrap_or_else(|err| panic!("failed to read {path}: {err}"))
+        };
+        let provider_client_source = source("crates/novex-provider-client/src/lib.rs");
+        let backend_http_source =
+            source("backend/src/application/ai/model_provider_transport/http.rs");
+        let backend_rag_source =
+            source("backend/src/application/ai/model_provider_transport/rag.rs");
+
+        assert!(provider_client_source.contains("pub struct ModelProviderEmbeddingRequest"));
+        assert!(provider_client_source.contains("pub struct ModelProviderRerankRequest"));
+        assert!(
+            provider_client_source.contains("pub async fn send_model_provider_embedding_request")
+        );
+        assert!(provider_client_source.contains("pub async fn send_model_provider_rerank_request"));
+        assert!(provider_client_source.contains("\"model\": request.model.unwrap_or_default()"));
+        assert!(provider_client_source.contains("\"input\": request.texts"));
+        assert!(provider_client_source.contains("\"query\": request.query"));
+        assert!(provider_client_source.contains("\"documents\": request.documents"));
+        assert!(provider_client_source.contains("parse_model_provider_embedding_vectors(&body)"));
+        assert!(provider_client_source.contains("parse_model_provider_rerank_scores(&body)"));
+        assert!(provider_client_source.contains("ModelProviderClientError::BadResponse"));
+        assert!(provider_client_source.contains("Embedding 模型响应为空"));
+        assert!(provider_client_source.contains("Rerank 模型响应为空"));
+        assert!(
+            backend_http_source.contains("pub(super) fn model_provider_client_error_to_app_error")
+        );
+        assert!(backend_rag_source
+            .contains("pub(in crate::application::ai) use novex_provider_client::{"));
+        assert!(backend_rag_source.contains("ModelProviderEmbeddingRequest"));
+        assert!(backend_rag_source.contains("ModelProviderRerankRequest"));
+        assert!(backend_rag_source
+            .contains("novex_provider_client::send_model_provider_embedding_request(request)"));
+        assert!(backend_rag_source
+            .contains("novex_provider_client::send_model_provider_rerank_request(request)"));
+        assert!(backend_rag_source.contains("model_provider_client_error_to_app_error"));
+        assert!(!backend_rag_source.contains("serde_json::{json, Value}"));
+        assert!(!backend_rag_source.contains("model_provider_http_client(request.timeout)"));
+        assert!(!backend_rag_source.contains(".post(request.endpoint)"));
+        assert!(!backend_rag_source.contains("Embedding 模型调用失败: {status}"));
+        assert!(!backend_rag_source.contains("Rerank 模型调用失败: {status}"));
+        assert!(!backend_rag_source.contains("Embedding 模型响应为空"));
+        assert!(!backend_rag_source.contains("Rerank 模型响应为空"));
     }
 
     #[test]

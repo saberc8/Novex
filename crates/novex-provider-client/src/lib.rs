@@ -1,7 +1,7 @@
 use std::{error::Error, fmt, time::Duration};
 
 use novex_model::{ModelEmbeddingVector, ModelRerankScore};
-use serde_json::Value;
+use serde_json::{json, Value};
 
 pub const CRATE_ID: &str = "novex-provider-client";
 
@@ -12,6 +12,7 @@ pub enum ModelProviderClientError {
         failure_message: String,
         status: u16,
     },
+    BadResponse(String),
 }
 
 impl fmt::Display for ModelProviderClientError {
@@ -22,6 +23,7 @@ impl fmt::Display for ModelProviderClientError {
                 failure_message,
                 status,
             } => write!(f, "{failure_message}: HTTP {status}"),
+            Self::BadResponse(message) => write!(f, "{message}"),
         }
     }
 }
@@ -30,7 +32,7 @@ impl Error for ModelProviderClientError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::Transport(err) => Some(err),
-            Self::HttpStatus { .. } => None,
+            Self::HttpStatus { .. } | Self::BadResponse(_) => None,
         }
     }
 }
@@ -69,6 +71,86 @@ pub async fn send_model_provider_http_request(
     }
 
     Ok(response)
+}
+
+pub struct ModelProviderEmbeddingRequest<'a> {
+    pub endpoint: &'a str,
+    pub api_key: &'a str,
+    pub model: Option<&'a str>,
+    pub texts: &'a [String],
+    pub timeout: Duration,
+}
+
+pub struct ModelProviderRerankRequest<'a> {
+    pub endpoint: &'a str,
+    pub api_key: &'a str,
+    pub model: Option<&'a str>,
+    pub query: &'a str,
+    pub documents: &'a [String],
+    pub timeout: Duration,
+}
+
+pub async fn send_model_provider_embedding_request(
+    request: ModelProviderEmbeddingRequest<'_>,
+) -> Result<Vec<ModelEmbeddingVector>, ModelProviderClientError> {
+    let client =
+        model_provider_http_client(request.timeout).map_err(ModelProviderClientError::Transport)?;
+    let response = client
+        .post(request.endpoint)
+        .bearer_auth(request.api_key)
+        .json(&json!({
+            "model": request.model.unwrap_or_default(),
+            "input": request.texts,
+        }))
+        .send()
+        .await
+        .map_err(ModelProviderClientError::Transport)?;
+    let status = response.status();
+    let body = response.json::<Value>().await.unwrap_or(Value::Null);
+    if !status.is_success() {
+        return Err(ModelProviderClientError::BadResponse(format!(
+            "Embedding 模型调用失败: {status}"
+        )));
+    }
+    let vectors = parse_model_provider_embedding_vectors(&body);
+    if vectors.is_empty() {
+        return Err(ModelProviderClientError::BadResponse(
+            "Embedding 模型响应为空".to_owned(),
+        ));
+    }
+    Ok(vectors)
+}
+
+pub async fn send_model_provider_rerank_request(
+    request: ModelProviderRerankRequest<'_>,
+) -> Result<Vec<ModelRerankScore>, ModelProviderClientError> {
+    let client =
+        model_provider_http_client(request.timeout).map_err(ModelProviderClientError::Transport)?;
+    let response = client
+        .post(request.endpoint)
+        .bearer_auth(request.api_key)
+        .json(&json!({
+            "model": request.model.unwrap_or_default(),
+            "query": request.query,
+            "documents": request.documents,
+        }))
+        .send()
+        .await
+        .map_err(ModelProviderClientError::Transport)?;
+    let status = response.status();
+    let body = response.json::<Value>().await.unwrap_or(Value::Null);
+    if !status.is_success() {
+        return Err(ModelProviderClientError::BadResponse(format!(
+            "Rerank 模型调用失败: {status}"
+        )));
+    }
+    let scores = parse_model_provider_rerank_scores(&body);
+    if scores.is_empty() {
+        return Err(ModelProviderClientError::BadResponse(
+            "Rerank 模型响应为空".to_owned(),
+        ));
+    }
+    Ok(scores)
 }
 
 pub fn parse_model_provider_rerank_scores(body: &Value) -> Vec<ModelRerankScore> {
@@ -179,6 +261,48 @@ mod tests {
         assert_eq!(request.payload["model"], "demo");
         assert_eq!(request.timeout, Duration::from_secs(15));
         assert_eq!(request.failure_message, "LLM 模型调用失败");
+    }
+
+    #[test]
+    fn bad_response_error_preserves_provider_message() {
+        let error = ModelProviderClientError::BadResponse("Embedding 模型响应为空".to_owned());
+
+        assert_eq!(error.to_string(), "Embedding 模型响应为空");
+    }
+
+    #[test]
+    fn rag_requests_carry_provider_dispatch_inputs() {
+        let texts = vec!["alpha".to_owned(), "beta".to_owned()];
+        let embedding = ModelProviderEmbeddingRequest {
+            endpoint: "https://provider.example/v1/embeddings",
+            api_key: "secret",
+            model: Some("embed-demo"),
+            texts: &texts,
+            timeout: Duration::from_secs(20),
+        };
+
+        assert_eq!(embedding.endpoint, "https://provider.example/v1/embeddings");
+        assert_eq!(embedding.api_key, "secret");
+        assert_eq!(embedding.model, Some("embed-demo"));
+        assert_eq!(embedding.texts, texts.as_slice());
+        assert_eq!(embedding.timeout, Duration::from_secs(20));
+
+        let documents = vec!["doc-a".to_owned(), "doc-b".to_owned()];
+        let rerank = ModelProviderRerankRequest {
+            endpoint: "https://provider.example/v1/rerank",
+            api_key: "secret",
+            model: Some("rerank-demo"),
+            query: "question",
+            documents: &documents,
+            timeout: Duration::from_secs(30),
+        };
+
+        assert_eq!(rerank.endpoint, "https://provider.example/v1/rerank");
+        assert_eq!(rerank.api_key, "secret");
+        assert_eq!(rerank.model, Some("rerank-demo"));
+        assert_eq!(rerank.query, "question");
+        assert_eq!(rerank.documents, documents.as_slice());
+        assert_eq!(rerank.timeout, Duration::from_secs(30));
     }
 
     #[test]
