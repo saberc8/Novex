@@ -12,12 +12,15 @@ pub(in crate::application::ai) async fn send_model_provider_http_request(
         .map_err(model_provider_client_error_to_app_error)
 }
 
-fn model_provider_client_error_to_app_error(error: ModelProviderClientError) -> AppError {
+pub(super) fn model_provider_client_error_to_app_error(
+    error: ModelProviderClientError,
+) -> AppError {
     match error {
         ModelProviderClientError::Transport(err) => AppError::Anyhow(err.into()),
         ModelProviderClientError::HttpStatus {
             failure_message,
             status,
         } => AppError::bad_request(format!("{failure_message}: HTTP {status}")),
+        ModelProviderClientError::BadResponse(message) => AppError::bad_request(message),
     }
 }

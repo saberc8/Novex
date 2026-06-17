@@ -286,6 +286,7 @@ cargo fmt -- --check
 git diff --check
 cargo test -p backend-rust provider_client_rag_dispatch_lives_in_provider_client_crate --offline
 cargo test -p backend-rust provider_client_rag_parsers_live_in_provider_client_crate --offline
+cargo test -p backend-rust provider_client_http_primitives_live_in_provider_client_crate --offline
 cargo test -p backend-rust model_provider_rag_transport_adapter --offline
 cargo test -p backend-rust model_provider_transport_splits_provider_client_modules --offline
 cargo test -p backend-rust runtime_embedding --offline
