@@ -172,10 +172,17 @@ enum ModelLoopFutureAwait<T> {
     Cancelled,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ModelLoopProviderCompletionReason {
+    ProviderCompleted,
+    StreamedToolCallDetected,
+}
+
 #[derive(Debug, Clone)]
 struct ModelLoopProviderCompletion<T> {
-    response: T,
+    response: Option<T>,
     streamed_tool_call_output: Option<ParsedModelTurnOutput>,
+    completion_reason: ModelLoopProviderCompletionReason,
 }
 
 #[derive(Debug, Clone)]
@@ -1190,8 +1197,18 @@ impl AgentService {
                     .await;
                 match model_call_result {
                     Ok(ModelLoopFutureAwait::Completed(completion)) => {
+                        let completion_reason = completion.completion_reason;
                         streamed_tool_call_output = completion.streamed_tool_call_output;
-                        model_response = Some(completion.response);
+                        if matches!(
+                            completion_reason,
+                            ModelLoopProviderCompletionReason::StreamedToolCallDetected
+                        ) && streamed_tool_call_output.is_none()
+                        {
+                            return Err(AppError::bad_request(
+                                "Agent 模型输出解析失败: streamed tool-call early stop missing parsed output",
+                            ));
+                        }
+                        model_response = completion.response;
                         break;
                     }
                     Ok(ModelLoopFutureAwait::Cancelled) => {
@@ -1281,22 +1298,22 @@ impl AgentService {
                     }
                 }
             }
-            let Some(model_response) = model_response else {
-                unreachable!("model retry loop should finish with a response or terminal run state")
-            };
+            if let Some(model_response) = model_response.as_ref() {
+                self.append_event(
+                    user_id,
+                    run_id,
+                    None,
+                    RunEventKind::Thought,
+                    run_status_code(RunStatus::Running),
+                    model_inference_event_payload(model_response),
+                )
+                .await?;
+            }
 
-            self.append_event(
-                user_id,
-                run_id,
-                None,
-                RunEventKind::Thought,
-                run_status_code(RunStatus::Running),
-                model_inference_event_payload(&model_response),
-            )
-            .await?;
-
-            let parsed =
-                model_loop_parse_turn_output(&model_response, streamed_tool_call_output.as_ref())?;
+            let parsed = model_loop_parse_turn_output(
+                model_response.as_ref(),
+                streamed_tool_call_output.as_ref(),
+            )?;
             let parsed_items = parsed.items.clone();
             let parsed_payload = agent_turn_item_event_payload(&parsed.item);
             if self
@@ -1878,14 +1895,18 @@ impl AgentService {
                     continue;
                 }
                 _ => {
+                    let fallback_answer = model_response
+                        .as_ref()
+                        .map(|response| response.answer.clone())
+                        .unwrap_or_else(|| parsed_payload.to_string());
                     runtime_state.push_item(parsed.item);
                     self.finish_model_loop_run(
                         user_id,
                         run_id,
                         None,
                         last_tool_terminal_status,
-                        &model_response.answer,
-                        json!({ "answer": model_response.answer.clone(), "runtimeMode": "model_loop" }),
+                        &fallback_answer,
+                        json!({ "answer": fallback_answer.clone(), "runtimeMode": "model_loop" }),
                         parsed_payload,
                     )
                     .await?;
@@ -3303,6 +3324,18 @@ impl ModelLoopProviderStreamState {
     }
 }
 
+fn model_loop_streamed_tool_call_completion<T>(
+    stream_state: &ModelLoopProviderStreamState,
+) -> Option<ModelLoopProviderCompletion<T>> {
+    stream_state
+        .detected_tool_call_output()
+        .map(|streamed_tool_call_output| ModelLoopProviderCompletion {
+            response: None,
+            streamed_tool_call_output: Some(streamed_tool_call_output),
+            completion_reason: ModelLoopProviderCompletionReason::StreamedToolCallDetected,
+        })
+}
+
 async fn await_model_loop_provider_future_or_cancelled_with_delta_events<F, C, T>(
     cancel_token: AgentRunCancellationToken,
     persistent_cancel: C,
@@ -3333,6 +3366,9 @@ where
             maybe_event = provider_stream_receiver.recv(), if !stream_closed => {
                 if let Some(event) = maybe_event {
                     drain_model_delta_events(service, user_id, run_id, &mut stream_state, event).await?;
+                    if let Some(completion) = model_loop_streamed_tool_call_completion::<T>(&stream_state) {
+                        return Ok(ModelLoopFutureAwait::Completed(completion));
+                    }
                 } else {
                     stream_closed = true;
                 }
@@ -3343,8 +3379,9 @@ where
                 }
                 return result.map(|response| {
                     ModelLoopFutureAwait::Completed(ModelLoopProviderCompletion {
-                        response,
+                        response: Some(response),
                         streamed_tool_call_output: stream_state.detected_tool_call_output(),
+                        completion_reason: ModelLoopProviderCompletionReason::ProviderCompleted,
                     })
                 });
             }
@@ -3386,12 +3423,18 @@ async fn drain_model_delta_events(
 }
 
 fn model_loop_parse_turn_output(
-    response: &ModelChatResp,
+    response: Option<&ModelChatResp>,
     streamed_tool_call_output: Option<&ParsedModelTurnOutput>,
 ) -> Result<ParsedModelTurnOutput, AppError> {
     if let Some(streamed_tool_call_output) = streamed_tool_call_output {
         return Ok(streamed_tool_call_output.clone());
     }
+
+    let Some(response) = response else {
+        return Err(AppError::bad_request(
+            "Agent 模型输出解析失败: provider response missing",
+        ));
+    };
 
     parse_model_turn_output(&response.answer)
         .map_err(|err| AppError::bad_request(format!("Agent 模型输出解析失败: {}", err.message)))
@@ -6753,8 +6796,15 @@ mod tests {
             .split("#[cfg(test)]")
             .next()
             .unwrap();
+        let model_loop = &source[source
+            .find("async fn execute_model_loop_existing_run")
+            .unwrap()
+            ..source
+                .find("async fn model_loop_context_compaction_outcome")
+                .unwrap()];
 
-        assert!(source.contains("model_inference_event_payload(&model_response)"));
+        assert!(model_loop.contains("if let Some(model_response) = model_response.as_ref()"));
+        assert!(model_loop.contains("model_inference_event_payload(model_response)"));
         assert!(source.contains("\"type\": \"model_inference\""));
         assert!(source.contains("\"latencyMs\""));
         assert!(source.contains("\"usage\""));
@@ -7040,7 +7090,7 @@ mod tests {
             provider_delta_chunks: vec![],
         };
 
-        let parsed = model_loop_parse_turn_output(&response, Some(&streamed)).unwrap();
+        let parsed = model_loop_parse_turn_output(Some(&response), Some(&streamed)).unwrap();
 
         assert_eq!(parsed.item, expected);
         assert_eq!(parsed.items, vec![expected]);
@@ -7062,11 +7112,122 @@ mod tests {
             ..source
                 .find("async fn model_loop_context_compaction_outcome")
                 .unwrap()];
+        let normalized_model_loop = model_loop.split_whitespace().collect::<Vec<_>>().join(" ");
 
         assert!(source.contains("struct ModelLoopProviderCompletion"));
         assert!(model_loop.contains("completion.streamed_tool_call_output"));
-        assert!(model_loop.contains(
-            "model_loop_parse_turn_output(&model_response, streamed_tool_call_output.as_ref())"
+        assert!(normalized_model_loop.contains(
+            "model_loop_parse_turn_output( model_response.as_ref(), streamed_tool_call_output.as_ref(), )"
+        ));
+    }
+
+    #[test]
+    fn streamed_tool_call_early_stop_completion_contract_is_explicit() {
+        let source = include_str!("agent_service.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+
+        assert!(source.contains("enum ModelLoopProviderCompletionReason"));
+        assert!(source.contains("ProviderCompleted"));
+        assert!(source.contains("StreamedToolCallDetected"));
+        assert!(source.contains("response: Option<T>"));
+        assert!(source.contains("completion_reason: ModelLoopProviderCompletionReason"));
+    }
+
+    #[test]
+    fn streamed_tool_call_early_stop_returns_completion_without_provider_response() {
+        let mut state = ModelLoopProviderStreamState::new();
+        let first = ModelProviderStreamEvent {
+            route_id: "runtime.llm.code_agent".to_owned(),
+            provider: "openai-compatible".to_owned(),
+            model: Some("gpt-compatible".to_owned()),
+            chunk: ModelProviderStreamChunk {
+                index: 0,
+                content: r#"{"type":"tool_"#.to_owned(),
+                provider_event: Some("response.output_text.delta".to_owned()),
+            },
+        };
+        let second = ModelProviderStreamEvent {
+            route_id: "runtime.llm.code_agent".to_owned(),
+            provider: "openai-compatible".to_owned(),
+            model: Some("gpt-compatible".to_owned()),
+            chunk: ModelProviderStreamChunk {
+                index: 1,
+                content: r#"call","callId":"call-1","toolCode":"rag.search","arguments":{"query":"policy"}}"#.to_owned(),
+                provider_event: Some("response.output_text.delta".to_owned()),
+            },
+        };
+
+        assert!(state.observe_tool_call(&first).is_none());
+        assert!(state.observe_tool_call(&second).is_some());
+
+        let completion = model_loop_streamed_tool_call_completion::<ModelChatResp>(&state)
+            .expect("streamed tool call should produce early-stop completion");
+        let expected = AgentTurnItem::tool_call("call-1", "rag.search", json!({"query":"policy"}));
+
+        assert!(completion.response.is_none());
+        assert_eq!(
+            completion.completion_reason,
+            ModelLoopProviderCompletionReason::StreamedToolCallDetected
+        );
+        assert_eq!(
+            completion
+                .streamed_tool_call_output
+                .expect("completion should retain streamed parsed output")
+                .item,
+            expected
+        );
+    }
+
+    #[test]
+    fn streamed_tool_call_early_stop_parse_accepts_missing_provider_response() {
+        let expected = AgentTurnItem::tool_call("call-1", "rag.search", json!({"query":"policy"}));
+        let streamed = ParsedModelTurnOutput {
+            item: expected.clone(),
+            items: vec![expected.clone()],
+            outcome: novex_agent_protocol::TurnOutcome::NeedsFollowUp,
+        };
+
+        let parsed = model_loop_parse_turn_output(None, Some(&streamed)).unwrap();
+
+        assert_eq!(parsed.item, expected);
+        assert_eq!(parsed.items, vec![expected]);
+        assert_eq!(
+            parsed.outcome,
+            novex_agent_protocol::TurnOutcome::NeedsFollowUp
+        );
+    }
+
+    #[test]
+    fn streamed_tool_call_early_stop_model_loop_uses_optional_response_contract() {
+        let source = include_str!("agent_service.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+        let provider_wait = &source[source
+            .find("async fn await_model_loop_provider_future_or_cancelled_with_delta_events")
+            .unwrap()
+            ..source.find("async fn drain_model_delta_events").unwrap()];
+        let model_loop = &source[source
+            .find("async fn execute_model_loop_existing_run")
+            .unwrap()
+            ..source
+                .find("async fn model_loop_context_compaction_outcome")
+                .unwrap()];
+        let normalized_provider_wait = provider_wait
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        let normalized_model_loop = model_loop.split_whitespace().collect::<Vec<_>>().join(" ");
+
+        assert!(provider_wait.contains("model_loop_streamed_tool_call_completion::<T>"));
+        assert!(normalized_provider_wait
+            .contains("completion_reason: ModelLoopProviderCompletionReason::ProviderCompleted"));
+        assert!(model_loop.contains("model_response = completion.response"));
+        assert!(model_loop.contains("if let Some(model_response) = model_response.as_ref()"));
+        assert!(normalized_model_loop.contains(
+            "model_loop_parse_turn_output( model_response.as_ref(), streamed_tool_call_output.as_ref(), )"
         ));
     }
 
