@@ -3585,6 +3585,7 @@ fn retrieval_plan_chat_command(
         max_tokens: Some(1200),
         request_metadata: None,
         provider_call_context: None,
+        provider_stream_sender: None,
     }
 }
 
@@ -4559,6 +4560,7 @@ fn large_document_notes_chat_command(
         max_tokens: Some(1200),
         request_metadata: None,
         provider_call_context: None,
+        provider_stream_sender: None,
     }
 }
 
@@ -4598,6 +4600,7 @@ fn large_document_final_answer_chat_command(
         max_tokens: Some(DEFAULT_RAG_ANSWER_MAX_TOKENS),
         request_metadata: None,
         provider_call_context: None,
+        provider_stream_sender: None,
     }
 }
 
@@ -4650,6 +4653,7 @@ fn rag_answer_chat_command(
         max_tokens: Some(max_tokens),
         request_metadata: None,
         provider_call_context: None,
+        provider_stream_sender: None,
     }
 }
 
@@ -6429,6 +6433,7 @@ mod tests {
             provider_call_lease_id: None,
             provider_response_id: None,
             provider_response_status: None,
+            provider_delta_chunks: vec![],
         };
 
         let answer = rag_answer_from_model_chat(chat, &hits, "llm_grounded");

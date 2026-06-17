@@ -19,6 +19,7 @@ use novex_tools::{parse_media_image_generation_response, MediaImageGenerationReq
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sqlx::{FromRow, PgPool};
+use tokio::sync::mpsc;
 
 use crate::{
     application::system::{ensure_max_chars, format_datetime},
@@ -74,13 +75,30 @@ pub struct ModelHealthCheckCommand {
     pub target: Option<String>,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelProviderStreamChunk {
+    pub index: usize,
+    pub content: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_event: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelProviderStreamEvent {
+    pub route_id: String,
+    pub provider: String,
+    pub model: Option<String>,
+    pub chunk: ModelProviderStreamChunk,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelHealthCheckResp {
     pub results: Vec<ModelHealthCheckResult>,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelChatCommand {
     #[serde(default)]
@@ -101,6 +119,8 @@ pub struct ModelChatCommand {
     pub request_metadata: Option<ModelChatRequestMetadata>,
     #[serde(skip)]
     pub provider_call_context: Option<ModelProviderCallContext>,
+    #[serde(skip)]
+    pub provider_stream_sender: Option<mpsc::UnboundedSender<ModelProviderStreamEvent>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -199,6 +219,8 @@ pub struct ModelChatResp {
     pub provider_response_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_response_status: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub provider_delta_chunks: Vec<ModelProviderStreamChunk>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -2701,8 +2723,6 @@ async fn execute_normalized_chat_completion_with_route(
         .await
         .map_err(|err| AppError::Anyhow(err.into()))?;
     let status = response.status();
-    let body_text = response.text().await.unwrap_or_default();
-    let body = serde_json::from_str::<Value>(&body_text).unwrap_or(Value::Null);
 
     if !status.is_success() {
         return Err(AppError::bad_request(format!(
@@ -2711,13 +2731,21 @@ async fn execute_normalized_chat_completion_with_route(
         )));
     }
 
+    let body_text = if model_chat_provider_request_streams_chat_completion(&provider_request) {
+        model_chat_streaming_response_text(response, route, command).await?
+    } else {
+        response.text().await.unwrap_or_default()
+    };
+
     match provider_request.transport {
-        ModelChatProviderTransport::ChatCompletions => model_chat_response_from_provider(
-            route,
-            body,
-            started.elapsed().as_millis(),
-            conversation_id,
-        ),
+        ModelChatProviderTransport::ChatCompletions => {
+            model_chat_response_from_chat_completion_text(
+                route,
+                &body_text,
+                started.elapsed().as_millis(),
+                conversation_id,
+            )
+        }
         ModelChatProviderTransport::ResponsesCompactionV2 => {
             model_chat_response_from_responses_compaction_text(
                 route,
@@ -2858,6 +2886,17 @@ fn model_chat_provider_request(
     }
 }
 
+fn model_chat_provider_request_streams_chat_completion(request: &ModelChatProviderRequest) -> bool {
+    matches!(
+        request.transport,
+        ModelChatProviderTransport::ChatCompletions
+    ) && request
+        .payload
+        .get("stream")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+}
+
 fn model_chat_is_compaction(command: &ModelChatCommand) -> bool {
     matches!(
         command
@@ -2881,6 +2920,15 @@ fn model_chat_route_supports_responses_compaction(route: &ModelRuntimeRoute) -> 
         route.provider(),
         ModelProviderType::OpenAiCompatible | ModelProviderType::LocalRuntime
     )
+}
+
+fn model_chat_should_stream_chat_completion(command: &ModelChatCommand) -> bool {
+    !model_chat_is_compaction(command)
+        && command
+            .provider_call_context
+            .as_ref()
+            .and_then(|context| context.route_purpose)
+            .is_some_and(|purpose| purpose == ModelRoutePurpose::CodeAgent)
 }
 
 fn model_chat_responses_compaction_endpoint(route: &ModelRuntimeRoute) -> String {
@@ -2974,7 +3022,7 @@ fn model_chat_request_payload(route: &ModelRuntimeRoute, command: &ModelChatComm
         "messages": messages,
         "temperature": command.temperature.unwrap_or(DEFAULT_MODEL_CHAT_TEMPERATURE),
         "max_tokens": command.max_tokens.unwrap_or(DEFAULT_MODEL_CHAT_MAX_TOKENS),
-        "stream": false,
+        "stream": model_chat_should_stream_chat_completion(command),
     });
     if let Some(response_format) = &command.response_format {
         payload["response_format"] = response_format.clone();
@@ -3059,29 +3107,198 @@ fn model_chat_file_context_prompt(files: &[ModelChatFileContext]) -> String {
     sections.join("\n\n")
 }
 
+#[derive(Debug, Clone, PartialEq)]
+struct ModelChatProviderOutput {
+    answer: String,
+    usage: ModelChatUsage,
+    provider_response_id: Option<String>,
+    provider_response_status: Option<String>,
+    delta_chunks: Vec<ModelProviderStreamChunk>,
+}
+
+async fn model_chat_streaming_response_text(
+    mut response: reqwest::Response,
+    route: &ModelRuntimeRoute,
+    command: &ModelChatCommand,
+) -> Result<String, AppError> {
+    let sender = command.provider_stream_sender.as_ref();
+    let mut body_text = String::new();
+    let mut pending = String::new();
+    let mut next_chunk_index = 0usize;
+
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|err| AppError::Anyhow(err.into()))?
+    {
+        let text = String::from_utf8_lossy(&chunk);
+        body_text.push_str(&text);
+        pending.push_str(&text);
+        next_chunk_index =
+            model_chat_emit_complete_stream_records(route, sender, &mut pending, next_chunk_index)?;
+    }
+
+    Ok(body_text)
+}
+
+fn model_chat_emit_complete_stream_records(
+    route: &ModelRuntimeRoute,
+    sender: Option<&mpsc::UnboundedSender<ModelProviderStreamEvent>>,
+    pending: &mut String,
+    mut next_chunk_index: usize,
+) -> Result<usize, AppError> {
+    *pending = pending.replace("\r\n", "\n");
+    while let Some(record_end) = pending.find("\n\n") {
+        let record = pending[..record_end].to_owned();
+        pending.drain(..record_end + 2);
+        let Some(data) = model_chat_sse_record_data_payload(&record) else {
+            continue;
+        };
+        if data == "[DONE]" {
+            continue;
+        }
+        let value = serde_json::from_str::<Value>(&data)
+            .map_err(|_| AppError::bad_request("LLM chat SSE 响应不是合法 JSON"))?;
+        let (chunks, next_index) =
+            model_chat_provider_delta_chunks_from_sse_value(&value, next_chunk_index);
+        next_chunk_index = next_index;
+        if let Some(sender) = sender {
+            for chunk in chunks {
+                let _ = sender.send(ModelProviderStreamEvent {
+                    route_id: route.summary().route_id.clone(),
+                    provider: route.provider().as_str().to_owned(),
+                    model: route.model().map(str::to_owned),
+                    chunk,
+                });
+            }
+        }
+    }
+    Ok(next_chunk_index)
+}
+
+fn model_chat_response_from_chat_completion_text(
+    route: &ModelRuntimeRoute,
+    body_text: &str,
+    latency_ms: u128,
+    conversation_id: Option<i64>,
+) -> Result<ModelChatResp, AppError> {
+    let trimmed = body_text.trim();
+    let output = if let Ok(body) = serde_json::from_str::<Value>(trimmed) {
+        model_chat_provider_output_from_body(&body)?
+    } else {
+        model_chat_provider_output_from_sse_text(trimmed)?
+    };
+    Ok(ModelChatResp {
+        conversation_id,
+        answer: output.answer,
+        route_id: route.summary().route_id,
+        provider: route.provider().as_str().to_owned(),
+        model: route.model().map(str::to_owned),
+        latency_ms,
+        usage: output.usage,
+        cost_cents: None,
+        provider_attempts: vec![model_provider_attempt_succeeded(
+            "primary", route, latency_ms,
+        )],
+        provider_call_lease_id: None,
+        provider_response_id: output.provider_response_id,
+        provider_response_status: output.provider_response_status,
+        provider_delta_chunks: output.delta_chunks,
+    })
+}
+
+#[allow(dead_code)]
 fn model_chat_response_from_provider(
     route: &ModelRuntimeRoute,
     body: Value,
     latency_ms: u128,
     conversation_id: Option<i64>,
 ) -> Result<ModelChatResp, AppError> {
-    let answer = model_chat_answer_from_provider_body(&body)
-        .ok_or_else(|| AppError::bad_request("LLM 响应为空"))?;
+    let output = model_chat_provider_output_from_body(&body)?;
     Ok(ModelChatResp {
         conversation_id,
-        answer,
+        answer: output.answer,
         route_id: route.summary().route_id,
         provider: route.provider().as_str().to_owned(),
         model: route.model().map(str::to_owned),
         latency_ms,
-        usage: normalize_model_provider_usage(&body),
+        usage: output.usage,
         cost_cents: None,
         provider_attempts: vec![model_provider_attempt_succeeded(
             "primary", route, latency_ms,
         )],
         provider_call_lease_id: None,
-        provider_response_id: None,
-        provider_response_status: None,
+        provider_response_id: output.provider_response_id,
+        provider_response_status: output.provider_response_status,
+        provider_delta_chunks: output.delta_chunks,
+    })
+}
+
+fn model_chat_provider_output_from_body(body: &Value) -> Result<ModelChatProviderOutput, AppError> {
+    let answer = model_chat_answer_from_provider_body(body)
+        .ok_or_else(|| AppError::bad_request("LLM 响应为空"))?;
+    Ok(ModelChatProviderOutput {
+        answer,
+        usage: normalize_model_provider_usage(body),
+        provider_response_id: model_provider_response_id_from_payload(body),
+        provider_response_status: model_provider_response_status_from_payload(body),
+        delta_chunks: vec![],
+    })
+}
+
+fn model_chat_provider_output_from_sse_text(
+    body_text: &str,
+) -> Result<ModelChatProviderOutput, AppError> {
+    let mut completed = false;
+    let mut usage = ModelChatUsage::default();
+    let mut provider_response_id = None;
+    let mut provider_response_status = None;
+    let mut delta_chunks = Vec::new();
+    let mut next_chunk_index = 0usize;
+
+    for data in model_chat_sse_data_payloads(body_text) {
+        if data == "[DONE]" {
+            completed = true;
+            continue;
+        }
+        let value = serde_json::from_str::<Value>(&data)
+            .map_err(|_| AppError::bad_request("LLM chat SSE 响应不是合法 JSON"))?;
+        if let Some(response_id) = model_provider_response_id_from_payload(&value) {
+            provider_response_id = Some(response_id);
+        }
+        if let Some(response_status) = model_provider_response_status_from_payload(&value) {
+            provider_response_status = Some(response_status);
+        }
+        if value.get("usage").is_some() {
+            usage = normalize_model_provider_usage(&value);
+        }
+        let (mut chunks, next_index) =
+            model_chat_provider_delta_chunks_from_sse_value(&value, next_chunk_index);
+        next_chunk_index = next_index;
+        delta_chunks.append(&mut chunks);
+        if model_chat_sse_value_is_terminal(&value) {
+            completed = true;
+        }
+    }
+
+    if !completed {
+        return Err(AppError::bad_request("LLM chat SSE 响应在完成前结束"));
+    }
+
+    let answer = delta_chunks
+        .iter()
+        .map(|chunk| chunk.content.as_str())
+        .collect::<String>();
+    if answer.is_empty() {
+        return Err(AppError::bad_request("LLM chat SSE 响应为空"));
+    }
+
+    Ok(ModelChatProviderOutput {
+        answer,
+        usage,
+        provider_response_id,
+        provider_response_status,
+        delta_chunks,
     })
 }
 
@@ -3120,6 +3337,7 @@ fn model_chat_response_from_responses_compaction_text(
         provider_call_lease_id: None,
         provider_response_id: output.provider_response_id,
         provider_response_status: output.provider_response_status,
+        provider_delta_chunks: vec![],
     })
 }
 
@@ -3197,16 +3415,92 @@ fn model_chat_sse_data_payloads(body_text: &str) -> Vec<String> {
     let normalized = body_text.replace("\r\n", "\n");
     normalized
         .split("\n\n")
-        .filter_map(|record| {
-            let data = record
-                .lines()
-                .filter_map(|line| line.strip_prefix("data:"))
-                .map(str::trim)
-                .collect::<Vec<_>>()
-                .join("\n");
-            (!data.trim().is_empty()).then(|| data.trim().to_owned())
-        })
+        .filter_map(model_chat_sse_record_data_payload)
         .collect()
+}
+
+fn model_chat_sse_record_data_payload(record: &str) -> Option<String> {
+    let data = record
+        .lines()
+        .filter_map(|line| line.strip_prefix("data:"))
+        .map(str::trim)
+        .collect::<Vec<_>>()
+        .join("\n");
+    (!data.trim().is_empty()).then(|| data.trim().to_owned())
+}
+
+fn model_chat_provider_delta_chunks_from_sse_value(
+    value: &Value,
+    next_chunk_index: usize,
+) -> (Vec<ModelProviderStreamChunk>, usize) {
+    let provider_event = model_chat_provider_event_name(value);
+    let Some(choices) = value.get("choices").and_then(Value::as_array) else {
+        return (vec![], next_chunk_index);
+    };
+
+    let mut chunks = Vec::new();
+    let mut index = next_chunk_index;
+    for choice in choices {
+        if let Some(content) = model_chat_delta_content_from_choice(choice) {
+            chunks.push(ModelProviderStreamChunk {
+                index,
+                content,
+                provider_event: provider_event.clone(),
+            });
+            index += 1;
+        }
+    }
+
+    (chunks, index)
+}
+
+fn model_chat_delta_content_from_choice(choice: &Value) -> Option<String> {
+    ["/delta/content", "/message/content", "/text"]
+        .into_iter()
+        .filter_map(|pointer| choice.pointer(pointer))
+        .find_map(model_chat_delta_text_from_value)
+}
+
+fn model_chat_delta_text_from_value(value: &Value) -> Option<String> {
+    match value {
+        Value::String(text) if !text.is_empty() => Some(text.to_owned()),
+        Value::Array(items) => {
+            let text = items
+                .iter()
+                .filter_map(|item| {
+                    item.get("text")
+                        .or_else(|| item.get("content"))
+                        .and_then(Value::as_str)
+                })
+                .collect::<String>();
+            (!text.is_empty()).then_some(text)
+        }
+        _ => None,
+    }
+}
+
+fn model_chat_provider_event_name(value: &Value) -> Option<String> {
+    ["object", "type"]
+        .into_iter()
+        .filter_map(|key| value.get(key))
+        .filter_map(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+        .next()
+}
+
+fn model_chat_sse_value_is_terminal(value: &Value) -> bool {
+    value
+        .get("choices")
+        .and_then(Value::as_array)
+        .is_some_and(|choices| {
+            choices.iter().any(|choice| {
+                choice
+                    .get("finish_reason")
+                    .is_some_and(|finish_reason| !finish_reason.is_null())
+            })
+        })
 }
 
 fn model_chat_compaction_output_from_items<'a, I>(items: I) -> Result<String, AppError>
@@ -3493,6 +3787,9 @@ fn model_provider_call_lease_completion_from_response(
         .filter(|value| !value.is_empty())
     {
         response_payload["providerResponseStatus"] = json!(provider_response_status);
+    }
+    if !response.provider_delta_chunks.is_empty() {
+        response_payload["providerDeltaChunkCount"] = json!(response.provider_delta_chunks.len());
     }
 
     ModelProviderCallLeaseCompletion {
@@ -5809,6 +6106,7 @@ mod tests {
             provider_call_lease_id: None,
             provider_response_id: output.provider_response_id,
             provider_response_status: output.provider_response_status,
+            provider_delta_chunks: vec![],
         })
     }
 
@@ -7411,6 +7709,52 @@ mod tests {
     }
 
     #[test]
+    fn provider_token_delta_code_agent_chat_request_enables_streaming() {
+        let route = openai_compatible_llm_route();
+        let command = test_code_agent_chat_command();
+
+        let request = model_chat_provider_request(&route, &command);
+
+        assert_eq!(
+            request.transport,
+            ModelChatProviderTransport::ChatCompletions
+        );
+        assert_eq!(request.payload["stream"], true);
+    }
+
+    #[test]
+    fn provider_token_delta_chat_sse_assembles_answer_and_chunks() {
+        let route = openai_compatible_llm_route();
+        let sse = concat!(
+            "data: {\"id\":\"chatcmpl_delta_1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hello\"}}]}\n\n",
+            "data: {\"id\":\"chatcmpl_delta_1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\" world\"}}],\"usage\":{\"prompt_tokens\":5,\"completion_tokens\":2,\"total_tokens\":7}}\n\n",
+            "data: [DONE]\n\n",
+        );
+
+        let response =
+            model_chat_response_from_chat_completion_text(&route, sse, 18, None).unwrap();
+
+        assert_eq!(response.answer, "Hello world");
+        assert_eq!(
+            response
+                .provider_delta_chunks
+                .iter()
+                .map(|chunk| chunk.content.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Hello", " world"]
+        );
+        assert_eq!(response.provider_delta_chunks[0].index, 0);
+        assert_eq!(response.provider_delta_chunks[1].index, 1);
+        assert_eq!(response.usage.prompt_tokens, Some(5));
+        assert_eq!(response.usage.completion_tokens, Some(2));
+        assert_eq!(response.usage.total_tokens, Some(7));
+        assert_eq!(
+            response.provider_response_id.as_deref(),
+            Some("chatcmpl_delta_1")
+        );
+    }
+
+    #[test]
     fn provider_background_response_capture_payload_marks_responses_background() {
         let route = openai_compatible_llm_route();
         let command = test_compaction_chat_command();
@@ -7749,6 +8093,7 @@ mod tests {
             provider_call_lease_id: None,
             provider_response_id: None,
             provider_response_status: None,
+            provider_delta_chunks: vec![],
         };
 
         let completion = model_provider_call_lease_completion_from_response(&response, 42, now);
@@ -7792,6 +8137,7 @@ mod tests {
             provider_call_lease_id: None,
             provider_response_id: Some("resp_bg_123".to_owned()),
             provider_response_status: Some("completed".to_owned()),
+            provider_delta_chunks: vec![],
         };
 
         let completion = model_provider_call_lease_completion_from_response(&response, 42, now);
@@ -8183,6 +8529,7 @@ mod tests {
             provider_call_lease_id: None,
             provider_response_id: None,
             provider_response_status: None,
+            provider_delta_chunks: vec![],
         };
 
         let records = model_chat_history_records(1, 9, &command, &response, now).unwrap();
@@ -8258,6 +8605,7 @@ mod tests {
             provider_call_lease_id: None,
             provider_response_id: None,
             provider_response_status: None,
+            provider_delta_chunks: vec![],
         };
 
         let record = model_chat_usage_record(1, 99, &response, now, "ai.models.chat");
@@ -8323,6 +8671,7 @@ mod tests {
             provider_call_lease_id: None,
             provider_response_id: None,
             provider_response_status: None,
+            provider_delta_chunks: vec![],
         };
 
         let record = model_chat_usage_record(42, 99, &response, now, "ai.chatFlow.model");
@@ -8449,6 +8798,23 @@ mod tests {
         .unwrap()
     }
 
+    fn test_code_agent_chat_command() -> ModelChatCommand {
+        normalize_model_chat_command(ModelChatCommand {
+            messages: vec![ModelChatMessage {
+                role: "user".to_owned(),
+                content: "plan and call tools".to_owned(),
+            }],
+            provider_call_context: Some(ModelProviderCallContext {
+                run_id: Some(88),
+                source: "agent.model_loop".to_owned(),
+                route_purpose: Some(ModelRoutePurpose::CodeAgent),
+                attempt_kind: "primary".to_owned(),
+            }),
+            ..ModelChatCommand::default()
+        })
+        .unwrap()
+    }
+
     fn test_unary_compaction_chat_command() -> ModelChatCommand {
         normalize_model_chat_command(ModelChatCommand {
             request_metadata: Some(test_unary_compaction_request_metadata()),
@@ -8549,6 +8915,7 @@ mod tests {
             provider_call_lease_id: None,
             provider_response_id: None,
             provider_response_status: None,
+            provider_delta_chunks: vec![],
         }
     }
 }
