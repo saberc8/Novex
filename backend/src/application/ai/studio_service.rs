@@ -724,6 +724,7 @@ fn studio_mind_map_chat_command(
         temperature: Some(0.0),
         max_tokens: Some(3200),
         request_metadata: None,
+        provider_call_context: None,
     }
 }
 

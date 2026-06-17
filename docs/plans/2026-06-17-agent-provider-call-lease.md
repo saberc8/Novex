@@ -12,7 +12,7 @@
 
 ### Task 1: Provider Call Lease Migration
 
-Status: Pending.
+Status: Completed.
 
 **Files:**
 - Create: `backend/migrations/202606170008_create_ai_model_provider_call_lease.sql`
@@ -56,7 +56,7 @@ Expected: PASS.
 
 ### Task 2: Lease Record Mapping
 
-Status: Pending.
+Status: Completed.
 
 **Files:**
 - Modify: `backend/src/application/ai/model_service.rs`
@@ -94,7 +94,7 @@ Expected: PASS.
 
 ### Task 3: Tenant-Bound Lease Persistence
 
-Status: Pending.
+Status: Completed.
 
 **Files:**
 - Modify: `backend/src/application/ai/model_service.rs`
@@ -124,7 +124,7 @@ Add SQLx helpers:
 - `begin_model_provider_call_lease`
 - `complete_model_provider_call_lease`
 
-Add `ModelRuntimeService::execute_normalized_chat_completion_with_lease`.
+Add `ModelRuntimeService::execute_normalized_chat_completion_with_provider_call_lease`.
 
 Update tenant-bound chat methods to use it.
 
@@ -140,7 +140,7 @@ Expected: PASS.
 
 ### Task 4: Agent Runtime Context And Trace Link
 
-Status: Pending.
+Status: Completed.
 
 **Files:**
 - Modify: `backend/src/application/ai/agent_service.rs`
@@ -155,7 +155,9 @@ Add or extend tests:
 
 **Step 2: Run tests to verify they fail**
 
-Run: `cargo test -p backend-rust provider_call_lease agent_service_model_loop_records_model_inference_spans --offline`
+Run:
+- `cargo test -p backend-rust agent_provider_call_lease_context_contract_links_run_and_source --offline`
+- `cargo test -p backend-rust model_inference_event_payload_links_provider_call_lease --offline`
 
 Expected: FAIL before context wiring.
 
@@ -175,7 +177,7 @@ Expected: PASS.
 
 ### Task 5: Migration Matrix And Full Verification
 
-Status: Pending.
+Status: Completed.
 
 **Files:**
 - Modify: `docs/plans/2026-06-16-codex-migration-matrix.md`
@@ -196,3 +198,8 @@ Expected: PASS.
 **Step 3: Commit, merge, clean**
 
 Commit feature work, merge `feat/enterprise-agent-foundation` into `main`, rerun full verification on `main`, run `cargo clean` in both worktrees, and sync feature to main.
+
+**Verification evidence:**
+- `cargo test -p backend-rust provider_call_lease --offline`
+- `cargo fmt -- --check`
+- `cargo test --workspace --offline`
