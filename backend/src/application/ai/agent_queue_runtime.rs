@@ -10,7 +10,8 @@ use crate::{
     infrastructure::{
         mq::rabbitmq::{AgentQueueMessage, AgentRabbitMqClient, AgentRabbitMqConfig},
         persistence::ai_agent_repository::{
-            AgentRunQueueClaimRecord, AgentRunQueueSaveRecord, AiAgentRepository,
+            AgentQueueOutboxRecord, AgentRunQueueClaimRecord, AgentRunQueueSaveRecord,
+            AiAgentRepository,
         },
     },
     shared::{config::AppConfig, error::AppError},
@@ -19,6 +20,7 @@ use crate::{
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AgentQueueRuntimeConfig {
     pub enabled: bool,
+    pub publisher_enabled: bool,
     pub tick_seconds: u64,
     pub batch_size: i64,
     pub lease_seconds: u64,
@@ -29,6 +31,7 @@ pub struct AgentQueueRuntimeConfig {
 pub fn agent_queue_from_config(config: &AppConfig) -> AgentQueueRuntimeConfig {
     AgentQueueRuntimeConfig {
         enabled: config.agent_queue_enabled,
+        publisher_enabled: config.agent_queue_publisher_enabled,
         tick_seconds: config.agent_queue_tick_seconds,
         batch_size: config.agent_queue_batch_size,
         lease_seconds: config.agent_queue_lease_seconds,
@@ -63,6 +66,14 @@ impl AgentQueueMessagePublisher for AgentRabbitMqClient {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentQueueOutboxPublishOutcome {
+    pub outbox_id: i64,
+    pub run_id: i64,
+    pub published: bool,
+    pub error: Option<String>,
+}
+
 pub fn agent_queue_message_from_save_record(record: &AgentRunQueueSaveRecord) -> AgentQueueMessage {
     AgentQueueMessage {
         queue_id: record.id,
@@ -78,6 +89,90 @@ pub fn agent_queue_message_from_save_record(record: &AgentRunQueueSaveRecord) ->
             .unwrap_or("agent.queue")
             .to_owned(),
     }
+}
+
+pub fn agent_queue_message_from_outbox(record: &AgentQueueOutboxRecord) -> AgentQueueMessage {
+    AgentQueueMessage {
+        queue_id: record.queue_id,
+        tenant_id: record.tenant_id,
+        run_id: record.run_id,
+        event: record.event_type.clone(),
+        attempt: record
+            .payload
+            .get("attempt")
+            .and_then(serde_json::Value::as_i64)
+            .unwrap_or(0)
+            .max(0) as i32,
+        max_attempts: record.max_attempts,
+        source: record
+            .payload
+            .get("source")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("agent.queue")
+            .to_owned(),
+    }
+}
+
+pub async fn publish_agent_queue_outbox_records<P>(
+    records: Vec<AgentQueueOutboxRecord>,
+    publisher: &P,
+) -> Vec<AgentQueueOutboxPublishOutcome>
+where
+    P: AgentQueueMessagePublisher,
+{
+    let mut outcomes = Vec::with_capacity(records.len());
+    for record in records {
+        let message = agent_queue_message_from_outbox(&record);
+        match publisher.publish_agent_execute(&message).await {
+            Ok(()) => outcomes.push(AgentQueueOutboxPublishOutcome {
+                outbox_id: record.id,
+                run_id: record.run_id,
+                published: true,
+                error: None,
+            }),
+            Err(error) => outcomes.push(AgentQueueOutboxPublishOutcome {
+                outbox_id: record.id,
+                run_id: record.run_id,
+                published: false,
+                error: Some(error.to_string()),
+            }),
+        }
+    }
+    outcomes
+}
+
+pub async fn publish_pending_agent_queue_outbox<P>(
+    repo: &AiAgentRepository,
+    publisher: &P,
+    batch_size: i64,
+    user_id: i64,
+) -> Result<usize, AppError>
+where
+    P: AgentQueueMessagePublisher,
+{
+    let records = repo.list_pending_agent_queue_outbox(batch_size).await?;
+    let outcomes = publish_agent_queue_outbox_records(records, publisher).await;
+    let now = Utc::now().naive_utc();
+    let mut published = 0usize;
+    for outcome in outcomes {
+        if outcome.published {
+            repo.mark_agent_queue_outbox_published(outcome.outbox_id, user_id, now)
+                .await?;
+            published += 1;
+        } else {
+            repo.mark_agent_queue_outbox_publish_failed(
+                outcome.outbox_id,
+                outcome
+                    .error
+                    .as_deref()
+                    .unwrap_or("agent queue publish failed"),
+                user_id,
+                now,
+            )
+            .await?;
+        }
+    }
+    Ok(published)
 }
 
 fn agent_queue_message_from_claim_record(
@@ -121,6 +216,46 @@ pub fn spawn_agent_queue_worker(
             tracing::error!(error = ?error, "agent queue worker stopped");
         }
     });
+}
+
+pub fn spawn_agent_queue_outbox_publisher(
+    db: PgPool,
+    runtime: AgentQueueRuntimeConfig,
+    rabbitmq: AgentRabbitMqConfig,
+) {
+    if !runtime.enabled || !runtime.publisher_enabled {
+        return;
+    }
+
+    tokio::spawn(async move {
+        if let Err(error) = run_agent_queue_outbox_publisher(db, runtime, rabbitmq).await {
+            tracing::error!(error = ?error, "agent queue outbox publisher stopped");
+        }
+    });
+}
+
+pub async fn run_agent_queue_outbox_publisher(
+    db: PgPool,
+    runtime: AgentQueueRuntimeConfig,
+    rabbitmq: AgentRabbitMqConfig,
+) -> Result<(), AppError> {
+    if !runtime.enabled || !runtime.publisher_enabled {
+        return Ok(());
+    }
+
+    let publisher = AgentRabbitMqClient::connect(rabbitmq).await?;
+    let repo = AiAgentRepository::new(db);
+    let mut interval = tokio::time::interval(Duration::from_secs(runtime.tick_seconds.max(1)));
+    loop {
+        interval.tick().await;
+        match publish_pending_agent_queue_outbox(&repo, &publisher, runtime.batch_size, 0).await {
+            Ok(count) if count > 0 => {
+                tracing::debug!(count, "published agent queue outbox messages");
+            }
+            Ok(_) => {}
+            Err(error) => tracing::error!(error = ?error, "publish agent queue outbox failed"),
+        }
+    }
 }
 
 pub fn spawn_agent_queue_broker_consumer(
@@ -410,6 +545,7 @@ mod tests {
             parser_queue_tick_seconds: 5,
             parser_queue_batch_size: 50,
             agent_queue_enabled: true,
+            agent_queue_publisher_enabled: true,
             agent_queue_tick_seconds: 2,
             agent_queue_batch_size: 10,
             agent_queue_lease_seconds: 120,
@@ -438,6 +574,7 @@ mod tests {
         let rabbitmq = agent_rabbitmq_from_config(&config);
 
         assert!(runtime.enabled);
+        assert!(runtime.publisher_enabled);
         assert_eq!(runtime.tick_seconds, 2);
         assert_eq!(runtime.batch_size, 10);
         assert_eq!(runtime.lease_seconds, 120);
@@ -496,6 +633,45 @@ mod tests {
     }
 
     #[test]
+    fn agent_queue_outbox_message_uses_outbox_identity_and_source() {
+        let record = agent_queue_outbox_record(10, 99, "agent.run.queued");
+
+        let message = agent_queue_message_from_outbox(&record);
+
+        assert_eq!(message.queue_id, 10);
+        assert_eq!(message.tenant_id, 1);
+        assert_eq!(message.run_id, 99);
+        assert_eq!(message.event, "agent.run.queued");
+        assert_eq!(message.attempt, 0);
+        assert_eq!(message.max_attempts, 3);
+        assert_eq!(message.source, "agent.create_run");
+    }
+
+    #[tokio::test]
+    async fn publish_agent_queue_outbox_records_reports_success_and_failures() {
+        let publisher = FakeAgentQueuePublisher::failing_on_run(100);
+        let success = agent_queue_outbox_record(10, 99, "agent.run.queued");
+        let failure = agent_queue_outbox_record(11, 100, "agent.run.resumed");
+
+        let outcomes = publish_agent_queue_outbox_records(vec![success, failure], &publisher).await;
+
+        assert_eq!(outcomes.len(), 2);
+        assert_eq!(outcomes[0].outbox_id, 10);
+        assert_eq!(outcomes[0].run_id, 99);
+        assert!(outcomes[0].published);
+        assert!(outcomes[0].error.is_none());
+        assert_eq!(outcomes[1].outbox_id, 11);
+        assert_eq!(outcomes[1].run_id, 100);
+        assert!(!outcomes[1].published);
+        assert!(outcomes[1]
+            .error
+            .as_deref()
+            .unwrap()
+            .contains("fake publish failure"));
+        assert_eq!(publisher.published_run_ids(), vec![99]);
+    }
+
+    #[test]
     fn agent_queue_broker_consumer_runtime_declares_execute_path() {
         let source = include_str!("agent_queue_runtime.rs")
             .split("#[cfg(test)]")
@@ -521,12 +697,48 @@ mod tests {
         }
     }
 
+    #[test]
+    fn agent_queue_outbox_runtime_declares_publisher_path() {
+        let source = include_str!("agent_queue_runtime.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+        let main = include_str!("../../main.rs");
+
+        for needle in [
+            "AgentQueueOutboxPublishOutcome",
+            "agent_queue_message_from_outbox",
+            "publish_agent_queue_outbox_records",
+            "publish_pending_agent_queue_outbox",
+            "list_pending_agent_queue_outbox",
+            "mark_agent_queue_outbox_published",
+            "mark_agent_queue_outbox_publish_failed",
+            "spawn_agent_queue_outbox_publisher",
+            "run_agent_queue_outbox_publisher",
+            "publish_agent_execute",
+        ] {
+            assert!(
+                source.contains(needle),
+                "{needle} missing from Agent queue outbox publisher"
+            );
+        }
+        assert!(main.contains("spawn_agent_queue_outbox_publisher"));
+    }
+
     #[derive(Debug, Default)]
     struct FakeAgentQueuePublisher {
         published: std::sync::Mutex<Vec<i64>>,
+        fail_run_id: Option<i64>,
     }
 
     impl FakeAgentQueuePublisher {
+        fn failing_on_run(run_id: i64) -> Self {
+            Self {
+                published: std::sync::Mutex::new(Vec::new()),
+                fail_run_id: Some(run_id),
+            }
+        }
+
         fn published_run_ids(&self) -> Vec<i64> {
             self.published.lock().unwrap().clone()
         }
@@ -535,8 +747,35 @@ mod tests {
     #[async_trait::async_trait]
     impl AgentQueueMessagePublisher for FakeAgentQueuePublisher {
         async fn publish_agent_execute(&self, message: &AgentQueueMessage) -> Result<(), AppError> {
+            if self.fail_run_id == Some(message.run_id) {
+                return Err(AppError::Anyhow(anyhow::anyhow!(
+                    "fake publish failure for run {}",
+                    message.run_id
+                )));
+            }
             self.published.lock().unwrap().push(message.run_id);
             Ok(())
+        }
+    }
+
+    fn agent_queue_outbox_record(
+        outbox_id: i64,
+        run_id: i64,
+        event_type: &str,
+    ) -> AgentQueueOutboxRecord {
+        AgentQueueOutboxRecord {
+            id: outbox_id,
+            tenant_id: 1,
+            queue_id: outbox_id,
+            run_id,
+            event_type: event_type.to_owned(),
+            max_attempts: 3,
+            payload: serde_json::json!({
+                "source": "agent.create_run",
+                "attempt": 0
+            }),
+            status: 1,
+            attempt_count: 0,
         }
     }
 }

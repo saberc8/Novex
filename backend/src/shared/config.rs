@@ -37,6 +37,7 @@ pub struct AppConfig {
     pub parser_queue_tick_seconds: u64,
     pub parser_queue_batch_size: i64,
     pub agent_queue_enabled: bool,
+    pub agent_queue_publisher_enabled: bool,
     pub agent_queue_tick_seconds: u64,
     pub agent_queue_batch_size: i64,
     pub agent_queue_lease_seconds: u64,
@@ -140,6 +141,10 @@ impl AppConfig {
         )?;
         let agent_queue_enabled =
             parse_bool_env(env::var("AGENT_QUEUE_ENABLED").ok().as_deref(), false)?;
+        let agent_queue_publisher_enabled = parse_bool_env(
+            env::var("AGENT_QUEUE_PUBLISHER_ENABLED").ok().as_deref(),
+            agent_queue_enabled,
+        )?;
         let agent_queue_tick_seconds = parse_positive_u64_env(
             "AGENT_QUEUE_TICK_SECONDS",
             &env::var("AGENT_QUEUE_TICK_SECONDS").unwrap_or_else(|_| "2".to_owned()),
@@ -230,6 +235,7 @@ impl AppConfig {
             parser_queue_tick_seconds,
             parser_queue_batch_size,
             agent_queue_enabled,
+            agent_queue_publisher_enabled,
             agent_queue_tick_seconds,
             agent_queue_batch_size,
             agent_queue_lease_seconds,
@@ -422,5 +428,17 @@ mod tests {
         let err = parse_positive_i64_env("SCHEDULER_BATCH_SIZE", "0").unwrap_err();
 
         assert!(err.to_string().contains("positive"));
+    }
+
+    #[test]
+    fn agent_queue_publisher_config_defaults_to_queue_enabled() {
+        let source = include_str!("config.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+
+        assert!(source.contains("agent_queue_publisher_enabled"));
+        assert!(source.contains("AGENT_QUEUE_PUBLISHER_ENABLED"));
+        assert!(source.contains("agent_queue_enabled"));
     }
 }

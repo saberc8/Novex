@@ -212,6 +212,7 @@ mod tests {
             "PARSER_QUEUE_ENABLED",
             "PARSER_QUEUE_PUBLISHER_ENABLED",
             "AGENT_QUEUE_ENABLED",
+            "AGENT_QUEUE_PUBLISHER_ENABLED",
             "PARSER_CALLBACK_TOKEN",
             "RABBITMQ_URL",
             "REDIS_URL",

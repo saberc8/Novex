@@ -1,6 +1,6 @@
 use chrono::NaiveDateTime;
 use serde_json::Value;
-use sqlx::{FromRow, PgPool, Postgres, QueryBuilder};
+use sqlx::{FromRow, PgPool, Postgres, QueryBuilder, Transaction};
 
 use crate::shared::error::AppError;
 
@@ -155,6 +155,21 @@ pub struct AgentRunQueueSaveRecord {
     pub now: NaiveDateTime,
 }
 
+#[derive(Debug, Clone)]
+pub struct AgentQueueOutboxSaveRecord {
+    pub id: i64,
+    pub tenant_id: i64,
+    pub queue_id: i64,
+    pub run_id: i64,
+    pub event_type: String,
+    pub max_attempts: i32,
+    pub payload: Value,
+    pub status: i16,
+    pub attempt_count: i32,
+    pub user_id: i64,
+    pub now: NaiveDateTime,
+}
+
 #[derive(Debug, Clone, FromRow)]
 pub struct AgentRunQueueClaimRecord {
     pub id: i64,
@@ -163,6 +178,19 @@ pub struct AgentRunQueueClaimRecord {
     pub attempt_count: i32,
     pub max_attempts: i32,
     pub payload: Value,
+}
+
+#[derive(Debug, Clone, FromRow)]
+pub struct AgentQueueOutboxRecord {
+    pub id: i64,
+    pub tenant_id: i64,
+    pub queue_id: i64,
+    pub run_id: i64,
+    pub event_type: String,
+    pub max_attempts: i32,
+    pub payload: Value,
+    pub status: i16,
+    pub attempt_count: i32,
 }
 
 #[derive(Debug, Clone)]
@@ -425,6 +453,37 @@ VALUES ($1, $2, $3, 'pending', $4, 0, $5, $6, $8, $7, $8, $7, $8);
         Ok(())
     }
 
+    pub async fn enqueue_agent_run_with_outbox(
+        &self,
+        record: &AgentRunQueueSaveRecord,
+        outbox: &AgentQueueOutboxSaveRecord,
+    ) -> Result<(), AppError> {
+        let mut tx = self.db.begin().await?;
+        sqlx::query(
+            r#"
+INSERT INTO ai_agent_run_queue (
+    id, tenant_id, run_id, queue_status, priority, attempt_count, max_attempts,
+    payload, queued_at, create_user, create_time, update_user, update_time
+)
+VALUES ($1, $2, $3, 'pending', $4, 0, $5, $6, $8, $7, $8, $7, $8);
+"#,
+        )
+        .bind(record.id)
+        .bind(record.tenant_id)
+        .bind(record.run_id)
+        .bind(record.priority)
+        .bind(record.max_attempts)
+        .bind(&record.payload)
+        .bind(record.user_id)
+        .bind(record.now)
+        .execute(&mut *tx)
+        .await?;
+
+        insert_agent_queue_outbox(&mut tx, outbox).await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
     pub async fn claim_agent_run_queue(
         &self,
         tenant_id: Option<i64>,
@@ -661,6 +720,147 @@ WHERE tenant_id = $1
         .execute(&self.db)
         .await?;
         Ok(result.rows_affected())
+    }
+
+    pub async fn requeue_agent_run_for_resume_with_outbox(
+        &self,
+        tenant_id: i64,
+        run_id: i64,
+        payload: &Value,
+        outbox: &AgentQueueOutboxSaveRecord,
+        user_id: i64,
+        now: NaiveDateTime,
+    ) -> Result<u64, AppError> {
+        let result = sqlx::query(
+            r#"
+WITH updated AS (
+    UPDATE ai_agent_run_queue
+    SET queue_status = $3,
+        attempt_count = 0,
+        locked_by = NULL,
+        locked_until = NULL,
+        last_error = NULL,
+        payload = $4,
+        queued_at = $6,
+        started_at = NULL,
+        finished_at = NULL,
+        update_user = $5,
+        update_time = $6
+    WHERE tenant_id = $1
+      AND run_id = $2
+      AND queue_status IN ('waiting_approval', 'succeeded')
+    RETURNING id, max_attempts
+)
+INSERT INTO ai_agent_queue_outbox (
+    id, tenant_id, queue_id, run_id, event_type, max_attempts, payload,
+    status, attempt_count, create_user, create_time
+)
+SELECT $7, $1, updated.id, $2, $8, updated.max_attempts, $9, $10, $11, $5, $6
+FROM updated
+ON CONFLICT (tenant_id, queue_id, event_type) DO UPDATE
+SET max_attempts = EXCLUDED.max_attempts,
+    payload = EXCLUDED.payload,
+    status = EXCLUDED.status,
+    attempt_count = EXCLUDED.attempt_count,
+    last_error = NULL,
+    published_time = NULL,
+    update_user = EXCLUDED.create_user,
+    update_time = EXCLUDED.create_time;
+"#,
+        )
+        .bind(tenant_id)
+        .bind(run_id)
+        .bind(AGENT_RUN_QUEUE_STATUS_PENDING)
+        .bind(payload)
+        .bind(user_id)
+        .bind(now)
+        .bind(outbox.id)
+        .bind(&outbox.event_type)
+        .bind(&outbox.payload)
+        .bind(outbox.status)
+        .bind(outbox.attempt_count)
+        .execute(&self.db)
+        .await?;
+        Ok(result.rows_affected())
+    }
+
+    pub async fn list_pending_agent_queue_outbox(
+        &self,
+        limit: i64,
+    ) -> Result<Vec<AgentQueueOutboxRecord>, AppError> {
+        Ok(sqlx::query_as::<_, AgentQueueOutboxRecord>(
+            r#"
+SELECT
+    id,
+    tenant_id,
+    queue_id,
+    run_id,
+    event_type,
+    max_attempts,
+    payload,
+    status,
+    attempt_count
+FROM ai_agent_queue_outbox
+WHERE status = 1
+ORDER BY create_time ASC, id ASC
+LIMIT $1;
+"#,
+        )
+        .bind(limit.max(1))
+        .fetch_all(&self.db)
+        .await?)
+    }
+
+    pub async fn mark_agent_queue_outbox_published(
+        &self,
+        outbox_id: i64,
+        user_id: i64,
+        now: NaiveDateTime,
+    ) -> Result<(), AppError> {
+        sqlx::query(
+            r#"
+UPDATE ai_agent_queue_outbox
+SET status = 2,
+    published_time = $1,
+    last_error = NULL,
+    update_user = $2,
+    update_time = $1
+WHERE id = $3;
+"#,
+        )
+        .bind(now)
+        .bind(user_id)
+        .bind(outbox_id)
+        .execute(&self.db)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn mark_agent_queue_outbox_publish_failed(
+        &self,
+        outbox_id: i64,
+        error: &str,
+        user_id: i64,
+        now: NaiveDateTime,
+    ) -> Result<(), AppError> {
+        sqlx::query(
+            r#"
+UPDATE ai_agent_queue_outbox
+SET status = 1,
+    attempt_count = attempt_count + 1,
+    last_error = $1,
+    update_user = $2,
+    update_time = $3
+WHERE id = $4;
+"#,
+        )
+        .bind(error)
+        .bind(user_id)
+        .bind(now)
+        .bind(outbox_id)
+        .execute(&self.db)
+        .await?;
+        Ok(())
     }
 
     pub async fn mark_agent_run_queue_retrying(
@@ -1078,6 +1278,44 @@ LIMIT 1;
     }
 }
 
+async fn insert_agent_queue_outbox(
+    tx: &mut Transaction<'_, Postgres>,
+    outbox: &AgentQueueOutboxSaveRecord,
+) -> Result<(), AppError> {
+    sqlx::query(
+        r#"
+INSERT INTO ai_agent_queue_outbox (
+    id, tenant_id, queue_id, run_id, event_type, max_attempts, payload,
+    status, attempt_count, create_user, create_time
+)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+ON CONFLICT (tenant_id, queue_id, event_type) DO UPDATE
+SET max_attempts = EXCLUDED.max_attempts,
+    payload = EXCLUDED.payload,
+    status = EXCLUDED.status,
+    attempt_count = EXCLUDED.attempt_count,
+    last_error = NULL,
+    published_time = NULL,
+    update_user = EXCLUDED.create_user,
+    update_time = EXCLUDED.create_time;
+"#,
+    )
+    .bind(outbox.id)
+    .bind(outbox.tenant_id)
+    .bind(outbox.queue_id)
+    .bind(outbox.run_id)
+    .bind(&outbox.event_type)
+    .bind(outbox.max_attempts)
+    .bind(&outbox.payload)
+    .bind(outbox.status)
+    .bind(outbox.attempt_count)
+    .bind(outbox.user_id)
+    .bind(outbox.now)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
 fn agent_run_select_sql() -> &'static str {
     r#"
 SELECT
@@ -1209,5 +1447,66 @@ mod tests {
         assert!(source.contains("run_id = $3"));
         assert!(source.contains("queue_status IN ('pending', 'retrying')"));
         assert!(source.contains("FOR UPDATE SKIP LOCKED"));
+    }
+
+    #[test]
+    fn agent_queue_outbox_migration_defines_durable_publish_contract() {
+        let migration_path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/migrations/202606170007_create_ai_agent_queue_outbox.sql"
+        );
+        let migration = std::fs::read_to_string(migration_path)
+            .expect("missing AI agent queue outbox migration");
+
+        for needle in [
+            "CREATE TABLE IF NOT EXISTS ai_agent_queue_outbox",
+            "queue_id",
+            "tenant_id",
+            "run_id",
+            "event_type",
+            "max_attempts",
+            "payload JSONB",
+            "status",
+            "attempt_count",
+            "last_error",
+            "published_time",
+            "uq_ai_agent_queue_outbox_queue_event",
+            "idx_ai_agent_queue_outbox_status",
+        ] {
+            assert!(
+                migration.contains(needle),
+                "{needle} missing from agent queue outbox migration"
+            );
+        }
+    }
+
+    #[test]
+    fn agent_queue_outbox_repository_exposes_transaction_and_publish_state() {
+        let source = include_str!("ai_agent_repository.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+
+        for needle in [
+            "AgentQueueOutboxSaveRecord",
+            "AgentQueueOutboxRecord",
+            "enqueue_agent_run_with_outbox",
+            "requeue_agent_run_for_resume_with_outbox",
+            "INSERT INTO ai_agent_queue_outbox",
+            "ON CONFLICT (tenant_id, queue_id, event_type) DO UPDATE",
+            "list_pending_agent_queue_outbox",
+            "mark_agent_queue_outbox_published",
+            "mark_agent_queue_outbox_publish_failed",
+            "FROM ai_agent_queue_outbox",
+            "status = 1",
+            "status = 2",
+            "published_time",
+            "attempt_count = attempt_count + 1",
+        ] {
+            assert!(
+                source.contains(needle),
+                "{needle} missing from agent queue outbox repository"
+            );
+        }
     }
 }

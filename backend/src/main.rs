@@ -3,7 +3,7 @@ use std::net::SocketAddr;
 use backend_rust::{
     application::ai::agent_queue_runtime::{
         agent_queue_from_config, agent_rabbitmq_from_config, spawn_agent_queue_broker_consumer,
-        spawn_agent_queue_worker,
+        spawn_agent_queue_outbox_publisher, spawn_agent_queue_worker,
     },
     application::ai::agent_service::AgentRuntimeRegistry,
     application::ai::parser_queue_runtime::{
@@ -52,9 +52,14 @@ async fn main() -> anyhow::Result<()> {
     );
     spawn_agent_queue_broker_consumer(
         db.clone(),
-        agent_queue_runtime,
+        agent_queue_runtime.clone(),
         agent_rabbitmq_from_config(&config),
         agent_runtime.clone(),
+    );
+    spawn_agent_queue_outbox_publisher(
+        db.clone(),
+        agent_queue_runtime,
+        agent_rabbitmq_from_config(&config),
     );
     spawn_parser_queue_publisher(
         db.clone(),

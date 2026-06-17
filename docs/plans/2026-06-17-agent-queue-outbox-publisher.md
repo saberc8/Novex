@@ -4,6 +4,8 @@
 
 **Goal:** Add a durable Agent queue outbox and publisher loop so queued Agent runs reliably emit RabbitMQ wake-up messages.
 
+**Progress 2026-06-17:** Implemented durable Agent queue outbox migration, repository transaction APIs, outbox-to-message mapping, publish outcome handling, pending outbox publisher loop, queued create/resume service wiring, `AGENT_QUEUE_PUBLISHER_ENABLED`, startup wiring, and focused verification.
+
 **Architecture:** Mirror the parser outbox pattern while using Agent queue identity as the broker consumer's concurrency gate. Queue creation and queued resume write queue state and outbox state in one repository transaction; a config-gated publisher loop emits `AgentQueueMessage` and records publish state.
 
 **Tech Stack:** Rust, SQLx/Postgres, lapin/RabbitMQ, existing Agent queue runtime tests.
@@ -12,7 +14,7 @@
 
 ### Task 1: Durable Agent Queue Outbox Contract
 
-Status: Pending.
+Status: Completed.
 
 **Files:**
 - Create: `backend/migrations/202606170007_create_ai_agent_queue_outbox.sql`
@@ -38,7 +40,7 @@ Expected: FAIL until migration and repository APIs exist.
 
 ### Task 2: Outbox Publisher Runtime Contract
 
-Status: Pending.
+Status: Completed.
 
 **Files:**
 - Modify: `backend/src/application/ai/agent_queue_runtime.rs`
@@ -62,7 +64,7 @@ Expected: FAIL until runtime publisher APIs exist.
 
 ### Task 3: Service And Config Wiring
 
-Status: Pending.
+Status: Completed.
 
 **Files:**
 - Modify: `backend/src/application/ai/agent_service.rs`
@@ -93,7 +95,7 @@ Expected: FAIL until service/config/main/env are wired.
 
 ### Task 4: Implement Minimal Outbox
 
-Status: Pending.
+Status: Completed.
 
 **Files:**
 - Create: `backend/migrations/202606170007_create_ai_agent_queue_outbox.sql`
@@ -145,7 +147,7 @@ cargo test -p backend-rust foundation --offline
 
 ### Task 5: Docs, Full Verification, Merge, Clean
 
-Status: Pending.
+Status: In progress.
 
 **Files:**
 - Modify: `docs/plans/2026-06-16-codex-migration-matrix.md`
