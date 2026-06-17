@@ -1789,6 +1789,7 @@ mod tests {
                 },
                 cost_cents: None,
                 provider_attempts: vec![],
+                provider_call_lease_id: None,
             },
         );
 

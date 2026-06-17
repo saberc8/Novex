@@ -48,7 +48,7 @@ use tokio::sync::watch;
 use crate::{
     application::ai::model_service::{
         ModelChatCommand, ModelChatCompactionMetadata, ModelChatMessage, ModelChatRequestMetadata,
-        ModelChatResp, ModelRetryPolicy, ModelRuntimeService,
+        ModelChatResp, ModelProviderCallContext, ModelRetryPolicy, ModelRuntimeService,
     },
     application::system::{ensure_max_chars, format_datetime},
     infrastructure::persistence::{
@@ -1152,6 +1152,7 @@ impl AgentService {
             let mut model_response = None;
             for attempt in 1..=model_retry_policy.max_attempts() {
                 let model_call_started = Instant::now();
+                let provider_attempt_kind = if attempt == 1 { "primary" } else { "retry" };
                 let model_call_result = await_model_loop_provider_future_or_cancelled(
                     cancel_token.clone(),
                     self.wait_for_model_loop_persistent_cancel(run_id),
@@ -1163,6 +1164,12 @@ impl AgentService {
                             messages: messages.clone(),
                             temperature: Some(0.2),
                             max_tokens: Some(1024),
+                            provider_call_context: Some(ModelProviderCallContext {
+                                run_id: Some(run_id),
+                                source: "agent.model_loop".to_owned(),
+                                route_purpose: Some(ModelRoutePurpose::CodeAgent),
+                                attempt_kind: provider_attempt_kind.to_owned(),
+                            }),
                             ..ModelChatCommand::default()
                         },
                     ),
@@ -1959,6 +1966,12 @@ impl AgentService {
                     temperature: Some(0.1),
                     max_tokens: Some(512),
                     request_metadata,
+                    provider_call_context: Some(ModelProviderCallContext {
+                        run_id: Some(run_id),
+                        source: "agent.context_compaction".to_owned(),
+                        route_purpose: Some(ModelRoutePurpose::CodeAgent),
+                        attempt_kind: "primary".to_owned(),
+                    }),
                     ..ModelChatCommand::default()
                 },
             ),
@@ -4739,6 +4752,12 @@ fn model_inference_event_payload(response: &ModelChatResp) -> Value {
             object.insert("fallbackUsed".to_owned(), json!(true));
             object.insert("fallbackRouteId".to_owned(), json!(fallback_route_id));
         }
+        if let Some(provider_call_lease_id) = response.provider_call_lease_id {
+            object.insert(
+                "providerCallLeaseId".to_owned(),
+                json!(provider_call_lease_id),
+            );
+        }
         if circuit_open {
             object.insert("circuitOpen".to_owned(), json!(true));
         }
@@ -6239,6 +6258,32 @@ mod tests {
     }
 
     #[test]
+    fn agent_provider_call_lease_context_contract_links_run_and_source() {
+        let source = include_str!("agent_service.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+        let model_loop = &source[source
+            .find("async fn execute_model_loop_existing_run")
+            .unwrap()
+            ..source
+                .find("async fn model_loop_context_compaction_outcome")
+                .unwrap()];
+        let compaction = &source[source
+            .find("async fn model_loop_context_compaction_outcome")
+            .unwrap()
+            ..source.find("pub async fn list_runs").unwrap()];
+
+        assert!(source.contains("ModelProviderCallContext"));
+        assert!(model_loop.contains("provider_call_context: Some(ModelProviderCallContext"));
+        assert!(model_loop.contains("run_id: Some(run_id)"));
+        assert!(model_loop.contains("\"agent.model_loop\""));
+        assert!(compaction.contains("provider_call_context: Some(ModelProviderCallContext"));
+        assert!(compaction.contains("run_id: Some(run_id)"));
+        assert!(compaction.contains("\"agent.context_compaction\""));
+    }
+
+    #[test]
     fn model_inference_cost_event_payload_preserves_response_cost() {
         let response = ModelChatResp {
             conversation_id: None,
@@ -6254,11 +6299,32 @@ mod tests {
             },
             cost_cents: Some(0.65),
             provider_attempts: vec![],
+            provider_call_lease_id: None,
         };
 
         let payload = model_inference_event_payload(&response);
 
         assert_eq!(payload["item"]["costCents"], 0.65);
+    }
+
+    #[test]
+    fn model_inference_event_payload_links_provider_call_lease() {
+        let response = ModelChatResp {
+            conversation_id: None,
+            answer: "ok".to_owned(),
+            route_id: "runtime.llm.code_agent".to_owned(),
+            provider: "deep-seek".to_owned(),
+            model: Some("deepseek-v4-flash".to_owned()),
+            latency_ms: 42,
+            usage: ModelChatUsage::default(),
+            cost_cents: None,
+            provider_attempts: vec![],
+            provider_call_lease_id: Some(123),
+        };
+
+        let payload = model_inference_event_payload(&response);
+
+        assert_eq!(payload["item"]["providerCallLeaseId"], 123);
     }
 
     #[test]
@@ -6276,6 +6342,7 @@ mod tests {
                 test_provider_attempt("primary", "runtime.llm", "failed"),
                 test_provider_attempt("fallback", "runtime.llm.backup", "succeeded"),
             ],
+            provider_call_lease_id: None,
         };
 
         let payload = model_inference_event_payload(&response);
@@ -6308,6 +6375,7 @@ mod tests {
                 ),
                 test_provider_attempt("fallback", "runtime.llm.backup", "succeeded"),
             ],
+            provider_call_lease_id: None,
         };
 
         let payload = model_inference_event_payload(&response);
@@ -6995,6 +7063,7 @@ mod tests {
             usage: ModelChatUsage::default(),
             cost_cents: None,
             provider_attempts: vec![],
+            provider_call_lease_id: None,
         };
 
         let decision = guardian_review_decision_with_model_metadata(decision, &response, 19);

@@ -44,6 +44,8 @@ const MAX_MODEL_CHAT_CONTENT_CHARS: usize = 12_000;
 const MAX_MODEL_CHAT_FILE_CONTEXTS: usize = 3;
 const MAX_MODEL_CHAT_FILE_CONTEXT_CHARS: usize = 20_000;
 const MAX_MODEL_RUNTIME_RETRIES: usize = 3;
+const MODEL_PROVIDER_CALL_LEASE_SECONDS: i64 = 150;
+const MODEL_RUNTIME_SYSTEM_USER_ID: i64 = 0;
 const DEFAULT_TENANT_ID: i64 = 1;
 const MODEL_CHAT_HISTORY_LIMIT: i64 = 30;
 const MODEL_CHAT_TITLE_CHARS: usize = 60;
@@ -90,6 +92,8 @@ pub struct ModelChatCommand {
     pub max_tokens: Option<u32>,
     #[serde(default, rename = "requestMetadata")]
     pub request_metadata: Option<ModelChatRequestMetadata>,
+    #[serde(skip)]
+    pub provider_call_context: Option<ModelProviderCallContext>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -104,6 +108,14 @@ impl ModelChatRequestKind {
             Self::Compaction => "compaction",
         }
     }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ModelProviderCallContext {
+    pub run_id: Option<i64>,
+    pub source: String,
+    pub route_purpose: Option<ModelRoutePurpose>,
+    pub attempt_kind: String,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -174,6 +186,8 @@ pub struct ModelChatResp {
     pub cost_cents: Option<f64>,
     #[serde(default)]
     pub provider_attempts: Vec<ModelProviderAttempt>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_call_lease_id: Option<i64>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -1669,11 +1683,17 @@ LIMIT 1;
             )
             .await?
             .ok_or_else(|| AppError::bad_request("LLM 模型环境变量未配置完整"))?;
-        let mut response =
-            execute_normalized_chat_completion_with_route(&route, &command, Some(conversation_id))
-                .await?;
-        response.cost_cents =
-            estimate_model_chat_response_cost_cents(&self.db, self.tenant_id, &response).await?;
+        let response = self
+            .execute_normalized_chat_completion_with_provider_call_lease(
+                user_id,
+                ModelRoutePurpose::Chat,
+                &route,
+                &command,
+                Some(conversation_id),
+                "ai.models.chat",
+                "primary",
+            )
+            .await?;
         let now = Utc::now().naive_utc();
         let history =
             model_chat_history_records(self.tenant_id, user_id, &command, &response, now)?;
@@ -1712,14 +1732,17 @@ LIMIT 1;
             )
             .await?
             .ok_or_else(|| AppError::bad_request("LLM 模型环境变量未配置完整"))?;
-        let mut response = execute_normalized_chat_completion_with_route(
-            &route,
-            &command,
-            command.conversation_id,
-        )
-        .await?;
-        response.cost_cents =
-            estimate_model_chat_response_cost_cents(&self.db, self.tenant_id, &response).await?;
+        let response = self
+            .execute_normalized_chat_completion_with_provider_call_lease(
+                user_id,
+                ModelRoutePurpose::Chat,
+                &route,
+                &command,
+                command.conversation_id,
+                source,
+                "primary",
+            )
+            .await?;
         let record = model_chat_usage_record(
             self.tenant_id,
             user_id,
@@ -1741,7 +1764,7 @@ LIMIT 1;
             .resolve_route_for_purpose_with_route_id(purpose, command.route_id.as_deref())
             .await?
             .ok_or_else(|| AppError::bad_request("LLM 模型环境变量未配置完整"))?;
-        let mut response = self
+        let response = self
             .execute_normalized_chat_completion_with_fallback(
                 purpose,
                 &route,
@@ -1749,9 +1772,86 @@ LIMIT 1;
                 command.conversation_id,
             )
             .await?;
-        response.cost_cents =
-            estimate_model_chat_response_cost_cents(&self.db, self.tenant_id, &response).await?;
         Ok(response)
+    }
+
+    async fn execute_normalized_chat_completion_with_provider_call_lease(
+        &self,
+        user_id: i64,
+        purpose: ModelRoutePurpose,
+        route: &ModelRuntimeRoute,
+        command: &ModelChatCommand,
+        conversation_id: Option<i64>,
+        source: &str,
+        attempt_kind: &str,
+    ) -> Result<ModelChatResp, AppError> {
+        let mut command = command.clone();
+        command.provider_call_context = Some(model_provider_call_context_for_attempt(
+            command.provider_call_context.as_ref(),
+            purpose,
+            source,
+            attempt_kind,
+        ));
+
+        let lease_owner = model_provider_call_lease_owner();
+        let started_at = Utc::now().naive_utc();
+        let record = model_provider_call_lease_record_from_command(
+            self.tenant_id,
+            user_id,
+            &lease_owner,
+            route,
+            &command,
+            started_at,
+        );
+        let lease_id = begin_model_provider_call_lease(&self.db, &record).await?;
+        let started = Instant::now();
+        let result =
+            execute_normalized_chat_completion_with_route(route, &command, conversation_id).await;
+        let latency_ms = started.elapsed().as_millis();
+        let completed_at = Utc::now().naive_utc();
+
+        match result {
+            Ok(mut response) => {
+                let cost_result =
+                    estimate_model_chat_response_cost_cents(&self.db, self.tenant_id, &response)
+                        .await;
+                if let Ok(cost_cents) = cost_result {
+                    response.cost_cents = cost_cents;
+                }
+                let completion = model_provider_call_lease_completion_from_response(
+                    &response,
+                    latency_ms,
+                    completed_at,
+                );
+                if let Err(err) =
+                    complete_model_provider_call_lease(&self.db, lease_id, user_id, &completion)
+                        .await
+                {
+                    tracing::warn!(
+                        error = %err,
+                        lease_id,
+                        "failed to complete model provider call lease"
+                    );
+                }
+                response.provider_call_lease_id = Some(lease_id);
+                Ok(response)
+            }
+            Err(err) => {
+                let completion =
+                    model_provider_call_lease_completion_from_error(&err, latency_ms, completed_at);
+                if let Err(complete_err) =
+                    complete_model_provider_call_lease(&self.db, lease_id, user_id, &completion)
+                        .await
+                {
+                    tracing::warn!(
+                        error = %complete_err,
+                        lease_id,
+                        "failed to complete failed model provider call lease"
+                    );
+                }
+                Err(err)
+            }
+        }
     }
 
     async fn execute_normalized_chat_completion_with_fallback(
@@ -1816,12 +1916,24 @@ LIMIT 1;
             }
 
             let attempt_started = Instant::now();
-            let result = execute_normalized_chat_completion_with_route(
-                &current_route,
-                command,
-                conversation_id,
-            )
-            .await;
+            let attempt_source = command
+                .provider_call_context
+                .as_ref()
+                .map(|context| context.source.trim())
+                .filter(|source| !source.is_empty())
+                .map(str::to_owned)
+                .unwrap_or_else(|| format!("ai.models.{}", purpose.as_str()));
+            let result = self
+                .execute_normalized_chat_completion_with_provider_call_lease(
+                    MODEL_RUNTIME_SYSTEM_USER_ID,
+                    purpose,
+                    &current_route,
+                    command,
+                    conversation_id,
+                    &attempt_source,
+                    attempt_kind,
+                )
+                .await;
             let provider_error = match result {
                 Ok(mut response) => {
                     for attempt in &mut response.provider_attempts {
@@ -2417,6 +2529,7 @@ fn model_chat_response_from_provider(
         provider_attempts: vec![model_provider_attempt_succeeded(
             "primary", route, latency_ms,
         )],
+        provider_call_lease_id: None,
     })
 }
 
@@ -2450,6 +2563,7 @@ fn model_chat_response_from_responses_compaction_text(
         provider_attempts: vec![model_provider_attempt_succeeded(
             "primary", route, latency_ms,
         )],
+        provider_call_lease_id: None,
     })
 }
 
@@ -2566,6 +2680,357 @@ struct ModelProviderErrorClass {
     kind: &'static str,
     http_status: Option<u16>,
     fallback_candidate: bool,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct ModelProviderCallLeaseRecord {
+    id: i64,
+    tenant_id: i64,
+    user_id: i64,
+    run_id: Option<i64>,
+    route_code: String,
+    route_purpose: String,
+    provider_type: String,
+    model_name: Option<String>,
+    request_kind: String,
+    source: String,
+    attempt_kind: String,
+    status: String,
+    lease_owner: String,
+    lease_expires_at: NaiveDateTime,
+    heartbeat_at: NaiveDateTime,
+    started_at: NaiveDateTime,
+    request_payload: Value,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct ModelProviderCallLeaseCompletion {
+    status: String,
+    completed_at: NaiveDateTime,
+    latency_ms: i64,
+    prompt_tokens: i64,
+    completion_tokens: i64,
+    total_tokens: i64,
+    cost_cents: Option<f64>,
+    error_kind: Option<String>,
+    http_status: Option<i32>,
+    error_message: Option<String>,
+    response_payload: Value,
+}
+
+fn model_provider_call_lease_record_from_command(
+    tenant_id: i64,
+    user_id: i64,
+    lease_owner: &str,
+    route: &ModelRuntimeRoute,
+    command: &ModelChatCommand,
+    started_at: NaiveDateTime,
+) -> ModelProviderCallLeaseRecord {
+    let context = command.provider_call_context.as_ref();
+    let route_purpose = context
+        .and_then(|context| context.route_purpose)
+        .or_else(|| route.purposes().first().copied())
+        .map(|purpose| purpose.as_str().to_owned())
+        .unwrap_or_else(|| route.target().as_str().to_owned());
+    let request_kind = command
+        .request_metadata
+        .as_ref()
+        .map(|metadata| metadata.request_kind.as_str().to_owned())
+        .unwrap_or_else(|| "model_call".to_owned());
+    let source = context
+        .map(|context| context.source.trim())
+        .filter(|source| !source.is_empty())
+        .unwrap_or("model_runtime")
+        .to_owned();
+    let attempt_kind = context
+        .map(|context| context.attempt_kind.trim())
+        .filter(|attempt_kind| !attempt_kind.is_empty())
+        .unwrap_or("primary")
+        .to_owned();
+
+    ModelProviderCallLeaseRecord {
+        id: next_id(),
+        tenant_id,
+        user_id,
+        run_id: context.and_then(|context| context.run_id),
+        route_code: route.route_id().to_owned(),
+        route_purpose,
+        provider_type: route.provider().as_str().to_owned(),
+        model_name: route.model().map(str::to_owned),
+        request_kind: request_kind.clone(),
+        source: source.clone(),
+        attempt_kind: attempt_kind.clone(),
+        status: "running".to_owned(),
+        lease_owner: lease_owner.to_owned(),
+        lease_expires_at: started_at + chrono::Duration::seconds(MODEL_PROVIDER_CALL_LEASE_SECONDS),
+        heartbeat_at: started_at,
+        started_at,
+        request_payload: model_provider_call_lease_request_payload(
+            route,
+            command,
+            &request_kind,
+            &source,
+            &attempt_kind,
+        ),
+    }
+}
+
+fn model_provider_call_lease_request_payload(
+    route: &ModelRuntimeRoute,
+    command: &ModelChatCommand,
+    request_kind: &str,
+    source: &str,
+    attempt_kind: &str,
+) -> Value {
+    json!({
+        "routeId": route.route_id(),
+        "provider": route.provider().as_str(),
+        "model": route.model(),
+        "requestKind": request_kind,
+        "source": source,
+        "attemptKind": attempt_kind,
+        "messageCount": command.messages.len(),
+        "fileContextCount": command.file_contexts.len(),
+        "maxTokens": command.max_tokens,
+        "temperature": command.temperature,
+        "compaction": command.request_metadata.as_ref().and_then(|metadata| metadata.compaction.as_ref()).map(|compaction| {
+            json!({
+                "implementation": compaction.implementation,
+                "trigger": compaction.trigger,
+                "reason": compaction.reason,
+                "phase": compaction.phase,
+                "strategy": compaction.strategy,
+                "windowId": compaction.window_id,
+                "inputHistoryCount": compaction.input_history_count,
+                "retainedHistoryCount": compaction.retained_history_count,
+                "compactedItemCount": compaction.compacted_item_count,
+                "retainedItemCount": compaction.retained_item_count,
+                "toolCodes": compaction.tool_codes,
+            })
+        }),
+    })
+}
+
+fn model_provider_call_lease_completion_from_response(
+    response: &ModelChatResp,
+    latency_ms: u128,
+    completed_at: NaiveDateTime,
+) -> ModelProviderCallLeaseCompletion {
+    let prompt_tokens = response.usage.prompt_tokens.unwrap_or_default();
+    let completion_tokens = response.usage.completion_tokens.unwrap_or_default();
+    let total_tokens = response
+        .usage
+        .total_tokens
+        .unwrap_or(prompt_tokens + completion_tokens);
+    ModelProviderCallLeaseCompletion {
+        status: "succeeded".to_owned(),
+        completed_at,
+        latency_ms: u128_to_i64(latency_ms),
+        prompt_tokens,
+        completion_tokens,
+        total_tokens,
+        cost_cents: response.cost_cents,
+        error_kind: None,
+        http_status: None,
+        error_message: None,
+        response_payload: json!({
+            "routeId": response.route_id,
+            "provider": response.provider,
+            "model": response.model,
+            "latencyMs": u128_to_i64(latency_ms),
+            "usage": response.usage,
+            "costCents": response.cost_cents,
+            "providerAttempts": response.provider_attempts,
+        }),
+    }
+}
+
+fn model_provider_call_lease_completion_from_error(
+    error: &AppError,
+    latency_ms: u128,
+    completed_at: NaiveDateTime,
+) -> ModelProviderCallLeaseCompletion {
+    let class = model_provider_error_class(error);
+    ModelProviderCallLeaseCompletion {
+        status: "failed".to_owned(),
+        completed_at,
+        latency_ms: u128_to_i64(latency_ms),
+        prompt_tokens: 0,
+        completion_tokens: 0,
+        total_tokens: 0,
+        cost_cents: None,
+        error_kind: Some(class.kind.to_owned()),
+        http_status: class.http_status.map(i32::from),
+        error_message: Some(model_provider_error_message(error)),
+        response_payload: json!({
+            "status": "failed",
+            "errorKind": class.kind,
+            "httpStatus": class.http_status,
+            "message": model_provider_error_message(error),
+            "latencyMs": u128_to_i64(latency_ms),
+        }),
+    }
+}
+
+#[allow(dead_code)]
+fn model_provider_call_lease_completion_cancelled(
+    latency_ms: u128,
+    completed_at: NaiveDateTime,
+) -> ModelProviderCallLeaseCompletion {
+    ModelProviderCallLeaseCompletion {
+        status: "cancelled".to_owned(),
+        completed_at,
+        latency_ms: u128_to_i64(latency_ms),
+        prompt_tokens: 0,
+        completion_tokens: 0,
+        total_tokens: 0,
+        cost_cents: None,
+        error_kind: Some("cancelled".to_owned()),
+        http_status: None,
+        error_message: Some("provider call cancelled".to_owned()),
+        response_payload: json!({
+            "status": "cancelled",
+            "cancelReason": "external_cancel",
+            "latencyMs": u128_to_i64(latency_ms),
+        }),
+    }
+}
+
+fn model_provider_call_context_for_attempt(
+    existing: Option<&ModelProviderCallContext>,
+    purpose: ModelRoutePurpose,
+    source: &str,
+    attempt_kind: &str,
+) -> ModelProviderCallContext {
+    let existing_source = existing
+        .map(|context| context.source.trim())
+        .filter(|source| !source.is_empty());
+    let default_source = source.trim();
+    let source = existing_source
+        .or_else(|| (!default_source.is_empty()).then_some(default_source))
+        .unwrap_or("model_runtime")
+        .to_owned();
+
+    let existing_attempt_kind = existing
+        .map(|context| context.attempt_kind.trim())
+        .filter(|attempt_kind| !attempt_kind.is_empty());
+    let default_attempt_kind = attempt_kind.trim();
+    let attempt_kind = match (existing_attempt_kind, default_attempt_kind) {
+        (Some(existing), fallback_attempt)
+            if !fallback_attempt.is_empty() && existing != fallback_attempt =>
+        {
+            format!("{existing}.{fallback_attempt}")
+        }
+        (Some(existing), _) => existing.to_owned(),
+        (None, fallback_attempt) if !fallback_attempt.is_empty() => fallback_attempt.to_owned(),
+        (None, _) => "primary".to_owned(),
+    };
+
+    ModelProviderCallContext {
+        run_id: existing.and_then(|context| context.run_id),
+        source,
+        route_purpose: existing
+            .and_then(|context| context.route_purpose)
+            .or(Some(purpose)),
+        attempt_kind,
+    }
+}
+
+fn model_provider_call_lease_owner() -> String {
+    let host = env::var("HOSTNAME")
+        .or_else(|_| env::var("COMPUTERNAME"))
+        .unwrap_or_else(|_| "local".to_owned());
+    let owner = format!("novex:{host}:{}", std::process::id());
+    owner.chars().take(128).collect()
+}
+
+async fn begin_model_provider_call_lease(
+    db: &PgPool,
+    record: &ModelProviderCallLeaseRecord,
+) -> Result<i64, AppError> {
+    sqlx::query(
+        r#"
+INSERT INTO ai_model_provider_call_lease (
+    id, tenant_id, run_id, route_code, route_purpose, provider_type, model_name,
+    request_kind, source, attempt_kind, status, lease_owner, lease_expires_at,
+    heartbeat_at, started_at, request_payload, create_user, create_time
+)
+VALUES (
+    $1, $2, $3, $4, $5, $6, $7,
+    $8, $9, $10, $11, $12, $13,
+    $14, $15, $16, $17, $18
+);
+"#,
+    )
+    .bind(record.id)
+    .bind(record.tenant_id)
+    .bind(record.run_id)
+    .bind(&record.route_code)
+    .bind(&record.route_purpose)
+    .bind(&record.provider_type)
+    .bind(&record.model_name)
+    .bind(&record.request_kind)
+    .bind(&record.source)
+    .bind(&record.attempt_kind)
+    .bind(&record.status)
+    .bind(&record.lease_owner)
+    .bind(record.lease_expires_at)
+    .bind(record.heartbeat_at)
+    .bind(record.started_at)
+    .bind(&record.request_payload)
+    .bind(record.user_id)
+    .bind(record.started_at)
+    .execute(db)
+    .await?;
+
+    Ok(record.id)
+}
+
+async fn complete_model_provider_call_lease(
+    db: &PgPool,
+    lease_id: i64,
+    user_id: i64,
+    completion: &ModelProviderCallLeaseCompletion,
+) -> Result<(), AppError> {
+    let result = sqlx::query(
+        r#"
+UPDATE ai_model_provider_call_lease
+SET status = $2,
+    completed_at = $3,
+    latency_ms = $4,
+    prompt_tokens = $5,
+    completion_tokens = $6,
+    total_tokens = $7,
+    cost_cents = $8::numeric,
+    error_kind = $9,
+    http_status = $10,
+    error_message = $11,
+    response_payload = $12,
+    update_user = $13,
+    update_time = $3
+WHERE id = $1;
+"#,
+    )
+    .bind(lease_id)
+    .bind(&completion.status)
+    .bind(completion.completed_at)
+    .bind(completion.latency_ms)
+    .bind(completion.prompt_tokens)
+    .bind(completion.completion_tokens)
+    .bind(completion.total_tokens)
+    .bind(completion.cost_cents)
+    .bind(&completion.error_kind)
+    .bind(completion.http_status)
+    .bind(&completion.error_message)
+    .bind(&completion.response_payload)
+    .bind(user_id)
+    .execute(db)
+    .await?;
+
+    if result.rows_affected() == 0 {
+        return Err(AppError::NotFound);
+    }
+    Ok(())
 }
 
 fn model_provider_attempt_succeeded(
@@ -4260,6 +4725,7 @@ mod tests {
             provider_attempts: vec![model_provider_attempt_succeeded(
                 "primary", route, latency_ms,
             )],
+            provider_call_lease_id: None,
         })
     }
 
@@ -4499,6 +4965,35 @@ mod tests {
         assert!(source.contains("estimate_model_chat_response_cost_cents(&self.db"));
         assert!(source.contains("response.cost_cents ="));
         assert!(source.contains("chat_completion_for_purpose"));
+    }
+
+    #[test]
+    fn provider_call_lease_source_contract_wraps_tenant_bound_chat_calls() {
+        let source = include_str!("model_service.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+
+        assert!(source.contains("execute_normalized_chat_completion_with_provider_call_lease"));
+        assert!(source.contains("begin_model_provider_call_lease(&self.db"));
+        assert!(source.contains("complete_model_provider_call_lease(&self.db"));
+        assert!(source.contains("response.provider_call_lease_id = Some(lease_id);"));
+        assert!(source.contains("model_provider_call_context_for_attempt"));
+    }
+
+    #[test]
+    fn provider_call_lease_source_contract_persists_begin_and_completion() {
+        let source = include_str!("model_service.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+
+        assert!(source.contains("INSERT INTO ai_model_provider_call_lease"));
+        assert!(source.contains("UPDATE ai_model_provider_call_lease"));
+        assert!(source.contains("lease_expires_at"));
+        assert!(source.contains("status = $2"));
+        assert!(source.contains("request_payload"));
+        assert!(source.contains("response_payload"));
     }
 
     #[test]
@@ -5102,6 +5597,35 @@ mod tests {
     }
 
     #[test]
+    fn provider_call_lease_migration_defines_runtime_contract() {
+        let migration_path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/migrations/202606170008_create_ai_model_provider_call_lease.sql"
+        );
+        let migration =
+            std::fs::read_to_string(migration_path).expect("missing provider call lease migration");
+
+        for field in [
+            "CREATE TABLE IF NOT EXISTS ai_model_provider_call_lease",
+            "tenant_id",
+            "run_id",
+            "route_code",
+            "route_purpose",
+            "provider_type",
+            "request_kind",
+            "lease_owner",
+            "lease_expires_at",
+            "heartbeat_at",
+            "status",
+            "error_kind",
+            "idx_ai_model_provider_call_lease_active",
+            "idx_ai_model_provider_call_lease_run",
+        ] {
+            assert!(migration.contains(field), "missing {field}");
+        }
+    }
+
+    #[test]
     fn multi_hop_fallback_allows_bounded_new_routes() {
         let mut visited = std::collections::HashSet::from(["runtime.llm".to_owned()]);
 
@@ -5635,6 +6159,131 @@ mod tests {
     }
 
     #[test]
+    fn provider_call_context_is_local_only_and_not_serialized() {
+        let command = normalize_model_chat_command(ModelChatCommand {
+            messages: vec![ModelChatMessage {
+                role: "user".to_owned(),
+                content: "hello".to_owned(),
+            }],
+            provider_call_context: Some(ModelProviderCallContext {
+                run_id: Some(88),
+                source: "agent.model_loop".to_owned(),
+                route_purpose: Some(ModelRoutePurpose::CodeAgent),
+                attempt_kind: "primary".to_owned(),
+            }),
+            ..ModelChatCommand::default()
+        })
+        .unwrap();
+
+        let serialized = serde_json::to_value(&command).unwrap();
+
+        assert_eq!(
+            command.provider_call_context.as_ref().unwrap().run_id,
+            Some(88)
+        );
+        assert!(serialized.get("providerCallContext").is_none());
+        assert!(serialized.get("provider_call_context").is_none());
+    }
+
+    #[test]
+    fn provider_call_lease_record_maps_route_context_and_request_kind() {
+        let route = openai_compatible_llm_route();
+        let command = test_compaction_chat_command_with_provider_call_context();
+        let now =
+            NaiveDateTime::parse_from_str("2026-06-17 10:00:00", "%Y-%m-%d %H:%M:%S").unwrap();
+
+        let record = model_provider_call_lease_record_from_command(
+            42, 99, "worker-a", &route, &command, now,
+        );
+
+        assert_eq!(record.tenant_id, 42);
+        assert_eq!(record.run_id, Some(88));
+        assert_eq!(record.route_code, "tenant42.code_agent");
+        assert_eq!(record.route_purpose, "code_agent");
+        assert_eq!(record.provider_type, "openai-compatible");
+        assert_eq!(record.model_name.as_deref(), Some("gpt-compatible"));
+        assert_eq!(record.request_kind, "compaction");
+        assert_eq!(record.source, "agent.context_compaction");
+        assert_eq!(record.attempt_kind, "primary");
+        assert_eq!(record.status, "running");
+        assert_eq!(record.lease_owner, "worker-a");
+        assert_eq!(record.request_payload["requestKind"], "compaction");
+        assert_eq!(record.request_payload["compaction"]["windowId"], 1);
+        assert!(!record.request_payload.to_string().contains("sk-fake"));
+    }
+
+    #[test]
+    fn provider_call_lease_completion_maps_success_usage_and_cost() {
+        let now =
+            NaiveDateTime::parse_from_str("2026-06-17 10:00:05", "%Y-%m-%d %H:%M:%S").unwrap();
+        let response = ModelChatResp {
+            conversation_id: None,
+            answer: "sensitive-user-content-needle".to_owned(),
+            route_id: "tenant42.code_agent".to_owned(),
+            provider: "openai-compatible".to_owned(),
+            model: Some("gpt-compatible".to_owned()),
+            latency_ms: 42,
+            usage: ModelChatUsage {
+                prompt_tokens: Some(11),
+                completion_tokens: Some(7),
+                total_tokens: Some(18),
+            },
+            cost_cents: Some(0.42),
+            provider_attempts: vec![],
+            provider_call_lease_id: None,
+        };
+
+        let completion = model_provider_call_lease_completion_from_response(&response, 42, now);
+
+        assert_eq!(completion.status, "succeeded");
+        assert_eq!(completion.latency_ms, 42);
+        assert_eq!(completion.prompt_tokens, 11);
+        assert_eq!(completion.completion_tokens, 7);
+        assert_eq!(completion.total_tokens, 18);
+        assert_eq!(completion.cost_cents, Some(0.42));
+        assert!(completion.error_kind.is_none());
+        assert_eq!(
+            completion.response_payload["routeId"],
+            "tenant42.code_agent"
+        );
+        assert_eq!(completion.response_payload["usage"]["totalTokens"], 18);
+        assert!(!completion
+            .response_payload
+            .to_string()
+            .contains("sensitive-user-content-needle"));
+    }
+
+    #[test]
+    fn provider_call_lease_completion_maps_failure_class() {
+        let now =
+            NaiveDateTime::parse_from_str("2026-06-17 10:00:05", "%Y-%m-%d %H:%M:%S").unwrap();
+        let err = AppError::bad_request("LLM 模型调用失败: HTTP 502");
+
+        let completion = model_provider_call_lease_completion_from_error(&err, 12, now);
+
+        assert_eq!(completion.status, "failed");
+        assert_eq!(completion.latency_ms, 12);
+        assert_eq!(completion.error_kind.as_deref(), Some("provider_http"));
+        assert_eq!(completion.http_status, Some(502));
+        assert_eq!(completion.response_payload["errorKind"], "provider_http");
+    }
+
+    #[test]
+    fn provider_call_lease_completion_maps_cancelled_status() {
+        let now =
+            NaiveDateTime::parse_from_str("2026-06-17 10:00:05", "%Y-%m-%d %H:%M:%S").unwrap();
+
+        let completion = model_provider_call_lease_completion_cancelled(18, now);
+
+        assert_eq!(completion.status, "cancelled");
+        assert_eq!(completion.latency_ms, 18);
+        assert_eq!(
+            completion.response_payload["cancelReason"],
+            "external_cancel"
+        );
+    }
+
+    #[test]
     fn model_chat_command_accepts_existing_conversation_id() {
         let command = normalize_model_chat_command(ModelChatCommand {
             conversation_id: Some(88),
@@ -5886,6 +6535,7 @@ mod tests {
             },
             cost_cents: None,
             provider_attempts: vec![],
+            provider_call_lease_id: None,
         };
 
         let records = model_chat_history_records(1, 9, &command, &response, now).unwrap();
@@ -5958,6 +6608,7 @@ mod tests {
             },
             cost_cents: None,
             provider_attempts: vec![],
+            provider_call_lease_id: None,
         };
 
         let record = model_chat_usage_record(1, 99, &response, now, "ai.models.chat");
@@ -6020,6 +6671,7 @@ mod tests {
             },
             cost_cents: None,
             provider_attempts: vec![],
+            provider_call_lease_id: None,
         };
 
         let record = model_chat_usage_record(42, 99, &response, now, "ai.chatFlow.model");
@@ -6106,6 +6758,19 @@ mod tests {
         .unwrap()
     }
 
+    fn test_compaction_chat_command_with_provider_call_context() -> ModelChatCommand {
+        normalize_model_chat_command(ModelChatCommand {
+            provider_call_context: Some(ModelProviderCallContext {
+                run_id: Some(88),
+                source: "agent.context_compaction".to_owned(),
+                route_purpose: Some(ModelRoutePurpose::CodeAgent),
+                attempt_kind: "primary".to_owned(),
+            }),
+            ..test_compaction_chat_command()
+        })
+        .unwrap()
+    }
+
     fn dynamic_route_test_row(
         route_code: &str,
         route_purpose: &str,
@@ -6142,6 +6807,7 @@ mod tests {
             },
             cost_cents: None,
             provider_attempts: vec![],
+            provider_call_lease_id: None,
         }
     }
 }
