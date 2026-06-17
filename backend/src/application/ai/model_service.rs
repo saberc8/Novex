@@ -3250,6 +3250,7 @@ fn model_chat_provider_output_from_sse_text(
     body_text: &str,
 ) -> Result<ModelChatProviderOutput, AppError> {
     let mut completed = false;
+    let mut completed_answer = None;
     let mut usage = ModelChatUsage::default();
     let mut provider_response_id = None;
     let mut provider_response_status = None;
@@ -3263,14 +3264,21 @@ fn model_chat_provider_output_from_sse_text(
         }
         let value = serde_json::from_str::<Value>(&data)
             .map_err(|_| AppError::bad_request("LLM chat SSE 响应不是合法 JSON"))?;
-        if let Some(response_id) = model_provider_response_id_from_payload(&value) {
+        let response_payload = model_chat_response_payload_from_sse_value(&value);
+        if let Some(response_id) = model_provider_response_id_from_payload(response_payload) {
             provider_response_id = Some(response_id);
         }
-        if let Some(response_status) = model_provider_response_status_from_payload(&value) {
+        if let Some(response_status) = model_provider_response_status_from_payload(response_payload)
+        {
             provider_response_status = Some(response_status);
         }
-        if value.get("usage").is_some() {
-            usage = normalize_model_provider_usage(&value);
+        let usage_payload = if response_payload.get("usage").is_some() {
+            response_payload
+        } else {
+            &value
+        };
+        if usage_payload.get("usage").is_some() {
+            usage = normalize_model_provider_usage(usage_payload);
         }
         let (mut chunks, next_index) =
             model_chat_provider_delta_chunks_from_sse_value(&value, next_chunk_index);
@@ -3278,6 +3286,7 @@ fn model_chat_provider_output_from_sse_text(
         delta_chunks.append(&mut chunks);
         if model_chat_sse_value_is_terminal(&value) {
             completed = true;
+            completed_answer = model_chat_answer_from_provider_body(response_payload);
         }
     }
 
@@ -3289,6 +3298,11 @@ fn model_chat_provider_output_from_sse_text(
         .iter()
         .map(|chunk| chunk.content.as_str())
         .collect::<String>();
+    let answer = if answer.is_empty() {
+        completed_answer.unwrap_or_default()
+    } else {
+        answer
+    };
     if answer.is_empty() {
         return Err(AppError::bad_request("LLM chat SSE 响应为空"));
     }
@@ -3300,6 +3314,10 @@ fn model_chat_provider_output_from_sse_text(
         provider_response_status,
         delta_chunks,
     })
+}
+
+fn model_chat_response_payload_from_sse_value(value: &Value) -> &Value {
+    value.get("response").unwrap_or(value)
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -3434,6 +3452,17 @@ fn model_chat_provider_delta_chunks_from_sse_value(
     next_chunk_index: usize,
 ) -> (Vec<ModelProviderStreamChunk>, usize) {
     let provider_event = model_chat_provider_event_name(value);
+    if let Some(content) = model_chat_responses_delta_content_from_value(value) {
+        return (
+            vec![ModelProviderStreamChunk {
+                index: next_chunk_index,
+                content,
+                provider_event,
+            }],
+            next_chunk_index + 1,
+        );
+    }
+
     let Some(choices) = value.get("choices").and_then(Value::as_array) else {
         return (vec![], next_chunk_index);
     };
@@ -3452,6 +3481,15 @@ fn model_chat_provider_delta_chunks_from_sse_value(
     }
 
     (chunks, index)
+}
+
+fn model_chat_responses_delta_content_from_value(value: &Value) -> Option<String> {
+    if value.get("type").and_then(Value::as_str) != Some("response.output_text.delta") {
+        return None;
+    }
+    value
+        .get("delta")
+        .and_then(model_chat_delta_text_from_value)
 }
 
 fn model_chat_delta_content_from_choice(choice: &Value) -> Option<String> {
@@ -3491,6 +3529,10 @@ fn model_chat_provider_event_name(value: &Value) -> Option<String> {
 }
 
 fn model_chat_sse_value_is_terminal(value: &Value) -> bool {
+    if value.get("type").and_then(Value::as_str) == Some("response.completed") {
+        return true;
+    }
+
     value
         .get("choices")
         .and_then(Value::as_array)
@@ -4541,7 +4583,21 @@ fn model_chat_answer_from_provider_body(body: &Value) -> Option<String> {
             }
         }
     }
-    None
+    model_chat_responses_output_text_from_body(body)
+}
+
+fn model_chat_responses_output_text_from_body(body: &Value) -> Option<String> {
+    let output_items = body.get("output").and_then(Value::as_array)?;
+    let text = output_items
+        .iter()
+        .filter_map(|item| {
+            item.get("content")
+                .and_then(model_chat_text_from_value)
+                .or_else(|| item.get("text").and_then(model_chat_text_from_value))
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    non_empty_model_chat_text(&text)
 }
 
 fn model_chat_text_from_value(value: &Value) -> Option<String> {
@@ -7755,6 +7811,70 @@ mod tests {
     }
 
     #[test]
+    fn provider_token_delta_responses_sse_assembles_answer_and_chunks() {
+        let route = openai_compatible_llm_route();
+        let sse = concat!(
+            "event: response.created\n",
+            "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_delta_1\",\"status\":\"in_progress\"}}\n\n",
+            "event: response.output_text.delta\n",
+            "data: {\"type\":\"response.output_text.delta\",\"item_id\":\"msg_1\",\"output_index\":0,\"content_index\":0,\"delta\":\"Hello\"}\n\n",
+            "event: response.output_text.delta\n",
+            "data: {\"type\":\"response.output_text.delta\",\"item_id\":\"msg_1\",\"output_index\":0,\"content_index\":0,\"delta\":\" world\"}\n\n",
+            "event: response.completed\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_delta_1\",\"status\":\"completed\",\"output\":[{\"type\":\"message\",\"content\":[{\"type\":\"output_text\",\"text\":\"Hello world\"}]}],\"usage\":{\"input_tokens\":11,\"output_tokens\":2,\"total_tokens\":13}}}\n\n",
+        );
+
+        let response =
+            model_chat_response_from_chat_completion_text(&route, sse, 18, None).unwrap();
+
+        assert_eq!(response.answer, "Hello world");
+        assert_eq!(
+            response
+                .provider_delta_chunks
+                .iter()
+                .map(|chunk| chunk.content.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Hello", " world"]
+        );
+        assert_eq!(response.provider_delta_chunks[0].index, 0);
+        assert_eq!(response.provider_delta_chunks[1].index, 1);
+        assert_eq!(
+            response.provider_delta_chunks[0].provider_event.as_deref(),
+            Some("response.output_text.delta")
+        );
+        assert_eq!(
+            response.provider_delta_chunks[1].provider_event.as_deref(),
+            Some("response.output_text.delta")
+        );
+        assert_eq!(response.usage.prompt_tokens, Some(11));
+        assert_eq!(response.usage.completion_tokens, Some(2));
+        assert_eq!(response.usage.total_tokens, Some(13));
+        assert_eq!(
+            response.provider_response_id.as_deref(),
+            Some("resp_delta_1")
+        );
+        assert_eq!(
+            response.provider_response_status.as_deref(),
+            Some("completed")
+        );
+    }
+
+    #[test]
+    fn provider_token_delta_responses_sse_rejects_incomplete_stream() {
+        let route = openai_compatible_llm_route();
+        let sse = concat!(
+            "event: response.created\n",
+            "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_delta_1\",\"status\":\"in_progress\"}}\n\n",
+            "event: response.output_text.delta\n",
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"partial\"}\n\n",
+        );
+
+        let response = model_chat_response_from_chat_completion_text(&route, sse, 18, None);
+
+        assert!(response.is_err());
+    }
+
+    #[test]
     fn provider_background_response_capture_payload_marks_responses_background() {
         let route = openai_compatible_llm_route();
         let command = test_compaction_chat_command();
@@ -8442,6 +8562,43 @@ mod tests {
         let response = model_chat_response_from_provider(&route, body, 42, None).unwrap();
 
         assert_eq!(response.answer, "Novex accepted a provider text fallback.");
+    }
+
+    #[test]
+    fn model_chat_response_accepts_responses_output_body() {
+        let route = openai_compatible_llm_route();
+        let body = json!({
+            "id": "resp_body_1",
+            "status": "completed",
+            "output": [
+                {
+                    "type": "message",
+                    "content": [
+                        { "type": "output_text", "text": "Novex accepted a Responses output body." }
+                    ]
+                }
+            ],
+            "usage": {
+                "input_tokens": 6,
+                "output_tokens": 8,
+                "total_tokens": 14
+            }
+        });
+
+        let response = model_chat_response_from_provider(&route, body, 42, None).unwrap();
+
+        assert_eq!(response.answer, "Novex accepted a Responses output body.");
+        assert_eq!(
+            response.provider_response_id.as_deref(),
+            Some("resp_body_1")
+        );
+        assert_eq!(
+            response.provider_response_status.as_deref(),
+            Some("completed")
+        );
+        assert_eq!(response.usage.prompt_tokens, Some(6));
+        assert_eq!(response.usage.completion_tokens, Some(8));
+        assert_eq!(response.usage.total_tokens, Some(14));
     }
 
     #[test]
