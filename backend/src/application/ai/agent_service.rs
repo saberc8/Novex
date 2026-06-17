@@ -43,12 +43,13 @@ use novex_trace::{TraceBundle, TraceEvent, TraceReplaySummary};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sqlx::PgPool;
-use tokio::sync::watch;
+use tokio::sync::{mpsc, watch};
 
 use crate::{
     application::ai::model_service::{
         ModelChatCommand, ModelChatCompactionMetadata, ModelChatMessage, ModelChatRequestMetadata,
-        ModelChatResp, ModelProviderCallContext, ModelRetryPolicy, ModelRuntimeService,
+        ModelChatResp, ModelChatUsage, ModelProviderCallContext, ModelProviderStreamChunk,
+        ModelProviderStreamEvent, ModelRetryPolicy, ModelRuntimeService,
     },
     application::system::{ensure_max_chars, format_datetime},
     infrastructure::persistence::{
@@ -1150,28 +1151,35 @@ impl AgentService {
                     &tool_codes,
                     &runtime_state.items,
                 );
-                let model_call_result = await_model_loop_provider_future_or_cancelled(
-                    cancel_token.clone(),
-                    self.wait_for_model_loop_persistent_cancel(run_id),
-                    "model_call",
-                    self.model_runtime.chat_completion_for_purpose(
-                        ModelRoutePurpose::CodeAgent,
-                        ModelChatCommand {
-                            route_id: command.model_route_id.clone(),
-                            messages: messages.clone(),
-                            temperature: Some(0.2),
-                            max_tokens: Some(1024),
-                            provider_call_context: Some(ModelProviderCallContext {
-                                run_id: Some(run_id),
-                                source: "agent.model_loop".to_owned(),
-                                route_purpose: Some(ModelRoutePurpose::CodeAgent),
-                                attempt_kind: provider_attempt_kind.to_owned(),
-                            }),
-                            ..ModelChatCommand::default()
-                        },
-                    ),
-                )
-                .await;
+                let (provider_stream_sender, provider_stream_receiver) = provider_stream_channel();
+                let model_call_result =
+                    await_model_loop_provider_future_or_cancelled_with_delta_events(
+                        cancel_token.clone(),
+                        self.wait_for_model_loop_persistent_cancel(run_id),
+                        "model_call",
+                        provider_stream_receiver,
+                        self,
+                        user_id,
+                        run_id,
+                        self.model_runtime.chat_completion_for_purpose(
+                            ModelRoutePurpose::CodeAgent,
+                            ModelChatCommand {
+                                route_id: command.model_route_id.clone(),
+                                messages: messages.clone(),
+                                temperature: Some(0.2),
+                                max_tokens: Some(1024),
+                                provider_call_context: Some(ModelProviderCallContext {
+                                    run_id: Some(run_id),
+                                    source: "agent.model_loop".to_owned(),
+                                    route_purpose: Some(ModelRoutePurpose::CodeAgent),
+                                    attempt_kind: provider_attempt_kind.to_owned(),
+                                }),
+                                provider_stream_sender: Some(provider_stream_sender),
+                                ..ModelChatCommand::default()
+                            },
+                        ),
+                    )
+                    .await;
                 match model_call_result {
                     Ok(ModelLoopFutureAwait::Completed(response)) => {
                         model_response = Some(response);
@@ -3238,6 +3246,74 @@ where
     }
 }
 
+fn provider_stream_channel() -> (
+    mpsc::UnboundedSender<ModelProviderStreamEvent>,
+    mpsc::UnboundedReceiver<ModelProviderStreamEvent>,
+) {
+    mpsc::unbounded_channel()
+}
+
+async fn await_model_loop_provider_future_or_cancelled_with_delta_events<F, C, T>(
+    cancel_token: AgentRunCancellationToken,
+    persistent_cancel: C,
+    _stage: &str,
+    mut provider_stream_receiver: mpsc::UnboundedReceiver<ModelProviderStreamEvent>,
+    service: &AgentService,
+    user_id: i64,
+    run_id: i64,
+    future: F,
+) -> Result<ModelLoopFutureAwait<T>, AppError>
+where
+    F: Future<Output = Result<T, AppError>>,
+    C: Future<Output = Result<(), AppError>>,
+{
+    tokio::pin!(future);
+    tokio::pin!(persistent_cancel);
+    let mut stream_closed = false;
+
+    loop {
+        tokio::select! {
+            biased;
+            _ = cancel_token.clone().cancelled() => return Ok(ModelLoopFutureAwait::Cancelled),
+            persistent = &mut persistent_cancel => {
+                persistent?;
+                return Ok(ModelLoopFutureAwait::Cancelled);
+            }
+            maybe_event = provider_stream_receiver.recv(), if !stream_closed => {
+                if let Some(event) = maybe_event {
+                    drain_model_delta_events(service, user_id, run_id, event).await?;
+                } else {
+                    stream_closed = true;
+                }
+            }
+            result = &mut future => {
+                while let Ok(event) = provider_stream_receiver.try_recv() {
+                    drain_model_delta_events(service, user_id, run_id, event).await?;
+                }
+                return result.map(ModelLoopFutureAwait::Completed);
+            }
+        }
+    }
+}
+
+async fn drain_model_delta_events(
+    service: &AgentService,
+    user_id: i64,
+    run_id: i64,
+    event: ModelProviderStreamEvent,
+) -> Result<(), AppError> {
+    service
+        .append_event(
+            user_id,
+            run_id,
+            None,
+            RunEventKind::Thought,
+            run_status_code(RunStatus::Running),
+            model_delta_event_payload_from_stream_event(&event),
+        )
+        .await
+}
+
 async fn execute_agent_tool_io_batch<F, Fut>(
     mode: ToolBatchExecutionMode,
     prepared_calls: Vec<PreparedAgentToolCall>,
@@ -4676,6 +4752,21 @@ fn model_inference_event_payload(response: &ModelChatResp) -> Value {
                 json!(provider_call_lease_id),
             );
         }
+        if !response.provider_delta_chunks.is_empty() {
+            object.insert("streaming".to_owned(), json!(true));
+            object.insert(
+                "deltaChunkCount".to_owned(),
+                json!(response.provider_delta_chunks.len()),
+            );
+            object.insert(
+                "deltaTextLength".to_owned(),
+                json!(response
+                    .provider_delta_chunks
+                    .iter()
+                    .map(|chunk| chunk.content.chars().count())
+                    .sum::<usize>()),
+            );
+        }
         if circuit_open {
             object.insert("circuitOpen".to_owned(), json!(true));
         }
@@ -4685,6 +4776,47 @@ fn model_inference_event_payload(response: &ModelChatResp) -> Value {
         "runtimeMode": "model_loop",
         "item": item
     })
+}
+
+fn model_delta_event_payload(response: &ModelChatResp, chunk: &ModelProviderStreamChunk) -> Value {
+    let mut item = json!({
+        "type": "model_delta",
+        "source": "provider_stream",
+        "routeId": &response.route_id,
+        "provider": &response.provider,
+        "model": &response.model,
+        "deltaIndex": chunk.index,
+        "content": &chunk.content,
+    });
+    if let Some(object) = item.as_object_mut() {
+        if let Some(provider_event) = chunk.provider_event.as_deref() {
+            object.insert("providerEvent".to_owned(), json!(provider_event));
+        }
+    }
+
+    json!({
+        "runtimeMode": "model_loop",
+        "item": item
+    })
+}
+
+fn model_delta_event_payload_from_stream_event(event: &ModelProviderStreamEvent) -> Value {
+    let response = ModelChatResp {
+        conversation_id: None,
+        answer: String::new(),
+        route_id: event.route_id.clone(),
+        provider: event.provider.clone(),
+        model: event.model.clone(),
+        latency_ms: 0,
+        usage: ModelChatUsage::default(),
+        cost_cents: None,
+        provider_attempts: vec![],
+        provider_call_lease_id: None,
+        provider_response_id: None,
+        provider_response_status: None,
+        provider_delta_chunks: vec![event.chunk.clone()],
+    };
+    model_delta_event_payload(&response, &event.chunk)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -6549,6 +6681,7 @@ mod tests {
             provider_call_lease_id: None,
             provider_response_id: None,
             provider_response_status: None,
+            provider_delta_chunks: vec![],
         };
 
         let payload = model_inference_event_payload(&response);
@@ -6571,11 +6704,107 @@ mod tests {
             provider_call_lease_id: Some(123),
             provider_response_id: None,
             provider_response_status: None,
+            provider_delta_chunks: vec![],
         };
 
         let payload = model_inference_event_payload(&response);
 
         assert_eq!(payload["item"]["providerCallLeaseId"], 123);
+    }
+
+    #[test]
+    fn model_delta_inference_payload_marks_streaming_metadata() {
+        let response = ModelChatResp {
+            conversation_id: None,
+            answer: "Hello world".to_owned(),
+            route_id: "runtime.llm.code_agent".to_owned(),
+            provider: "openai-compatible".to_owned(),
+            model: Some("gpt-compatible".to_owned()),
+            latency_ms: 42,
+            usage: ModelChatUsage::default(),
+            cost_cents: None,
+            provider_attempts: vec![],
+            provider_call_lease_id: None,
+            provider_response_id: None,
+            provider_response_status: None,
+            provider_delta_chunks: vec![
+                ModelProviderStreamChunk {
+                    index: 0,
+                    content: "Hello".to_owned(),
+                    provider_event: Some("chat.completion.chunk".to_owned()),
+                },
+                ModelProviderStreamChunk {
+                    index: 1,
+                    content: " world".to_owned(),
+                    provider_event: Some("chat.completion.chunk".to_owned()),
+                },
+            ],
+        };
+
+        let payload = model_inference_event_payload(&response);
+
+        assert_eq!(payload["item"]["streaming"], true);
+        assert_eq!(payload["item"]["deltaChunkCount"], 2);
+        assert_eq!(payload["item"]["deltaTextLength"], 11);
+        assert!(payload["item"].get("answer").is_none());
+    }
+
+    #[test]
+    fn model_delta_event_payload_preserves_chunk_contract() {
+        let response = ModelChatResp {
+            conversation_id: None,
+            answer: "Hello world".to_owned(),
+            route_id: "runtime.llm.code_agent".to_owned(),
+            provider: "openai-compatible".to_owned(),
+            model: Some("gpt-compatible".to_owned()),
+            latency_ms: 42,
+            usage: ModelChatUsage::default(),
+            cost_cents: None,
+            provider_attempts: vec![],
+            provider_call_lease_id: None,
+            provider_response_id: None,
+            provider_response_status: None,
+            provider_delta_chunks: vec![],
+        };
+        let chunk = ModelProviderStreamChunk {
+            index: 3,
+            content: " partial".to_owned(),
+            provider_event: Some("chat.completion.chunk".to_owned()),
+        };
+
+        let payload = model_delta_event_payload(&response, &chunk);
+
+        assert_eq!(payload["runtimeMode"], "model_loop");
+        assert_eq!(payload["item"]["type"], "model_delta");
+        assert_eq!(payload["item"]["source"], "provider_stream");
+        assert_eq!(payload["item"]["routeId"], "runtime.llm.code_agent");
+        assert_eq!(payload["item"]["provider"], "openai-compatible");
+        assert_eq!(payload["item"]["model"], "gpt-compatible");
+        assert_eq!(payload["item"]["deltaIndex"], 3);
+        assert_eq!(payload["item"]["content"], " partial");
+        assert_eq!(payload["item"]["providerEvent"], "chat.completion.chunk");
+    }
+
+    #[test]
+    fn agent_service_model_loop_attaches_provider_stream_channel() {
+        let source = include_str!("agent_service.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+        let model_loop = &source[source
+            .find("async fn execute_model_loop_existing_run")
+            .unwrap()
+            ..source
+                .find("async fn model_loop_context_compaction_outcome")
+                .unwrap()];
+
+        assert!(model_loop.contains("provider_stream_channel"));
+        assert!(model_loop.contains("provider_stream_sender"));
+        assert!(
+            model_loop.contains("await_model_loop_provider_future_or_cancelled_with_delta_events")
+        );
+        assert!(source.contains("drain_model_delta_events"));
+        assert!(source.contains("model_delta_event_payload"));
     }
 
     #[test]
@@ -6596,6 +6825,7 @@ mod tests {
             provider_call_lease_id: None,
             provider_response_id: None,
             provider_response_status: None,
+            provider_delta_chunks: vec![],
         };
 
         let payload = model_inference_event_payload(&response);
@@ -6631,6 +6861,7 @@ mod tests {
             provider_call_lease_id: None,
             provider_response_id: None,
             provider_response_status: None,
+            provider_delta_chunks: vec![],
         };
 
         let payload = model_inference_event_payload(&response);
@@ -7380,6 +7611,7 @@ mod tests {
             provider_call_lease_id: None,
             provider_response_id: None,
             provider_response_status: None,
+            provider_delta_chunks: vec![],
         };
 
         let decision = guardian_review_decision_with_model_metadata(decision, &response, 19);

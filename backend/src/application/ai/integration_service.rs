@@ -1792,6 +1792,7 @@ mod tests {
                 provider_call_lease_id: None,
                 provider_response_id: None,
                 provider_response_status: None,
+                provider_delta_chunks: vec![],
             },
         );
 
