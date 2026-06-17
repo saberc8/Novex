@@ -12,7 +12,7 @@
 
 ### Task 1: Permission And HTTP Contract
 
-Status: Pending.
+Status: Completed.
 
 **Files:**
 - Create: `backend/migrations/202606170009_seed_ai_model_provider_call_lease_permissions.sql`
@@ -43,7 +43,7 @@ Expected: PASS.
 
 ### Task 2: Service DTOs And Query Mapping
 
-Status: Pending.
+Status: Completed.
 
 **Files:**
 - Modify: `backend/src/application/ai/model_service.rs`
@@ -77,7 +77,7 @@ Expected: PASS.
 
 ### Task 3: Stale Expire Control
 
-Status: Pending.
+Status: Completed.
 
 **Files:**
 - Modify: `backend/src/application/ai/model_service.rs`
@@ -109,7 +109,7 @@ Expected: PASS.
 
 ### Task 4: Docs, Verification, Merge
 
-Status: Pending.
+Status: Completed.
 
 **Files:**
 - Modify: `docs/plans/2026-06-16-codex-migration-matrix.md`
@@ -130,3 +130,8 @@ Expected: PASS.
 **Step 3: Commit, merge, clean**
 
 Commit feature work, merge `feat/enterprise-agent-foundation` into `main`, rerun full verification on `main`, run `cargo clean` in both worktrees, and sync feature to main.
+
+**Verification evidence:**
+- `cargo test -p backend-rust provider_call_lease_controls --offline`
+- `cargo fmt -- --check`
+- `cargo test --workspace --offline`
