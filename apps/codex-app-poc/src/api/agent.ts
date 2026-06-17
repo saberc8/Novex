@@ -2,11 +2,28 @@ import { apiRequest, apiUrl } from "@/lib/api";
 import type { AgentRunCommand, AgentRunEventStreamQuery, AgentRunResp } from "@/types/agent";
 
 const AGENT_RUN_URL = "/ai/agents/runs";
+const CONFIGURED_MODEL_AGENT_BUDGET = {
+  maxSteps: 8,
+  maxToolCalls: 1,
+  maxSeconds: 60,
+  maxCostCents: 0
+};
 
 export function createAgentRun(data: AgentRunCommand) {
   return apiRequest<AgentRunResp>(AGENT_RUN_URL, {
     method: "POST",
     body: JSON.stringify(data)
+  });
+}
+
+export function createConfiguredModelAgentRun(input: string) {
+  const modelRouteId = configuredAgentModelRouteId();
+  return createAgentRun({
+    input,
+    runtimeMode: "model_loop",
+    autoApprove: false,
+    ...(modelRouteId ? { modelRouteId } : {}),
+    budget: CONFIGURED_MODEL_AGENT_BUDGET
   });
 }
 
@@ -20,4 +37,8 @@ export function fetchAgentRunEventStream(
       Accept: "text/event-stream"
     }
   });
+}
+
+function configuredAgentModelRouteId() {
+  return (process.env.NEXT_PUBLIC_AGENT_MODEL_ROUTE_ID ?? "").trim() || undefined;
 }

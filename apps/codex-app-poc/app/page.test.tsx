@@ -55,6 +55,7 @@ describe("Codex app POC page", () => {
       })
     }));
     vi.stubGlobal("fetch", fetchMock);
+    vi.stubEnv("NEXT_PUBLIC_AGENT_MODEL_ROUTE_ID", "runtime.llm.code_agent");
 
     render(<Page />);
     fireEvent.change(screen.getByLabelText("任务输入"), {
@@ -63,6 +64,23 @@ describe("Codex app POC page", () => {
     fireEvent.click(screen.getByLabelText("发送"));
 
     expect(fetchMock).toHaveBeenCalled();
+    expect(fetchMock).toHaveBeenCalledWith(
+      expect.stringContaining("/ai/agents/runs"),
+      expect.objectContaining({
+        body: JSON.stringify({
+          input: "search policy",
+          runtimeMode: "model_loop",
+          autoApprove: false,
+          modelRouteId: "runtime.llm.code_agent",
+          budget: {
+            maxSteps: 8,
+            maxToolCalls: 1,
+            maxSeconds: 60,
+            maxCostCents: 0
+          }
+        })
+      })
+    );
     expect(await screen.findByText("Done")).toBeTruthy();
   });
 });

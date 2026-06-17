@@ -19,7 +19,7 @@ import {
   ShieldAlert,
   SquarePen
 } from "lucide-react";
-import { createAgentRun } from "@/api/agent";
+import { createConfiguredModelAgentRun } from "@/api/agent";
 import type { AgentRunResp } from "@/types/agent";
 
 const navigationItems = [
@@ -266,17 +266,7 @@ function Composer() {
     setRunError(null);
     setRunResult(null);
     try {
-      const result = await createAgentRun({
-        input,
-        runtimeMode: "model_loop",
-        autoApprove: false,
-        budget: {
-          maxSteps: 8,
-          maxToolCalls: 1,
-          maxSeconds: 60,
-          maxCostCents: 0
-        }
-      });
+      const result = await createConfiguredModelAgentRun(input);
       setRunResult(result);
     } catch (error) {
       setRunError(error instanceof Error ? error.message : "提交失败");

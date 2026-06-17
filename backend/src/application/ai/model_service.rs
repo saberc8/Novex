@@ -722,6 +722,15 @@ impl ModelRuntimeService {
         &self,
         purpose: ModelRoutePurpose,
     ) -> Result<ModelRetryPolicy, AppError> {
+        self.retry_policy_for_purpose_with_route_id(purpose, None)
+            .await
+    }
+
+    pub async fn retry_policy_for_purpose_with_route_id(
+        &self,
+        purpose: ModelRoutePurpose,
+        route_id: Option<&str>,
+    ) -> Result<ModelRetryPolicy, AppError> {
         let row = sqlx::query_as::<_, ModelRouteRetryPolicyRow>(
             r#"
 SELECT
@@ -752,6 +761,7 @@ LEFT JOIN ai_model_deployment fallback_deployment
  AND fallback_deployment.status = 1
 WHERE r.tenant_id = $1
   AND r.route_purpose = $2
+  AND ($3::text IS NULL OR r.code = $3)
   AND r.status = 1
 ORDER BY r.priority ASC, r.id ASC
 LIMIT 1;
@@ -759,6 +769,7 @@ LIMIT 1;
         )
         .bind(self.tenant_id)
         .bind(purpose.as_str())
+        .bind(route_id)
         .fetch_optional(&self.db)
         .await?;
 
