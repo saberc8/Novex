@@ -15,6 +15,7 @@ use novex_model::{
     ModelRuntimeRoute, ModelRuntimeRouteSummary, ModelRuntimeSummary, ModelRuntimeTarget,
     ModelTokenUsage, ModelUsageCostInput,
 };
+use novex_tools::{parse_media_image_generation_response, MediaImageGenerationRequest};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sqlx::{FromRow, PgPool};
@@ -36,6 +37,7 @@ const MODEL_ALERT_DELIVERY_BATCH_LIMIT: i64 = 100;
 const MODEL_CHAT_TIMEOUT: Duration = Duration::from_secs(120);
 const MODEL_RERANK_TIMEOUT: Duration = Duration::from_secs(30);
 const MODEL_EMBEDDING_TIMEOUT: Duration = Duration::from_secs(30);
+const MODEL_MEDIA_IMAGE_TIMEOUT: Duration = Duration::from_secs(30);
 const DEFAULT_MODEL_CHAT_TEMPERATURE: f64 = 0.2;
 const MAX_MODEL_CHAT_TEMPERATURE: f64 = 1.0;
 const DEFAULT_MODEL_CHAT_MAX_TOKENS: u32 = 1024;
@@ -192,6 +194,14 @@ pub struct ModelChatResp {
     pub provider_attempts: Vec<ModelProviderAttempt>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_call_lease_id: Option<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelMediaImageGenerationResp {
+    pub provider_payload: Value,
+    pub asset_url: String,
+    pub provider_asset_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -1567,6 +1577,79 @@ ORDER BY r.priority ASC, r.id ASC;
                     "model": route.model(),
                     "latencyMs": u128_to_i64(latency_ms),
                     "scoreCount": scores.len(),
+                })
+            },
+        )
+        .await
+    }
+
+    pub async fn generate_media_image(
+        route: &ModelRuntimeRoute,
+        request: &MediaImageGenerationRequest,
+    ) -> Result<ModelMediaImageGenerationResp, AppError> {
+        let request_payload = request.to_provider_payload();
+        let client = reqwest::Client::builder()
+            .timeout(MODEL_MEDIA_IMAGE_TIMEOUT)
+            .build()
+            .map_err(|err| AppError::bad_request(format!("图片生成客户端初始化失败: {err}")))?;
+        let response = client
+            .post(route.endpoint())
+            .bearer_auth(route.api_key())
+            .header("x-api-key", route.api_key())
+            .json(&request_payload)
+            .send()
+            .await
+            .map_err(|err| AppError::bad_request(format!("图片生成请求失败: {err}")))?;
+        let status = response.status();
+        let provider_payload = response.json::<Value>().await.unwrap_or_else(|_| json!({}));
+        if !status.is_success() {
+            return Err(AppError::bad_request(format!(
+                "图片生成请求失败: HTTP {}",
+                status.as_u16()
+            )));
+        }
+        let Some(result) = parse_media_image_generation_response(&provider_payload) else {
+            return Err(AppError::bad_request("图片生成响应缺少资产 URL"));
+        };
+
+        Ok(ModelMediaImageGenerationResp {
+            provider_payload,
+            asset_url: result.asset_url,
+            provider_asset_id: result.provider_asset_id,
+        })
+    }
+
+    pub async fn generate_media_image_for_source(
+        &self,
+        route: &ModelRuntimeRoute,
+        request: &MediaImageGenerationRequest,
+        source: &str,
+    ) -> Result<ModelMediaImageGenerationResp, AppError> {
+        let request_payload = json!({
+            "promptCharCount": request.prompt.chars().count(),
+            "size": request.size.as_deref(),
+            "count": request.count,
+        });
+        self.execute_provider_call_with_lease(
+            MODEL_RUNTIME_SYSTEM_USER_ID,
+            route,
+            ModelRoutePurpose::MediaGeneration,
+            "media_image_generation",
+            source,
+            request_payload,
+            || async { Self::generate_media_image(route, request).await },
+            |response: &ModelMediaImageGenerationResp, latency_ms| {
+                json!({
+                    "routeId": route.route_id(),
+                    "provider": route.provider().as_str(),
+                    "model": route.model(),
+                    "latencyMs": u128_to_i64(latency_ms),
+                    "assetUrlPresent": !response.asset_url.trim().is_empty(),
+                    "providerAssetIdPresent": response
+                        .provider_asset_id
+                        .as_deref()
+                        .map(str::trim)
+                        .is_some_and(|provider_asset_id| !provider_asset_id.is_empty()),
                 })
             },
         )
@@ -5651,6 +5734,52 @@ mod tests {
     }
 
     #[test]
+    fn provider_call_lease_record_maps_media_provider_request() {
+        let route = draw_route();
+        let now =
+            NaiveDateTime::parse_from_str("2026-06-17 10:00:00", "%Y-%m-%d %H:%M:%S").unwrap();
+
+        let record = model_provider_call_lease_record_from_provider_request(
+            42,
+            99,
+            "worker-a",
+            &route,
+            ModelRoutePurpose::MediaGeneration,
+            "media_image_generation",
+            "ai.agent.media.image",
+            "primary",
+            json!({
+                "promptCharCount": 24,
+                "size": "1024x1024",
+                "count": 1,
+            }),
+            now,
+        );
+
+        assert_eq!(record.tenant_id, 42);
+        assert_eq!(record.run_id, None);
+        assert_eq!(record.route_code, "runtime.draw");
+        assert_eq!(record.route_purpose, "media_generation");
+        assert_eq!(record.provider_type, "right-code-draw");
+        assert_eq!(record.model_name.as_deref(), Some("right-code-draw-v1"));
+        assert_eq!(record.request_kind, "media_image_generation");
+        assert_eq!(record.source, "ai.agent.media.image");
+        assert_eq!(record.attempt_kind, "primary");
+        assert_eq!(
+            record.request_payload["requestKind"],
+            "media_image_generation"
+        );
+        assert_eq!(record.request_payload["promptCharCount"], 24);
+        assert_eq!(record.request_payload["size"], "1024x1024");
+        assert_eq!(record.request_payload["count"], 1);
+        assert!(!record.request_payload.to_string().contains("sk-fake"));
+        assert!(!record
+            .request_payload
+            .to_string()
+            .contains("training poster"));
+    }
+
+    #[test]
     fn provider_call_lease_source_contract_wraps_embedding_and_rerank_calls() {
         let model_source = include_str!("model_service.rs")
             .split("#[cfg(test)]")
@@ -5681,6 +5810,43 @@ mod tests {
         assert!(knowledge_source.contains(".rerank_documents_for_source("));
         assert!(!knowledge_source.contains("ModelRuntimeService::embed_texts(&route"));
         assert!(!knowledge_source.contains("ModelRuntimeService::rerank_documents(&route"));
+    }
+
+    #[test]
+    fn provider_call_lease_source_contract_wraps_media_generation_calls() {
+        let model_source = include_str!("model_service.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+        let media_method = model_source
+            .find("pub async fn generate_media_image_for_source")
+            .and_then(|start| {
+                model_source[start..]
+                    .find("async fn execute_provider_call_with_lease")
+                    .map(|end| &model_source[start..start + end])
+            })
+            .unwrap_or_default();
+        let agent_source = include_str!("agent_service.rs");
+        let media_tool = &agent_source[agent_source
+            .find("async fn execute_media_image_tool")
+            .unwrap()
+            ..agent_source
+                .find("async fn execute_feishu_message_tool")
+                .unwrap()];
+
+        assert!(model_source.contains("pub async fn generate_media_image("));
+        assert!(model_source.contains("pub async fn generate_media_image_for_source"));
+        assert!(media_method.contains("ModelRoutePurpose::MediaGeneration"));
+        assert!(media_method.contains("\"media_image_generation\""));
+        assert!(media_method.contains("\"promptCharCount\""));
+        assert!(media_method.contains("\"assetUrlPresent\""));
+        assert!(model_source.contains("begin_model_provider_call_lease(&self.db"));
+        assert!(model_source.contains("start_model_provider_call_lease_heartbeat"));
+        assert!(model_source.contains("complete_model_provider_call_lease(&self.db"));
+        assert!(media_tool.contains(".generate_media_image_for_source("));
+        assert!(!media_tool.contains("reqwest::Client::builder()"));
+        assert!(!media_tool.contains(".post(&endpoint)"));
+        assert!(!media_tool.contains(".bearer_auth(route.api_key())"));
     }
 
     #[test]
@@ -7526,6 +7692,22 @@ mod tests {
             "sk-fake-embedding-secret-ffff",
             vec![ModelRoutePurpose::Embedding],
             vec!["EMBEDDING_API_KEY".to_owned()],
+        )
+        .unwrap()
+    }
+
+    fn draw_route() -> ModelRuntimeRoute {
+        ModelRuntimeRoute::new(
+            "runtime.draw",
+            ModelRuntimeTarget::Draw,
+            ModelKind::MediaGeneration,
+            ModelProviderType::RightCodeDraw,
+            Some("right-code-draw-v1".to_owned()),
+            "https://draw.example.com/v1",
+            "https://draw.example.com/v1/images",
+            "sk-fake-draw-secret-ffff",
+            vec![ModelRoutePurpose::MediaGeneration],
+            vec!["DRAW_API_KEY".to_owned()],
         )
         .unwrap()
     }
