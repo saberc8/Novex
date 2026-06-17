@@ -183,6 +183,7 @@ struct ModelLoopProviderCompletion<T> {
     response: Option<T>,
     streamed_tool_call_output: Option<ParsedModelTurnOutput>,
     completion_reason: ModelLoopProviderCompletionReason,
+    provider_call_lease_id: Option<i64>,
     provider_response_id: Option<String>,
     provider_response_status: Option<String>,
 }
@@ -1200,6 +1201,7 @@ impl AgentService {
                 match model_call_result {
                     Ok(ModelLoopFutureAwait::Completed(completion)) => {
                         let completion_reason = completion.completion_reason;
+                        let provider_call_lease_id = completion.provider_call_lease_id;
                         let provider_response_id = completion.provider_response_id;
                         let provider_response_status = completion.provider_response_status;
                         streamed_tool_call_output = completion.streamed_tool_call_output;
@@ -1212,8 +1214,10 @@ impl AgentService {
                                 "Agent 模型输出解析失败: streamed tool-call early stop missing parsed output",
                             ));
                         }
-                        let _stream_provider_response_metadata_present =
-                            provider_response_id.is_some() || provider_response_status.is_some();
+                        let _stream_provider_response_metadata_present = provider_call_lease_id
+                            .is_some()
+                            || provider_response_id.is_some()
+                            || provider_response_status.is_some();
                         model_response = completion.response;
                         break;
                     }
@@ -3294,6 +3298,7 @@ struct ModelLoopProviderStreamState {
     tool_call_detected: bool,
     tool_call_parser_disabled: bool,
     detected_tool_call_output: Option<ParsedModelTurnOutput>,
+    provider_call_lease_id: Option<i64>,
     provider_response_id: Option<String>,
     provider_response_status: Option<String>,
 }
@@ -3305,6 +3310,7 @@ impl ModelLoopProviderStreamState {
             tool_call_detected: false,
             tool_call_parser_disabled: false,
             detected_tool_call_output: None,
+            provider_call_lease_id: None,
             provider_response_id: None,
             provider_response_status: None,
         }
@@ -3336,6 +3342,9 @@ impl ModelLoopProviderStreamState {
     }
 
     fn observe_provider_response_metadata(&mut self, event: &ModelProviderStreamEvent) {
+        if let Some(provider_call_lease_id) = event.provider_call_lease_id {
+            self.provider_call_lease_id = Some(provider_call_lease_id);
+        }
         if let Some(provider_response_id) = event.provider_response_id.as_ref() {
             self.provider_response_id = Some(provider_response_id.clone());
         }
@@ -3346,6 +3355,10 @@ impl ModelLoopProviderStreamState {
 
     fn provider_response_id(&self) -> Option<String> {
         self.provider_response_id.clone()
+    }
+
+    fn provider_call_lease_id(&self) -> Option<i64> {
+        self.provider_call_lease_id
     }
 
     fn provider_response_status(&self) -> Option<String> {
@@ -3362,6 +3375,7 @@ fn model_loop_streamed_tool_call_completion<T>(
             response: None,
             streamed_tool_call_output: Some(streamed_tool_call_output),
             completion_reason: ModelLoopProviderCompletionReason::StreamedToolCallDetected,
+            provider_call_lease_id: stream_state.provider_call_lease_id(),
             provider_response_id: stream_state.provider_response_id(),
             provider_response_status: stream_state.provider_response_status(),
         })
@@ -3413,6 +3427,7 @@ where
                         response: Some(response),
                         streamed_tool_call_output: stream_state.detected_tool_call_output(),
                         completion_reason: ModelLoopProviderCompletionReason::ProviderCompleted,
+                        provider_call_lease_id: stream_state.provider_call_lease_id(),
                         provider_response_id: stream_state.provider_response_id(),
                         provider_response_status: stream_state.provider_response_status(),
                     })
@@ -4970,13 +4985,19 @@ fn model_delta_event_payload_from_stream_event(event: &ModelProviderStreamEvent)
         usage: ModelChatUsage::default(),
         cost_cents: None,
         provider_attempts: vec![],
-        provider_call_lease_id: None,
+        provider_call_lease_id: event.provider_call_lease_id,
         provider_response_id: None,
         provider_response_status: None,
         provider_delta_chunks: vec![event.chunk.clone()],
     };
     let mut payload = model_delta_event_payload(&response, &event.chunk);
     if let Some(item) = payload.get_mut("item").and_then(Value::as_object_mut) {
+        if let Some(provider_call_lease_id) = event.provider_call_lease_id {
+            item.insert(
+                "providerCallLeaseId".to_owned(),
+                json!(provider_call_lease_id),
+            );
+        }
         if let Some(provider_response_id) = event.provider_response_id.as_deref() {
             item.insert("providerResponseId".to_owned(), json!(provider_response_id));
         }
@@ -5025,6 +5046,12 @@ fn model_stream_tool_call_event_payload(
         }
     });
     if let Some(item) = payload.get_mut("item").and_then(Value::as_object_mut) {
+        if let Some(provider_call_lease_id) = event.provider_call_lease_id {
+            item.insert(
+                "providerCallLeaseId".to_owned(),
+                json!(provider_call_lease_id),
+            );
+        }
         if let Some(provider_response_id) = event.provider_response_id.as_deref() {
             item.insert("providerResponseId".to_owned(), json!(provider_response_id));
         }
@@ -7022,6 +7049,7 @@ mod tests {
             route_id: "runtime.llm.code_agent".to_owned(),
             provider: "openai-compatible".to_owned(),
             model: Some("gpt-compatible".to_owned()),
+            provider_call_lease_id: None,
             provider_response_id: Some("resp_stream_1".to_owned()),
             provider_response_status: Some("in_progress".to_owned()),
             chunk: ModelProviderStreamChunk {
@@ -7039,12 +7067,35 @@ mod tests {
     }
 
     #[test]
+    fn provider_stream_lease_id_is_added_to_model_delta_payload() {
+        let event = ModelProviderStreamEvent {
+            route_id: "runtime.llm.code_agent".to_owned(),
+            provider: "openai-compatible".to_owned(),
+            model: Some("gpt-compatible".to_owned()),
+            provider_call_lease_id: Some(4242),
+            provider_response_id: Some("resp_stream_1".to_owned()),
+            provider_response_status: Some("in_progress".to_owned()),
+            chunk: ModelProviderStreamChunk {
+                index: 3,
+                content: " partial".to_owned(),
+                provider_event: Some("response.output_text.delta".to_owned()),
+            },
+        };
+
+        let payload = model_delta_event_payload_from_stream_event(&event);
+
+        assert_eq!(payload["item"]["providerCallLeaseId"], 4242);
+        assert_eq!(payload["item"]["providerResponseId"], "resp_stream_1");
+    }
+
+    #[test]
     fn provider_stream_tool_call_state_detects_complete_json_across_chunks() {
         let mut state = ModelLoopProviderStreamState::new();
         let first = ModelProviderStreamEvent {
             route_id: "runtime.llm.code_agent".to_owned(),
             provider: "openai-compatible".to_owned(),
             model: Some("gpt-compatible".to_owned()),
+            provider_call_lease_id: None,
             provider_response_id: None,
             provider_response_status: None,
             chunk: ModelProviderStreamChunk {
@@ -7057,6 +7108,7 @@ mod tests {
             route_id: "runtime.llm.code_agent".to_owned(),
             provider: "openai-compatible".to_owned(),
             model: Some("gpt-compatible".to_owned()),
+            provider_call_lease_id: None,
             provider_response_id: None,
             provider_response_status: None,
             chunk: ModelProviderStreamChunk {
@@ -7095,6 +7147,7 @@ mod tests {
             route_id: "runtime.llm.code_agent".to_owned(),
             provider: "openai-compatible".to_owned(),
             model: Some("gpt-compatible".to_owned()),
+            provider_call_lease_id: None,
             provider_response_id: Some("resp_stream_1".to_owned()),
             provider_response_status: Some("in_progress".to_owned()),
             chunk: ModelProviderStreamChunk {
@@ -7107,6 +7160,7 @@ mod tests {
             route_id: "runtime.llm.code_agent".to_owned(),
             provider: "openai-compatible".to_owned(),
             model: Some("gpt-compatible".to_owned()),
+            provider_call_lease_id: None,
             provider_response_id: Some("resp_stream_1".to_owned()),
             provider_response_status: Some("in_progress".to_owned()),
             chunk: ModelProviderStreamChunk {
@@ -7133,6 +7187,7 @@ mod tests {
             route_id: "runtime.llm.code_agent".to_owned(),
             provider: "openai-compatible".to_owned(),
             model: Some("gpt-compatible".to_owned()),
+            provider_call_lease_id: None,
             provider_response_id: None,
             provider_response_status: None,
             chunk: ModelProviderStreamChunk {
@@ -7145,6 +7200,7 @@ mod tests {
             route_id: "runtime.llm.code_agent".to_owned(),
             provider: "openai-compatible".to_owned(),
             model: Some("gpt-compatible".to_owned()),
+            provider_call_lease_id: None,
             provider_response_id: None,
             provider_response_status: None,
             chunk: ModelProviderStreamChunk {
@@ -7267,6 +7323,7 @@ mod tests {
             route_id: "runtime.llm.code_agent".to_owned(),
             provider: "openai-compatible".to_owned(),
             model: Some("gpt-compatible".to_owned()),
+            provider_call_lease_id: None,
             provider_response_id: Some("resp_stream_1".to_owned()),
             provider_response_status: Some("in_progress".to_owned()),
             chunk: ModelProviderStreamChunk {
@@ -7279,6 +7336,7 @@ mod tests {
             route_id: "runtime.llm.code_agent".to_owned(),
             provider: "openai-compatible".to_owned(),
             model: Some("gpt-compatible".to_owned()),
+            provider_call_lease_id: None,
             provider_response_id: Some("resp_stream_1".to_owned()),
             provider_response_status: Some("in_progress".to_owned()),
             chunk: ModelProviderStreamChunk {

@@ -725,6 +725,7 @@ fn studio_mind_map_chat_command(
         max_tokens: Some(3200),
         request_metadata: None,
         provider_call_context: None,
+        provider_call_lease_id: None,
         provider_stream_sender: None,
     }
 }
