@@ -47,7 +47,8 @@ use tokio::sync::watch;
 
 use crate::{
     application::ai::model_service::{
-        ModelChatCommand, ModelChatMessage, ModelChatResp, ModelRetryPolicy, ModelRuntimeService,
+        ModelChatCommand, ModelChatCompactionMetadata, ModelChatMessage, ModelChatRequestMetadata,
+        ModelChatResp, ModelRetryPolicy, ModelRuntimeService,
     },
     application::system::{ensure_max_chars, format_datetime},
     infrastructure::persistence::{
@@ -1796,6 +1797,26 @@ impl AgentService {
                                     let remote_payload =
                                         serde_json::to_value(remote_request).unwrap_or(Value::Null);
                                     object.insert("remoteCompaction".to_owned(), remote_payload);
+                                    if let Some(model_request_metadata) =
+                                        model_chat_request_metadata_for_remote_compaction(Some(
+                                            remote_request,
+                                        ))
+                                    {
+                                        object.insert(
+                                            "modelRequestMetadata".to_owned(),
+                                            serde_json::to_value(model_request_metadata)
+                                                .unwrap_or(Value::Null),
+                                        );
+                                        object.insert(
+                                            "compactionTransport".to_owned(),
+                                            json!("provider_metadata_envelope"),
+                                        );
+                                    }
+                                } else {
+                                    object.insert(
+                                        "compactionTransport".to_owned(),
+                                        json!("prompt_adapter"),
+                                    );
                                 }
                                 if let Some(model_payload) = &compaction_outcome.model_payload {
                                     object
@@ -1919,6 +1940,8 @@ impl AgentService {
             tool_codes,
             remote_compaction_request,
         );
+        let request_metadata =
+            model_chat_request_metadata_for_remote_compaction(remote_compaction_request);
         let started = Instant::now();
         let result = await_model_loop_future_or_cancelled(
             cancel_token,
@@ -1930,6 +1953,7 @@ impl AgentService {
                     messages,
                     temperature: Some(0.1),
                     max_tokens: Some(512),
+                    request_metadata,
                     ..ModelChatCommand::default()
                 },
             ),
@@ -4870,6 +4894,34 @@ fn build_model_loop_remote_context_compaction_messages(
     ]
 }
 
+fn model_chat_request_metadata_for_remote_compaction(
+    remote_compaction_request: Option<&AgentRemoteCompactionRequest>,
+) -> Option<ModelChatRequestMetadata> {
+    let request = remote_compaction_request?;
+    Some(ModelChatRequestMetadata::remote_compaction(
+        ModelChatCompactionMetadata {
+            implementation: serialized_compaction_metadata_value(request.implementation),
+            trigger: serialized_compaction_metadata_value(request.trigger),
+            reason: serialized_compaction_metadata_value(request.reason),
+            phase: serialized_compaction_metadata_value(request.phase),
+            strategy: "memento".to_owned(),
+            window_id: request.window_id,
+            input_history_count: request.input_history.len(),
+            retained_history_count: request.retained_history.len(),
+            compacted_item_count: request.compacted_item_count,
+            retained_item_count: request.retained_item_count,
+            tool_codes: request.tool_codes.clone(),
+        },
+    ))
+}
+
+fn serialized_compaction_metadata_value<T: Serialize>(value: T) -> String {
+    serde_json::to_value(value)
+        .ok()
+        .and_then(|value| value.as_str().map(str::to_owned))
+        .unwrap_or_else(|| "unknown".to_owned())
+}
+
 fn remote_compaction_prompt_metadata(request: &AgentRemoteCompactionRequest) -> Value {
     json!({
         "implementation": request.implementation,
@@ -6472,6 +6524,28 @@ mod tests {
     }
 
     #[test]
+    fn remote_compaction_maps_to_model_request_metadata() {
+        let request = test_remote_compaction_request();
+
+        let metadata = model_chat_request_metadata_for_remote_compaction(Some(&request)).unwrap();
+        let compaction = metadata.compaction.as_ref().unwrap();
+
+        assert_eq!(
+            metadata.request_kind,
+            crate::application::ai::model_service::ModelChatRequestKind::Compaction
+        );
+        assert_eq!(compaction.implementation, "responses_compaction_v2");
+        assert_eq!(compaction.trigger, "auto");
+        assert_eq!(compaction.reason, "observation_threshold");
+        assert_eq!(compaction.phase, "model_loop_follow_up");
+        assert_eq!(compaction.strategy, "memento");
+        assert_eq!(compaction.window_id, 1);
+        assert_eq!(compaction.input_history_count, 2);
+        assert_eq!(compaction.retained_history_count, 1);
+        assert_eq!(compaction.tool_codes, vec!["rag.search"]);
+    }
+
+    #[test]
     fn model_loop_model_compaction_response_accepts_json_or_plain_text() {
         assert_eq!(
             model_loop_context_compaction_summary_from_response(r#"{"summary":"short policy"}"#),
@@ -6510,6 +6584,23 @@ mod tests {
         assert!(source.contains("remote_compaction_request"));
         assert!(source.contains("\"remoteCompaction\""));
         assert!(source.contains("\"compactionImplementation\""));
+        assert!(source.contains("\"modelRequestMetadata\""));
+        assert!(source.contains("\"compactionTransport\""));
+    }
+
+    #[test]
+    fn remote_compaction_agent_service_passes_provider_metadata_to_model_call() {
+        let source = include_str!("agent_service.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+        let compaction = &source[source
+            .find("async fn model_loop_context_compaction_outcome")
+            .unwrap()
+            ..source.find("pub async fn list_runs").unwrap()];
+
+        assert!(compaction.contains("request_metadata"));
+        assert!(compaction.contains("model_chat_request_metadata_for_remote_compaction"));
     }
 
     #[test]

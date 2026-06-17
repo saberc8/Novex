@@ -12,7 +12,7 @@
 
 ### Task 1: Model Runtime Transport Metadata
 
-Status: Pending.
+Status: Completed.
 
 **Files:**
 - Modify: `backend/src/application/ai/model_service.rs`
@@ -23,7 +23,7 @@ Add tests for:
 
 - ordinary chat payload omits `metadata`;
 - OpenAI-compatible compaction payload includes `metadata.request_kind = compaction`;
-- metadata contains `compaction.implementation = responses_compaction_v2`;
+- metadata contains `compaction_implementation = responses_compaction_v2`;
 - DeepSeek payload omits provider metadata even when command carries compaction metadata.
 
 **Step 2: Verify RED**
@@ -66,7 +66,7 @@ Expected: PASS.
 
 ### Task 2: Agent Compaction Adapter Wiring
 
-Status: Pending.
+Status: Completed.
 
 **Files:**
 - Modify: `backend/src/application/ai/agent_service.rs`
@@ -106,7 +106,7 @@ Expected: PASS.
 
 ### Task 3: Documentation And Verification
 
-Status: Pending.
+Status: Completed.
 
 **Files:**
 - Modify: `docs/plans/2026-06-16-codex-migration-matrix.md`

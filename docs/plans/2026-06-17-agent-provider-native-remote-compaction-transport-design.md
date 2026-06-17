@@ -46,21 +46,22 @@ Add backend model-service types:
 {
   "metadata": {
     "request_kind": "compaction",
-    "compaction": {
-      "implementation": "responses_compaction_v2",
-      "trigger": "auto",
-      "reason": "observation_threshold",
-      "phase": "model_loop_follow_up",
-      "strategy": "memento",
-      "window_id": "1",
-      "input_history_count": "2",
-      "retained_history_count": "1"
-    }
+    "compaction_implementation": "responses_compaction_v2",
+    "compaction_trigger": "auto",
+    "compaction_reason": "observation_threshold",
+    "compaction_phase": "model_loop_follow_up",
+    "compaction_strategy": "memento",
+    "compaction_window_id": "1",
+    "input_history_count": "2",
+    "retained_history_count": "1",
+    "compacted_item_count": "2",
+    "retained_item_count": "1",
+    "tool_codes": "rag.search"
   }
 }
 ```
 
-The values are strings to stay compatible with OpenAI-style metadata constraints.
+The provider metadata values are strings and intentionally flat to stay compatible with OpenAI-style metadata constraints. The richer `modelRequestMetadata` event payload remains structured JSON for trace and eval consumers.
 
 ## AgentService Adapter
 
@@ -69,7 +70,7 @@ When `model_loop_context_compaction_outcome(...)` receives an `AgentRemoteCompac
 The compaction event payload additionally records:
 
 - `modelRequestMetadata`
-- `compactionTransport = provider_metadata`
+- `compactionTransport = provider_metadata_envelope`
 
 When no remote request exists, the call remains a prompt adapter without transport metadata.
 
