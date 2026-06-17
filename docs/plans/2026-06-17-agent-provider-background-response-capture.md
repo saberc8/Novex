@@ -276,7 +276,7 @@ Expected: all pass with exit code 0.
 - Workspace: `cargo test --workspace --offline` passed with backend `760` tests.
 - Diff hygiene: `git diff --check` passed.
 
-- [ ] **Step 3: Commit, merge, clean**
+- [x] **Step 3: Commit, merge, clean**
 
 ```bash
 git add backend/src/application/ai/model_service.rs docs/plans/2026-06-16-codex-migration-matrix.md docs/plans/2026-06-17-agent-provider-background-response-capture-design.md docs/plans/2026-06-17-agent-provider-background-response-capture.md
@@ -291,3 +291,11 @@ cd /Users/yusenlin/Avalon/freedom/github/zm-agent/Novex/.worktrees/enterprise-ag
 cargo clean
 git merge --ff-only main
 ```
+
+**Evidence:**
+- Planning commit: `23aa3ca docs: plan provider background response capture`.
+- Feature commit: `12e751d feat: capture provider background response metadata`.
+- Main merge: `1c1f118 merge: enterprise agent foundation provider background response capture`.
+- Main verification: `cargo fmt -- --check`, `cargo test --workspace --offline`, and `git diff --check` passed.
+- Clean: `cargo clean` removed `3.3GiB` in main and `6.7GiB` in the feature worktree.
+- Alignment: feature worktree fast-forwarded to main after the merge.
