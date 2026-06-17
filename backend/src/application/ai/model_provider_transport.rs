@@ -1,12 +1,12 @@
 use std::time::Duration;
 
-use novex_model::{normalize_model_provider_usage, ModelTokenUsage};
+use novex_model::{
+    normalize_model_provider_usage, ModelEmbeddingVector, ModelMediaImageGenerationResp,
+    ModelProviderStreamChunk, ModelRerankScore, ModelTokenUsage,
+};
 use novex_tools::{parse_media_image_generation_response, MediaImageGenerationRequest};
 use serde_json::{json, Value};
 
-use super::model_service::{
-    ModelEmbeddingVector, ModelMediaImageGenerationResp, ModelProviderStreamChunk, ModelRerankScore,
-};
 use crate::shared::error::AppError;
 
 pub(super) struct ModelProviderHttpRequest<'a> {

@@ -14,6 +14,9 @@ use novex_model::{
     ModelRoutePurpose, ModelRuntimeConfig, ModelRuntimeRoute, ModelRuntimeRouteSummary,
     ModelRuntimeSummary, ModelRuntimeTarget, ModelTokenUsage, ModelUsageCostInput,
 };
+pub use novex_model::{
+    ModelEmbeddingVector, ModelMediaImageGenerationResp, ModelProviderStreamChunk, ModelRerankScore,
+};
 use novex_tools::MediaImageGenerationRequest;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -85,15 +88,6 @@ pub struct ModelRuntimeService {
 pub struct ModelHealthCheckCommand {
     #[serde(default)]
     pub target: Option<String>,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ModelProviderStreamChunk {
-    pub index: usize,
-    pub content: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub provider_event: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -289,14 +283,6 @@ pub struct ModelChatResp {
     pub provider_delta_chunks: Vec<ModelProviderStreamChunk>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ModelMediaImageGenerationResp {
-    pub provider_payload: Value,
-    pub asset_url: String,
-    pub provider_asset_id: Option<String>,
-}
-
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelProviderAttempt {
@@ -369,18 +355,6 @@ pub struct ModelHealthCheckResult {
     pub message: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub detail: Option<Value>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct ModelRerankScore {
-    pub index: usize,
-    pub score: f32,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct ModelEmbeddingVector {
-    pub index: usize,
-    pub vector: Vec<f32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -6399,6 +6373,34 @@ mod tests {
         assert!(!media_path.contains(".header(\"x-api-key\", route.api_key())"));
         assert!(!media_path.contains("parse_media_image_generation_response"));
         assert!(!service_source.contains("parse_media_image_generation_response"));
+    }
+
+    #[test]
+    fn model_provider_transport_types_live_in_shared_model_crate() {
+        let service_source = include_str!("model_service.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+        let transport_source = include_str!("model_provider_transport.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+        let model_source = include_str!("../../../../crates/novex-model/src/lib.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+
+        assert!(model_source.contains("pub struct ModelProviderStreamChunk"));
+        assert!(model_source.contains("pub struct ModelEmbeddingVector"));
+        assert!(model_source.contains("pub struct ModelRerankScore"));
+        assert!(model_source.contains("pub struct ModelMediaImageGenerationResp"));
+        assert!(service_source.contains("pub use novex_model::{"));
+        assert!(!service_source.contains("pub struct ModelProviderStreamChunk"));
+        assert!(!service_source.contains("pub struct ModelEmbeddingVector"));
+        assert!(!service_source.contains("pub struct ModelRerankScore"));
+        assert!(!service_source.contains("pub struct ModelMediaImageGenerationResp"));
+        assert!(transport_source.contains("use novex_model::{"));
+        assert!(!transport_source.contains("use super::model_service::{"));
     }
 
     #[test]
