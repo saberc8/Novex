@@ -45,6 +45,8 @@ const MAX_MODEL_CHAT_FILE_CONTEXTS: usize = 3;
 const MAX_MODEL_CHAT_FILE_CONTEXT_CHARS: usize = 20_000;
 const MAX_MODEL_RUNTIME_RETRIES: usize = 3;
 const MODEL_PROVIDER_CALL_LEASE_SECONDS: i64 = 150;
+const MODEL_PROVIDER_CALL_LEASE_LIST_DEFAULT_LIMIT: i64 = 50;
+const MODEL_PROVIDER_CALL_LEASE_LIST_MAX_LIMIT: i64 = 200;
 const MODEL_RUNTIME_SYSTEM_USER_ID: i64 = 0;
 const DEFAULT_TENANT_ID: i64 = 1;
 const MODEL_CHAT_HISTORY_LIMIT: i64 = 30;
@@ -350,6 +352,52 @@ pub struct ModelRouteCircuitBreakerResp {
     pub remaining_ms: i64,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelProviderCallLeaseQuery {
+    #[serde(default)]
+    pub status: Option<String>,
+    #[serde(default)]
+    pub run_id: Option<i64>,
+    #[serde(default)]
+    pub limit: Option<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelProviderCallLeaseResp {
+    pub id: i64,
+    pub run_id: Option<i64>,
+    pub route_code: String,
+    pub route_purpose: String,
+    pub provider_type: String,
+    pub model_name: Option<String>,
+    pub request_kind: String,
+    pub source: String,
+    pub attempt_kind: String,
+    pub status: String,
+    pub lease_owner: String,
+    pub lease_expires_at: String,
+    pub heartbeat_at: String,
+    pub started_at: String,
+    pub completed_at: Option<String>,
+    pub latency_ms: Option<i64>,
+    pub prompt_tokens: i64,
+    pub completion_tokens: i64,
+    pub total_tokens: i64,
+    pub cost_cents: Option<f64>,
+    pub error_kind: Option<String>,
+    pub http_status: Option<i32>,
+    pub error_message: Option<String>,
+    pub is_expired: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelProviderCallLeaseSweepResp {
+    pub expired_count: u64,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelOpsUsageSummaryResp {
@@ -521,6 +569,44 @@ struct ModelRouteCircuitBreakerControlRow {
     pub open_reason: String,
     pub last_error_kind: Option<String>,
     pub last_http_status: Option<i32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct NormalizedProviderCallLeaseQuery {
+    status: Option<String>,
+    run_id: Option<i64>,
+    limit: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, FromRow)]
+struct ModelProviderCallLeaseControlRow {
+    pub id: i64,
+    pub run_id: Option<i64>,
+    pub route_code: String,
+    pub route_purpose: String,
+    pub provider_type: String,
+    pub model_name: Option<String>,
+    pub request_kind: String,
+    pub source: String,
+    pub attempt_kind: String,
+    pub status: String,
+    pub lease_owner: String,
+    pub lease_expires_at: NaiveDateTime,
+    pub heartbeat_at: NaiveDateTime,
+    pub started_at: NaiveDateTime,
+    pub completed_at: Option<NaiveDateTime>,
+    pub latency_ms: Option<i64>,
+    pub prompt_tokens: i64,
+    pub completion_tokens: i64,
+    pub total_tokens: i64,
+    pub cost_cents: Option<f64>,
+    pub error_kind: Option<String>,
+    pub http_status: Option<i32>,
+    pub error_message: Option<String>,
+    #[sqlx(default)]
+    pub request_payload: Value,
+    #[sqlx(default)]
+    pub response_payload: Value,
 }
 
 #[derive(Debug, Clone, PartialEq, FromRow)]
@@ -912,6 +998,99 @@ WHERE tenant_id = $1
         model_circuit_breaker_clear(route_id);
 
         Ok(())
+    }
+
+    pub async fn list_provider_call_leases(
+        &self,
+        query: ModelProviderCallLeaseQuery,
+    ) -> Result<Vec<ModelProviderCallLeaseResp>, AppError> {
+        let query = normalize_provider_call_lease_query(query)?;
+        let rows = sqlx::query_as::<_, ModelProviderCallLeaseControlRow>(
+            r#"
+SELECT
+    id,
+    run_id,
+    route_code,
+    route_purpose,
+    provider_type,
+    model_name,
+    request_kind,
+    source,
+    attempt_kind,
+    status,
+    lease_owner,
+    lease_expires_at,
+    heartbeat_at,
+    started_at,
+    completed_at,
+    latency_ms,
+    prompt_tokens,
+    completion_tokens,
+    total_tokens,
+    cost_cents::float8 AS cost_cents,
+    error_kind,
+    http_status,
+    error_message
+FROM ai_model_provider_call_lease
+WHERE tenant_id = $1
+  AND ($2::text IS NULL OR status = $2)
+  AND ($3::bigint IS NULL OR run_id = $3)
+ORDER BY started_at DESC, id DESC
+LIMIT $4;
+"#,
+        )
+        .bind(self.tenant_id)
+        .bind(&query.status)
+        .bind(query.run_id)
+        .bind(query.limit)
+        .fetch_all(&self.db)
+        .await?;
+        let now = Utc::now().naive_utc();
+
+        Ok(rows
+            .into_iter()
+            .map(|row| model_provider_call_lease_response_from_row(row, now))
+            .collect())
+    }
+
+    pub async fn expire_stale_provider_call_leases(
+        &self,
+        user_id: i64,
+    ) -> Result<ModelProviderCallLeaseSweepResp, AppError> {
+        let now = Utc::now().naive_utc();
+        let expired_ids = sqlx::query_scalar::<_, i64>(
+            r#"
+UPDATE ai_model_provider_call_lease
+SET status = 'expired',
+    completed_at = $2,
+    latency_ms = COALESCE(
+        latency_ms,
+        GREATEST(EXTRACT(EPOCH FROM ($2 - started_at)) * 1000, 0)::bigint
+    ),
+    error_kind = COALESCE(error_kind, 'lease_expired'),
+    error_message = COALESCE(error_message, 'provider call lease expired'),
+    response_payload = jsonb_build_object(
+        'status', 'expired',
+        'reason', 'lease_expired',
+        'expiredAt', to_char($2, 'YYYY-MM-DD"T"HH24:MI:SS')
+    ),
+    update_user = $3,
+    update_time = $2
+WHERE tenant_id = $1
+  AND lease_expires_at < $2
+  AND status = 'running'
+RETURNING id;
+"#,
+        )
+        .bind(self.tenant_id)
+        .bind(now)
+        .bind(user_id)
+        .fetch_all(&self.db)
+        .await?;
+
+        Ok(ModelProviderCallLeaseSweepResp {
+            expired_count: expired_ids.len() as u64,
+        })
     }
 
     pub async fn model_ops_summary(&self) -> Result<ModelOpsSummaryResp, AppError> {
@@ -3033,6 +3212,74 @@ WHERE id = $1;
     Ok(())
 }
 
+fn normalize_provider_call_lease_query(
+    query: ModelProviderCallLeaseQuery,
+) -> Result<NormalizedProviderCallLeaseQuery, AppError> {
+    let status = query
+        .status
+        .map(|status| status.trim().to_ascii_lowercase())
+        .filter(|status| !status.is_empty());
+    if let Some(status) = status.as_deref() {
+        if !model_provider_call_lease_status_is_filterable(status) {
+            return Err(AppError::bad_request("模型调用租约状态不支持"));
+        }
+    }
+    if matches!(query.run_id, Some(run_id) if run_id <= 0) {
+        return Err(AppError::bad_request("运行 ID 不合法"));
+    }
+    let limit = query
+        .limit
+        .unwrap_or(MODEL_PROVIDER_CALL_LEASE_LIST_DEFAULT_LIMIT)
+        .clamp(1, MODEL_PROVIDER_CALL_LEASE_LIST_MAX_LIMIT);
+
+    Ok(NormalizedProviderCallLeaseQuery {
+        status,
+        run_id: query.run_id,
+        limit,
+    })
+}
+
+fn model_provider_call_lease_status_is_filterable(status: &str) -> bool {
+    matches!(
+        status,
+        "running" | "succeeded" | "failed" | "cancelled" | "expired"
+    )
+}
+
+fn model_provider_call_lease_response_from_row(
+    row: ModelProviderCallLeaseControlRow,
+    now: NaiveDateTime,
+) -> ModelProviderCallLeaseResp {
+    let is_expired = row.status == "running" && row.lease_expires_at < now;
+
+    ModelProviderCallLeaseResp {
+        id: row.id,
+        run_id: row.run_id,
+        route_code: row.route_code,
+        route_purpose: row.route_purpose,
+        provider_type: row.provider_type,
+        model_name: row.model_name,
+        request_kind: row.request_kind,
+        source: row.source,
+        attempt_kind: row.attempt_kind,
+        status: row.status,
+        lease_owner: row.lease_owner,
+        lease_expires_at: format_datetime(row.lease_expires_at),
+        heartbeat_at: format_datetime(row.heartbeat_at),
+        started_at: format_datetime(row.started_at),
+        completed_at: row.completed_at.map(format_datetime),
+        latency_ms: row.latency_ms,
+        prompt_tokens: row.prompt_tokens,
+        completion_tokens: row.completion_tokens,
+        total_tokens: row.total_tokens,
+        cost_cents: row.cost_cents,
+        error_kind: row.error_kind,
+        http_status: row.http_status,
+        error_message: row.error_message,
+        is_expired,
+    }
+}
+
 fn model_provider_attempt_succeeded(
     attempt_kind: &str,
     route: &ModelRuntimeRoute,
@@ -4994,6 +5241,111 @@ mod tests {
         assert!(source.contains("status = $2"));
         assert!(source.contains("request_payload"));
         assert!(source.contains("response_payload"));
+    }
+
+    #[test]
+    fn provider_call_lease_controls_query_normalizes_status_run_and_limit() {
+        let query = normalize_provider_call_lease_query(ModelProviderCallLeaseQuery {
+            status: Some(" RUNNING ".to_owned()),
+            run_id: Some(88),
+            limit: Some(999),
+        })
+        .unwrap();
+
+        assert_eq!(query.status.as_deref(), Some("running"));
+        assert_eq!(query.run_id, Some(88));
+        assert_eq!(query.limit, MODEL_PROVIDER_CALL_LEASE_LIST_MAX_LIMIT);
+    }
+
+    #[test]
+    fn provider_call_lease_controls_query_rejects_unknown_status() {
+        let err = normalize_provider_call_lease_query(ModelProviderCallLeaseQuery {
+            status: Some("unknown".to_owned()),
+            run_id: None,
+            limit: Some(10),
+        })
+        .unwrap_err();
+
+        assert!(matches!(err, AppError::BadRequest(_)));
+    }
+
+    #[test]
+    fn provider_call_lease_controls_response_omits_payload_content() {
+        let now =
+            NaiveDateTime::parse_from_str("2026-06-17 10:01:00", "%Y-%m-%d %H:%M:%S").unwrap();
+        let row = ModelProviderCallLeaseControlRow {
+            id: 123,
+            run_id: Some(88),
+            route_code: "tenant42.code_agent".to_owned(),
+            route_purpose: "code_agent".to_owned(),
+            provider_type: "openai-compatible".to_owned(),
+            model_name: Some("gpt-compatible".to_owned()),
+            request_kind: "model_call".to_owned(),
+            source: "agent.model_loop".to_owned(),
+            attempt_kind: "primary".to_owned(),
+            status: "running".to_owned(),
+            lease_owner: "novex:test".to_owned(),
+            lease_expires_at: NaiveDateTime::parse_from_str(
+                "2026-06-17 10:00:30",
+                "%Y-%m-%d %H:%M:%S",
+            )
+            .unwrap(),
+            heartbeat_at: NaiveDateTime::parse_from_str("2026-06-17 10:00:10", "%Y-%m-%d %H:%M:%S")
+                .unwrap(),
+            started_at: NaiveDateTime::parse_from_str("2026-06-17 10:00:00", "%Y-%m-%d %H:%M:%S")
+                .unwrap(),
+            completed_at: None,
+            latency_ms: None,
+            prompt_tokens: 0,
+            completion_tokens: 0,
+            total_tokens: 0,
+            cost_cents: None,
+            error_kind: None,
+            http_status: None,
+            error_message: None,
+            request_payload: json!({"prompt": "sensitive prompt"}),
+            response_payload: json!({"answer": "sensitive answer"}),
+        };
+
+        let resp = model_provider_call_lease_response_from_row(row, now);
+        let serialized = serde_json::to_string(&resp).unwrap();
+
+        assert_eq!(resp.id, 123);
+        assert_eq!(resp.run_id, Some(88));
+        assert_eq!(resp.status, "running");
+        assert!(resp.is_expired);
+        assert!(!serialized.contains("sensitive prompt"));
+        assert!(!serialized.contains("sensitive answer"));
+    }
+
+    #[test]
+    fn provider_call_lease_controls_source_contract_lists_tenant_rows() {
+        let source = include_str!("model_service.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+
+        assert!(source.contains("pub async fn list_provider_call_leases"));
+        assert!(source.contains("FROM ai_model_provider_call_lease"));
+        assert!(source.contains("WHERE tenant_id = $1"));
+        assert!(source.contains("ORDER BY started_at DESC"));
+        assert!(source.contains("normalize_provider_call_lease_query"));
+    }
+
+    #[test]
+    fn provider_call_lease_controls_source_contract_expires_stale_running_rows() {
+        let source = include_str!("model_service.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+
+        assert!(source.contains("pub async fn expire_stale_provider_call_leases"));
+        assert!(source.contains("UPDATE ai_model_provider_call_lease"));
+        assert!(source.contains("status = 'expired'"));
+        assert!(source.contains("status = 'running'"));
+        assert!(source.contains("lease_expires_at < $2"));
+        assert!(source.contains("update_user = $3"));
+        assert!(source.contains("RETURNING id"));
     }
 
     #[test]

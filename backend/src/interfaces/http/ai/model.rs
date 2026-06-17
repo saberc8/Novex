@@ -1,5 +1,5 @@
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     routing::{delete, get, post},
     Json, Router,
 };
@@ -7,7 +7,8 @@ use axum::{
 use crate::{
     application::ai::model_service::{
         ModelChatCommand, ModelChatConversationResp, ModelChatResp, ModelHealthCheckCommand,
-        ModelHealthCheckResp, ModelOpsSummaryResp, ModelRegistrySummary,
+        ModelHealthCheckResp, ModelOpsSummaryResp, ModelProviderCallLeaseQuery,
+        ModelProviderCallLeaseResp, ModelProviderCallLeaseSweepResp, ModelRegistrySummary,
         ModelRouteCircuitBreakerResp, ModelRuntimeService,
     },
     domain::auth::model::CurrentUser,
@@ -21,6 +22,8 @@ pub const MODEL_CHAT_PERMISSION: &str = "ai:model:chat";
 pub const MODEL_CIRCUIT_BREAKER_LIST_PERMISSION: &str = "ai:model:circuitBreaker:list";
 pub const MODEL_CIRCUIT_BREAKER_CLEAR_PERMISSION: &str = "ai:model:circuitBreaker:clear";
 pub const MODEL_OPS_SUMMARY_PERMISSION: &str = "ai:model:opsSummary";
+pub const MODEL_PROVIDER_CALL_LEASE_LIST_PERMISSION: &str = "ai:model:providerCallLease:list";
+pub const MODEL_PROVIDER_CALL_LEASE_EXPIRE_PERMISSION: &str = "ai:model:providerCallLease:expire";
 
 pub fn routes() -> Router<AppState> {
     Router::new()
@@ -35,6 +38,14 @@ pub fn routes() -> Router<AppState> {
         .route(
             "/ai/models/route-circuit-breakers/:route_id",
             delete(clear_route_circuit_breaker),
+        )
+        .route(
+            "/ai/models/provider-call-leases",
+            get(list_provider_call_leases),
+        )
+        .route(
+            "/ai/models/provider-call-leases/expire-stale",
+            post(expire_stale_provider_call_leases),
         )
         .route(
             "/ai/models/chat/conversations",
@@ -112,6 +123,33 @@ async fn clear_route_circuit_breaker(
     service.clear_route_circuit_breaker(&route_id).await?;
 
     Ok(Json(ApiResponse::ok(())))
+}
+
+async fn list_provider_call_leases(
+    State(state): State<AppState>,
+    current_user: CurrentUser,
+    Query(query): Query<ModelProviderCallLeaseQuery>,
+) -> Result<Json<ApiResponse<Vec<ModelProviderCallLeaseResp>>>, AppError> {
+    require_permission(&current_user, MODEL_PROVIDER_CALL_LEASE_LIST_PERMISSION)?;
+    let service = ModelRuntimeService::for_tenant(state.db, current_user.tenant_id);
+
+    Ok(Json(ApiResponse::ok(
+        service.list_provider_call_leases(query).await?,
+    )))
+}
+
+async fn expire_stale_provider_call_leases(
+    State(state): State<AppState>,
+    current_user: CurrentUser,
+) -> Result<Json<ApiResponse<ModelProviderCallLeaseSweepResp>>, AppError> {
+    require_permission(&current_user, MODEL_PROVIDER_CALL_LEASE_EXPIRE_PERMISSION)?;
+    let service = ModelRuntimeService::for_tenant(state.db, current_user.tenant_id);
+
+    Ok(Json(ApiResponse::ok(
+        service
+            .expire_stale_provider_call_leases(current_user.id)
+            .await?,
+    )))
 }
 
 async fn chat_completion(
@@ -221,6 +259,16 @@ mod tests {
         );
 
         assert!(seed.contains(MODEL_OPS_SUMMARY_PERMISSION));
+    }
+
+    #[test]
+    fn provider_call_lease_controls_permission_seed_contains_controls() {
+        let seed = include_str!(
+            "../../../../migrations/202606170009_seed_ai_model_provider_call_lease_permissions.sql"
+        );
+
+        assert!(seed.contains(MODEL_PROVIDER_CALL_LEASE_LIST_PERMISSION));
+        assert!(seed.contains(MODEL_PROVIDER_CALL_LEASE_EXPIRE_PERMISSION));
     }
 
     #[test]
@@ -395,6 +443,29 @@ mod tests {
         assert!(matches!(err, AppError::Forbidden));
     }
 
+    #[tokio::test]
+    async fn provider_call_lease_controls_list_handler_rejects_missing_permission() {
+        let err = list_provider_call_leases(
+            State(test_state()),
+            user_with_permissions(vec![]),
+            axum::extract::Query(Default::default()),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(matches!(err, AppError::Forbidden));
+    }
+
+    #[tokio::test]
+    async fn provider_call_lease_controls_expire_handler_rejects_missing_permission() {
+        let err =
+            expire_stale_provider_call_leases(State(test_state()), user_with_permissions(vec![]))
+                .await
+                .unwrap_err();
+
+        assert!(matches!(err, AppError::Forbidden));
+    }
+
     #[test]
     fn model_circuit_breaker_routes_are_registered() {
         let source = include_str!("model.rs");
@@ -409,6 +480,16 @@ mod tests {
 
         assert!(source.contains("/ai/models/ops-summary"));
         assert!(source.contains("MODEL_OPS_SUMMARY_PERMISSION"));
+    }
+
+    #[test]
+    fn provider_call_lease_controls_routes_are_registered() {
+        let source = include_str!("model.rs");
+
+        assert!(source.contains("/ai/models/provider-call-leases"));
+        assert!(source.contains("/ai/models/provider-call-leases/expire-stale"));
+        assert!(source.contains("MODEL_PROVIDER_CALL_LEASE_LIST_PERMISSION"));
+        assert!(source.contains("MODEL_PROVIDER_CALL_LEASE_EXPIRE_PERMISSION"));
     }
 
     #[tokio::test]
