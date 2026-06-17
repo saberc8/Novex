@@ -67,6 +67,35 @@ impl Default for ParserRabbitMqConfig {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct AgentRabbitMqConfig {
+    pub url: String,
+    pub exchange: String,
+    pub execute_queue: String,
+    pub retry_queue: String,
+    pub dead_queue: String,
+    pub execute_routing_key: String,
+    pub retry_routing_key: String,
+    pub dead_routing_key: String,
+    pub retry_ttl_ms: u32,
+}
+
+impl Default for AgentRabbitMqConfig {
+    fn default() -> Self {
+        Self {
+            url: "amqp://guest:guest@127.0.0.1:5673/%2f".to_owned(),
+            exchange: "novex.agent".to_owned(),
+            execute_queue: "novex.agent.execute".to_owned(),
+            retry_queue: "novex.agent.retry".to_owned(),
+            dead_queue: "novex.agent.dead".to_owned(),
+            execute_routing_key: "agent.execute".to_owned(),
+            retry_routing_key: "agent.retry".to_owned(),
+            dead_routing_key: "agent.dead".to_owned(),
+            retry_ttl_ms: 30_000,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SchedulerMessage {
@@ -88,6 +117,18 @@ pub struct ParserJobMessage {
     pub attempt: i32,
     pub max_attempts: i32,
     pub parser_request: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentQueueMessage {
+    pub queue_id: i64,
+    pub tenant_id: i64,
+    pub run_id: i64,
+    pub event: String,
+    pub attempt: i32,
+    pub max_attempts: i32,
+    pub source: String,
 }
 
 #[derive(Clone)]
@@ -406,6 +447,169 @@ impl ParserRabbitMqClient {
     }
 }
 
+#[derive(Clone)]
+pub struct AgentRabbitMqClient {
+    channel: Channel,
+    config: AgentRabbitMqConfig,
+}
+
+impl AgentRabbitMqClient {
+    pub async fn connect(config: AgentRabbitMqConfig) -> Result<Self, AppError> {
+        let connection = Connection::connect(&config.url, ConnectionProperties::default())
+            .await
+            .map_err(|error| {
+                AppError::Anyhow(anyhow::anyhow!("connect agent RabbitMQ: {error}"))
+            })?;
+        let channel = connection.create_channel().await.map_err(|error| {
+            AppError::Anyhow(anyhow::anyhow!("create agent RabbitMQ channel: {error}"))
+        })?;
+        channel
+            .confirm_select(ConfirmSelectOptions::default())
+            .await
+            .map_err(|error| {
+                AppError::Anyhow(anyhow::anyhow!(
+                    "enable agent RabbitMQ publisher confirms: {error}"
+                ))
+            })?;
+        let client = Self { channel, config };
+        client.declare_agent_topology().await?;
+        Ok(client)
+    }
+
+    pub fn channel(&self) -> &Channel {
+        &self.channel
+    }
+
+    pub fn config(&self) -> &AgentRabbitMqConfig {
+        &self.config
+    }
+
+    pub async fn publish_agent_execute(&self, message: &AgentQueueMessage) -> Result<(), AppError> {
+        self.publish(&self.config.execute_routing_key, message)
+            .await
+    }
+
+    pub async fn publish_agent_retry(&self, message: &AgentQueueMessage) -> Result<(), AppError> {
+        self.publish(&self.config.retry_routing_key, message).await
+    }
+
+    pub async fn publish_agent_dead(&self, message: &AgentQueueMessage) -> Result<(), AppError> {
+        self.publish(&self.config.dead_routing_key, message).await
+    }
+
+    async fn publish(
+        &self,
+        routing_key: &str,
+        message: &AgentQueueMessage,
+    ) -> Result<(), AppError> {
+        let payload = serde_json::to_vec(message).map_err(|error| {
+            AppError::Anyhow(anyhow::anyhow!("encode agent execute message: {error}"))
+        })?;
+        let confirmation = self
+            .channel
+            .basic_publish(
+                &self.config.exchange,
+                routing_key,
+                BasicPublishOptions::default(),
+                &payload,
+                BasicProperties::default().with_content_type("application/json".into()),
+            )
+            .await
+            .map_err(|error| {
+                AppError::Anyhow(anyhow::anyhow!("publish agent execute message: {error}"))
+            })?
+            .await
+            .map_err(|error| {
+                AppError::Anyhow(anyhow::anyhow!("confirm agent execute message: {error}"))
+            })?;
+        if !matches!(confirmation, Confirmation::Ack(_)) {
+            return Err(AppError::Anyhow(anyhow::anyhow!(
+                "RabbitMQ did not ack agent execute message"
+            )));
+        }
+        Ok(())
+    }
+
+    async fn declare_agent_topology(&self) -> Result<(), AppError> {
+        self.channel
+            .exchange_declare(
+                &self.config.exchange,
+                ExchangeKind::Direct,
+                ExchangeDeclareOptions {
+                    durable: true,
+                    ..Default::default()
+                },
+                FieldTable::default(),
+            )
+            .await
+            .map_err(|error| {
+                AppError::Anyhow(anyhow::anyhow!("declare agent exchange: {error}"))
+            })?;
+
+        self.declare_queue(&self.config.execute_queue, FieldTable::default())
+            .await?;
+        self.bind_queue(&self.config.execute_queue, &self.config.execute_routing_key)
+            .await?;
+
+        let mut retry_args = FieldTable::default();
+        retry_args.insert(
+            "x-message-ttl".into(),
+            AMQPValue::LongUInt(self.config.retry_ttl_ms),
+        );
+        retry_args.insert(
+            "x-dead-letter-exchange".into(),
+            AMQPValue::LongString(self.config.exchange.clone().into()),
+        );
+        retry_args.insert(
+            "x-dead-letter-routing-key".into(),
+            AMQPValue::LongString(self.config.execute_routing_key.clone().into()),
+        );
+        self.declare_queue(&self.config.retry_queue, retry_args)
+            .await?;
+        self.bind_queue(&self.config.retry_queue, &self.config.retry_routing_key)
+            .await?;
+
+        self.declare_queue(&self.config.dead_queue, FieldTable::default())
+            .await?;
+        self.bind_queue(&self.config.dead_queue, &self.config.dead_routing_key)
+            .await?;
+        Ok(())
+    }
+
+    async fn declare_queue(&self, queue: &str, args: FieldTable) -> Result<(), AppError> {
+        self.channel
+            .queue_declare(
+                queue,
+                QueueDeclareOptions {
+                    durable: true,
+                    ..Default::default()
+                },
+                args,
+            )
+            .await
+            .map_err(|error| {
+                AppError::Anyhow(anyhow::anyhow!("declare agent queue {queue}: {error}"))
+            })?;
+        Ok(())
+    }
+
+    async fn bind_queue(&self, queue: &str, routing_key: &str) -> Result<(), AppError> {
+        self.channel
+            .queue_bind(
+                queue,
+                &self.config.exchange,
+                routing_key,
+                QueueBindOptions::default(),
+                FieldTable::default(),
+            )
+            .await
+            .map_err(|error| {
+                AppError::Anyhow(anyhow::anyhow!("bind agent queue {queue}: {error}"))
+            })?;
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -452,6 +656,28 @@ mod tests {
     }
 
     #[test]
+    fn agent_queue_broker_wakeup_message_serializes_with_camel_case_fields() {
+        let message = AgentQueueMessage {
+            queue_id: 1,
+            tenant_id: 2,
+            run_id: 3,
+            event: "agent.run.queued".to_owned(),
+            attempt: 0,
+            max_attempts: 3,
+            source: "agent.create_run".to_owned(),
+        };
+
+        let value = serde_json::to_value(message).unwrap();
+
+        assert_eq!(value["queueId"], 1);
+        assert_eq!(value["tenantId"], 2);
+        assert_eq!(value["runId"], 3);
+        assert_eq!(value["event"], "agent.run.queued");
+        assert_eq!(value["maxAttempts"], 3);
+        assert_eq!(value["source"], "agent.create_run");
+    }
+
+    #[test]
     fn parser_rabbitmq_config_defaults_to_dedicated_topology() {
         let config = ParserRabbitMqConfig::default();
 
@@ -462,6 +688,20 @@ mod tests {
         assert_eq!(config.execute_routing_key, "parser.execute");
         assert_eq!(config.retry_routing_key, "parser.retry");
         assert_eq!(config.dead_routing_key, "parser.dead");
+        assert_eq!(config.retry_ttl_ms, 30_000);
+    }
+
+    #[test]
+    fn agent_queue_broker_wakeup_config_defaults_to_dedicated_topology() {
+        let config = AgentRabbitMqConfig::default();
+
+        assert_eq!(config.exchange, "novex.agent");
+        assert_eq!(config.execute_queue, "novex.agent.execute");
+        assert_eq!(config.retry_queue, "novex.agent.retry");
+        assert_eq!(config.dead_queue, "novex.agent.dead");
+        assert_eq!(config.execute_routing_key, "agent.execute");
+        assert_eq!(config.retry_routing_key, "agent.retry");
+        assert_eq!(config.dead_routing_key, "agent.dead");
         assert_eq!(config.retry_ttl_ms, 30_000);
     }
 
@@ -487,6 +727,27 @@ mod tests {
     }
 
     #[test]
+    fn agent_queue_broker_wakeup_module_defines_publish_path() {
+        let source = include_str!("rabbitmq.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+
+        for needle in [
+            "AgentRabbitMqClient",
+            "publish_agent_execute",
+            "declare_agent_topology",
+            "agent execute message",
+            "novex.agent.execute",
+        ] {
+            assert!(
+                source.contains(needle),
+                "{needle} missing from RabbitMQ module"
+            );
+        }
+    }
+
+    #[test]
     fn rabbitmq_clients_enable_publisher_confirms_before_publishing() {
         let source = include_str!("rabbitmq.rs")
             .split("#[cfg(test)]")
@@ -496,8 +757,8 @@ mod tests {
         let confirm_select_calls = source.matches(".confirm_select(").count();
 
         assert!(
-            confirm_select_calls >= 2,
-            "scheduler and parser RabbitMQ clients must enable publisher confirms"
+            confirm_select_calls >= 3,
+            "scheduler, parser, and agent RabbitMQ clients must enable publisher confirms"
         );
     }
 }

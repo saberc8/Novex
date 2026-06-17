@@ -51,6 +51,14 @@ pub struct AppConfig {
     pub rabbitmq_parser_retry_routing_key: String,
     pub rabbitmq_parser_dead_routing_key: String,
     pub rabbitmq_parser_retry_ttl_ms: u32,
+    pub rabbitmq_agent_exchange: String,
+    pub rabbitmq_agent_execute_queue: String,
+    pub rabbitmq_agent_retry_queue: String,
+    pub rabbitmq_agent_dead_queue: String,
+    pub rabbitmq_agent_execute_routing_key: String,
+    pub rabbitmq_agent_retry_routing_key: String,
+    pub rabbitmq_agent_dead_routing_key: String,
+    pub rabbitmq_agent_retry_ttl_ms: u32,
 }
 
 impl AppConfig {
@@ -170,6 +178,24 @@ impl AppConfig {
             "RABBITMQ_PARSER_RETRY_TTL_MS",
             &env::var("RABBITMQ_PARSER_RETRY_TTL_MS").unwrap_or_else(|_| "30000".to_owned()),
         )?;
+        let rabbitmq_agent_exchange =
+            env::var("RABBITMQ_AGENT_EXCHANGE").unwrap_or_else(|_| "novex.agent".to_owned());
+        let rabbitmq_agent_execute_queue = env::var("RABBITMQ_AGENT_EXECUTE_QUEUE")
+            .unwrap_or_else(|_| "novex.agent.execute".to_owned());
+        let rabbitmq_agent_retry_queue = env::var("RABBITMQ_AGENT_RETRY_QUEUE")
+            .unwrap_or_else(|_| "novex.agent.retry".to_owned());
+        let rabbitmq_agent_dead_queue =
+            env::var("RABBITMQ_AGENT_DEAD_QUEUE").unwrap_or_else(|_| "novex.agent.dead".to_owned());
+        let rabbitmq_agent_execute_routing_key = env::var("RABBITMQ_AGENT_EXECUTE_ROUTING_KEY")
+            .unwrap_or_else(|_| "agent.execute".to_owned());
+        let rabbitmq_agent_retry_routing_key = env::var("RABBITMQ_AGENT_RETRY_ROUTING_KEY")
+            .unwrap_or_else(|_| "agent.retry".to_owned());
+        let rabbitmq_agent_dead_routing_key =
+            env::var("RABBITMQ_AGENT_DEAD_ROUTING_KEY").unwrap_or_else(|_| "agent.dead".to_owned());
+        let rabbitmq_agent_retry_ttl_ms = parse_positive_u32_env(
+            "RABBITMQ_AGENT_RETRY_TTL_MS",
+            &env::var("RABBITMQ_AGENT_RETRY_TTL_MS").unwrap_or_else(|_| "30000".to_owned()),
+        )?;
 
         if cors_allowed_origins.is_empty() {
             bail!("CORS_ALLOWED_ORIGINS must include at least one origin");
@@ -218,6 +244,14 @@ impl AppConfig {
             rabbitmq_parser_retry_routing_key,
             rabbitmq_parser_dead_routing_key,
             rabbitmq_parser_retry_ttl_ms,
+            rabbitmq_agent_exchange,
+            rabbitmq_agent_execute_queue,
+            rabbitmq_agent_retry_queue,
+            rabbitmq_agent_dead_queue,
+            rabbitmq_agent_execute_routing_key,
+            rabbitmq_agent_retry_routing_key,
+            rabbitmq_agent_dead_routing_key,
+            rabbitmq_agent_retry_ttl_ms,
         })
     }
 }

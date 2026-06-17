@@ -5,7 +5,10 @@ use sqlx::PgPool;
 
 use crate::{
     application::ai::agent_service::{AgentRuntimeRegistry, AgentService},
-    infrastructure::persistence::ai_agent_repository::AiAgentRepository,
+    infrastructure::{
+        mq::rabbitmq::{AgentQueueMessage, AgentRabbitMqClient, AgentRabbitMqConfig},
+        persistence::ai_agent_repository::{AgentRunQueueSaveRecord, AiAgentRepository},
+    },
     shared::{config::AppConfig, error::AppError},
 };
 
@@ -27,6 +30,49 @@ pub fn agent_queue_from_config(config: &AppConfig) -> AgentQueueRuntimeConfig {
         lease_seconds: config.agent_queue_lease_seconds,
         max_attempts: config.agent_queue_max_attempts,
         worker_id: config.agent_queue_worker_id.clone(),
+    }
+}
+
+pub fn agent_rabbitmq_from_config(config: &AppConfig) -> AgentRabbitMqConfig {
+    AgentRabbitMqConfig {
+        url: config.rabbitmq_url.clone(),
+        exchange: config.rabbitmq_agent_exchange.clone(),
+        execute_queue: config.rabbitmq_agent_execute_queue.clone(),
+        retry_queue: config.rabbitmq_agent_retry_queue.clone(),
+        dead_queue: config.rabbitmq_agent_dead_queue.clone(),
+        execute_routing_key: config.rabbitmq_agent_execute_routing_key.clone(),
+        retry_routing_key: config.rabbitmq_agent_retry_routing_key.clone(),
+        dead_routing_key: config.rabbitmq_agent_dead_routing_key.clone(),
+        retry_ttl_ms: config.rabbitmq_agent_retry_ttl_ms,
+    }
+}
+
+#[async_trait::async_trait]
+pub trait AgentQueueMessagePublisher: Send + Sync {
+    async fn publish_agent_execute(&self, message: &AgentQueueMessage) -> Result<(), AppError>;
+}
+
+#[async_trait::async_trait]
+impl AgentQueueMessagePublisher for AgentRabbitMqClient {
+    async fn publish_agent_execute(&self, message: &AgentQueueMessage) -> Result<(), AppError> {
+        AgentRabbitMqClient::publish_agent_execute(self, message).await
+    }
+}
+
+pub fn agent_queue_message_from_save_record(record: &AgentRunQueueSaveRecord) -> AgentQueueMessage {
+    AgentQueueMessage {
+        queue_id: record.id,
+        tenant_id: record.tenant_id,
+        run_id: record.run_id,
+        event: "agent.run.queued".to_owned(),
+        attempt: 0,
+        max_attempts: record.max_attempts,
+        source: record
+            .payload
+            .get("source")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("agent.queue")
+            .to_owned(),
     }
 }
 
@@ -220,9 +266,18 @@ mod tests {
             rabbitmq_parser_retry_routing_key: "parser.retry".to_owned(),
             rabbitmq_parser_dead_routing_key: "parser.dead".to_owned(),
             rabbitmq_parser_retry_ttl_ms: 30_000,
+            rabbitmq_agent_exchange: "novex.agent".to_owned(),
+            rabbitmq_agent_execute_queue: "novex.agent.execute".to_owned(),
+            rabbitmq_agent_retry_queue: "novex.agent.retry".to_owned(),
+            rabbitmq_agent_dead_queue: "novex.agent.dead".to_owned(),
+            rabbitmq_agent_execute_routing_key: "agent.execute".to_owned(),
+            rabbitmq_agent_retry_routing_key: "agent.retry".to_owned(),
+            rabbitmq_agent_dead_routing_key: "agent.dead".to_owned(),
+            rabbitmq_agent_retry_ttl_ms: 30_000,
         };
 
         let runtime = agent_queue_from_config(&config);
+        let rabbitmq = agent_rabbitmq_from_config(&config);
 
         assert!(runtime.enabled);
         assert_eq!(runtime.tick_seconds, 2);
@@ -230,5 +285,74 @@ mod tests {
         assert_eq!(runtime.lease_seconds, 120);
         assert_eq!(runtime.max_attempts, 3);
         assert_eq!(runtime.worker_id, "agent-test");
+        assert_eq!(rabbitmq.exchange, "novex.agent");
+        assert_eq!(rabbitmq.execute_queue, "novex.agent.execute");
+        assert_eq!(rabbitmq.retry_queue, "novex.agent.retry");
+        assert_eq!(rabbitmq.dead_queue, "novex.agent.dead");
+        assert_eq!(rabbitmq.execute_routing_key, "agent.execute");
+    }
+
+    #[test]
+    fn agent_queue_broker_wakeup_message_uses_queue_save_record_metadata() {
+        let record = AgentRunQueueSaveRecord {
+            id: 10,
+            tenant_id: 1,
+            run_id: 99,
+            priority: 0,
+            max_attempts: 3,
+            payload: serde_json::json!({ "source": "agent.create_run" }),
+            user_id: 7,
+            now: chrono::NaiveDate::from_ymd_opt(2026, 6, 17)
+                .unwrap()
+                .and_hms_opt(0, 0, 0)
+                .unwrap(),
+        };
+
+        let message = agent_queue_message_from_save_record(&record);
+
+        assert_eq!(message.queue_id, 10);
+        assert_eq!(message.tenant_id, 1);
+        assert_eq!(message.run_id, 99);
+        assert_eq!(message.event, "agent.run.queued");
+        assert_eq!(message.attempt, 0);
+        assert_eq!(message.max_attempts, 3);
+        assert_eq!(message.source, "agent.create_run");
+    }
+
+    #[tokio::test]
+    async fn agent_queue_broker_wakeup_publisher_trait_supports_fake_publishers() {
+        let publisher = FakeAgentQueuePublisher::default();
+        let message = AgentQueueMessage {
+            queue_id: 10,
+            tenant_id: 1,
+            run_id: 99,
+            event: "agent.run.queued".to_owned(),
+            attempt: 0,
+            max_attempts: 3,
+            source: "agent.create_run".to_owned(),
+        };
+
+        publisher.publish_agent_execute(&message).await.unwrap();
+
+        assert_eq!(publisher.published_run_ids(), vec![99]);
+    }
+
+    #[derive(Debug, Default)]
+    struct FakeAgentQueuePublisher {
+        published: std::sync::Mutex<Vec<i64>>,
+    }
+
+    impl FakeAgentQueuePublisher {
+        fn published_run_ids(&self) -> Vec<i64> {
+            self.published.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl AgentQueueMessagePublisher for FakeAgentQueuePublisher {
+        async fn publish_agent_execute(&self, message: &AgentQueueMessage) -> Result<(), AppError> {
+            self.published.lock().unwrap().push(message.run_id);
+            Ok(())
+        }
     }
 }
