@@ -92,6 +92,7 @@ const MEDIA_IMAGE_TIMEOUT: Duration = Duration::from_secs(30);
 const GITHUB_CONNECTOR_TIMEOUT: Duration = Duration::from_secs(15);
 const AGENT_TOOL_IO_TIMEOUT: Duration = Duration::from_secs(45);
 const GUARDIAN_REVIEW_TIMEOUT: Duration = Duration::from_secs(90);
+const MODEL_LOOP_PERSISTENT_CANCEL_POLL_INTERVAL: Duration = Duration::from_millis(250);
 const MAX_AGENT_MEMORY_SNIPPETS: usize = 6;
 const MAX_AGENT_MEMORY_CANDIDATES: i64 = 32;
 const CODE_AGENT_MODEL_ROUTE_ID: &str = "runtime.llm.code_agent";
@@ -1151,8 +1152,9 @@ impl AgentService {
             let mut model_response = None;
             for attempt in 1..=model_retry_policy.max_attempts() {
                 let model_call_started = Instant::now();
-                let model_call_result = await_model_loop_future_or_cancelled(
+                let model_call_result = await_model_loop_provider_future_or_cancelled(
                     cancel_token.clone(),
+                    self.wait_for_model_loop_persistent_cancel(run_id),
                     "model_call",
                     self.model_runtime.chat_completion_for_purpose(
                         ModelRoutePurpose::CodeAgent,
@@ -1730,6 +1732,7 @@ impl AgentService {
                             let compaction_outcome = self
                                 .model_loop_context_compaction_outcome(
                                     cancel_token.clone(),
+                                    run_id,
                                     &command.input,
                                     &deterministic_summary,
                                     &tool_codes,
@@ -1928,6 +1931,7 @@ impl AgentService {
     async fn model_loop_context_compaction_outcome(
         &self,
         cancel_token: AgentRunCancellationToken,
+        run_id: i64,
         original_input: &str,
         deterministic_summary: &str,
         tool_codes: &[String],
@@ -1943,8 +1947,9 @@ impl AgentService {
         let request_metadata =
             model_chat_request_metadata_for_remote_compaction(remote_compaction_request);
         let started = Instant::now();
-        let result = await_model_loop_future_or_cancelled(
+        let result = await_model_loop_provider_future_or_cancelled(
             cancel_token,
+            self.wait_for_model_loop_persistent_cancel(run_id),
             "context_compaction",
             self.model_runtime.chat_completion_for_purpose(
                 ModelRoutePurpose::CodeAgent,
@@ -2333,6 +2338,18 @@ impl AgentService {
         self.finish_model_loop_cancelled(user_id, run_id, &run.status, stage)
             .await?;
         Ok(ModelLoopCancelCheck::Cancelled)
+    }
+
+    async fn wait_for_model_loop_persistent_cancel(&self, run_id: i64) -> Result<(), AppError> {
+        loop {
+            tokio::time::sleep(MODEL_LOOP_PERSISTENT_CANCEL_POLL_INTERVAL).await;
+            let Some(run) = self.repo.find_run(self.tenant_id, run_id).await? else {
+                return Err(AppError::NotFound);
+            };
+            if model_loop_cancel_requested(&run.status) {
+                return Ok(());
+            }
+        }
     }
 
     async fn finish_model_loop_cancelled(
@@ -3158,6 +3175,7 @@ async fn execute_agent_tool(
     )
 }
 
+#[allow(dead_code)]
 async fn await_model_loop_future_or_cancelled<F, T>(
     cancel_token: AgentRunCancellationToken,
     _stage: &str,
@@ -3169,6 +3187,27 @@ where
     tokio::select! {
         biased;
         _ = cancel_token.cancelled() => Ok(ModelLoopFutureAwait::Cancelled),
+        result = future => result.map(ModelLoopFutureAwait::Completed),
+    }
+}
+
+async fn await_model_loop_provider_future_or_cancelled<F, C, T>(
+    cancel_token: AgentRunCancellationToken,
+    persistent_cancel: C,
+    _stage: &str,
+    future: F,
+) -> Result<ModelLoopFutureAwait<T>, AppError>
+where
+    F: Future<Output = Result<T, AppError>>,
+    C: Future<Output = Result<(), AppError>>,
+{
+    tokio::select! {
+        biased;
+        _ = cancel_token.cancelled() => Ok(ModelLoopFutureAwait::Cancelled),
+        persistent = persistent_cancel => {
+            persistent?;
+            Ok(ModelLoopFutureAwait::Cancelled)
+        }
         result = future => result.map(ModelLoopFutureAwait::Completed),
     }
 }
@@ -6151,6 +6190,42 @@ mod tests {
     }
 
     #[test]
+    fn provider_abort_source_contract_polls_persistent_run_status() {
+        let source = include_str!("agent_service.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+
+        assert!(source.contains("MODEL_LOOP_PERSISTENT_CANCEL_POLL_INTERVAL"));
+        assert!(source.contains("wait_for_model_loop_persistent_cancel"));
+        assert!(source.contains("self.repo.find_run(self.tenant_id, run_id)"));
+        assert!(source.contains("model_loop_cancel_requested(&run.status)"));
+    }
+
+    #[test]
+    fn provider_abort_source_contract_wraps_model_and_compaction_calls() {
+        let source = include_str!("agent_service.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+        let model_loop = &source[source
+            .find("async fn execute_model_loop_existing_run")
+            .unwrap()
+            ..source
+                .find("async fn model_loop_context_compaction_outcome")
+                .unwrap()];
+        let compaction = &source[source
+            .find("async fn model_loop_context_compaction_outcome")
+            .unwrap()
+            ..source.find("pub async fn list_runs").unwrap()];
+
+        assert!(model_loop.contains("await_model_loop_provider_future_or_cancelled"));
+        assert!(model_loop.contains("wait_for_model_loop_persistent_cancel"));
+        assert!(compaction.contains("await_model_loop_provider_future_or_cancelled"));
+        assert!(compaction.contains("wait_for_model_loop_persistent_cancel"));
+    }
+
+    #[test]
     fn agent_service_model_loop_records_model_inference_spans() {
         let source = include_str!("agent_service.rs")
             .split("#[cfg(test)]")
@@ -6327,6 +6402,41 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_secs(60)).await;
             Ok::<_, AppError>("finished")
         })
+        .await
+        .unwrap();
+
+        assert_eq!(result, ModelLoopFutureAwait::Cancelled);
+    }
+
+    #[tokio::test]
+    async fn provider_abort_persistent_cancel_returns_cancelled_before_provider_future() {
+        let registry = AgentRuntimeRegistry::default();
+        let (_guard, token) = registry.register_run(1, 42);
+
+        let result = await_model_loop_provider_future_or_cancelled(
+            token,
+            async { Ok::<_, AppError>(()) },
+            "model_call",
+            std::future::pending::<Result<&'static str, AppError>>(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result, ModelLoopFutureAwait::Cancelled);
+    }
+
+    #[tokio::test]
+    async fn provider_abort_local_token_returns_cancelled_before_provider_future() {
+        let registry = AgentRuntimeRegistry::default();
+        let (_guard, token) = registry.register_run(1, 42);
+        assert!(registry.cancel_run(1, 42));
+
+        let result = await_model_loop_provider_future_or_cancelled(
+            token,
+            std::future::pending::<Result<(), AppError>>(),
+            "model_call",
+            std::future::pending::<Result<&'static str, AppError>>(),
+        )
         .await
         .unwrap();
 

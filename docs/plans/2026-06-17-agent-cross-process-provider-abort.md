@@ -12,7 +12,7 @@
 
 ### Task 1: Provider Await Helper
 
-Status: Pending.
+Status: Completed.
 
 **Files:**
 - Modify: `backend/src/application/ai/agent_service.rs`
@@ -65,7 +65,7 @@ Expected: PASS.
 
 ### Task 2: Persistent Cancellation Watcher
 
-Status: Pending.
+Status: Completed.
 
 **Files:**
 - Modify: `backend/src/application/ai/agent_service.rs`
@@ -124,7 +124,7 @@ Expected: PASS.
 
 ### Task 3: Documentation And Merge
 
-Status: Pending.
+Status: Completed.
 
 **Files:**
 - Modify: `docs/plans/2026-06-16-codex-migration-matrix.md`
