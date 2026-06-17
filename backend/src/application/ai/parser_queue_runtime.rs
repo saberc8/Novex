@@ -364,6 +364,7 @@ mod tests {
             parser_queue_tick_seconds: 5,
             parser_queue_batch_size: 50,
             agent_queue_enabled: false,
+            agent_queue_publisher_enabled: false,
             agent_queue_tick_seconds: 2,
             agent_queue_batch_size: 10,
             agent_queue_lease_seconds: 120,

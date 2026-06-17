@@ -52,10 +52,11 @@ use crate::{
     application::system::{ensure_max_chars, format_datetime},
     infrastructure::persistence::{
         ai_agent_repository::{
-            AgentRolloutSaveRecord, AgentRunFilter, AgentRunQueueSaveRecord, AgentRunRecord,
-            AgentRunSaveRecord, AgentRunStatusUpdate, AgentTraceSaveRecord, AiAgentRepository,
-            RunEventCursorFilter, RunEventFilter, RunEventRecord, RunEventSaveRecord,
-            RunPauseSaveRecord, RunSaveRecord, RunStatusUpdate, RunStepSaveRecord,
+            AgentQueueOutboxSaveRecord, AgentRolloutSaveRecord, AgentRunFilter,
+            AgentRunQueueSaveRecord, AgentRunRecord, AgentRunSaveRecord, AgentRunStatusUpdate,
+            AgentTraceSaveRecord, AiAgentRepository, RunEventCursorFilter, RunEventFilter,
+            RunEventRecord, RunEventSaveRecord, RunPauseSaveRecord, RunSaveRecord, RunStatusUpdate,
+            RunStepSaveRecord,
         },
         ai_capability_repository::{AiCapabilityRepository, ToolAuditSaveRecord, ToolLookupRecord},
         ai_capability_repository::{ConnectorCredentialLookupRecord, McpToolExecutionRecord},
@@ -885,21 +886,42 @@ impl AgentService {
             }),
         )
         .await?;
+        let queue_id = next_id();
+        let queue_payload = json!({
+            "command": agent_run_command_payload(&command),
+            "executionMode": "queued",
+            "source": "agent.create_run"
+        });
+        let queue_record = AgentRunQueueSaveRecord {
+            id: queue_id,
+            tenant_id: self.tenant_id,
+            run_id,
+            priority: 0,
+            max_attempts: DEFAULT_AGENT_QUEUE_MAX_ATTEMPTS,
+            payload: queue_payload.clone(),
+            user_id,
+            now,
+        };
         self.repo
-            .enqueue_agent_run(&AgentRunQueueSaveRecord {
-                id: next_id(),
-                tenant_id: self.tenant_id,
-                run_id,
-                priority: 0,
-                max_attempts: DEFAULT_AGENT_QUEUE_MAX_ATTEMPTS,
-                payload: json!({
-                    "command": agent_run_command_payload(&command),
-                    "executionMode": "queued",
-                    "source": "agent.create_run"
-                }),
-                user_id,
-                now,
-            })
+            .enqueue_agent_run_with_outbox(
+                &queue_record,
+                &AgentQueueOutboxSaveRecord {
+                    id: next_id(),
+                    tenant_id: self.tenant_id,
+                    queue_id,
+                    run_id,
+                    event_type: "agent.run.queued".to_owned(),
+                    max_attempts: DEFAULT_AGENT_QUEUE_MAX_ATTEMPTS,
+                    payload: json!({
+                        "source": "agent.create_run",
+                        "executionMode": "queued"
+                    }),
+                    status: 1,
+                    attempt_count: 0,
+                    user_id,
+                    now,
+                },
+            )
             .await?;
         self.refresh_trace_snapshot(
             user_id,
@@ -2101,12 +2123,29 @@ impl AgentService {
             json!({ "pauseReason": pause.pause_reason }),
         )
         .await?;
+        let resume_queue_payload = agent_resume_queue_payload(&command);
         let requeued = self
             .repo
-            .requeue_agent_run_for_resume(
+            .requeue_agent_run_for_resume_with_outbox(
                 self.tenant_id,
                 run_id,
-                &agent_resume_queue_payload(&command),
+                &resume_queue_payload,
+                &AgentQueueOutboxSaveRecord {
+                    id: next_id(),
+                    tenant_id: self.tenant_id,
+                    queue_id: 0,
+                    run_id,
+                    event_type: "agent.run.resumed".to_owned(),
+                    max_attempts: DEFAULT_AGENT_QUEUE_MAX_ATTEMPTS,
+                    payload: json!({
+                        "source": "agent.resume_run",
+                        "executionMode": "queued"
+                    }),
+                    status: 1,
+                    attempt_count: 0,
+                    user_id,
+                    now,
+                },
                 user_id,
                 now,
             )
@@ -5592,6 +5631,27 @@ mod tests {
         assert!(source.contains("AgentRunQueueSaveRecord"));
         assert!(source.contains("\"executionMode\""));
         assert!(source.contains("RunEventKind::StatusChanged"));
+    }
+
+    #[test]
+    fn agent_queue_outbox_service_writes_publish_intents_for_create_and_resume() {
+        let source = include_str!("agent_service.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+
+        let create_queued_run = &source[source.find("async fn create_queued_run").unwrap()
+            ..source.find("pub async fn execute_queued_run").unwrap()];
+        let resume_run = &source[source.find("pub async fn resume_run").unwrap()
+            ..source.find("pub async fn cancel_run").unwrap()];
+
+        assert!(source.contains("AgentQueueOutboxSaveRecord"));
+        assert!(create_queued_run.contains("enqueue_agent_run_with_outbox"));
+        assert!(create_queued_run.contains("\"agent.run.queued\""));
+        assert!(create_queued_run.contains("\"source\": \"agent.create_run\""));
+        assert!(resume_run.contains("requeue_agent_run_for_resume_with_outbox"));
+        assert!(resume_run.contains("\"agent.run.resumed\""));
+        assert!(resume_run.contains("\"source\": \"agent.resume_run\""));
     }
 
     #[test]
