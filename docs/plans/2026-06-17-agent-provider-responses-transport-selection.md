@@ -57,7 +57,10 @@ fn provider_responses_transport_code_agent_request_uses_configured_responses_end
     assert_eq!(request.endpoint, "https://llm.internal/v1/responses");
     assert_eq!(request.payload["model"], "qwen-private");
     assert_eq!(request.payload["stream"], true);
-    assert_eq!(request.payload["max_output_tokens"], 512);
+    assert_eq!(
+        request.payload["max_output_tokens"],
+        json!(command.max_tokens.unwrap())
+    );
     assert!(request.payload.get("input").is_some());
     assert!(request.payload.get("messages").is_none());
     assert!(request.payload.get("max_tokens").is_none());
