@@ -183,6 +183,8 @@ struct ModelLoopProviderCompletion<T> {
     response: Option<T>,
     streamed_tool_call_output: Option<ParsedModelTurnOutput>,
     completion_reason: ModelLoopProviderCompletionReason,
+    provider_response_id: Option<String>,
+    provider_response_status: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -1198,6 +1200,8 @@ impl AgentService {
                 match model_call_result {
                     Ok(ModelLoopFutureAwait::Completed(completion)) => {
                         let completion_reason = completion.completion_reason;
+                        let provider_response_id = completion.provider_response_id;
+                        let provider_response_status = completion.provider_response_status;
                         streamed_tool_call_output = completion.streamed_tool_call_output;
                         if matches!(
                             completion_reason,
@@ -1208,6 +1212,8 @@ impl AgentService {
                                 "Agent 模型输出解析失败: streamed tool-call early stop missing parsed output",
                             ));
                         }
+                        let _stream_provider_response_metadata_present =
+                            provider_response_id.is_some() || provider_response_status.is_some();
                         model_response = completion.response;
                         break;
                     }
@@ -3288,6 +3294,8 @@ struct ModelLoopProviderStreamState {
     tool_call_detected: bool,
     tool_call_parser_disabled: bool,
     detected_tool_call_output: Option<ParsedModelTurnOutput>,
+    provider_response_id: Option<String>,
+    provider_response_status: Option<String>,
 }
 
 impl ModelLoopProviderStreamState {
@@ -3297,10 +3305,14 @@ impl ModelLoopProviderStreamState {
             tool_call_detected: false,
             tool_call_parser_disabled: false,
             detected_tool_call_output: None,
+            provider_response_id: None,
+            provider_response_status: None,
         }
     }
 
     fn observe_tool_call(&mut self, event: &ModelProviderStreamEvent) -> Option<Value> {
+        self.observe_provider_response_metadata(event);
+
         if self.tool_call_detected || self.tool_call_parser_disabled {
             return None;
         }
@@ -3322,6 +3334,23 @@ impl ModelLoopProviderStreamState {
     fn detected_tool_call_output(&self) -> Option<ParsedModelTurnOutput> {
         self.detected_tool_call_output.clone()
     }
+
+    fn observe_provider_response_metadata(&mut self, event: &ModelProviderStreamEvent) {
+        if let Some(provider_response_id) = event.provider_response_id.as_ref() {
+            self.provider_response_id = Some(provider_response_id.clone());
+        }
+        if let Some(provider_response_status) = event.provider_response_status.as_ref() {
+            self.provider_response_status = Some(provider_response_status.clone());
+        }
+    }
+
+    fn provider_response_id(&self) -> Option<String> {
+        self.provider_response_id.clone()
+    }
+
+    fn provider_response_status(&self) -> Option<String> {
+        self.provider_response_status.clone()
+    }
 }
 
 fn model_loop_streamed_tool_call_completion<T>(
@@ -3333,6 +3362,8 @@ fn model_loop_streamed_tool_call_completion<T>(
             response: None,
             streamed_tool_call_output: Some(streamed_tool_call_output),
             completion_reason: ModelLoopProviderCompletionReason::StreamedToolCallDetected,
+            provider_response_id: stream_state.provider_response_id(),
+            provider_response_status: stream_state.provider_response_status(),
         })
 }
 
@@ -3382,6 +3413,8 @@ where
                         response: Some(response),
                         streamed_tool_call_output: stream_state.detected_tool_call_output(),
                         completion_reason: ModelLoopProviderCompletionReason::ProviderCompleted,
+                        provider_response_id: stream_state.provider_response_id(),
+                        provider_response_status: stream_state.provider_response_status(),
                     })
                 });
             }
@@ -4942,7 +4975,19 @@ fn model_delta_event_payload_from_stream_event(event: &ModelProviderStreamEvent)
         provider_response_status: None,
         provider_delta_chunks: vec![event.chunk.clone()],
     };
-    model_delta_event_payload(&response, &event.chunk)
+    let mut payload = model_delta_event_payload(&response, &event.chunk);
+    if let Some(item) = payload.get_mut("item").and_then(Value::as_object_mut) {
+        if let Some(provider_response_id) = event.provider_response_id.as_deref() {
+            item.insert("providerResponseId".to_owned(), json!(provider_response_id));
+        }
+        if let Some(provider_response_status) = event.provider_response_status.as_deref() {
+            item.insert(
+                "providerResponseStatus".to_owned(),
+                json!(provider_response_status),
+            );
+        }
+    }
+    payload
 }
 
 fn model_stream_tool_call_event_payload(
@@ -4966,7 +5011,7 @@ fn model_stream_tool_call_event_payload(
         })
         .collect::<Vec<_>>();
 
-    json!({
+    let mut payload = json!({
         "runtimeMode": "model_loop",
         "item": {
             "type": "model_stream_tool_call",
@@ -4978,7 +5023,19 @@ fn model_stream_tool_call_event_payload(
             "toolCallCount": tool_calls.len(),
             "toolCalls": tool_calls,
         }
-    })
+    });
+    if let Some(item) = payload.get_mut("item").and_then(Value::as_object_mut) {
+        if let Some(provider_response_id) = event.provider_response_id.as_deref() {
+            item.insert("providerResponseId".to_owned(), json!(provider_response_id));
+        }
+        if let Some(provider_response_status) = event.provider_response_status.as_deref() {
+            item.insert(
+                "providerResponseStatus".to_owned(),
+                json!(provider_response_status),
+            );
+        }
+    }
+    payload
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -6960,12 +7017,36 @@ mod tests {
     }
 
     #[test]
+    fn provider_stream_response_id_is_added_to_model_delta_payload() {
+        let event = ModelProviderStreamEvent {
+            route_id: "runtime.llm.code_agent".to_owned(),
+            provider: "openai-compatible".to_owned(),
+            model: Some("gpt-compatible".to_owned()),
+            provider_response_id: Some("resp_stream_1".to_owned()),
+            provider_response_status: Some("in_progress".to_owned()),
+            chunk: ModelProviderStreamChunk {
+                index: 3,
+                content: " partial".to_owned(),
+                provider_event: Some("response.output_text.delta".to_owned()),
+            },
+        };
+
+        let payload = model_delta_event_payload_from_stream_event(&event);
+
+        assert_eq!(payload["item"]["providerResponseId"], "resp_stream_1");
+        assert_eq!(payload["item"]["providerResponseStatus"], "in_progress");
+        assert_eq!(payload["item"]["content"], " partial");
+    }
+
+    #[test]
     fn provider_stream_tool_call_state_detects_complete_json_across_chunks() {
         let mut state = ModelLoopProviderStreamState::new();
         let first = ModelProviderStreamEvent {
             route_id: "runtime.llm.code_agent".to_owned(),
             provider: "openai-compatible".to_owned(),
             model: Some("gpt-compatible".to_owned()),
+            provider_response_id: None,
+            provider_response_status: None,
             chunk: ModelProviderStreamChunk {
                 index: 0,
                 content: r#"{"type":"tool_"#.to_owned(),
@@ -6976,6 +7057,8 @@ mod tests {
             route_id: "runtime.llm.code_agent".to_owned(),
             provider: "openai-compatible".to_owned(),
             model: Some("gpt-compatible".to_owned()),
+            provider_response_id: None,
+            provider_response_status: None,
             chunk: ModelProviderStreamChunk {
                 index: 1,
                 content: r#"call","callId":"call-1","toolCode":"rag.search","arguments":{"query":"policy"}}"#.to_owned(),
@@ -7006,12 +7089,14 @@ mod tests {
     }
 
     #[test]
-    fn streamed_tool_call_output_is_retained_for_model_loop_decision() {
+    fn provider_stream_response_id_is_added_to_streamed_tool_call_payload() {
         let mut state = ModelLoopProviderStreamState::new();
         let first = ModelProviderStreamEvent {
             route_id: "runtime.llm.code_agent".to_owned(),
             provider: "openai-compatible".to_owned(),
             model: Some("gpt-compatible".to_owned()),
+            provider_response_id: Some("resp_stream_1".to_owned()),
+            provider_response_status: Some("in_progress".to_owned()),
             chunk: ModelProviderStreamChunk {
                 index: 0,
                 content: r#"{"type":"tool_"#.to_owned(),
@@ -7022,6 +7107,46 @@ mod tests {
             route_id: "runtime.llm.code_agent".to_owned(),
             provider: "openai-compatible".to_owned(),
             model: Some("gpt-compatible".to_owned()),
+            provider_response_id: Some("resp_stream_1".to_owned()),
+            provider_response_status: Some("in_progress".to_owned()),
+            chunk: ModelProviderStreamChunk {
+                index: 1,
+                content: r#"call","callId":"call-1","toolCode":"rag.search","arguments":{"query":"policy"}}"#.to_owned(),
+                provider_event: Some("response.output_text.delta".to_owned()),
+            },
+        };
+
+        assert!(state.observe_tool_call(&first).is_none());
+        let payload = state
+            .observe_tool_call(&second)
+            .expect("complete streamed tool call should be detected");
+
+        assert_eq!(payload["item"]["providerResponseId"], "resp_stream_1");
+        assert_eq!(payload["item"]["providerResponseStatus"], "in_progress");
+        assert_eq!(payload["item"]["toolCalls"][0]["toolCode"], "rag.search");
+    }
+
+    #[test]
+    fn streamed_tool_call_output_is_retained_for_model_loop_decision() {
+        let mut state = ModelLoopProviderStreamState::new();
+        let first = ModelProviderStreamEvent {
+            route_id: "runtime.llm.code_agent".to_owned(),
+            provider: "openai-compatible".to_owned(),
+            model: Some("gpt-compatible".to_owned()),
+            provider_response_id: None,
+            provider_response_status: None,
+            chunk: ModelProviderStreamChunk {
+                index: 0,
+                content: r#"{"type":"tool_"#.to_owned(),
+                provider_event: Some("response.output_text.delta".to_owned()),
+            },
+        };
+        let second = ModelProviderStreamEvent {
+            route_id: "runtime.llm.code_agent".to_owned(),
+            provider: "openai-compatible".to_owned(),
+            model: Some("gpt-compatible".to_owned()),
+            provider_response_id: None,
+            provider_response_status: None,
             chunk: ModelProviderStreamChunk {
                 index: 1,
                 content: r#"call","callId":"call-1","toolCode":"rag.search","arguments":{"query":"policy"}}"#.to_owned(),
@@ -7142,6 +7267,8 @@ mod tests {
             route_id: "runtime.llm.code_agent".to_owned(),
             provider: "openai-compatible".to_owned(),
             model: Some("gpt-compatible".to_owned()),
+            provider_response_id: Some("resp_stream_1".to_owned()),
+            provider_response_status: Some("in_progress".to_owned()),
             chunk: ModelProviderStreamChunk {
                 index: 0,
                 content: r#"{"type":"tool_"#.to_owned(),
@@ -7152,6 +7279,8 @@ mod tests {
             route_id: "runtime.llm.code_agent".to_owned(),
             provider: "openai-compatible".to_owned(),
             model: Some("gpt-compatible".to_owned()),
+            provider_response_id: Some("resp_stream_1".to_owned()),
+            provider_response_status: Some("in_progress".to_owned()),
             chunk: ModelProviderStreamChunk {
                 index: 1,
                 content: r#"call","callId":"call-1","toolCode":"rag.search","arguments":{"query":"policy"}}"#.to_owned(),
@@ -7170,6 +7299,14 @@ mod tests {
         assert_eq!(
             completion.completion_reason,
             ModelLoopProviderCompletionReason::StreamedToolCallDetected
+        );
+        assert_eq!(
+            completion.provider_response_id.as_deref(),
+            Some("resp_stream_1")
+        );
+        assert_eq!(
+            completion.provider_response_status.as_deref(),
+            Some("in_progress")
         );
         assert_eq!(
             completion

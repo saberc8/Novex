@@ -89,6 +89,8 @@ pub struct ModelProviderStreamEvent {
     pub route_id: String,
     pub provider: String,
     pub model: Option<String>,
+    pub provider_response_id: Option<String>,
+    pub provider_response_status: Option<String>,
     pub chunk: ModelProviderStreamChunk,
 }
 
@@ -3161,6 +3163,13 @@ struct ModelChatProviderOutput {
     delta_chunks: Vec<ModelProviderStreamChunk>,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct ModelChatStreamState {
+    next_chunk_index: usize,
+    provider_response_id: Option<String>,
+    provider_response_status: Option<String>,
+}
+
 async fn model_chat_streaming_response_text(
     mut response: reqwest::Response,
     route: &ModelRuntimeRoute,
@@ -3169,7 +3178,7 @@ async fn model_chat_streaming_response_text(
     let sender = command.provider_stream_sender.as_ref();
     let mut body_text = String::new();
     let mut pending = String::new();
-    let mut next_chunk_index = 0usize;
+    let mut stream_state = ModelChatStreamState::default();
 
     while let Some(chunk) = response
         .chunk()
@@ -3179,8 +3188,7 @@ async fn model_chat_streaming_response_text(
         let text = String::from_utf8_lossy(&chunk);
         body_text.push_str(&text);
         pending.push_str(&text);
-        next_chunk_index =
-            model_chat_emit_complete_stream_records(route, sender, &mut pending, next_chunk_index)?;
+        model_chat_emit_complete_stream_records(route, sender, &mut pending, &mut stream_state)?;
     }
 
     Ok(body_text)
@@ -3190,8 +3198,8 @@ fn model_chat_emit_complete_stream_records(
     route: &ModelRuntimeRoute,
     sender: Option<&mpsc::UnboundedSender<ModelProviderStreamEvent>>,
     pending: &mut String,
-    mut next_chunk_index: usize,
-) -> Result<usize, AppError> {
+    stream_state: &mut ModelChatStreamState,
+) -> Result<(), AppError> {
     *pending = pending.replace("\r\n", "\n");
     while let Some(record_end) = pending.find("\n\n") {
         let record = pending[..record_end].to_owned();
@@ -3204,21 +3212,37 @@ fn model_chat_emit_complete_stream_records(
         }
         let value = serde_json::from_str::<Value>(&data)
             .map_err(|_| AppError::bad_request("LLM chat SSE 响应不是合法 JSON"))?;
+        model_chat_stream_state_observe_response_metadata(stream_state, &value);
         let (chunks, next_index) =
-            model_chat_provider_delta_chunks_from_sse_value(&value, next_chunk_index);
-        next_chunk_index = next_index;
+            model_chat_provider_delta_chunks_from_sse_value(&value, stream_state.next_chunk_index);
+        stream_state.next_chunk_index = next_index;
         if let Some(sender) = sender {
             for chunk in chunks {
                 let _ = sender.send(ModelProviderStreamEvent {
                     route_id: route.summary().route_id.clone(),
                     provider: route.provider().as_str().to_owned(),
                     model: route.model().map(str::to_owned),
+                    provider_response_id: stream_state.provider_response_id.clone(),
+                    provider_response_status: stream_state.provider_response_status.clone(),
                     chunk,
                 });
             }
         }
     }
-    Ok(next_chunk_index)
+    Ok(())
+}
+
+fn model_chat_stream_state_observe_response_metadata(
+    stream_state: &mut ModelChatStreamState,
+    value: &Value,
+) {
+    let response_payload = model_chat_response_payload_from_sse_value(value);
+    if let Some(response_id) = model_provider_response_id_from_payload(response_payload) {
+        stream_state.provider_response_id = Some(response_id);
+    }
+    if let Some(response_status) = model_provider_response_status_from_payload(response_payload) {
+        stream_state.provider_response_status = Some(response_status);
+    }
 }
 
 fn model_chat_response_from_chat_completion_text(
@@ -7939,6 +7963,72 @@ mod tests {
             response.provider_response_status.as_deref(),
             Some("completed")
         );
+    }
+
+    #[test]
+    fn provider_stream_response_id_event_carries_responses_created_metadata() {
+        let route = openai_compatible_llm_route();
+        let (sender, mut receiver) = mpsc::unbounded_channel();
+        let mut pending = concat!(
+            "event: response.created\n",
+            "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_stream_1\",\"status\":\"in_progress\"}}\n\n",
+            "event: response.output_text.delta\n",
+            "data: {\"type\":\"response.output_text.delta\",\"item_id\":\"msg_1\",\"output_index\":0,\"content_index\":0,\"delta\":\"Hello\"}\n\n",
+        )
+        .to_owned();
+
+        let mut stream_state = ModelChatStreamState::default();
+        model_chat_emit_complete_stream_records(
+            &route,
+            Some(&sender),
+            &mut pending,
+            &mut stream_state,
+        )
+        .unwrap();
+        let event = receiver
+            .try_recv()
+            .expect("delta stream event should be emitted");
+
+        assert_eq!(stream_state.next_chunk_index, 1);
+        assert_eq!(event.chunk.index, 0);
+        assert_eq!(event.chunk.content, "Hello");
+        assert_eq!(event.provider_response_id.as_deref(), Some("resp_stream_1"));
+        assert_eq!(
+            event.provider_response_status.as_deref(),
+            Some("in_progress")
+        );
+        assert!(receiver.try_recv().is_err());
+    }
+
+    #[test]
+    fn provider_stream_response_id_event_carries_chat_completion_chunk_id() {
+        let route = openai_compatible_llm_route();
+        let (sender, mut receiver) = mpsc::unbounded_channel();
+        let mut pending = concat!(
+            "data: {\"id\":\"chatcmpl_stream_1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hello\"}}]}\n\n",
+        )
+        .to_owned();
+        let mut stream_state = ModelChatStreamState::default();
+
+        model_chat_emit_complete_stream_records(
+            &route,
+            Some(&sender),
+            &mut pending,
+            &mut stream_state,
+        )
+        .unwrap();
+        let event = receiver
+            .try_recv()
+            .expect("delta stream event should be emitted");
+
+        assert_eq!(stream_state.next_chunk_index, 1);
+        assert_eq!(event.chunk.content, "Hello");
+        assert_eq!(
+            event.provider_response_id.as_deref(),
+            Some("chatcmpl_stream_1")
+        );
+        assert_eq!(event.provider_response_status, None);
+        assert!(receiver.try_recv().is_err());
     }
 
     #[test]
