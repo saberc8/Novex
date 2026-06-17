@@ -24,7 +24,8 @@ use sqlx::{FromRow, PgPool};
 use tokio::sync::mpsc;
 
 use super::model_provider_transport::{
-    model_chat_sse_record_data_payload, model_provider_client_error_to_app_error,
+    build_model_provider_chat_plan, model_chat_sse_record_data_payload,
+    model_provider_chat_plan_streams_chat_completion, model_provider_client_error_to_app_error,
     model_provider_response_id_from_payloads, normalize_model_provider_response_id,
     parse_model_chat_compaction_provider_output_from_text,
     parse_model_chat_provider_output_from_body, parse_model_chat_provider_output_from_text,
@@ -32,9 +33,11 @@ use super::model_provider_transport::{
     send_model_provider_chat_request, send_model_provider_chat_unary_request,
     send_model_provider_embedding_request, send_model_provider_media_image_request,
     send_model_provider_native_cancel_request, send_model_provider_rerank_request,
-    ModelChatProviderOutput, ModelChatStreamCompletionBuilder, ModelProviderChatRequest,
-    ModelProviderEmbeddingRequest, ModelProviderMediaImageRequest,
-    ModelProviderNativeCancelRequest, ModelProviderRerankRequest,
+    ModelChatProviderOutput, ModelChatStreamCompletionBuilder, ModelProviderChatCompactionMetadata,
+    ModelProviderChatFileContext, ModelProviderChatMessage, ModelProviderChatPlan,
+    ModelProviderChatPlanInput, ModelProviderChatRequest, ModelProviderChatRequestKind,
+    ModelProviderChatRequestMetadata, ModelProviderChatTransport, ModelProviderEmbeddingRequest,
+    ModelProviderMediaImageRequest, ModelProviderNativeCancelRequest, ModelProviderRerankRequest,
 };
 
 use crate::{
@@ -2911,13 +2914,8 @@ fn model_chat_stream_lifecycle(
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ModelChatProviderTransport {
-    ChatCompletions,
-    ResponsesCodeAgent,
-    ResponsesCompactionV2,
-    ResponsesCompactUnary,
-}
+type ModelChatProviderTransport = ModelProviderChatTransport;
+type ModelChatProviderRequest = ModelProviderChatPlan;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ModelProviderDispatchMode {
@@ -2925,304 +2923,86 @@ enum ModelProviderDispatchMode {
     Stream,
 }
 
-#[derive(Debug, Clone, PartialEq)]
-struct ModelChatProviderRequest {
-    endpoint: String,
-    payload: Value,
-    transport: ModelChatProviderTransport,
-}
-
 fn model_chat_provider_request(
     route: &ModelRuntimeRoute,
     command: &ModelChatCommand,
 ) -> ModelChatProviderRequest {
-    if model_chat_route_supports_responses_compaction(route) && model_chat_is_compaction(command) {
-        if matches!(
-            model_chat_compaction_implementation(command),
-            Some("responses_compaction_unary")
-        ) {
-            return ModelChatProviderRequest {
-                endpoint: model_chat_responses_compact_unary_endpoint(route),
-                payload: model_chat_responses_compact_unary_payload(route, command),
-                transport: ModelChatProviderTransport::ResponsesCompactUnary,
-            };
-        }
-        return ModelChatProviderRequest {
-            endpoint: model_chat_responses_compaction_endpoint(route),
-            payload: model_chat_responses_compaction_payload(route, command),
-            transport: ModelChatProviderTransport::ResponsesCompactionV2,
-        };
-    }
-
-    if model_chat_route_uses_responses_code_agent(route, command) {
-        return ModelChatProviderRequest {
-            endpoint: route.endpoint().to_owned(),
-            payload: model_chat_responses_code_agent_payload(route, command),
-            transport: ModelChatProviderTransport::ResponsesCodeAgent,
-        };
-    }
-
-    ModelChatProviderRequest {
+    build_model_provider_chat_plan(ModelProviderChatPlanInput {
+        provider: route.provider(),
+        model: route.model().map(str::to_owned),
+        base_url: route.base_url().to_owned(),
         endpoint: route.endpoint().to_owned(),
-        payload: model_chat_request_payload(route, command),
-        transport: ModelChatProviderTransport::ChatCompletions,
-    }
+        messages: command
+            .messages
+            .iter()
+            .map(|message| ModelProviderChatMessage {
+                role: message.role.clone(),
+                content: message.content.clone(),
+            })
+            .collect(),
+        file_contexts: command
+            .file_contexts
+            .iter()
+            .map(|file| ModelProviderChatFileContext {
+                name: file.name.clone(),
+                content_type: file.content_type.clone(),
+                content: file.content.clone(),
+            })
+            .collect(),
+        temperature: command
+            .temperature
+            .unwrap_or(DEFAULT_MODEL_CHAT_TEMPERATURE),
+        max_tokens: command.max_tokens.unwrap_or(DEFAULT_MODEL_CHAT_MAX_TOKENS),
+        response_format: command.response_format.clone(),
+        request_metadata: command
+            .request_metadata
+            .as_ref()
+            .map(model_provider_chat_request_metadata_from_command),
+        should_stream_chat_completion: model_chat_should_stream_chat_completion(command),
+    })
 }
 
 fn model_chat_provider_request_streams_chat_completion(request: &ModelChatProviderRequest) -> bool {
-    matches!(
-        request.transport,
-        ModelChatProviderTransport::ChatCompletions
-            | ModelChatProviderTransport::ResponsesCodeAgent
-    ) && request
-        .payload
-        .get("stream")
-        .and_then(Value::as_bool)
-        .unwrap_or(false)
+    model_provider_chat_plan_streams_chat_completion(request)
 }
 
-fn model_chat_is_compaction(command: &ModelChatCommand) -> bool {
-    matches!(
+fn model_chat_should_stream_chat_completion(command: &ModelChatCommand) -> bool {
+    !matches!(
         command
             .request_metadata
             .as_ref()
             .map(|metadata| metadata.request_kind),
         Some(ModelChatRequestKind::Compaction)
-    )
-}
-
-fn model_chat_compaction_implementation(command: &ModelChatCommand) -> Option<&str> {
-    command
-        .request_metadata
+    ) && command
+        .provider_call_context
         .as_ref()
-        .and_then(|metadata| metadata.compaction.as_ref())
-        .map(|compaction| compaction.implementation.as_str())
+        .and_then(|context| context.route_purpose)
+        .is_some_and(|purpose| purpose == ModelRoutePurpose::CodeAgent)
 }
 
-fn model_chat_route_supports_responses_compaction(route: &ModelRuntimeRoute) -> bool {
-    matches!(
-        route.provider(),
-        ModelProviderType::OpenAiCompatible | ModelProviderType::LocalRuntime
-    )
-}
-
-fn model_chat_route_uses_responses_code_agent(
-    route: &ModelRuntimeRoute,
-    command: &ModelChatCommand,
-) -> bool {
-    model_chat_route_supports_responses_compaction(route)
-        && model_chat_should_stream_chat_completion(command)
-        && model_chat_route_endpoint_is_responses(route)
-}
-
-fn model_chat_route_endpoint_is_responses(route: &ModelRuntimeRoute) -> bool {
-    route
-        .endpoint()
-        .trim()
-        .trim_end_matches('/')
-        .ends_with("/responses")
-}
-
-fn model_chat_should_stream_chat_completion(command: &ModelChatCommand) -> bool {
-    !model_chat_is_compaction(command)
-        && command
-            .provider_call_context
-            .as_ref()
-            .and_then(|context| context.route_purpose)
-            .is_some_and(|purpose| purpose == ModelRoutePurpose::CodeAgent)
-}
-
-fn model_chat_responses_compaction_endpoint(route: &ModelRuntimeRoute) -> String {
-    join_model_endpoint(route.base_url(), Some("responses"))
-}
-
-fn model_chat_responses_compact_unary_endpoint(route: &ModelRuntimeRoute) -> String {
-    join_model_endpoint(route.base_url(), Some("responses/compact"))
-}
-
-fn model_chat_responses_code_agent_payload(
-    route: &ModelRuntimeRoute,
-    command: &ModelChatCommand,
-) -> Value {
-    let mut payload = json!({
-        "model": route.model().unwrap_or_default(),
-        "input": model_chat_message_input_items(command),
-        "temperature": command.temperature.unwrap_or(DEFAULT_MODEL_CHAT_TEMPERATURE),
-        "max_output_tokens": command.max_tokens.unwrap_or(DEFAULT_MODEL_CHAT_MAX_TOKENS),
-        "stream": true,
-    });
-    if let Some(metadata) = model_chat_provider_metadata(route, command) {
-        payload["metadata"] = metadata;
+fn model_provider_chat_request_metadata_from_command(
+    metadata: &ModelChatRequestMetadata,
+) -> ModelProviderChatRequestMetadata {
+    ModelProviderChatRequestMetadata {
+        request_kind: match metadata.request_kind {
+            ModelChatRequestKind::Compaction => ModelProviderChatRequestKind::Compaction,
+        },
+        compaction: metadata.compaction.as_ref().map(|compaction| {
+            ModelProviderChatCompactionMetadata {
+                implementation: compaction.implementation.clone(),
+                trigger: compaction.trigger.clone(),
+                reason: compaction.reason.clone(),
+                phase: compaction.phase.clone(),
+                strategy: compaction.strategy.clone(),
+                window_id: compaction.window_id,
+                input_history_count: compaction.input_history_count,
+                retained_history_count: compaction.retained_history_count,
+                compacted_item_count: compaction.compacted_item_count,
+                retained_item_count: compaction.retained_item_count,
+                tool_codes: compaction.tool_codes.clone(),
+            }
+        }),
     }
-    payload
-}
-
-fn model_chat_responses_compaction_payload(
-    route: &ModelRuntimeRoute,
-    command: &ModelChatCommand,
-) -> Value {
-    let mut input = model_chat_message_input_items(command);
-    input.push(json!({ "type": "compaction_trigger" }));
-
-    let mut payload = json!({
-        "model": route.model().unwrap_or_default(),
-        "input": input,
-        "temperature": command.temperature.unwrap_or(DEFAULT_MODEL_CHAT_TEMPERATURE),
-        "max_output_tokens": command.max_tokens.unwrap_or(DEFAULT_MODEL_CHAT_MAX_TOKENS),
-        "background": true,
-        "store": true,
-        "stream": true,
-    });
-    if let Some(metadata) = model_chat_provider_metadata(route, command) {
-        payload["metadata"] = metadata;
-    }
-    payload
-}
-
-fn model_chat_responses_compact_unary_payload(
-    route: &ModelRuntimeRoute,
-    command: &ModelChatCommand,
-) -> Value {
-    let mut payload = json!({
-        "model": route.model().unwrap_or_default(),
-        "input": model_chat_message_input_items(command),
-        "tools": [],
-        "parallel_tool_calls": false,
-    });
-    if let Some(metadata) = model_chat_provider_metadata(route, command) {
-        payload["metadata"] = metadata;
-    }
-    payload
-}
-
-fn model_chat_message_input_items(command: &ModelChatCommand) -> Vec<Value> {
-    let mut messages = Vec::new();
-    if !command.file_contexts.is_empty() {
-        messages.push(json!({
-            "type": "message",
-            "role": "system",
-            "content": [{ "type": "input_text", "text": model_chat_file_context_prompt(&command.file_contexts) }],
-        }));
-    }
-    messages.extend(command.messages.iter().map(|message| {
-        json!({
-            "type": "message",
-            "role": message.role,
-            "content": [{ "type": "input_text", "text": message.content }],
-        })
-    }));
-    messages
-}
-
-fn model_chat_request_payload(route: &ModelRuntimeRoute, command: &ModelChatCommand) -> Value {
-    let mut messages = Vec::new();
-    if !command.file_contexts.is_empty() {
-        messages.push(json!({
-            "role": "system",
-            "content": model_chat_file_context_prompt(&command.file_contexts),
-        }));
-    }
-    messages.extend(
-        command
-            .messages
-            .iter()
-            .map(|message| {
-                json!({
-                    "role": message.role,
-                    "content": message.content,
-                })
-            })
-            .collect::<Vec<_>>(),
-    );
-
-    let mut payload = json!({
-        "model": route.model().unwrap_or_default(),
-        "messages": messages,
-        "temperature": command.temperature.unwrap_or(DEFAULT_MODEL_CHAT_TEMPERATURE),
-        "max_tokens": command.max_tokens.unwrap_or(DEFAULT_MODEL_CHAT_MAX_TOKENS),
-        "stream": model_chat_should_stream_chat_completion(command),
-    });
-    if let Some(response_format) = &command.response_format {
-        payload["response_format"] = response_format.clone();
-    }
-    if let Some(metadata) = model_chat_provider_metadata(route, command) {
-        payload["metadata"] = metadata;
-    }
-    payload
-}
-
-fn model_chat_provider_metadata(
-    route: &ModelRuntimeRoute,
-    command: &ModelChatCommand,
-) -> Option<Value> {
-    if !model_chat_route_supports_provider_metadata(route) {
-        return None;
-    }
-
-    let metadata = command.request_metadata.as_ref()?;
-    let mut payload = serde_json::Map::from_iter([(
-        "request_kind".to_owned(),
-        json!(metadata.request_kind.as_str()),
-    )]);
-
-    if let Some(compaction) = &metadata.compaction {
-        payload.insert(
-            "compaction_implementation".to_owned(),
-            json!(compaction.implementation),
-        );
-        payload.insert("compaction_trigger".to_owned(), json!(compaction.trigger));
-        payload.insert("compaction_reason".to_owned(), json!(compaction.reason));
-        payload.insert("compaction_phase".to_owned(), json!(compaction.phase));
-        payload.insert("compaction_strategy".to_owned(), json!(compaction.strategy));
-        payload.insert(
-            "compaction_window_id".to_owned(),
-            json!(compaction.window_id.to_string()),
-        );
-        payload.insert(
-            "input_history_count".to_owned(),
-            json!(compaction.input_history_count.to_string()),
-        );
-        payload.insert(
-            "retained_history_count".to_owned(),
-            json!(compaction.retained_history_count.to_string()),
-        );
-        payload.insert(
-            "compacted_item_count".to_owned(),
-            json!(compaction.compacted_item_count.to_string()),
-        );
-        payload.insert(
-            "retained_item_count".to_owned(),
-            json!(compaction.retained_item_count.to_string()),
-        );
-        payload.insert(
-            "tool_codes".to_owned(),
-            json!(compaction.tool_codes.join(",")),
-        );
-    }
-
-    Some(Value::Object(payload))
-}
-
-fn model_chat_route_supports_provider_metadata(route: &ModelRuntimeRoute) -> bool {
-    matches!(
-        route.provider(),
-        ModelProviderType::OpenAiCompatible
-            | ModelProviderType::AzureOpenAi
-            | ModelProviderType::LocalRuntime
-    )
-}
-
-fn model_chat_file_context_prompt(files: &[ModelChatFileContext]) -> String {
-    let mut sections = vec![
-        "Use the following user-provided file context when it is relevant. If the files do not contain enough evidence, say so.".to_owned(),
-    ];
-    for file in files {
-        sections.push(format!(
-            "[File: {} | {}]\n{}",
-            file.name, file.content_type, file.content
-        ));
-    }
-    sections.join("\n\n")
 }
 
 async fn model_chat_streaming_provider_output(
@@ -6712,6 +6492,40 @@ mod tests {
     }
 
     #[test]
+    fn provider_client_chat_request_plan_lives_in_provider_client_crate() {
+        let workspace_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("backend manifest should live below workspace root");
+        let source = |path: &str| {
+            std::fs::read_to_string(workspace_root.join(path))
+                .unwrap_or_else(|err| panic!("failed to read {path}: {err}"))
+        };
+        let provider_client_source = source("crates/novex-provider-client/src/lib.rs");
+        let service_source = source("backend/src/application/ai/model_service.rs");
+        let plan_path = &service_source[service_source
+            .find("fn model_chat_provider_request(")
+            .unwrap()
+            ..service_source
+                .find("fn model_chat_provider_request_streams_chat_completion")
+                .unwrap()];
+
+        assert!(provider_client_source.contains("pub enum ModelProviderChatTransport"));
+        assert!(provider_client_source.contains("pub struct ModelProviderChatPlanInput"));
+        assert!(provider_client_source.contains("pub struct ModelProviderChatPlan"));
+        assert!(provider_client_source.contains("pub fn build_model_provider_chat_plan"));
+        assert!(provider_client_source
+            .contains("pub fn model_provider_chat_plan_streams_chat_completion"));
+        assert!(provider_client_source.contains("\"responses/compact\""));
+        assert!(provider_client_source.contains("\"compaction_trigger\""));
+        assert!(provider_client_source.contains("\"max_output_tokens\""));
+        assert!(provider_client_source.contains("\"response_format\""));
+        assert!(plan_path.contains("build_model_provider_chat_plan(ModelProviderChatPlanInput"));
+        assert!(!plan_path.contains("json!({"));
+        assert!(!plan_path.contains("model_chat_responses_compaction_payload"));
+        assert!(!plan_path.contains("model_chat_request_payload"));
+    }
+
+    #[test]
     fn provider_client_http_primitives_live_in_provider_client_crate() {
         let workspace_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
@@ -8157,7 +7971,7 @@ mod tests {
         })
         .unwrap();
 
-        let payload = model_chat_request_payload(&route, &command);
+        let payload = model_chat_provider_request(&route, &command).payload;
 
         assert_eq!(payload["model"], "deepseek-v4-flash");
         assert_eq!(payload["temperature"], 0.2);
@@ -8180,7 +7994,7 @@ mod tests {
         })
         .unwrap();
 
-        let payload = model_chat_request_payload(&route, &command);
+        let payload = model_chat_provider_request(&route, &command).payload;
 
         assert!(payload.get("metadata").is_none());
     }
@@ -8198,7 +8012,7 @@ mod tests {
         })
         .unwrap();
 
-        let payload = model_chat_request_payload(&route, &command);
+        let payload = model_chat_provider_request(&route, &command).payload;
 
         assert_eq!(payload["metadata"]["request_kind"], "compaction");
         assert_eq!(
@@ -8235,7 +8049,7 @@ mod tests {
         })
         .unwrap();
 
-        let payload = model_chat_request_payload(&route, &command);
+        let payload = model_chat_provider_request(&route, &command).payload;
 
         assert_eq!(route.provider(), ModelProviderType::DeepSeek);
         assert!(payload.get("metadata").is_none());
@@ -9255,7 +9069,7 @@ mod tests {
         })
         .unwrap();
 
-        let payload = model_chat_request_payload(&route, &command);
+        let payload = model_chat_provider_request(&route, &command).payload;
 
         assert_eq!(payload["messages"][0]["role"], "system");
         assert!(payload["messages"][0]["content"]
@@ -9286,7 +9100,7 @@ mod tests {
         })
         .unwrap();
 
-        let payload = model_chat_request_payload(&route, &command);
+        let payload = model_chat_provider_request(&route, &command).payload;
 
         assert_eq!(payload["response_format"]["type"], "json_object");
     }

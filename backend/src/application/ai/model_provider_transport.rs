@@ -9,10 +9,14 @@ pub(super) use native_cancel::{
     send_model_provider_native_cancel_request, ModelProviderNativeCancelRequest,
 };
 pub(super) use novex_provider_client::{
-    model_chat_sse_record_data_payload, model_provider_response_id_from_payloads,
+    build_model_provider_chat_plan, model_chat_sse_record_data_payload,
+    model_provider_chat_plan_streams_chat_completion, model_provider_response_id_from_payloads,
     normalize_model_provider_response_id, parse_model_provider_embedding_vectors,
     parse_model_provider_rerank_scores, ModelChatCompactionProviderOutput, ModelChatProviderOutput,
-    ModelChatStreamCompletionBuilder, ModelProviderChatRequest,
+    ModelChatStreamCompletionBuilder, ModelProviderChatCompactionMetadata,
+    ModelProviderChatFileContext, ModelProviderChatMessage, ModelProviderChatPlan,
+    ModelProviderChatPlanInput, ModelProviderChatRequest, ModelProviderChatRequestKind,
+    ModelProviderChatRequestMetadata, ModelProviderChatTransport,
 };
 use serde_json::Value;
 

@@ -4,6 +4,8 @@
 
 **Goal:** Move provider-neutral chat/Responses request planning and payload construction from backend route execution into `novex-provider-client`.
 
+**Status:** Implemented in branch `feat/enterprise-agent-foundation`; pending final full verification and merge at the time this plan was updated.
+
 **Architecture:** Backend remains responsible for route resolution, command normalization, provider-call leases, fallback, trace/eval context, tenant state, and stream event emission. `novex-provider-client` owns a pure chat plan builder that accepts normalized provider inputs and returns endpoint, payload, and transport kind for chat-completions, Responses CodeAgent streaming, Responses compaction v2, and unary `/responses/compact`.
 
 **Tech Stack:** Rust 2021, Cargo workspace, `serde_json`, `novex-model`, `novex-provider-client`, backend source-contract tests, provider-client unit tests, offline cargo verification.
