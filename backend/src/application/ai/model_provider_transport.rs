@@ -3,10 +3,7 @@ mod media;
 mod native_cancel;
 mod rag;
 
-pub(super) use http::{
-    model_provider_client_error_to_app_error, send_model_provider_http_request,
-    ModelProviderHttpRequest,
-};
+pub(super) use http::model_provider_client_error_to_app_error;
 pub(super) use media::{send_model_provider_media_image_request, ModelProviderMediaImageRequest};
 pub(super) use native_cancel::{
     send_model_provider_native_cancel_request, ModelProviderNativeCancelRequest,
@@ -15,7 +12,7 @@ pub(super) use novex_provider_client::{
     model_chat_sse_record_data_payload, model_provider_response_id_from_payloads,
     normalize_model_provider_response_id, parse_model_provider_embedding_vectors,
     parse_model_provider_rerank_scores, ModelChatCompactionProviderOutput, ModelChatProviderOutput,
-    ModelChatStreamCompletionBuilder,
+    ModelChatStreamCompletionBuilder, ModelProviderChatRequest,
 };
 use serde_json::Value;
 
@@ -26,10 +23,27 @@ pub(super) use rag::{
 
 use crate::shared::error::AppError;
 
+#[allow(dead_code)]
 pub(super) async fn read_model_provider_response_text(
     response: reqwest::Response,
 ) -> Result<String, AppError> {
     novex_provider_client::read_model_provider_response_text(response)
+        .await
+        .map_err(model_provider_client_error_to_app_error)
+}
+
+pub(super) async fn send_model_provider_chat_request(
+    request: ModelProviderChatRequest<'_>,
+) -> Result<reqwest::Response, AppError> {
+    novex_provider_client::send_model_provider_chat_request(request)
+        .await
+        .map_err(model_provider_client_error_to_app_error)
+}
+
+pub(super) async fn send_model_provider_chat_unary_request(
+    request: ModelProviderChatRequest<'_>,
+) -> Result<String, AppError> {
+    novex_provider_client::send_model_provider_chat_unary_request(request)
         .await
         .map_err(model_provider_client_error_to_app_error)
 }

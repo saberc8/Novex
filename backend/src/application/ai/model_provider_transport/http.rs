@@ -3,6 +3,7 @@ use novex_provider_client::{self, ModelProviderClientError};
 
 use crate::shared::error::AppError;
 
+#[allow(dead_code)]
 pub(in crate::application::ai) async fn send_model_provider_http_request(
     request: ModelProviderHttpRequest<'_>,
 ) -> Result<reqwest::Response, AppError> {

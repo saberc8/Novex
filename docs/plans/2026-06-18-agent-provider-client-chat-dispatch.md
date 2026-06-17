@@ -4,6 +4,8 @@
 
 **Goal:** Move provider-neutral chat and Responses HTTP dispatch APIs from backend route execution into `novex-provider-client`.
 
+**Status:** Implemented in branch `feat/enterprise-agent-foundation`; pending final full verification and merge at the time this plan was updated.
+
 **Architecture:** Keep backend responsible for route selection, provider request planning, payload construction, stream/unary mode selection, provider-call leases, trace/eval metadata, and stream event emission. Add chat-specific provider-client request APIs that POST the already-built payload with the standard LLM failure message; stream dispatch returns `reqwest::Response` for backend event draining, while unary dispatch returns provider response text for backend parser routing. `backend/src/application/ai/model_provider_transport.rs` remains the compatibility facade that maps `ModelProviderClientError` into `AppError`.
 
 **Tech Stack:** Rust 2021, Cargo workspace, `reqwest`, `serde_json`, `novex-provider-client`, backend source-contract tests, provider-client unit tests, offline cargo verification.

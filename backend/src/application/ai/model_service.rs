@@ -29,12 +29,12 @@ use super::model_provider_transport::{
     parse_model_chat_compaction_provider_output_from_text,
     parse_model_chat_provider_output_from_body, parse_model_chat_provider_output_from_text,
     parse_model_provider_embedding_vectors, parse_model_provider_rerank_scores,
-    read_model_provider_response_text, send_model_provider_embedding_request,
-    send_model_provider_http_request, send_model_provider_media_image_request,
+    send_model_provider_chat_request, send_model_provider_chat_unary_request,
+    send_model_provider_embedding_request, send_model_provider_media_image_request,
     send_model_provider_native_cancel_request, send_model_provider_rerank_request,
-    ModelChatProviderOutput, ModelChatStreamCompletionBuilder, ModelProviderEmbeddingRequest,
-    ModelProviderHttpRequest, ModelProviderMediaImageRequest, ModelProviderNativeCancelRequest,
-    ModelProviderRerankRequest,
+    ModelChatProviderOutput, ModelChatStreamCompletionBuilder, ModelProviderChatRequest,
+    ModelProviderEmbeddingRequest, ModelProviderMediaImageRequest,
+    ModelProviderNativeCancelRequest, ModelProviderRerankRequest,
 };
 
 use crate::{
@@ -2760,17 +2760,15 @@ async fn execute_normalized_chat_completion_with_route(
 ) -> Result<ModelChatResp, AppError> {
     let provider_request = model_chat_provider_request(route, command);
     let started = Instant::now();
-    let response = send_model_provider_http_request(ModelProviderHttpRequest {
-        endpoint: &provider_request.endpoint,
-        api_key: route.api_key(),
-        payload: &provider_request.payload,
-        timeout: MODEL_CHAT_TIMEOUT,
-        failure_message: "LLM 模型调用失败",
-    })
-    .await?;
-
     let stream_dispatch = matches!(dispatch_mode, ModelProviderDispatchMode::Stream);
     if stream_dispatch && model_chat_provider_request_streams_chat_completion(&provider_request) {
+        let response = send_model_provider_chat_request(ModelProviderChatRequest {
+            endpoint: &provider_request.endpoint,
+            api_key: route.api_key(),
+            payload: &provider_request.payload,
+            timeout: MODEL_CHAT_TIMEOUT,
+        })
+        .await?;
         let output = model_chat_streaming_provider_output(response, route, command).await?;
         return Ok(model_chat_response_from_provider_output(
             route,
@@ -2780,7 +2778,13 @@ async fn execute_normalized_chat_completion_with_route(
         ));
     }
 
-    let body_text = read_model_provider_response_text(response).await?;
+    let body_text = send_model_provider_chat_unary_request(ModelProviderChatRequest {
+        endpoint: &provider_request.endpoint,
+        api_key: route.api_key(),
+        payload: &provider_request.payload,
+        timeout: MODEL_CHAT_TIMEOUT,
+    })
+    .await?;
     match provider_request.transport {
         ModelChatProviderTransport::ChatCompletions
         | ModelChatProviderTransport::ResponsesCodeAgent => {
@@ -6205,7 +6209,10 @@ mod tests {
             "if stream_dispatch && model_chat_provider_request_streams_chat_completion(&provider_request)"
         ));
         assert!(normalized_runtime_path
-            .contains("let body_text = read_model_provider_response_text(response).await?;"));
+            .contains("let response = send_model_provider_chat_request(ModelProviderChatRequest"));
+        assert!(normalized_runtime_path.contains(
+            "let body_text = send_model_provider_chat_unary_request(ModelProviderChatRequest"
+        ));
         assert!(normalized_runtime_path.contains(
             "ModelChatProviderTransport::ChatCompletions | ModelChatProviderTransport::ResponsesCodeAgent"
         ));
@@ -6217,15 +6224,29 @@ mod tests {
             .split("#[cfg(test)]")
             .next()
             .unwrap();
+        let transport_source = include_str!("model_provider_transport.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+        let backend_http_source = include_str!("model_provider_transport/http.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
         let route_path = &source[source
             .find("async fn execute_normalized_chat_completion_with_route")
             .unwrap()
             ..source.find("fn normalize_model_chat_command").unwrap()];
 
         assert!(source.contains("model_provider_transport::{"));
-        assert!(source.contains("ModelProviderHttpRequest"));
-        assert!(source.contains("send_model_provider_http_request"));
-        assert!(route_path.contains("send_model_provider_http_request(ModelProviderHttpRequest"));
+        assert!(backend_http_source.contains("ModelProviderHttpRequest"));
+        assert!(backend_http_source.contains("send_model_provider_http_request"));
+        assert!(transport_source.contains("send_model_provider_chat_request"));
+        assert!(transport_source.contains("send_model_provider_chat_unary_request"));
+        assert!(route_path.contains("send_model_provider_chat_request(ModelProviderChatRequest"));
+        assert!(
+            route_path.contains("send_model_provider_chat_unary_request(ModelProviderChatRequest")
+        );
+        assert!(!route_path.contains("send_model_provider_http_request(ModelProviderHttpRequest"));
         assert!(!route_path.contains("reqwest::Client::builder()"));
         assert!(!route_path.contains(".post(&provider_request.endpoint)"));
         assert!(!route_path.contains(".bearer_auth(route.api_key())"));
@@ -6254,11 +6275,12 @@ mod tests {
                 .find("fn normalize_model_chat_command")
                 .unwrap()];
 
-        assert!(service_source.contains("read_model_provider_response_text"));
         assert!(service_source.contains("ModelChatStreamCompletionBuilder"));
         assert!(transport_source.contains("pub(super) async fn read_model_provider_response_text"));
         assert!(transport_source
             .contains("novex_provider_client::read_model_provider_response_text(response)"));
+        assert!(transport_source
+            .contains("novex_provider_client::send_model_provider_chat_unary_request(request)"));
         assert!(transport_source
             .contains("novex_provider_client::parse_model_chat_provider_output_from_text"));
         assert!(transport_source.contains(
@@ -6273,8 +6295,11 @@ mod tests {
         );
         assert!(provider_client_source
             .contains("pub fn parse_model_chat_compaction_provider_output_from_text"));
-        assert!(route_path.contains("read_model_provider_response_text(response).await?"));
+        assert!(
+            route_path.contains("send_model_provider_chat_unary_request(ModelProviderChatRequest")
+        );
         assert!(!route_path.contains("response.text().await.unwrap_or_default()"));
+        assert!(!route_path.contains("read_model_provider_response_text(response).await?"));
         assert!(!service_source.contains("fn model_chat_provider_output_from_body"));
         assert!(!service_source.contains("fn model_chat_provider_output_from_sse_text"));
         assert!(!service_source.contains("fn model_chat_compaction_provider_output_from_body"));
@@ -6508,7 +6533,8 @@ mod tests {
         assert!(transport_source.contains("mod media;"));
         assert!(transport_source.contains("mod native_cancel;"));
         assert!(transport_source.contains("mod rag;"));
-        assert!(transport_source.contains("pub(super) use http::{"));
+        assert!(transport_source
+            .contains("pub(super) use http::model_provider_client_error_to_app_error"));
         assert!(transport_source.contains("pub(super) use media::{"));
         assert!(transport_source.contains("pub(super) use native_cancel::{"));
         assert!(transport_source.contains("pub(super) use rag::{"));
@@ -6640,6 +6666,49 @@ mod tests {
             .contains("pub(super) struct ModelChatStreamCompletionBuilder"));
         assert!(!backend_transport_source.contains("fn model_chat_compaction_output_from_items"));
         assert!(!backend_transport_source.contains("fn model_chat_answer_from_provider_body"));
+    }
+
+    #[test]
+    fn provider_client_chat_dispatch_lives_in_provider_client_crate() {
+        let workspace_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("backend manifest should live below workspace root");
+        let source = |path: &str| {
+            std::fs::read_to_string(workspace_root.join(path))
+                .unwrap_or_else(|err| panic!("failed to read {path}: {err}"))
+        };
+        let provider_client_source = source("crates/novex-provider-client/src/lib.rs");
+        let backend_transport_source =
+            source("backend/src/application/ai/model_provider_transport.rs");
+        let service_source = source("backend/src/application/ai/model_service.rs");
+        let route_path = &service_source[service_source
+            .find("async fn execute_normalized_chat_completion_with_route")
+            .unwrap()
+            ..service_source
+                .find("fn normalize_model_chat_command")
+                .unwrap()];
+
+        assert!(provider_client_source.contains("pub struct ModelProviderChatRequest"));
+        assert!(provider_client_source.contains("pub async fn send_model_provider_chat_request"));
+        assert!(
+            provider_client_source.contains("pub async fn send_model_provider_chat_unary_request")
+        );
+        assert!(provider_client_source.contains("failure_message: \"LLM 模型调用失败\""));
+        assert!(
+            provider_client_source.contains("read_model_provider_response_text(response).await")
+        );
+        assert!(backend_transport_source.contains("ModelProviderChatRequest"));
+        assert!(backend_transport_source
+            .contains("novex_provider_client::send_model_provider_chat_request(request)"));
+        assert!(backend_transport_source
+            .contains("novex_provider_client::send_model_provider_chat_unary_request(request)"));
+        assert!(backend_transport_source.contains("model_provider_client_error_to_app_error"));
+        assert!(route_path.contains("send_model_provider_chat_request(ModelProviderChatRequest"));
+        assert!(
+            route_path.contains("send_model_provider_chat_unary_request(ModelProviderChatRequest")
+        );
+        assert!(!route_path.contains("send_model_provider_http_request(ModelProviderHttpRequest"));
+        assert!(!route_path.contains("read_model_provider_response_text(response).await?"));
     }
 
     #[test]
@@ -8416,7 +8485,10 @@ mod tests {
             .collect::<Vec<_>>()
             .join(" ");
         assert!(normalized_runtime_path.contains(
-            "if stream_dispatch && model_chat_provider_request_streams_chat_completion(&provider_request) { let output = model_chat_streaming_provider_output"
+            "if stream_dispatch && model_chat_provider_request_streams_chat_completion(&provider_request) { let response = send_model_provider_chat_request"
+        ));
+        assert!(normalized_runtime_path.contains(
+            "let output = model_chat_streaming_provider_output(response, route, command).await?"
         ));
         assert!(
             normalized_runtime_path.contains("return Ok(model_chat_response_from_provider_output(")
