@@ -12,7 +12,7 @@
 
 ### Task 1: Red Tests
 
-Status: Pending.
+Status: Completed.
 
 **Files:**
 - Create: `apps/codex-app-poc/scripts/agent-live-smoke.test.mjs`
@@ -40,7 +40,7 @@ Expected: FAIL because `scripts/agent-live-smoke.mjs` does not exist.
 
 ### Task 2: Smoke Runner
 
-Status: Pending.
+Status: Completed.
 
 **Files:**
 - Create: `apps/codex-app-poc/scripts/agent-live-smoke.mjs`
@@ -77,7 +77,7 @@ pnpm test -- scripts/agent-live-smoke.test.mjs
 
 ### Task 3: Documentation
 
-Status: Pending.
+Status: Completed.
 
 **Files:**
 - Modify: `apps/codex-app-poc/README.md`
@@ -102,7 +102,7 @@ Mark tasks complete after verification.
 
 ### Task 4: Verify, Commit, Merge
 
-Status: Pending.
+Status: Completed.
 
 **Step 1: Verify feature branch**
 
@@ -111,7 +111,7 @@ Run:
 ```bash
 cargo fmt -- --check
 cargo test --workspace --offline
-cd apps/codex-app-poc && pnpm test -- src/api/agent.test.ts app/page.test.tsx scripts/agent-live-smoke.test.mjs && pnpm typecheck
+cd apps/codex-app-poc && pnpm test -- src/api/agent.test.ts app/page.test.tsx scripts/agent-live-smoke.test.mjs && pnpm typecheck && pnpm lint && pnpm smoke:agent-live
 cd ../agent-workspace && pnpm test -- src/api/agent.test.ts
 ```
 
