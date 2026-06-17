@@ -6342,10 +6342,12 @@ mod tests {
         assert!(rag_source.contains(
             "pub(in crate::application::ai) async fn send_model_provider_rerank_request"
         ));
-        assert!(rag_source
-            .contains("pub(in crate::application::ai) fn parse_model_provider_embedding_vectors"));
-        assert!(rag_source
-            .contains("pub(in crate::application::ai) fn parse_model_provider_rerank_scores"));
+        assert!(transport_source.contains("pub(super) use novex_provider_client::{"));
+        assert!(rag_source.contains("use novex_provider_client::{"));
+        assert!(rag_source.contains("parse_model_provider_embedding_vectors"));
+        assert!(rag_source.contains("parse_model_provider_rerank_scores"));
+        assert!(!rag_source.contains("fn parse_embedding_vector("));
+        assert!(!rag_source.contains("fn parse_rerank_score("));
         assert!(rag_source.contains("model_provider_http_client(request.timeout)"));
         assert!(embed_path
             .contains("send_model_provider_embedding_request(ModelProviderEmbeddingRequest"));
@@ -6479,15 +6481,48 @@ mod tests {
         assert!(rag_source.contains(
             "pub(in crate::application::ai) async fn send_model_provider_rerank_request"
         ));
-        assert!(rag_source
-            .contains("pub(in crate::application::ai) fn parse_model_provider_embedding_vectors"));
-        assert!(rag_source
-            .contains("pub(in crate::application::ai) fn parse_model_provider_rerank_scores"));
+        assert!(transport_source.contains("pub(super) use novex_provider_client::{"));
+        assert!(rag_source.contains("use novex_provider_client::{"));
+        assert!(rag_source.contains("parse_model_provider_embedding_vectors"));
+        assert!(rag_source.contains("parse_model_provider_rerank_scores"));
+        assert!(!rag_source.contains("fn parse_embedding_vector("));
+        assert!(!rag_source.contains("fn parse_rerank_score("));
         assert!(rag_source.contains("model_provider_http_client(request.timeout)"));
         assert!(media_source.contains(
             "pub(in crate::application::ai) async fn send_model_provider_media_image_request"
         ));
         assert!(media_source.contains("model_provider_http_client(request.timeout)"));
+    }
+
+    #[test]
+    fn provider_client_rag_parsers_live_in_provider_client_crate() {
+        let workspace_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("backend manifest should live below workspace root");
+        let source = |path: &str| {
+            std::fs::read_to_string(workspace_root.join(path))
+                .unwrap_or_else(|err| panic!("failed to read {path}: {err}"))
+        };
+        let workspace_source = source("Cargo.toml");
+        let backend_cargo_source = source("backend/Cargo.toml");
+        let provider_client_source = source("crates/novex-provider-client/src/lib.rs");
+        let rag_source = source("backend/src/application/ai/model_provider_transport/rag.rs");
+
+        assert!(workspace_source.contains("\"crates/novex-provider-client\""));
+        assert!(workspace_source
+            .contains("novex-provider-client = { path = \"crates/novex-provider-client\" }"));
+        assert!(backend_cargo_source.contains("novex-provider-client.workspace = true"));
+        assert!(provider_client_source.contains("pub fn parse_model_provider_embedding_vectors"));
+        assert!(provider_client_source.contains("pub fn parse_model_provider_rerank_scores"));
+        assert!(provider_client_source.contains("fn parse_embedding_vector("));
+        assert!(provider_client_source.contains("fn parse_rerank_score("));
+        assert!(rag_source.contains("use novex_provider_client::{"));
+        assert!(rag_source.contains("parse_model_provider_embedding_vectors"));
+        assert!(rag_source.contains("parse_model_provider_rerank_scores"));
+        assert!(!rag_source.contains("fn parse_embedding_vector("));
+        assert!(!rag_source.contains("fn parse_rerank_score("));
+        assert!(!rag_source.contains("fn json_usize("));
+        assert!(!rag_source.contains("fn json_f32("));
     }
 
     #[test]

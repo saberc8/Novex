@@ -9,8 +9,10 @@ pub(super) use native_cancel::{
     send_model_provider_native_cancel_request, ModelProviderNativeCancelRequest,
 };
 use novex_model::{normalize_model_provider_usage, ModelProviderStreamChunk, ModelTokenUsage};
-pub(super) use rag::{
+pub(super) use novex_provider_client::{
     parse_model_provider_embedding_vectors, parse_model_provider_rerank_scores,
+};
+pub(super) use rag::{
     send_model_provider_embedding_request, send_model_provider_rerank_request,
     ModelProviderEmbeddingRequest, ModelProviderRerankRequest,
 };

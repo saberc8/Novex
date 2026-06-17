@@ -1,6 +1,9 @@
 use std::time::Duration;
 
 use novex_model::{ModelEmbeddingVector, ModelRerankScore};
+use novex_provider_client::{
+    parse_model_provider_embedding_vectors, parse_model_provider_rerank_scores,
+};
 use serde_json::{json, Value};
 
 use super::http::model_provider_http_client;
@@ -80,77 +83,4 @@ pub(in crate::application::ai) async fn send_model_provider_rerank_request(
         return Err(AppError::bad_request("Rerank 模型响应为空"));
     }
     Ok(scores)
-}
-
-pub(in crate::application::ai) fn parse_model_provider_rerank_scores(
-    body: &Value,
-) -> Vec<ModelRerankScore> {
-    body.get("results")
-        .or_else(|| body.get("data"))
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(parse_rerank_score)
-        .collect()
-}
-
-pub(in crate::application::ai) fn parse_model_provider_embedding_vectors(
-    body: &Value,
-) -> Vec<ModelEmbeddingVector> {
-    body.get("data")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(parse_embedding_vector)
-        .collect()
-}
-
-fn parse_rerank_score(value: &Value) -> Option<ModelRerankScore> {
-    let index = value
-        .get("index")
-        .and_then(json_usize)
-        .or_else(|| value.get("document_index").and_then(json_usize))
-        .or_else(|| value.get("documentIndex").and_then(json_usize))?;
-    let score = value
-        .get("relevance_score")
-        .or_else(|| value.get("relevanceScore"))
-        .or_else(|| value.get("score"))
-        .and_then(json_f32)?;
-    if !score.is_finite() {
-        return None;
-    }
-    Some(ModelRerankScore { index, score })
-}
-
-fn parse_embedding_vector(value: &Value) -> Option<ModelEmbeddingVector> {
-    let index = value.get("index").and_then(json_usize).unwrap_or(0);
-    let vector = value
-        .get("embedding")?
-        .as_array()?
-        .iter()
-        .filter_map(json_f32)
-        .filter(|value| value.is_finite())
-        .collect::<Vec<_>>();
-    if vector.is_empty() {
-        return None;
-    }
-    Some(ModelEmbeddingVector { index, vector })
-}
-
-fn json_usize(value: &Value) -> Option<usize> {
-    if let Some(value) = value.as_u64() {
-        return usize::try_from(value).ok();
-    }
-    value
-        .as_str()
-        .and_then(|text| text.trim().parse::<usize>().ok())
-}
-
-fn json_f32(value: &Value) -> Option<f32> {
-    if let Some(value) = value.as_f64() {
-        return Some(value as f32);
-    }
-    value
-        .as_str()
-        .and_then(|text| text.trim().parse::<f32>().ok())
 }
