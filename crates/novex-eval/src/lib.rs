@@ -216,6 +216,17 @@ impl EvalCaseCandidate {
                 json!(inference_summary.provider_attempt_count),
             );
         }
+        if inference_summary.delta_count > 0 {
+            tags.insert(
+                "modelDeltaCount".to_owned(),
+                json!(inference_summary.delta_count),
+            );
+            tags.insert(
+                "modelDeltaTextLength".to_owned(),
+                json!(inference_summary.delta_text_length),
+            );
+            tags.insert("streamingModelOutput".to_owned(), json!(true));
+        }
         if inference_summary.fallback_count > 0 {
             tags.insert(
                 "modelFallbackCount".to_owned(),
@@ -833,6 +844,8 @@ struct TraceInferenceSummary {
     retry_count: usize,
     retryable_error_count: usize,
     provider_attempt_count: usize,
+    delta_count: usize,
+    delta_text_length: usize,
     fallback_count: usize,
     circuit_open_count: usize,
     fallback_route_id: Option<String>,
@@ -858,7 +871,14 @@ fn trace_inference_summary(bundle: &TraceBundle) -> TraceInferenceSummary {
         if summary.model.is_none() {
             summary.model = trace_value_text(payload.get("model"));
         }
-        if trace_value_text(payload.get("type")).as_deref() == Some("model_inference_error") {
+        let inference_type = trace_value_text(payload.get("type"));
+        if inference_type.as_deref() == Some("model_delta") {
+            summary.delta_count += 1;
+            summary.delta_text_length += trace_value_raw_text(payload.get("content"))
+                .map(|content| content.chars().count())
+                .unwrap_or_default();
+        }
+        if inference_type.as_deref() == Some("model_inference_error") {
             summary.error_count += 1;
             if payload
                 .get("retryable")
@@ -963,6 +983,14 @@ fn trace_value_text(value: Option<&Value>) -> Option<String> {
             let value = value.trim();
             (!value.is_empty()).then(|| value.to_owned())
         }
+        Value::Null => None,
+        value => Some(value.to_string()),
+    }
+}
+
+fn trace_value_raw_text(value: Option<&Value>) -> Option<String> {
+    match value? {
+        Value::String(value) => Some(value.to_owned()),
         Value::Null => None,
         value => Some(value.to_string()),
     }
@@ -1359,6 +1387,70 @@ mod tests {
         assert_eq!(candidate.tags["completionTokens"], 9);
         assert_eq!(candidate.tags["totalTokens"], 23);
         assert_eq!(candidate.tags["costCents"], 0.65);
+    }
+
+    #[test]
+    fn trace_eval_candidate_tags_model_delta_streaming() {
+        let bundle = TraceBundle::new("agent-1")
+            .with_event(TraceEvent::inference(
+                1,
+                json!({
+                    "item": {
+                        "type": "model_delta",
+                        "source": "provider_stream",
+                        "routeId": "runtime.llm.code_agent",
+                        "provider": "openai-compatible",
+                        "model": "gpt-compatible",
+                        "deltaIndex": 0,
+                        "content": "Hello",
+                        "providerEvent": "chat.completion.chunk"
+                    }
+                }),
+            ))
+            .with_event(TraceEvent::inference(
+                2,
+                json!({
+                    "item": {
+                        "type": "model_delta",
+                        "source": "provider_stream",
+                        "routeId": "runtime.llm.code_agent",
+                        "provider": "openai-compatible",
+                        "model": "gpt-compatible",
+                        "deltaIndex": 1,
+                        "content": " world",
+                        "providerEvent": "chat.completion.chunk"
+                    }
+                }),
+            ))
+            .with_event(TraceEvent::inference(
+                3,
+                json!({
+                    "item": {
+                        "type": "model_inference",
+                        "routeId": "runtime.llm.code_agent",
+                        "provider": "openai-compatible",
+                        "model": "gpt-compatible",
+                        "streaming": true,
+                        "deltaChunkCount": 2,
+                        "deltaTextLength": 11,
+                        "latencyMs": 42,
+                        "usage": {
+                            "promptTokens": 11,
+                            "completionTokens": 7,
+                            "totalTokens": 18
+                        }
+                    }
+                }),
+            ));
+
+        let candidate = EvalCaseCandidate::from_trace_bundle(&bundle);
+
+        assert_eq!(candidate.tags["inferenceCount"], 3);
+        assert_eq!(candidate.tags["modelDeltaCount"], 2);
+        assert_eq!(candidate.tags["modelDeltaTextLength"], 11);
+        assert_eq!(candidate.tags["streamingModelOutput"], true);
+        assert_eq!(candidate.tags["modelProvider"], "openai-compatible");
+        assert_eq!(candidate.tags["modelRouteId"], "runtime.llm.code_agent");
     }
 
     #[test]

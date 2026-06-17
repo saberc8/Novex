@@ -5564,7 +5564,10 @@ fn trace_event_from_run_event(event: &RunEventRecord) -> Option<TraceEvent> {
 }
 
 fn is_model_inference_trace_item(item_type: &str) -> bool {
-    matches!(item_type, "model_inference" | "model_inference_error")
+    matches!(
+        item_type,
+        "model_inference" | "model_inference_error" | "model_delta"
+    )
 }
 
 fn trace_payload_item_type(payload: &Value) -> Option<String> {
@@ -7848,6 +7851,42 @@ mod tests {
         assert_eq!(
             bundle.events[0].payload["item"]["routeId"],
             "runtime.llm.code_agent"
+        );
+    }
+
+    #[test]
+    fn agent_run_events_convert_model_delta_spans_to_trace_bundle() {
+        let events = vec![fake_agent_event(
+            "thought",
+            2,
+            json!({
+                "runtimeMode": "model_loop",
+                "item": {
+                    "type": "model_delta",
+                    "source": "provider_stream",
+                    "routeId": "runtime.llm.code_agent",
+                    "provider": "openai-compatible",
+                    "model": "gpt-compatible",
+                    "deltaIndex": 1,
+                    "content": " world",
+                    "providerEvent": "chat.completion.chunk"
+                }
+            }),
+        )];
+
+        let bundle = agent_events_to_trace_bundle("agent-1", events);
+
+        assert_eq!(bundle.events[0].kind, TraceEventKind::Inference);
+        assert_eq!(bundle.events[0].payload["item"]["type"], "model_delta");
+        assert_eq!(
+            bundle.events[0].payload["item"]["source"],
+            "provider_stream"
+        );
+        assert_eq!(bundle.events[0].payload["item"]["deltaIndex"], 1);
+        assert_eq!(bundle.events[0].payload["item"]["content"], " world");
+        assert_eq!(
+            bundle.events[0].payload["item"]["providerEvent"],
+            "chat.completion.chunk"
         );
     }
 
