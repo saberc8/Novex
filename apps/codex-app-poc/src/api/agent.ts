@@ -1,6 +1,13 @@
 import { apiRequest, apiUrl } from "@/lib/api";
 import { getAuthToken } from "@/lib/auth";
-import type { AgentRunCommand, AgentRunEventStreamQuery, AgentRunResp } from "@/types/agent";
+import type {
+  AgentRunCommand,
+  AgentRunEventQuery,
+  AgentRunEventResp,
+  AgentRunEventStreamQuery,
+  AgentRunResp,
+  PageResult
+} from "@/types/agent";
 
 const AGENT_RUN_URL = "/ai/agents/runs";
 const CONFIGURED_MODEL_AGENT_BUDGET = {
@@ -48,6 +55,13 @@ export function fetchAgentRunEventStream(
   return fetch(apiUrl(`${AGENT_RUN_URL}/${runId}/events/stream`, query), {
     method: "GET",
     headers
+  });
+}
+
+export function listAgentRunEvents(runId: number, query: AgentRunEventQuery = {}) {
+  return apiRequest<PageResult<AgentRunEventResp>>(`${AGENT_RUN_URL}/${runId}/events`, {
+    method: "GET",
+    query
   });
 }
 

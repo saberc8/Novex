@@ -42,18 +42,69 @@ describe("Codex app POC page", () => {
   });
 
   it("submits composer input as model loop agent run", async () => {
-    const fetchMock = vi.fn(async () => ({
-      ok: true,
-      json: async () => ({
-        code: "200",
-        data: {
-          runId: 42,
-          traceId: "agent-42",
-          status: "succeeded",
-          finalOutput: "Done"
-        }
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          code: "200",
+          data: {
+            runId: 42,
+            traceId: "agent-42",
+            status: "succeeded",
+            finalOutput: "Done"
+          }
+        })
       })
-    }));
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          code: "200",
+          data: {
+            list: [
+              {
+                id: 201,
+                runId: 42,
+                stepId: null,
+                eventType: "thought",
+                sequenceNo: 6,
+                status: "running",
+                payload: {
+                  item: {
+                    type: "model_delta",
+                    routeId: "runtime.llm.code_agent",
+                    provider: "openai-compatible",
+                    model: "gpt-compatible",
+                    deltaIndex: 1,
+                    content: " world"
+                  }
+                },
+                createTime: "2026-06-17 12:00:01"
+              },
+              {
+                id: 202,
+                runId: 42,
+                stepId: null,
+                eventType: "thought",
+                sequenceNo: 5,
+                status: "running",
+                payload: {
+                  item: {
+                    type: "model_delta",
+                    routeId: "runtime.llm.code_agent",
+                    provider: "openai-compatible",
+                    model: "gpt-compatible",
+                    deltaIndex: 0,
+                    content: "Hello"
+                  }
+                },
+                createTime: "2026-06-17 12:00:00"
+              }
+            ],
+            total: 2
+          }
+        })
+      });
     vi.stubGlobal("fetch", fetchMock);
     vi.stubEnv("NEXT_PUBLIC_AGENT_MODEL_ROUTE_ID", "runtime.llm.code_agent");
 
@@ -82,5 +133,7 @@ describe("Codex app POC page", () => {
       })
     );
     expect(await screen.findByText("Done")).toBeTruthy();
+    expect(await screen.findByText("Live model output")).toBeTruthy();
+    expect(await screen.findByText("Hello world")).toBeTruthy();
   });
 });

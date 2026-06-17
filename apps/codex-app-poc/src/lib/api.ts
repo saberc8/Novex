@@ -9,9 +9,14 @@ type ApiEnvelope<T> = {
   message?: string;
 };
 
-export async function apiRequest<T>(path: string, init: RequestInit = {}): Promise<T> {
+type ApiRequestInit = RequestInit & {
+  query?: Record<string, unknown>;
+};
+
+export async function apiRequest<T>(path: string, init: ApiRequestInit = {}): Promise<T> {
+  const { query, ...requestInit } = init;
   const headers: Record<string, string> = {};
-  new Headers(init.headers).forEach((value, key) => {
+  new Headers(requestInit.headers).forEach((value, key) => {
     headers[key] = value;
   });
   if (!("Content-Type" in headers) && !("content-type" in headers)) {
@@ -22,8 +27,8 @@ export async function apiRequest<T>(path: string, init: RequestInit = {}): Promi
     headers.Authorization = `Bearer ${token}`;
   }
 
-  const response = await fetch(`${apiBaseUrl()}${path}`, {
-    ...init,
+  const response = await fetch(apiUrl(path, query), {
+    ...requestInit,
     headers
   });
   const body = (await response.json()) as ApiEnvelope<T>;

@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import {
   ArrowLeft,
   ArrowRight,
@@ -19,8 +19,9 @@ import {
   ShieldAlert,
   SquarePen
 } from "lucide-react";
-import { createConfiguredModelAgentRun } from "@/api/agent";
-import type { AgentRunResp } from "@/types/agent";
+import { createConfiguredModelAgentRun, listAgentRunEvents } from "@/api/agent";
+import { summarizeModelDeltas } from "@/lib/agent-events";
+import type { AgentRunEventResp, AgentRunResp } from "@/types/agent";
 
 const navigationItems = [
   { label: "新对话", icon: SquarePen, active: true },
@@ -218,7 +219,9 @@ function Composer() {
   const [activeCommandIndex, setActiveCommandIndex] = useState(0);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [runResult, setRunResult] = useState<AgentRunResp | null>(null);
+  const [runEvents, setRunEvents] = useState<AgentRunEventResp[]>([]);
   const [runError, setRunError] = useState<string | null>(null);
+  const modelDeltaSummary = useMemo(() => summarizeModelDeltas(runEvents), [runEvents]);
 
   function handleComposerChange(value: string) {
     setComposerValue(value);
@@ -265,9 +268,16 @@ function Composer() {
     setIsSubmitting(true);
     setRunError(null);
     setRunResult(null);
+    setRunEvents([]);
     try {
       const result = await createConfiguredModelAgentRun(input);
       setRunResult(result);
+      try {
+        const eventPage = await listAgentRunEvents(result.runId, { page: 1, size: 100 });
+        setRunEvents(eventPage.list);
+      } catch {
+        setRunEvents([]);
+      }
     } catch (error) {
       setRunError(error instanceof Error ? error.message : "提交失败");
     } finally {
@@ -353,6 +363,21 @@ function Composer() {
           <p className="mt-2 whitespace-pre-wrap text-[15px] leading-6 text-[#111111]">
             {runResult.finalOutput || `Agent run ${runResult.status}`}
           </p>
+          {modelDeltaSummary ? (
+            <section className="mt-3 rounded-[9px] border border-[#D7E7FF] bg-white px-3 py-3">
+              <div className="flex flex-wrap items-center justify-between gap-2 text-[13px] text-[#596A7E]">
+                <span className="font-medium text-[#111111]">Live model output</span>
+                <span>{modelDeltaSummary.chunkCount} chunks</span>
+              </div>
+              <p className="mt-2 whitespace-pre-wrap text-[15px] leading-6 text-[#111111]">
+                {modelDeltaSummary.text}
+              </p>
+              <div className="mt-2 flex flex-wrap gap-2 text-[12px] text-[#6F6F6F]">
+                {modelDeltaSummary.routeId ? <span>{modelDeltaSummary.routeId}</span> : null}
+                {modelDeltaSummary.model ? <span>{modelDeltaSummary.model}</span> : null}
+              </div>
+            </section>
+          ) : null}
         </section>
       ) : null}
 

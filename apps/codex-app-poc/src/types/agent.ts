@@ -21,6 +21,16 @@ export type AgentRunEventStreamQuery = {
   maxIdleMs?: number;
 };
 
+export type AgentRunEventQuery = {
+  page?: number;
+  size?: number;
+};
+
+export type PageResult<T> = {
+  list: T[];
+  total: number;
+};
+
 export type AgentRunResp = {
   runId: number;
   traceId: string;
@@ -33,4 +43,15 @@ export type AgentRunResp = {
   taskBudget?: TaskBudget;
   createTime?: string;
   updateTime?: string | null;
+};
+
+export type AgentRunEventResp = {
+  id: number;
+  runId: number;
+  stepId?: number | null;
+  eventType: string;
+  sequenceNo: number;
+  status: string;
+  payload: Record<string, unknown> | unknown[] | string | number | boolean | null;
+  createTime: string;
 };

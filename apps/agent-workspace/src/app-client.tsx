@@ -25,6 +25,7 @@ import {
   listAgentRuns,
   resumeAgentRun
 } from "@/api/agent";
+import { summarizeModelDeltas } from "@/lib/agent-events";
 import type { AgentRunEventResp, AgentRunResp, TaskBudget } from "@/types/agent";
 
 const defaultBudget: Required<TaskBudget> = {
@@ -229,6 +230,7 @@ export function AgentWorkspaceClient() {
     ],
     [selectedRun]
   );
+  const modelDeltaSummary = useMemo(() => summarizeModelDeltas(events), [events]);
 
   return (
     <main className="min-h-screen bg-slate-100 text-slate-950">
@@ -431,6 +433,24 @@ export function AgentWorkspaceClient() {
               </div>
             </div>
             <div className="grid gap-3 p-4">
+              {modelDeltaSummary ? (
+                <section className="rounded-lg border border-sky-200 bg-sky-50 p-3">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div className="text-sm font-semibold text-sky-950">Live model output</div>
+                    <span className="rounded-md bg-white px-2 py-1 text-xs font-medium text-sky-800 ring-1 ring-sky-100">
+                      {modelDeltaSummary.chunkCount} chunks
+                    </span>
+                  </div>
+                  <p className="mt-3 whitespace-pre-wrap rounded-md bg-white p-3 text-sm leading-6 text-slate-900 ring-1 ring-sky-100">
+                    {modelDeltaSummary.text}
+                  </p>
+                  <div className="mt-2 flex flex-wrap gap-2 text-xs text-sky-800">
+                    {modelDeltaSummary.routeId ? <span>{modelDeltaSummary.routeId}</span> : null}
+                    {modelDeltaSummary.model ? <span>{modelDeltaSummary.model}</span> : null}
+                    {modelDeltaSummary.provider ? <span>{modelDeltaSummary.provider}</span> : null}
+                  </div>
+                </section>
+              ) : null}
               {loadingEvents ? (
                 <div className="rounded-md border border-dashed border-slate-300 p-6 text-center text-sm text-slate-500">
                   Loading events
