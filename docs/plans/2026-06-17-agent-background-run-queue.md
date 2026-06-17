@@ -4,9 +4,9 @@
 
 **Goal:** Add durable Agent run queueing so HTTP can create queued Agent runs and a background worker can claim and execute them using the same Agent runtime code.
 
-**Progress 2026-06-17:** Implemented the durable queue table/repository, `executionMode=queued` API contract, queued Run Graph creation, replayable queued events, config-gated embedded worker, Postgres `FOR UPDATE SKIP LOCKED` claim/lease polling, shared HTTP/worker `AgentRuntimeRegistry`, deterministic existing-run execution, model-loop existing-run execution, and pending/retrying queue-row cancellation sync.
+**Progress 2026-06-17:** Implemented the durable queue table/repository, `executionMode=queued` API contract, queued Run Graph creation, replayable queued events, config-gated embedded worker, Postgres `FOR UPDATE SKIP LOCKED` claim/lease polling, shared HTTP/worker `AgentRuntimeRegistry`, deterministic existing-run execution, model-loop existing-run execution, pending/retrying queue-row cancellation sync, and queued approval-resume requeue.
 
-**Architecture:** A Postgres-backed `ai_agent_run_queue` owns durable queue state and leases. `AgentService` creates queued runs, exposes an existing-run execution entrypoint, and terminalizes not-yet-claimed queue rows when a queued run is cancelled. `agent_queue_runtime.rs` polls/claims queue rows and calls the service; SSE over `ai_run_event` remains the client progress API.
+**Architecture:** A Postgres-backed `ai_agent_run_queue` owns durable queue state and leases. `AgentService` creates queued runs, exposes an existing-run execution entrypoint, terminalizes not-yet-claimed queue rows when a queued run is cancelled, and requeues queued approval resumes instead of executing tools in the HTTP request. `agent_queue_runtime.rs` polls/claims queue rows and calls the service; SSE over `ai_run_event` remains the client progress API.
 
 **Tech Stack:** Rust, Axum service layer, SQLx/Postgres, existing Run Graph tables, existing Agent runtime/model/tool crates.
 
@@ -175,7 +175,8 @@ Record:
 - Runtime loop slice moves to background queue implemented.
 - Current evidence includes queue migration, repository, service, runtime worker, and config.
 - Current evidence includes pending/retrying queue-row cancellation sync.
-- Remaining gaps: broker wake-up transport, active cross-process provider abort, resume requeue for human approval.
+- Current evidence includes waiting-approval queue rows and queued approval-resume requeue.
+- Remaining gaps: broker wake-up transport and active cross-process provider abort.
 
 **Step 2: Verify**
 
