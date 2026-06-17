@@ -1,3 +1,5 @@
+import { getAuthToken } from "./auth";
+
 const DEFAULT_API_BASE_URL = "http://localhost:4398";
 
 type ApiEnvelope<T> = {
@@ -8,9 +10,16 @@ type ApiEnvelope<T> = {
 };
 
 export async function apiRequest<T>(path: string, init: RequestInit = {}): Promise<T> {
-  const headers = new Headers(init.headers);
-  if (!headers.has("Content-Type")) {
-    headers.set("Content-Type", "application/json");
+  const headers: Record<string, string> = {};
+  new Headers(init.headers).forEach((value, key) => {
+    headers[key] = value;
+  });
+  if (!("Content-Type" in headers) && !("content-type" in headers)) {
+    headers["Content-Type"] = "application/json";
+  }
+  const token = getAuthToken();
+  if (token) {
+    headers.Authorization = `Bearer ${token}`;
   }
 
   const response = await fetch(`${apiBaseUrl()}${path}`, {

@@ -3,6 +3,8 @@ use chrono::{DateTime, Duration, Utc};
 use jsonwebtoken::{decode, encode, DecodingKey, EncodingKey, Header, Validation};
 use serde::{Deserialize, Serialize};
 
+const AGENT_RUN_EVENT_WS_TICKET_PURPOSE: &str = "agent_run_event_ws";
+
 #[derive(Debug, Clone)]
 pub struct JwtService {
     secret: String,
@@ -13,6 +15,16 @@ pub struct JwtService {
 pub struct TokenClaims {
     pub user_id: i64,
     pub username: String,
+    pub exp: usize,
+    pub iat: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentRunEventWsTicketClaims {
+    pub purpose: String,
+    pub user_id: i64,
+    pub username: String,
+    pub run_id: i64,
     pub exp: usize,
     pub iat: usize,
 }
@@ -50,6 +62,56 @@ impl JwtService {
         .context("issue JWT")?;
 
         Ok(IssuedToken { token, expire })
+    }
+
+    pub fn issue_agent_run_event_ws_ticket(
+        &self,
+        user_id: i64,
+        username: &str,
+        run_id: i64,
+        ttl_seconds: i64,
+    ) -> Result<IssuedToken> {
+        let now = Utc::now();
+        let expire = now + Duration::seconds(ttl_seconds.max(1));
+        let claims = AgentRunEventWsTicketClaims {
+            purpose: AGENT_RUN_EVENT_WS_TICKET_PURPOSE.to_owned(),
+            user_id,
+            username: username.to_owned(),
+            run_id,
+            iat: now.timestamp() as usize,
+            exp: expire.timestamp() as usize,
+        };
+        let token = encode(
+            &Header::default(),
+            &claims,
+            &EncodingKey::from_secret(self.secret.as_bytes()),
+        )
+        .context("issue agent run event websocket ticket")?;
+
+        Ok(IssuedToken { token, expire })
+    }
+
+    pub fn parse_agent_run_event_ws_ticket(
+        &self,
+        ticket: &str,
+        expected_run_id: i64,
+    ) -> Result<AgentRunEventWsTicketClaims> {
+        let token_data = decode::<AgentRunEventWsTicketClaims>(
+            ticket.trim(),
+            &DecodingKey::from_secret(self.secret.as_bytes()),
+            &Validation::default(),
+        )
+        .context("parse agent run event websocket ticket")?;
+        let claims = token_data.claims;
+
+        if claims.purpose != AGENT_RUN_EVENT_WS_TICKET_PURPOSE {
+            bail!("invalid agent run event websocket ticket purpose");
+        }
+        if claims.run_id != expected_run_id {
+            bail!("invalid agent run event websocket ticket run scope");
+        }
+
+        Ok(claims)
     }
 
     pub fn parse(&self, authorization: &str) -> Result<TokenClaims> {
@@ -136,5 +198,43 @@ mod tests {
         let err = parser.parse(&format!("Bearer {token}")).unwrap_err();
 
         assert!(err.to_string().contains("parse JWT"));
+    }
+
+    #[tokio::test]
+    async fn agent_event_ws_ticket_round_trips_with_run_scope() {
+        let service = JwtService::new(
+            "local-dev-only-change-this-secret-32chars-min".to_owned(),
+            24,
+        );
+
+        let issued = service
+            .issue_agent_run_event_ws_ticket(7, "agent-user", 42, 60)
+            .unwrap();
+        let claims = service
+            .parse_agent_run_event_ws_ticket(&issued.token, 42)
+            .unwrap();
+
+        assert_eq!(claims.purpose, "agent_run_event_ws");
+        assert_eq!(claims.user_id, 7);
+        assert_eq!(claims.username, "agent-user");
+        assert_eq!(claims.run_id, 42);
+        assert!(claims.exp > claims.iat);
+    }
+
+    #[tokio::test]
+    async fn agent_event_ws_ticket_rejects_wrong_run_scope() {
+        let service = JwtService::new(
+            "local-dev-only-change-this-secret-32chars-min".to_owned(),
+            24,
+        );
+        let issued = service
+            .issue_agent_run_event_ws_ticket(7, "agent-user", 42, 60)
+            .unwrap();
+
+        let err = service
+            .parse_agent_run_event_ws_ticket(&issued.token, 43)
+            .unwrap_err();
+
+        assert!(err.to_string().contains("run scope"));
     }
 }
