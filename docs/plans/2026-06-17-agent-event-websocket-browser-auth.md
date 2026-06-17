@@ -187,7 +187,7 @@ Expected: PASS.
 
 Actual: PASS for `cargo fmt -- --check`, `cargo test --workspace --offline`, both frontend API test commands, both frontend `pnpm typecheck` commands, and `git diff --check`.
 
-- [ ] **Step 3: Commit feature branch**
+- [x] **Step 3: Commit feature branch**
 
 Commit with:
 
@@ -195,7 +195,9 @@ Commit with:
 git commit -m "feat: add agent websocket browser tickets"
 ```
 
-- [ ] **Step 4: Merge to main**
+Actual: `4af991a feat: add agent websocket browser tickets`.
+
+- [x] **Step 4: Merge to main**
 
 Merge with:
 
@@ -203,6 +205,27 @@ Merge with:
 git merge --no-ff feat/enterprise-agent-foundation -m "merge: enterprise agent foundation websocket browser tickets"
 ```
 
-- [ ] **Step 5: Verify main and clean**
+Actual: `88af86f merge: enterprise agent foundation websocket browser tickets`.
+
+- [x] **Step 5: Verify main and clean**
 
 Run the full verification on main, then run `cargo clean` in both main and feature worktrees and fast-forward the feature branch to main.
+
+Actual: PASS for `cargo fmt -- --check`, `cargo test --workspace --offline`, both frontend API test commands, both frontend `pnpm typecheck` commands, and `git diff --check` on main. `cargo clean` removed main and feature build artifacts.
+
+## Completion Evidence
+
+- Planning commit: `8611c80 docs: plan agent websocket browser tickets`.
+- Feature commit: `4af991a feat: add agent websocket browser tickets`.
+- Main merge: `88af86f merge: enterprise agent foundation websocket browser tickets`.
+- Red tests:
+  - `cargo test -p backend-rust agent_event_ws_ticket --offline` failed because ticket issue/parse methods were missing.
+  - `cargo test -p backend-rust agent_event_websocket_ticket --offline` failed because `create_event_ws_ticket` was missing.
+  - `pnpm test -- src/api/agent.test.ts` failed in both frontend apps because browser ticket helpers were missing.
+- Green verification:
+  - `cargo fmt -- --check`
+  - `cargo test --workspace --offline`
+  - `cd apps/agent-workspace && pnpm test -- src/api/agent.test.ts && pnpm typecheck`
+  - `cd apps/codex-app-poc && pnpm test -- src/api/agent.test.ts && pnpm typecheck`
+  - `git diff --check`
+- Cleanup: `cargo clean` ran in both main and feature worktrees.
