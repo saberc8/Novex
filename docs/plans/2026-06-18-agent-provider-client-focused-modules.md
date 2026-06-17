@@ -28,7 +28,7 @@
 - Produces backend source-contract test `provider_client_crate_uses_focused_modules`.
 - Consumes the future module files under `crates/novex-provider-client/src`.
 
-- [ ] **Step 1: Write the failing source-contract test**
+- [x] **Step 1: Write the failing source-contract test**
 
 Add this test near the existing provider-client source-contract tests:
 
@@ -87,7 +87,7 @@ fn provider_client_crate_uses_focused_modules() {
 }
 ```
 
-- [ ] **Step 2: Verify RED**
+- [x] **Step 2: Verify RED**
 
 Run: `cargo test -p backend-rust provider_client_crate_uses_focused_modules --offline`
 
@@ -108,7 +108,7 @@ Expected: FAIL because provider-client is still implemented in a single `src/lib
   - `http::{ModelProviderHttpRequest, model_provider_http_client, send_model_provider_http_request, read_model_provider_response_text}`
 - Consumes: existing public error and generic HTTP primitive definitions from `lib.rs`.
 
-- [ ] **Step 1: Move error type**
+- [x] **Step 1: Move error type**
 
 Create `error.rs` with `ModelProviderClientError`, its `Display`, and `Error` implementations. Re-export it from `lib.rs` with:
 
@@ -117,15 +117,15 @@ mod error;
 pub use error::ModelProviderClientError;
 ```
 
-- [ ] **Step 2: Move HTTP primitives**
+- [x] **Step 2: Move HTTP primitives**
 
 Create `http.rs` with `ModelProviderHttpRequest`, `model_provider_http_client`, `send_model_provider_http_request`, and `read_model_provider_response_text`. Import `crate::ModelProviderClientError` inside the module.
 
-- [ ] **Step 3: Move HTTP tests**
+- [x] **Step 3: Move HTTP tests**
 
 Move `http_status_error_preserves_backend_message_shape` and `bad_response_error_preserves_provider_message` into `error.rs`. Move `http_request_carries_provider_post_inputs` into `http.rs`.
 
-- [ ] **Step 4: Verify focused primitive tests**
+- [x] **Step 4: Verify focused primitive tests**
 
 Run: `cargo test -p novex-provider-client http --offline`
 
@@ -149,23 +149,23 @@ Expected: PASS.
   - `chat_parse::{ModelChatProviderOutput, ModelChatStreamCompletionBuilder, parse_model_chat_provider_output_from_text, parse_model_chat_provider_output_from_body, parse_model_chat_provider_output_from_sse_text, model_chat_sse_record_data_payload, model_provider_response_id_from_payloads, model_provider_response_id_from_payload, normalize_model_provider_response_id}`
   - `compaction::{ModelChatCompactionProviderOutput, parse_model_chat_compaction_provider_output_from_text, parse_model_chat_compaction_provider_output_from_body, parse_model_chat_compaction_provider_output_from_sse_text}`
 
-- [ ] **Step 1: Move chat plan code and tests**
+- [x] **Step 1: Move chat plan code and tests**
 
 Move chat plan DTOs, endpoint/payload helpers, and `chat_plan_builder_*` tests into `chat_plan.rs`.
 
-- [ ] **Step 2: Move chat dispatch code and tests**
+- [x] **Step 2: Move chat dispatch code and tests**
 
 Move `ModelProviderChatRequest`, `send_model_provider_chat_request`, `send_model_provider_chat_unary_request`, `chat_request_carries_provider_dispatch_inputs`, and `chat_http_status_error_preserves_backend_message_shape` into `chat_dispatch.rs`.
 
-- [ ] **Step 3: Move chat parsing code and tests**
+- [x] **Step 3: Move chat parsing code and tests**
 
 Move `ModelChatProviderOutput`, `ModelChatStreamCompletionBuilder`, chat parser helpers, response-id helpers, and chat parser tests into `chat_parse.rs`.
 
-- [ ] **Step 4: Move compaction parsing code and tests**
+- [x] **Step 4: Move compaction parsing code and tests**
 
 Move `ModelChatCompactionProviderOutput`, compaction parser helpers, and compaction parser tests into `compaction.rs`. Share response id/status helpers from `chat_parse`.
 
-- [ ] **Step 5: Verify chat modules**
+- [x] **Step 5: Verify chat modules**
 
 Run:
 
@@ -192,19 +192,19 @@ Expected: all commands pass.
   - `media::{ModelProviderMediaImageRequest, send_model_provider_media_image_request}`
   - `rag::{ModelProviderEmbeddingRequest, ModelProviderRerankRequest, send_model_provider_embedding_request, send_model_provider_rerank_request, parse_model_provider_rerank_scores, parse_model_provider_embedding_vectors}`
 
-- [ ] **Step 1: Move native cancel code and tests**
+- [x] **Step 1: Move native cancel code and tests**
 
 Move native cancel request/dispatch and tests into `native_cancel.rs`.
 
-- [ ] **Step 2: Move media code and tests**
+- [x] **Step 2: Move media code and tests**
 
 Move media image request/dispatch/parser dependency tests into `media.rs`.
 
-- [ ] **Step 3: Move RAG code and tests**
+- [x] **Step 3: Move RAG code and tests**
 
 Move embedding/rerank request, dispatch, parser functions, `json_usize`, `json_f32`, and RAG tests into `rag.rs`.
 
-- [ ] **Step 4: Verify provider-client crate**
+- [x] **Step 4: Verify provider-client crate**
 
 Run: `cargo test -p novex-provider-client --offline`
 
@@ -223,11 +223,11 @@ Expected: PASS.
 - Consumes: focused provider-client module files from Tasks 2-4.
 - Produces: source-contract evidence that provider-client is no longer a monolithic crate file.
 
-- [ ] **Step 1: Update matrix and plan status**
+- [x] **Step 1: Update matrix and plan status**
 
 Change runtime-loop status to the next slice and update the notes to say `novex-provider-client` now has focused internal modules for error, HTTP, chat planning, chat dispatch, chat parsing, compaction parsing, native cancel, media, and RAG.
 
-- [ ] **Step 2: Run focused verification**
+- [x] **Step 2: Run focused verification**
 
 Run:
 
@@ -247,7 +247,7 @@ cargo test --workspace --offline
 
 Expected: all commands pass.
 
-- [ ] **Step 3: Commit implementation**
+- [x] **Step 3: Commit implementation**
 
 ```bash
 git add crates/novex-provider-client/src backend/src/application/ai/model_service.rs docs/plans/2026-06-16-codex-migration-matrix.md docs/plans/2026-06-18-agent-provider-client-focused-modules.md
