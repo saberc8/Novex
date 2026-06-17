@@ -90,6 +90,7 @@ pub fn customer_service_agent_run_command(
         input: customer_service_model_input(&command, &policy)?,
         runtime_mode: Some("model_loop".to_owned()),
         execution_mode: None,
+        model_route_id: None,
         auto_approve: false,
         budget: customer_service_task_budget(),
     })

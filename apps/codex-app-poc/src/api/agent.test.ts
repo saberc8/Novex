@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { createAgentRun, fetchAgentRunEventStream } from "./agent";
+import { createAgentRun, createConfiguredModelAgentRun, fetchAgentRunEventStream } from "./agent";
 
 describe("codex poc agent api", () => {
   afterEach(() => {
@@ -23,6 +23,71 @@ describe("codex poc agent api", () => {
       expect.objectContaining({
         method: "POST",
         body: JSON.stringify({ input: "search policy", runtimeMode: "model_loop" })
+      })
+    );
+  });
+
+  it("sends configured model route id when the POC env selects one", async () => {
+    const fetchMock = vi.fn(async () => ({
+      ok: true,
+      json: async () => ({
+        code: "200",
+        data: { runId: 2, status: "queued", traceId: "agent-2" }
+      })
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+    vi.stubEnv("NEXT_PUBLIC_AGENT_MODEL_ROUTE_ID", " runtime.llm.code_agent ");
+
+    await createConfiguredModelAgentRun("search policy");
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      expect.stringContaining("/ai/agents/runs"),
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({
+          input: "search policy",
+          runtimeMode: "model_loop",
+          autoApprove: false,
+          modelRouteId: "runtime.llm.code_agent",
+          budget: {
+            maxSteps: 8,
+            maxToolCalls: 1,
+            maxSeconds: 60,
+            maxCostCents: 0
+          }
+        })
+      })
+    );
+  });
+
+  it("omits configured model route id when the POC env is blank", async () => {
+    const fetchMock = vi.fn(async () => ({
+      ok: true,
+      json: async () => ({
+        code: "200",
+        data: { runId: 3, status: "succeeded", traceId: "agent-3" }
+      })
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+    vi.stubEnv("NEXT_PUBLIC_AGENT_MODEL_ROUTE_ID", "   ");
+
+    await createConfiguredModelAgentRun("search policy");
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      expect.stringContaining("/ai/agents/runs"),
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({
+          input: "search policy",
+          runtimeMode: "model_loop",
+          autoApprove: false,
+          budget: {
+            maxSteps: 8,
+            maxToolCalls: 1,
+            maxSeconds: 60,
+            maxCostCents: 0
+          }
+        })
       })
     );
   });

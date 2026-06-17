@@ -418,6 +418,8 @@ pub struct AgentRunCommand {
     #[serde(default)]
     pub execution_mode: Option<String>,
     #[serde(default)]
+    pub model_route_id: Option<String>,
+    #[serde(default)]
     pub auto_approve: bool,
     #[serde(default)]
     pub budget: TaskBudget,
@@ -1103,7 +1105,10 @@ impl AgentService {
     ) -> Result<AgentRunResp, AppError> {
         let model_retry_policy: ModelRetryPolicy = self
             .model_runtime
-            .retry_policy_for_purpose(ModelRoutePurpose::CodeAgent)
+            .retry_policy_for_purpose_with_route_id(
+                ModelRoutePurpose::CodeAgent,
+                command.model_route_id.as_deref(),
+            )
             .await?;
         let (_active_run_guard, cancel_token) =
             self.agent_runtime.register_run(self.tenant_id, run_id);
@@ -1151,6 +1156,7 @@ impl AgentService {
                     self.model_runtime.chat_completion_for_purpose(
                         ModelRoutePurpose::CodeAgent,
                         ModelChatCommand {
+                            route_id: command.model_route_id.clone(),
                             messages: messages.clone(),
                             temperature: Some(0.2),
                             max_tokens: Some(1024),
@@ -1727,6 +1733,7 @@ impl AgentService {
                                     &deterministic_summary,
                                     &tool_codes,
                                     remote_compaction_request.as_ref(),
+                                    command.model_route_id.as_deref(),
                                 )
                                 .await?;
                             if compaction_outcome.cancelled {
@@ -1904,6 +1911,7 @@ impl AgentService {
         deterministic_summary: &str,
         tool_codes: &[String],
         remote_compaction_request: Option<&AgentRemoteCompactionRequest>,
+        model_route_id: Option<&str>,
     ) -> Result<ModelLoopContextCompactionOutcome, AppError> {
         let messages = build_model_loop_remote_context_compaction_messages(
             original_input,
@@ -1918,6 +1926,7 @@ impl AgentService {
             self.model_runtime.chat_completion_for_purpose(
                 ModelRoutePurpose::CodeAgent,
                 ModelChatCommand {
+                    route_id: model_route_id.map(str::to_owned),
                     messages,
                     temperature: Some(0.1),
                     max_tokens: Some(512),
@@ -4444,9 +4453,22 @@ pub fn normalize_agent_run_command(
     ensure_max_chars("Agent 输入", &command.input, 4000)?;
     command.runtime_mode = normalize_agent_runtime_mode(command.runtime_mode)?;
     command.execution_mode = Some(normalize_agent_execution_mode(command.execution_mode)?);
+    command.model_route_id = normalize_optional_agent_model_route_id(command.model_route_id)?;
     command.budget = novex_ai_core::normalize_task_budget(command.budget)
         .map_err(|err| AppError::bad_request(format!("任务预算超出限制: {}", err.field)))?;
     Ok(command)
+}
+
+fn normalize_optional_agent_model_route_id(
+    route_id: Option<String>,
+) -> Result<Option<String>, AppError> {
+    let route_id = route_id
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty());
+    if let Some(route_id) = &route_id {
+        ensure_max_chars("模型路由", route_id, 128)?;
+    }
+    Ok(route_id)
 }
 
 fn normalize_agent_runtime_mode(runtime_mode: Option<String>) -> Result<Option<String>, AppError> {
@@ -4483,6 +4505,7 @@ fn agent_run_command_payload(command: &AgentRunCommand) -> Value {
         "input": command.input,
         "runtimeMode": command.runtime_mode,
         "executionMode": command.execution_mode,
+        "modelRouteId": command.model_route_id,
         "autoApprove": command.auto_approve,
         "budget": command.budget
     })
@@ -5569,6 +5592,7 @@ mod tests {
             input: "   ".to_owned(),
             runtime_mode: None,
             execution_mode: None,
+            model_route_id: None,
             auto_approve: false,
             budget: TaskBudget::default(),
         })
@@ -5595,6 +5619,7 @@ mod tests {
             input: "search policy".to_owned(),
             runtime_mode: None,
             execution_mode: None,
+            model_route_id: None,
             auto_approve: false,
             budget: TaskBudget::default(),
         })
@@ -5609,6 +5634,7 @@ mod tests {
             input: "search policy".to_owned(),
             runtime_mode: None,
             execution_mode: Some("fire_and_forget".to_owned()),
+            model_route_id: None,
             auto_approve: false,
             budget: TaskBudget::default(),
         })
@@ -5751,6 +5777,64 @@ mod tests {
         .unwrap();
 
         assert_eq!(command.runtime_mode.as_deref(), Some("model_loop"));
+    }
+
+    #[test]
+    fn agent_poc_configured_model_route_source_contract() {
+        let source = include_str!("agent_service.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+        let model_loop = &source[source
+            .find("async fn execute_model_loop_existing_run")
+            .unwrap()
+            ..source
+                .find("async fn model_loop_context_compaction_outcome")
+                .unwrap()];
+        let compaction = &source[source
+            .find("async fn model_loop_context_compaction_outcome")
+            .unwrap()
+            ..source.find("pub async fn list_runs").unwrap()];
+
+        assert!(source.contains("model_route_id"));
+        assert!(source.contains("\"modelRouteId\""));
+        assert!(source.contains("normalize_optional_agent_model_route_id"));
+        assert!(source.contains("retry_policy_for_purpose_with_route_id"));
+        assert!(model_loop.contains(".retry_policy_for_purpose_with_route_id("));
+        assert!(model_loop.contains("command.model_route_id.as_deref()"));
+        assert!(model_loop.contains("route_id: command.model_route_id.clone()"));
+        assert!(model_loop.contains("command.model_route_id.as_deref()"));
+        assert!(compaction.contains("model_route_id: Option<&str>"));
+        assert!(compaction.contains("route_id: model_route_id.map(str::to_owned)"));
+    }
+
+    #[test]
+    fn agent_poc_configured_model_route_command_trims_route_id() {
+        let command: AgentRunCommand = serde_json::from_value(serde_json::json!({
+            "input": "search policy",
+            "runtimeMode": "model_loop",
+            "modelRouteId": " runtime.llm.code_agent "
+        }))
+        .unwrap();
+        let command = normalize_agent_run_command(command).unwrap();
+
+        assert_eq!(
+            command.model_route_id.as_deref(),
+            Some("runtime.llm.code_agent")
+        );
+    }
+
+    #[test]
+    fn agent_poc_configured_model_route_command_rejects_overlong_route_id() {
+        let command: AgentRunCommand = serde_json::from_value(serde_json::json!({
+            "input": "search policy",
+            "runtimeMode": "model_loop",
+            "modelRouteId": "x".repeat(129)
+        }))
+        .unwrap();
+        let err = normalize_agent_run_command(command).unwrap_err();
+
+        assert!(err.to_string().contains("模型路由"));
     }
 
     #[test]
@@ -6163,7 +6247,8 @@ mod tests {
             .next()
             .unwrap();
 
-        assert!(source.contains("retry_policy_for_purpose(ModelRoutePurpose::CodeAgent)"));
+        assert!(source.contains("retry_policy_for_purpose_with_route_id("));
+        assert!(source.contains("command.model_route_id.as_deref()"));
         assert!(source.contains("for attempt in 1..=model_retry_policy.max_attempts()"));
         assert!(source.contains("will_retry"));
         assert!(source.contains("model_inference_error_attempt_event_payload"));
@@ -6445,6 +6530,7 @@ mod tests {
             input: "search the training handbook".to_owned(),
             runtime_mode: None,
             execution_mode: None,
+            model_route_id: None,
             auto_approve: false,
             budget: TaskBudget {
                 max_steps: Some(6),
@@ -6467,6 +6553,7 @@ mod tests {
             input: "send a Feishu reminder".to_owned(),
             runtime_mode: None,
             execution_mode: None,
+            model_route_id: None,
             auto_approve: false,
             budget: TaskBudget {
                 max_steps: Some(6),
@@ -6502,6 +6589,7 @@ mod tests {
             input: "answer in my preferred language".to_owned(),
             runtime_mode: None,
             execution_mode: None,
+            model_route_id: None,
             auto_approve: false,
             budget: TaskBudget::default(),
         })
@@ -7421,6 +7509,7 @@ mod tests {
             input: "search the training handbook".to_owned(),
             runtime_mode: None,
             execution_mode: None,
+            model_route_id: None,
             auto_approve: false,
             budget: TaskBudget {
                 max_steps: Some(6),

@@ -12,6 +12,8 @@
 
 ### Task 1: Backend Red Tests
 
+Status: Completed.
+
 **Files:**
 - Modify: `backend/src/application/ai/agent_service.rs`
 
@@ -35,6 +37,8 @@ cargo test -p backend-rust agent_poc_configured_model_route --offline
 Expected: FAIL until the DTO field and route propagation exist.
 
 ### Task 2: Frontend Red Tests
+
+Status: Completed.
 
 **Files:**
 - Modify: `apps/codex-app-poc/src/api/agent.test.ts`
@@ -63,6 +67,8 @@ Expected: FAIL until the helper and type field exist.
 
 ### Task 3: Backend Implementation
 
+Status: Completed.
+
 **Files:**
 - Modify: `backend/src/application/ai/agent_service.rs`
 
@@ -89,6 +95,8 @@ cargo test -p backend-rust queued_model_loop --offline
 ```
 
 ### Task 4: POC Implementation
+
+Status: Completed.
 
 **Files:**
 - Modify: `apps/codex-app-poc/src/types/agent.ts`
@@ -117,6 +125,8 @@ pnpm test -- src/api/agent.test.ts app/page.test.tsx
 ```
 
 ### Task 5: Docs, Full Verify, Commit, Merge
+
+Status: Completed.
 
 **Files:**
 - Modify: `docs/plans/2026-06-16-codex-migration-matrix.md`

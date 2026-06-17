@@ -8,6 +8,8 @@
 
 **Tech Stack:** Next.js 16, React 19, TypeScript, Tailwind CSS, lucide-react, Vitest, React Testing Library.
 
+**Progress 2026-06-17:** The composer now submits real Agent run requests with `runtimeMode=model_loop`. It can include `NEXT_PUBLIC_AGENT_MODEL_ROUTE_ID` as `modelRouteId`, allowing demos to pin a configured backend `CodeAgent` route while keeping the backend model registry/env fallback in control.
+
 ---
 
 ### Task 1: App Scaffold
@@ -121,7 +123,25 @@ Run: `pnpm test -- app/page.test.tsx`
 
 Expected: PASS.
 
-### Task 6: Verification
+### Task 6: Agent API Runtime Wiring
+
+Status: Completed.
+
+**Files:**
+- Modify: `apps/codex-app-poc/src/api/agent.ts`
+- Modify: `apps/codex-app-poc/src/types/agent.ts`
+- Modify: `apps/codex-app-poc/src/app-client.tsx`
+- Modify: `apps/codex-app-poc/src/api/agent.test.ts`
+- Modify: `apps/codex-app-poc/app/page.test.tsx`
+
+**Implemented:**
+
+- `createConfiguredModelAgentRun` centralizes the POC model-loop payload.
+- `NEXT_PUBLIC_AGENT_MODEL_ROUTE_ID` is trimmed and sent as `modelRouteId` only when nonblank.
+- Composer submit uses the configured-model helper.
+- API and page tests cover route-id inclusion and omission.
+
+### Task 7: Verification
 
 **Files:**
 - Modify if needed: app files under `apps/codex-app-poc`
