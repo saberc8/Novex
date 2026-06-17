@@ -32,7 +32,7 @@
 
 - [ ] **Step 1: Write failing source-contract test**
 
-Add backend test `model_stream_transport_task_replaces_boxed_future`. It should assert production source contains `pub struct ModelChatStreamTransportTask`, `pub transport: ModelChatStreamTransportTask`, `tokio::spawn`, `JoinHandle<Result<ModelChatResp, AppError>>`, and a `Drop for ModelChatStreamTransportTask` implementation. It should also assert the production source no longer contains `pub type ModelChatStreamFuture` or `pub response: ModelChatStreamFuture`.
+Add backend tests `model_stream_transport_task_replaces_boxed_future` and `model_stream_transport_task_drop_aborts_provider_task`. The source-contract test should assert production source contains `pub struct ModelChatStreamTransportTask`, `pub transport: ModelChatStreamTransportTask`, `tokio::spawn`, `JoinHandle<Result<ModelChatResp, AppError>>`, and a `Drop for ModelChatStreamTransportTask` implementation. It should also assert the production source no longer contains `pub type ModelChatStreamFuture` or `pub response: ModelChatStreamFuture`. The behavior test should spawn a never-completing transport task, wait until it starts, drop the task, and assert an in-future drop guard fires within one second.
 
 - [ ] **Step 2: Run focused test red**
 

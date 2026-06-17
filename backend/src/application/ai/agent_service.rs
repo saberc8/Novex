@@ -3463,10 +3463,10 @@ where
 {
     let ModelChatStreamCall {
         lifecycle: _lifecycle,
-        response,
+        transport,
         events: mut provider_stream_receiver,
     } = model_stream_call;
-    let future = response;
+    let future = transport.wait();
     tokio::pin!(future);
     tokio::pin!(persistent_cancel);
     let mut stream_closed = false;
@@ -7375,7 +7375,7 @@ mod tests {
     }
 
     #[test]
-    fn agent_model_stream_call_lifecycle_owns_future_and_events() {
+    fn agent_model_stream_call_lifecycle_owns_transport_and_events() {
         let source = include_str!("agent_service.rs")
             .split("#[cfg(test)]")
             .next()
@@ -7402,6 +7402,22 @@ mod tests {
         assert!(!model_loop.contains("model_stream_call.events"));
         assert!(!model_loop.contains("model_stream_call.response"));
         assert!(normalized_provider_wait.contains("model_stream_call: ModelChatStreamCall"));
+    }
+
+    #[test]
+    fn agent_model_stream_transport_task_waits_without_boxed_future() {
+        let source = include_str!("agent_service.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+        let provider_wait = &source[source
+            .find("async fn await_model_loop_stream_call_or_cancelled_with_delta_events")
+            .unwrap()
+            ..source.find("async fn drain_model_delta_events").unwrap()];
+
+        assert!(provider_wait.contains("transport,"));
+        assert!(provider_wait.contains("transport.wait()"));
+        assert!(!provider_wait.contains("let future = response"));
     }
 
     #[test]
