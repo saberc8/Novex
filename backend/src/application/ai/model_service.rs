@@ -2370,7 +2370,9 @@ LIMIT 1;
         command.provider_stream_sender = Some(sender);
         let service = self.clone();
         let transport = ModelChatStreamTransportTask::spawn(async move {
-            service.chat_completion_for_purpose(purpose, command).await
+            service
+                .execute_chat_completion_stream_transport(purpose, command)
+                .await
         });
 
         Ok(ModelChatStreamCall {
@@ -2378,6 +2380,25 @@ LIMIT 1;
             transport,
             events,
         })
+    }
+
+    async fn execute_chat_completion_stream_transport(
+        &self,
+        purpose: ModelRoutePurpose,
+        command: ModelChatCommand,
+    ) -> Result<ModelChatResp, AppError> {
+        let command = normalize_model_chat_command(command)?;
+        let route = self
+            .resolve_route_for_purpose_with_route_id(purpose, command.route_id.as_deref())
+            .await?
+            .ok_or_else(|| AppError::bad_request("LLM 模型环境变量未配置完整"))?;
+        self.execute_normalized_chat_completion_with_fallback(
+            purpose,
+            &route,
+            &command,
+            command.conversation_id,
+        )
+        .await
     }
 
     async fn execute_normalized_chat_completion_with_provider_call_lease(
@@ -6702,6 +6723,26 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
+    }
+
+    #[test]
+    fn model_stream_transport_executor_uses_stream_specific_executor() {
+        let source = include_str!("model_service.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+        let stream_transport = &source[source
+            .find("pub async fn chat_completion_stream_for_purpose")
+            .unwrap()
+            ..source
+                .find("async fn execute_normalized_chat_completion_with_provider_call_lease")
+                .unwrap()];
+
+        assert!(stream_transport.contains("execute_chat_completion_stream_transport"));
+        assert!(stream_transport.contains("normalize_model_chat_command(command)?"));
+        assert!(stream_transport.contains("resolve_route_for_purpose_with_route_id"));
+        assert!(stream_transport.contains("execute_normalized_chat_completion_with_fallback"));
+        assert!(!stream_transport.contains("chat_completion_for_purpose(purpose, command)"));
     }
 
     #[test]
