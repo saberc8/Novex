@@ -2,6 +2,7 @@ use std::{
     collections::{BTreeMap, HashMap, HashSet},
     env,
     future::Future,
+    pin::Pin,
     sync::{Mutex, OnceLock},
     time::{Duration, Instant},
 };
@@ -93,6 +94,14 @@ pub struct ModelProviderStreamEvent {
     pub provider_response_id: Option<String>,
     pub provider_response_status: Option<String>,
     pub chunk: ModelProviderStreamChunk,
+}
+
+pub type ModelChatStreamFuture =
+    Pin<Box<dyn Future<Output = Result<ModelChatResp, AppError>> + Send>>;
+
+pub struct ModelChatStreamCall {
+    pub response: ModelChatStreamFuture,
+    pub events: mpsc::UnboundedReceiver<ModelProviderStreamEvent>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -2309,6 +2318,20 @@ LIMIT 1;
             )
             .await?;
         Ok(response)
+    }
+
+    pub async fn chat_completion_stream_for_purpose(
+        &self,
+        purpose: ModelRoutePurpose,
+        mut command: ModelChatCommand,
+    ) -> Result<ModelChatStreamCall, AppError> {
+        let (sender, events) = mpsc::unbounded_channel();
+        command.provider_stream_sender = Some(sender);
+        let service = self.clone();
+        let response =
+            Box::pin(async move { service.chat_completion_for_purpose(purpose, command).await });
+
+        Ok(ModelChatStreamCall { response, events })
     }
 
     async fn execute_normalized_chat_completion_with_provider_call_lease(
@@ -6525,6 +6548,20 @@ mod tests {
         assert!(source.contains("complete_model_provider_call_lease(&self.db"));
         assert!(source.contains("response.provider_call_lease_id = Some(lease_id);"));
         assert!(source.contains("model_provider_call_context_for_attempt"));
+    }
+
+    #[test]
+    fn model_stream_native_runtime_api_exposes_future_and_event_receiver() {
+        let source = include_str!("model_service.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+
+        assert!(source.contains("pub type ModelChatStreamFuture"));
+        assert!(source.contains("pub struct ModelChatStreamCall"));
+        assert!(source.contains("pub response: ModelChatStreamFuture"));
+        assert!(source.contains("pub events: mpsc::UnboundedReceiver<ModelProviderStreamEvent>"));
+        assert!(source.contains("pub async fn chat_completion_stream_for_purpose"));
     }
 
     #[test]
