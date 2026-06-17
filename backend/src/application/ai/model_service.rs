@@ -2777,12 +2777,17 @@ async fn execute_normalized_chat_completion_with_route(
         )));
     }
 
-    let body_text = if model_chat_provider_request_streams_chat_completion(&provider_request) {
-        model_chat_streaming_response_text(response, route, command).await?
-    } else {
-        response.text().await.unwrap_or_default()
-    };
+    if model_chat_provider_request_streams_chat_completion(&provider_request) {
+        let output = model_chat_streaming_provider_output(response, route, command).await?;
+        return Ok(model_chat_response_from_provider_output(
+            route,
+            output,
+            started.elapsed().as_millis(),
+            conversation_id,
+        ));
+    }
 
+    let body_text = response.text().await.unwrap_or_default();
     match provider_request.transport {
         ModelChatProviderTransport::ChatCompletions
         | ModelChatProviderTransport::ResponsesCodeAgent => {
@@ -3207,26 +3212,95 @@ struct ModelChatProviderOutput {
     delta_chunks: Vec<ModelProviderStreamChunk>,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-struct ModelChatStreamState {
-    next_chunk_index: usize,
-    provider_call_lease_id: Option<i64>,
+#[derive(Debug, Clone, Default, PartialEq)]
+struct ModelChatStreamCompletionBuilder {
+    completed: bool,
+    completed_answer: Option<String>,
+    usage: ModelChatUsage,
     provider_response_id: Option<String>,
     provider_response_status: Option<String>,
+    delta_chunks: Vec<ModelProviderStreamChunk>,
+    next_chunk_index: usize,
 }
 
-async fn model_chat_streaming_response_text(
+impl ModelChatStreamCompletionBuilder {
+    fn observe_done(&mut self) {
+        self.completed = true;
+    }
+
+    fn observe_sse_value(&mut self, value: &Value) -> Vec<ModelProviderStreamChunk> {
+        let response_payload = model_chat_response_payload_from_sse_value(value);
+        if let Some(response_id) = model_provider_response_id_from_payload(response_payload) {
+            self.provider_response_id = Some(response_id);
+        }
+        if let Some(response_status) = model_provider_response_status_from_payload(response_payload)
+        {
+            self.provider_response_status = Some(response_status);
+        }
+        let usage_payload = if response_payload.get("usage").is_some() {
+            response_payload
+        } else {
+            value
+        };
+        if usage_payload.get("usage").is_some() {
+            self.usage = normalize_model_provider_usage(usage_payload);
+        }
+        let (chunks, next_index) =
+            model_chat_provider_delta_chunks_from_sse_value(value, self.next_chunk_index);
+        self.next_chunk_index = next_index;
+        self.delta_chunks.extend(chunks.iter().cloned());
+        if model_chat_sse_value_is_terminal(value) {
+            self.completed = true;
+            self.completed_answer = model_chat_answer_from_provider_body(response_payload);
+        }
+        chunks
+    }
+
+    fn finish(self) -> Result<ModelChatProviderOutput, AppError> {
+        if !self.completed {
+            return Err(AppError::bad_request("LLM chat SSE 响应在完成前结束"));
+        }
+
+        let answer = self
+            .delta_chunks
+            .iter()
+            .map(|chunk| chunk.content.as_str())
+            .collect::<String>();
+        let answer = if answer.is_empty() {
+            self.completed_answer.unwrap_or_default()
+        } else {
+            answer
+        };
+        if answer.is_empty() {
+            return Err(AppError::bad_request("LLM chat SSE 响应为空"));
+        }
+
+        Ok(ModelChatProviderOutput {
+            answer,
+            usage: self.usage,
+            provider_response_id: self.provider_response_id,
+            provider_response_status: self.provider_response_status,
+            delta_chunks: self.delta_chunks,
+        })
+    }
+
+    fn provider_response_id(&self) -> Option<String> {
+        self.provider_response_id.clone()
+    }
+
+    fn provider_response_status(&self) -> Option<String> {
+        self.provider_response_status.clone()
+    }
+}
+
+async fn model_chat_streaming_provider_output(
     mut response: reqwest::Response,
     route: &ModelRuntimeRoute,
     command: &ModelChatCommand,
-) -> Result<String, AppError> {
+) -> Result<ModelChatProviderOutput, AppError> {
     let sender = command.provider_stream_sender.as_ref();
-    let mut body_text = String::new();
     let mut pending = String::new();
-    let mut stream_state = ModelChatStreamState {
-        provider_call_lease_id: command.provider_call_lease_id,
-        ..ModelChatStreamState::default()
-    };
+    let mut builder = ModelChatStreamCompletionBuilder::default();
 
     while let Some(chunk) = response
         .chunk()
@@ -3234,19 +3308,25 @@ async fn model_chat_streaming_response_text(
         .map_err(|err| AppError::Anyhow(err.into()))?
     {
         let text = String::from_utf8_lossy(&chunk);
-        body_text.push_str(&text);
         pending.push_str(&text);
-        model_chat_emit_complete_stream_records(route, sender, &mut pending, &mut stream_state)?;
+        model_chat_emit_complete_stream_records(
+            route,
+            sender,
+            &mut pending,
+            &mut builder,
+            command.provider_call_lease_id,
+        )?;
     }
 
-    Ok(body_text)
+    builder.finish()
 }
 
 fn model_chat_emit_complete_stream_records(
     route: &ModelRuntimeRoute,
     sender: Option<&mpsc::UnboundedSender<ModelProviderStreamEvent>>,
     pending: &mut String,
-    stream_state: &mut ModelChatStreamState,
+    builder: &mut ModelChatStreamCompletionBuilder,
+    provider_call_lease_id: Option<i64>,
 ) -> Result<(), AppError> {
     *pending = pending.replace("\r\n", "\n");
     while let Some(record_end) = pending.find("\n\n") {
@@ -3256,42 +3336,27 @@ fn model_chat_emit_complete_stream_records(
             continue;
         };
         if data == "[DONE]" {
+            builder.observe_done();
             continue;
         }
         let value = serde_json::from_str::<Value>(&data)
             .map_err(|_| AppError::bad_request("LLM chat SSE 响应不是合法 JSON"))?;
-        model_chat_stream_state_observe_response_metadata(stream_state, &value);
-        let (chunks, next_index) =
-            model_chat_provider_delta_chunks_from_sse_value(&value, stream_state.next_chunk_index);
-        stream_state.next_chunk_index = next_index;
+        let chunks = builder.observe_sse_value(&value);
         if let Some(sender) = sender {
             for chunk in chunks {
                 let _ = sender.send(ModelProviderStreamEvent {
                     route_id: route.summary().route_id.clone(),
                     provider: route.provider().as_str().to_owned(),
                     model: route.model().map(str::to_owned),
-                    provider_call_lease_id: stream_state.provider_call_lease_id,
-                    provider_response_id: stream_state.provider_response_id.clone(),
-                    provider_response_status: stream_state.provider_response_status.clone(),
+                    provider_call_lease_id,
+                    provider_response_id: builder.provider_response_id(),
+                    provider_response_status: builder.provider_response_status(),
                     chunk,
                 });
             }
         }
     }
     Ok(())
-}
-
-fn model_chat_stream_state_observe_response_metadata(
-    stream_state: &mut ModelChatStreamState,
-    value: &Value,
-) {
-    let response_payload = model_chat_response_payload_from_sse_value(value);
-    if let Some(response_id) = model_provider_response_id_from_payload(response_payload) {
-        stream_state.provider_response_id = Some(response_id);
-    }
-    if let Some(response_status) = model_provider_response_status_from_payload(response_payload) {
-        stream_state.provider_response_status = Some(response_status);
-    }
 }
 
 fn model_chat_response_from_chat_completion_text(
@@ -3306,7 +3371,21 @@ fn model_chat_response_from_chat_completion_text(
     } else {
         model_chat_provider_output_from_sse_text(trimmed)?
     };
-    Ok(ModelChatResp {
+    Ok(model_chat_response_from_provider_output(
+        route,
+        output,
+        latency_ms,
+        conversation_id,
+    ))
+}
+
+fn model_chat_response_from_provider_output(
+    route: &ModelRuntimeRoute,
+    output: ModelChatProviderOutput,
+    latency_ms: u128,
+    conversation_id: Option<i64>,
+) -> ModelChatResp {
+    ModelChatResp {
         conversation_id,
         answer: output.answer,
         route_id: route.summary().route_id,
@@ -3322,7 +3401,7 @@ fn model_chat_response_from_chat_completion_text(
         provider_response_id: output.provider_response_id,
         provider_response_status: output.provider_response_status,
         provider_delta_chunks: output.delta_chunks,
-    })
+    }
 }
 
 #[allow(dead_code)]
@@ -3367,71 +3446,19 @@ fn model_chat_provider_output_from_body(body: &Value) -> Result<ModelChatProvide
 fn model_chat_provider_output_from_sse_text(
     body_text: &str,
 ) -> Result<ModelChatProviderOutput, AppError> {
-    let mut completed = false;
-    let mut completed_answer = None;
-    let mut usage = ModelChatUsage::default();
-    let mut provider_response_id = None;
-    let mut provider_response_status = None;
-    let mut delta_chunks = Vec::new();
-    let mut next_chunk_index = 0usize;
+    let mut builder = ModelChatStreamCompletionBuilder::default();
 
     for data in model_chat_sse_data_payloads(body_text) {
         if data == "[DONE]" {
-            completed = true;
+            builder.observe_done();
             continue;
         }
         let value = serde_json::from_str::<Value>(&data)
             .map_err(|_| AppError::bad_request("LLM chat SSE 响应不是合法 JSON"))?;
-        let response_payload = model_chat_response_payload_from_sse_value(&value);
-        if let Some(response_id) = model_provider_response_id_from_payload(response_payload) {
-            provider_response_id = Some(response_id);
-        }
-        if let Some(response_status) = model_provider_response_status_from_payload(response_payload)
-        {
-            provider_response_status = Some(response_status);
-        }
-        let usage_payload = if response_payload.get("usage").is_some() {
-            response_payload
-        } else {
-            &value
-        };
-        if usage_payload.get("usage").is_some() {
-            usage = normalize_model_provider_usage(usage_payload);
-        }
-        let (mut chunks, next_index) =
-            model_chat_provider_delta_chunks_from_sse_value(&value, next_chunk_index);
-        next_chunk_index = next_index;
-        delta_chunks.append(&mut chunks);
-        if model_chat_sse_value_is_terminal(&value) {
-            completed = true;
-            completed_answer = model_chat_answer_from_provider_body(response_payload);
-        }
+        builder.observe_sse_value(&value);
     }
 
-    if !completed {
-        return Err(AppError::bad_request("LLM chat SSE 响应在完成前结束"));
-    }
-
-    let answer = delta_chunks
-        .iter()
-        .map(|chunk| chunk.content.as_str())
-        .collect::<String>();
-    let answer = if answer.is_empty() {
-        completed_answer.unwrap_or_default()
-    } else {
-        answer
-    };
-    if answer.is_empty() {
-        return Err(AppError::bad_request("LLM chat SSE 响应为空"));
-    }
-
-    Ok(ModelChatProviderOutput {
-        answer,
-        usage,
-        provider_response_id,
-        provider_response_status,
-        delta_chunks,
-    })
+    builder.finish()
 }
 
 fn model_chat_response_payload_from_sse_value(value: &Value) -> &Value {
@@ -7994,6 +8021,148 @@ mod tests {
     }
 
     #[test]
+    fn model_stream_completion_builder_assembles_chat_sse_incrementally() {
+        let first = json!({
+            "id": "chatcmpl_delta_1",
+            "object": "chat.completion.chunk",
+            "choices": [{ "index": 0, "delta": { "content": "Hello" } }]
+        });
+        let second = json!({
+            "id": "chatcmpl_delta_1",
+            "object": "chat.completion.chunk",
+            "choices": [{ "index": 0, "delta": { "content": " world" }, "finish_reason": "stop" }],
+            "usage": { "prompt_tokens": 5, "completion_tokens": 2, "total_tokens": 7 }
+        });
+        let mut builder = ModelChatStreamCompletionBuilder::default();
+
+        let first_chunks = builder.observe_sse_value(&first);
+        let second_chunks = builder.observe_sse_value(&second);
+        builder.observe_done();
+        let output = builder.finish().unwrap();
+
+        assert_eq!(first_chunks.len(), 1);
+        assert_eq!(second_chunks.len(), 1);
+        assert_eq!(output.answer, "Hello world");
+        assert_eq!(
+            output
+                .delta_chunks
+                .iter()
+                .map(|chunk| chunk.content.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Hello", " world"]
+        );
+        assert_eq!(output.delta_chunks[0].index, 0);
+        assert_eq!(output.delta_chunks[1].index, 1);
+        assert_eq!(output.usage.prompt_tokens, Some(5));
+        assert_eq!(output.usage.completion_tokens, Some(2));
+        assert_eq!(output.usage.total_tokens, Some(7));
+        assert_eq!(
+            output.provider_response_id.as_deref(),
+            Some("chatcmpl_delta_1")
+        );
+        assert_eq!(output.provider_response_status, None);
+    }
+
+    #[test]
+    fn model_stream_completion_builder_assembles_responses_sse_incrementally() {
+        let created = json!({
+            "type": "response.created",
+            "response": { "id": "resp_delta_1", "status": "in_progress" }
+        });
+        let first_delta = json!({
+            "type": "response.output_text.delta",
+            "item_id": "msg_1",
+            "output_index": 0,
+            "content_index": 0,
+            "delta": "Hello"
+        });
+        let second_delta = json!({
+            "type": "response.output_text.delta",
+            "item_id": "msg_1",
+            "output_index": 0,
+            "content_index": 0,
+            "delta": " world"
+        });
+        let completed = json!({
+            "type": "response.completed",
+            "response": {
+                "id": "resp_delta_1",
+                "status": "completed",
+                "output": [{
+                    "type": "message",
+                    "content": [{ "type": "output_text", "text": "Hello world" }]
+                }],
+                "usage": { "input_tokens": 11, "output_tokens": 2, "total_tokens": 13 }
+            }
+        });
+        let mut builder = ModelChatStreamCompletionBuilder::default();
+
+        assert!(builder.observe_sse_value(&created).is_empty());
+        let first_chunks = builder.observe_sse_value(&first_delta);
+        let second_chunks = builder.observe_sse_value(&second_delta);
+        assert!(builder.observe_sse_value(&completed).is_empty());
+        let output = builder.finish().unwrap();
+
+        assert_eq!(first_chunks.len(), 1);
+        assert_eq!(second_chunks.len(), 1);
+        assert_eq!(output.answer, "Hello world");
+        assert_eq!(
+            output
+                .delta_chunks
+                .iter()
+                .map(|chunk| chunk.content.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Hello", " world"]
+        );
+        assert_eq!(
+            output.delta_chunks[0].provider_event.as_deref(),
+            Some("response.output_text.delta")
+        );
+        assert_eq!(
+            output.delta_chunks[1].provider_event.as_deref(),
+            Some("response.output_text.delta")
+        );
+        assert_eq!(output.usage.prompt_tokens, Some(11));
+        assert_eq!(output.usage.completion_tokens, Some(2));
+        assert_eq!(output.usage.total_tokens, Some(13));
+        assert_eq!(output.provider_response_id.as_deref(), Some("resp_delta_1"));
+        assert_eq!(
+            output.provider_response_status.as_deref(),
+            Some("completed")
+        );
+    }
+
+    #[test]
+    fn model_stream_completion_builder_runtime_path_returns_provider_output() {
+        let source = include_str!("model_service.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+        let runtime_path = &source[source
+            .find("async fn execute_normalized_chat_completion_with_route")
+            .unwrap()
+            ..source.find("fn normalize_model_chat_command").unwrap()];
+
+        assert!(source.contains("async fn model_chat_streaming_provider_output"));
+        assert!(!source.contains("model_chat_streaming_response_text"));
+        assert!(source.contains("fn model_chat_response_from_provider_output"));
+        assert!(runtime_path.contains("model_chat_streaming_provider_output"));
+        assert!(runtime_path.contains("model_chat_response_from_provider_output"));
+        let normalized_runtime_path = runtime_path
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(normalized_runtime_path.contains(
+            "if model_chat_provider_request_streams_chat_completion(&provider_request) { let output = model_chat_streaming_provider_output"
+        ));
+        assert!(
+            normalized_runtime_path.contains("return Ok(model_chat_response_from_provider_output(")
+        );
+        assert!(!normalized_runtime_path
+            .contains("let body_text = if model_chat_provider_request_streams_chat_completion"));
+    }
+
+    #[test]
     fn provider_token_delta_responses_sse_assembles_answer_and_chunks() {
         let route = openai_compatible_llm_route();
         let sse = concat!(
@@ -8054,19 +8223,20 @@ mod tests {
         )
         .to_owned();
 
-        let mut stream_state = ModelChatStreamState::default();
+        let mut builder = ModelChatStreamCompletionBuilder::default();
         model_chat_emit_complete_stream_records(
             &route,
             Some(&sender),
             &mut pending,
-            &mut stream_state,
+            &mut builder,
+            None,
         )
         .unwrap();
         let event = receiver
             .try_recv()
             .expect("delta stream event should be emitted");
 
-        assert_eq!(stream_state.next_chunk_index, 1);
+        assert_eq!(builder.next_chunk_index, 1);
         assert_eq!(event.chunk.index, 0);
         assert_eq!(event.chunk.content, "Hello");
         assert_eq!(event.provider_response_id.as_deref(), Some("resp_stream_1"));
@@ -8085,20 +8255,21 @@ mod tests {
             "data: {\"id\":\"chatcmpl_stream_1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hello\"}}]}\n\n",
         )
         .to_owned();
-        let mut stream_state = ModelChatStreamState::default();
+        let mut builder = ModelChatStreamCompletionBuilder::default();
 
         model_chat_emit_complete_stream_records(
             &route,
             Some(&sender),
             &mut pending,
-            &mut stream_state,
+            &mut builder,
+            None,
         )
         .unwrap();
         let event = receiver
             .try_recv()
             .expect("delta stream event should be emitted");
 
-        assert_eq!(stream_state.next_chunk_index, 1);
+        assert_eq!(builder.next_chunk_index, 1);
         assert_eq!(event.chunk.content, "Hello");
         assert_eq!(
             event.provider_response_id.as_deref(),
@@ -8117,16 +8288,14 @@ mod tests {
             "data: {\"type\":\"response.output_text.delta\",\"delta\":\"Hello\"}\n\n",
         )
         .to_owned();
-        let mut stream_state = ModelChatStreamState {
-            provider_call_lease_id: Some(4242),
-            ..ModelChatStreamState::default()
-        };
+        let mut builder = ModelChatStreamCompletionBuilder::default();
 
         model_chat_emit_complete_stream_records(
             &route,
             Some(&sender),
             &mut pending,
-            &mut stream_state,
+            &mut builder,
+            Some(4242),
         )
         .unwrap();
         let event = receiver
