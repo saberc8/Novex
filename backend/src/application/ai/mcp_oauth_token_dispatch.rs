@@ -4,7 +4,7 @@ use std::{collections::BTreeMap, future::Future, time::Duration};
 
 use novex_mcp::{
     mcp_oauth_session_from_token_response, McpOAuthClientAuth, McpOAuthSessionMaterial,
-    McpOAuthTokenExchangePlan, McpOAuthTokenResponse,
+    McpOAuthTokenExchangeConfig, McpOAuthTokenExchangePlan, McpOAuthTokenResponse,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -80,6 +80,196 @@ impl McpOAuthTokenDispatchError {
             sanitized_evidence,
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct McpOAuthCallbackTokenCommand {
+    pub server_code: String,
+    pub state: String,
+    pub expected_state: String,
+    pub authorization_code: String,
+    pub callback_error: Option<String>,
+    pub callback_error_description: Option<String>,
+    pub token_endpoint: String,
+    pub client_id: String,
+    pub redirect_uri: String,
+    pub code_verifier_secret_ref: String,
+    pub client_auth: McpOAuthClientAuth,
+    pub access_token_secret_ref: String,
+    pub refresh_token_secret_ref: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct McpOAuthCallbackTokenOutcome {
+    pub callback_evidence: Value,
+    pub token: McpOAuthTokenDispatchOutcome,
+}
+
+impl McpOAuthCallbackTokenOutcome {
+    pub(crate) fn sanitized_evidence(&self) -> Value {
+        json!({
+            "callback": self.callback_evidence,
+            "token": self.token.sanitized_evidence(),
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct McpOAuthCallbackTokenError {
+    pub field: String,
+    pub message: String,
+    pub callback_evidence: Value,
+    pub token_evidence: Value,
+    pub sanitized_evidence: Value,
+}
+
+impl McpOAuthCallbackTokenError {
+    fn new(
+        field: impl Into<String>,
+        message: impl Into<String>,
+        callback_evidence: Value,
+        token_evidence: Value,
+    ) -> Self {
+        let field = field.into();
+        let message = message.into();
+        let sanitized_evidence = if token_evidence.is_null() {
+            json!({
+                "callback": callback_evidence,
+                "error": {
+                    "field": field,
+                    "message": message,
+                },
+            })
+        } else {
+            json!({
+                "callback": callback_evidence,
+                "token": token_evidence,
+                "error": {
+                    "field": field,
+                    "message": message,
+                },
+            })
+        };
+
+        Self {
+            field,
+            message,
+            callback_evidence,
+            token_evidence,
+            sanitized_evidence,
+        }
+    }
+}
+
+pub(crate) async fn exchange_mcp_oauth_callback_with_dispatch<EnvGet, Dispatch, DispatchFuture>(
+    command: McpOAuthCallbackTokenCommand,
+    received_at_epoch_seconds: u64,
+    env_get: EnvGet,
+    dispatch: Dispatch,
+) -> Result<McpOAuthCallbackTokenOutcome, McpOAuthCallbackTokenError>
+where
+    EnvGet: FnMut(&str) -> Option<String>,
+    Dispatch:
+        FnOnce(McpOAuthTokenExchangePlan, McpOAuthTokenDispatchResolvedSecrets) -> DispatchFuture,
+    DispatchFuture: Future<Output = Result<McpOAuthTokenDispatchHttpResponse, String>>,
+{
+    let provider_error = command
+        .callback_error
+        .as_deref()
+        .map(str::trim)
+        .filter(|error| !error.is_empty());
+    let state_present = !command.state.trim().is_empty();
+    let expected_state_present = !command.expected_state.trim().is_empty();
+    let state_verified = state_present
+        && expected_state_present
+        && command.state.trim() == command.expected_state.trim();
+    let authorization_code_present = !command.authorization_code.trim().is_empty();
+    let callback_evidence = mcp_oauth_callback_evidence(&command, state_verified);
+
+    if let Some(provider_error) = provider_error {
+        return Err(McpOAuthCallbackTokenError::new(
+            "callback_error",
+            format!("MCP OAuth callback returned provider error: {provider_error}"),
+            callback_evidence,
+            Value::Null,
+        ));
+    }
+    if !state_present {
+        return Err(McpOAuthCallbackTokenError::new(
+            "state",
+            "MCP OAuth callback state is required",
+            callback_evidence,
+            Value::Null,
+        ));
+    }
+    if !expected_state_present {
+        return Err(McpOAuthCallbackTokenError::new(
+            "expected_state",
+            "MCP OAuth expected callback state is required",
+            callback_evidence,
+            Value::Null,
+        ));
+    }
+    if !state_verified {
+        return Err(McpOAuthCallbackTokenError::new(
+            "state",
+            "MCP OAuth callback state does not match expected state",
+            callback_evidence,
+            Value::Null,
+        ));
+    }
+    if !authorization_code_present {
+        return Err(McpOAuthCallbackTokenError::new(
+            "authorization_code",
+            "MCP OAuth authorization code is required",
+            callback_evidence,
+            Value::Null,
+        ));
+    }
+
+    let plan = McpOAuthTokenExchangePlan::authorization_code(McpOAuthTokenExchangeConfig {
+        server_code: command.server_code.clone(),
+        token_endpoint: command.token_endpoint.clone(),
+        client_id: command.client_id.clone(),
+        redirect_uri: command.redirect_uri.clone(),
+        authorization_code: command.authorization_code.clone(),
+        code_verifier_secret_ref: command.code_verifier_secret_ref.clone(),
+        client_auth: command.client_auth.clone(),
+    })
+    .map_err(|error| {
+        McpOAuthCallbackTokenError::new(
+            error.field,
+            error.message,
+            callback_evidence.clone(),
+            Value::Null,
+        )
+    })?;
+
+    let token = exchange_mcp_oauth_token_with_dispatch(
+        plan,
+        received_at_epoch_seconds,
+        &command.access_token_secret_ref,
+        command.refresh_token_secret_ref.as_deref(),
+        env_get,
+        dispatch,
+    )
+    .await
+    .map_err(|error| {
+        McpOAuthCallbackTokenError::new(
+            error.field,
+            error.message,
+            callback_evidence.clone(),
+            error.sanitized_evidence,
+        )
+    })?;
+
+    Ok(McpOAuthCallbackTokenOutcome {
+        callback_evidence,
+        token,
+    })
 }
 
 pub(crate) async fn exchange_mcp_oauth_token_with_dispatch<EnvGet, Dispatch, DispatchFuture>(
@@ -221,6 +411,48 @@ pub(crate) async fn dispatch_mcp_oauth_token_request(
     })
 }
 
+fn mcp_oauth_callback_evidence(
+    command: &McpOAuthCallbackTokenCommand,
+    state_verified: bool,
+) -> Value {
+    json!({
+        "serverCode": command.server_code.trim(),
+        "statePresent": !command.state.trim().is_empty(),
+        "expectedStatePresent": !command.expected_state.trim().is_empty(),
+        "stateVerified": state_verified,
+        "authorizationCodePresent": !command.authorization_code.trim().is_empty(),
+        "providerError": command
+            .callback_error
+            .as_deref()
+            .map(str::trim)
+            .filter(|error| !error.is_empty()),
+        "providerErrorDescriptionPresent": command
+            .callback_error_description
+            .as_deref()
+            .map(str::trim)
+            .is_some_and(|description| !description.is_empty()),
+        "tokenEndpoint": command.token_endpoint.trim(),
+        "clientId": command.client_id.trim(),
+        "redirectUri": command.redirect_uri.trim(),
+        "codeVerifierSecretRef": command.code_verifier_secret_ref.trim(),
+        "clientAuth": mcp_oauth_client_auth_evidence(&command.client_auth),
+        "accessTokenSecretRef": command.access_token_secret_ref.trim(),
+        "refreshTokenSecretRef": command.refresh_token_secret_ref.as_deref().map(str::trim),
+    })
+}
+
+fn mcp_oauth_client_auth_evidence(client_auth: &McpOAuthClientAuth) -> Value {
+    match client_auth {
+        McpOAuthClientAuth::None => json!({ "type": "none" }),
+        McpOAuthClientAuth::ClientSecretRef(secret_ref) => {
+            json!({
+                "type": "client_secret_ref",
+                "clientSecretRef": secret_ref,
+            })
+        }
+    }
+}
+
 fn resolve_env_secret_ref<F>(
     field: &str,
     secret_ref: &str,
@@ -338,6 +570,172 @@ mod tests {
             ),
         })
         .expect("valid token exchange plan")
+    }
+
+    fn callback_token_command() -> McpOAuthCallbackTokenCommand {
+        McpOAuthCallbackTokenCommand {
+            server_code: "docs".to_owned(),
+            state: "state-secret-value".to_owned(),
+            expected_state: "state-secret-value".to_owned(),
+            authorization_code: "authorization-code-value".to_owned(),
+            callback_error: None,
+            callback_error_description: None,
+            token_endpoint: "https://auth.example.com/oauth/token".to_owned(),
+            client_id: "novex-mcp-client".to_owned(),
+            redirect_uri: "https://novex.example.com/mcp/oauth/callback".to_owned(),
+            code_verifier_secret_ref: "env:MCP_OAUTH_CODE_VERIFIER".to_owned(),
+            client_auth: McpOAuthClientAuth::ClientSecretRef(
+                "env:MCP_OAUTH_CLIENT_SECRET".to_owned(),
+            ),
+            access_token_secret_ref: "env:DOCS_MCP_ACCESS_TOKEN".to_owned(),
+            refresh_token_secret_ref: Some("env:DOCS_MCP_REFRESH_TOKEN".to_owned()),
+        }
+    }
+
+    #[tokio::test]
+    async fn mcp_oauth_callback_exchanges_code_after_state_validation() {
+        let outcome = exchange_mcp_oauth_callback_with_dispatch(
+            callback_token_command(),
+            1_700_000_000,
+            |key| match key {
+                "MCP_OAUTH_CODE_VERIFIER" => Some("code-verifier-value".to_owned()),
+                "MCP_OAUTH_CLIENT_SECRET" => Some("client-secret-value".to_owned()),
+                _ => None,
+            },
+            |plan, secrets| async move {
+                assert_eq!(plan.server_code, "docs");
+                assert_eq!(plan.token_endpoint, "https://auth.example.com/oauth/token");
+                assert_eq!(
+                    plan.form.get("code").map(String::as_str),
+                    Some("authorization-code-value")
+                );
+                assert_eq!(
+                    plan.form.get("client_id").map(String::as_str),
+                    Some("novex-mcp-client")
+                );
+                assert_eq!(
+                    plan.form.get("redirect_uri").map(String::as_str),
+                    Some("https://novex.example.com/mcp/oauth/callback")
+                );
+                assert_eq!(secrets.code_verifier, "code-verifier-value");
+                assert_eq!(
+                    secrets.client_secret.as_deref(),
+                    Some("client-secret-value")
+                );
+                Ok(McpOAuthTokenDispatchHttpResponse {
+                    http_status: 200,
+                    content_type: "application/json".to_owned(),
+                    body: json!({
+                        "access_token": "access-token-value",
+                        "token_type": "Bearer",
+                        "expires_in": 3600,
+                        "refresh_token": "refresh-token-value",
+                        "scope": "mcp:tools offline_access"
+                    })
+                    .to_string(),
+                })
+            },
+        )
+        .await
+        .expect("valid callback should exchange token after state validation");
+
+        assert_eq!(outcome.callback_evidence["serverCode"], "docs");
+        assert_eq!(outcome.callback_evidence["stateVerified"], true);
+        assert_eq!(outcome.callback_evidence["authorizationCodePresent"], true);
+        assert_eq!(
+            outcome.token.session.access_token_secret_ref,
+            "env:DOCS_MCP_ACCESS_TOKEN"
+        );
+        let evidence = serde_json::to_string(&outcome.sanitized_evidence()).unwrap();
+        for secret in [
+            "state-secret-value",
+            "authorization-code-value",
+            "code-verifier-value",
+            "client-secret-value",
+            "access-token-value",
+            "refresh-token-value",
+        ] {
+            assert!(!evidence.contains(secret), "leaked secret: {secret}");
+        }
+    }
+
+    #[tokio::test]
+    async fn mcp_oauth_callback_rejects_state_mismatch_without_dispatch() {
+        let mut command = callback_token_command();
+        command.state = "wrong-state-secret".to_owned();
+
+        let err = exchange_mcp_oauth_callback_with_dispatch(
+            command,
+            1_700_000_000,
+            |_key| None,
+            |_plan, _secrets| async move {
+                panic!("token dispatch must not run when callback state mismatches")
+            },
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(err.field, "state");
+        assert_eq!(err.sanitized_evidence["callback"]["stateVerified"], false);
+        let evidence = err.sanitized_evidence.to_string();
+        assert!(!evidence.contains("state-secret-value"));
+        assert!(!evidence.contains("wrong-state-secret"));
+        assert!(!evidence.contains("authorization-code-value"));
+    }
+
+    #[tokio::test]
+    async fn mcp_oauth_callback_rejects_provider_error_without_dispatch() {
+        let mut command = callback_token_command();
+        command.callback_error = Some("access_denied".to_owned());
+        command.callback_error_description =
+            Some("user denied authorization-code-value".to_owned());
+
+        let err = exchange_mcp_oauth_callback_with_dispatch(
+            command,
+            1_700_000_000,
+            |_key| None,
+            |_plan, _secrets| async move {
+                panic!("token dispatch must not run when provider returned callback error")
+            },
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(err.field, "callback_error");
+        assert_eq!(
+            err.sanitized_evidence["callback"]["providerError"],
+            "access_denied"
+        );
+        let evidence = err.sanitized_evidence.to_string();
+        assert!(!evidence.contains("authorization-code-value"));
+        assert!(!evidence.contains("user denied"));
+    }
+
+    #[tokio::test]
+    async fn mcp_oauth_callback_rejects_missing_authorization_code_without_dispatch() {
+        let mut command = callback_token_command();
+        command.authorization_code = " ".to_owned();
+
+        let err = exchange_mcp_oauth_callback_with_dispatch(
+            command,
+            1_700_000_000,
+            |_key| None,
+            |_plan, _secrets| async move {
+                panic!("token dispatch must not run when authorization code is missing")
+            },
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(err.field, "authorization_code");
+        assert_eq!(
+            err.sanitized_evidence["callback"]["authorizationCodePresent"],
+            false
+        );
+        assert!(!err
+            .sanitized_evidence
+            .to_string()
+            .contains("authorization-code-value"));
     }
 
     #[tokio::test]
