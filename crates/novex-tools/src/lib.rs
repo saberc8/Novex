@@ -584,6 +584,34 @@ pub fn agent_model_loop_tool_definitions() -> Vec<ToolDefinition> {
             concurrency: ToolConcurrencyPolicy::shared(),
         },
         ToolDefinition {
+            code: "web.search".to_owned(),
+            name: "Search web".to_owned(),
+            description: "Search fresh external web results when the run enables web search."
+                .to_owned(),
+            input_schema: json!({
+                "type": "object",
+                "required": ["query"],
+                "properties": {
+                    "query": {"type": "string"},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 10}
+                }
+            }),
+            output_schema: Some(json!({
+                "type": "object",
+                "properties": {
+                    "dryRun": {"type": "boolean"},
+                    "status": {"type": "string"},
+                    "query": {"type": "string"},
+                    "results": {"type": "array"},
+                    "message": {"type": "string"}
+                }
+            })),
+            risk_level: ToolRiskLevel::Low,
+            approval_policy: ApprovalPolicy::OnRisk,
+            permission_code: Some("ai:agent:run".to_owned()),
+            concurrency: ToolConcurrencyPolicy::shared(),
+        },
+        ToolDefinition {
             code: "github.repo.search".to_owned(),
             name: "Search GitHub repository".to_owned(),
             description: "Search code in an authorized GitHub repository or organization."
@@ -695,6 +723,11 @@ pub fn agent_model_loop_tool_executor_bindings() -> Vec<ToolExecutorBinding> {
         ToolExecutorBinding::new(
             "rag.search",
             "builtin.rag.search",
+            ToolExecutorKind::Builtin,
+        ),
+        ToolExecutorBinding::new(
+            "web.search",
+            "builtin.web.search",
             ToolExecutorKind::Builtin,
         ),
         ToolExecutorBinding::new(
@@ -1526,10 +1559,25 @@ mod tests {
         let codes = router.tool_codes();
 
         assert!(codes.contains(&"rag.search".to_owned()));
+        assert!(codes.contains(&"web.search".to_owned()));
         assert!(codes.contains(&"github.repo.search".to_owned()));
         assert!(codes.contains(&"github.repo.read".to_owned()));
         assert!(codes.contains(&"media.image.generate".to_owned()));
         assert!(codes.contains(&"feishu.message.send".to_owned()));
+    }
+
+    #[test]
+    fn web_search_executor_binding_is_builtin() {
+        let registry =
+            ToolExecutorRegistry::from_bindings(agent_model_loop_tool_executor_bindings())
+                .expect("agent executor registry should build");
+
+        let web = registry
+            .executor_for("web.search")
+            .expect("web.search should have an executor");
+
+        assert_eq!(web.executor_code, "builtin.web.search");
+        assert_eq!(web.kind, ToolExecutorKind::Builtin);
     }
 
     #[test]

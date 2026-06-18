@@ -32,6 +32,7 @@ pub(super) const FEISHU_TOOL_CODE: &str = "feishu.message.send";
 pub(super) const MEDIA_IMAGE_TOOL_CODE: &str = "media.image.generate";
 pub(super) const GITHUB_REPO_SEARCH_TOOL_CODE: &str = "github.repo.search";
 pub(super) const GITHUB_REPO_READ_TOOL_CODE: &str = "github.repo.read";
+pub(super) const WEB_SEARCH_TOOL_CODE: &str = "web.search";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct FeishuWebhookConfig {
@@ -63,6 +64,7 @@ pub(super) enum AgentToolExecutorSelection {
     MediaImage,
     GitHubRepoSearch,
     GitHubRepoRead,
+    WebSearch,
     DryRun,
 }
 
@@ -82,6 +84,7 @@ impl AgentToolExecutorSelection {
             Some("model.media.image.generate") => return Self::MediaImage,
             Some("connector.github.repo.search") => return Self::GitHubRepoSearch,
             Some("connector.github.repo.read") => return Self::GitHubRepoRead,
+            Some("builtin.web.search") => return Self::WebSearch,
             _ => {}
         }
 
@@ -90,6 +93,7 @@ impl AgentToolExecutorSelection {
             MEDIA_IMAGE_TOOL_CODE => Self::MediaImage,
             GITHUB_REPO_SEARCH_TOOL_CODE => Self::GitHubRepoSearch,
             GITHUB_REPO_READ_TOOL_CODE => Self::GitHubRepoRead,
+            WEB_SEARCH_TOOL_CODE => Self::WebSearch,
             _ => Self::DryRun,
         }
     }
@@ -165,6 +169,9 @@ pub(super) async fn execute_agent_tool(
         AgentToolExecutorSelection::GitHubRepoRead => {
             return execute_github_repo_read_tool(input, connector_credential).await;
         }
+        AgentToolExecutorSelection::WebSearch => {
+            return execute_web_search_tool(input).await;
+        }
         AgentToolExecutorSelection::DryRun => {}
     }
 
@@ -178,6 +185,34 @@ pub(super) async fn execute_agent_tool(
         }),
         true,
         format!("Agent dry-run executed {tool_code}."),
+    )
+}
+
+async fn execute_web_search_tool(input: &Value) -> AgentToolExecution {
+    let query = input
+        .get("query")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("");
+    let limit = input
+        .get("limit")
+        .and_then(Value::as_i64)
+        .unwrap_or(5)
+        .clamp(1, 10);
+
+    AgentToolExecution::succeeded(
+        json!({
+            "dryRun": true,
+            "status": "dry_run",
+            "toolCode": WEB_SEARCH_TOOL_CODE,
+            "query": query,
+            "limit": limit,
+            "results": [],
+            "message": "web.search is wired, but no web search provider is configured for this POC environment"
+        }),
+        true,
+        "Web search dry-run executed.".to_owned(),
     )
 }
 
@@ -1266,6 +1301,41 @@ mod tests {
             AgentToolExecutorSelection::from_dispatch("unknown.tool", ToolKind::Function, None),
             AgentToolExecutorSelection::DryRun
         );
+    }
+
+    #[test]
+    fn web_search_executor_selection_matches_tool_code_and_binding() {
+        assert_eq!(
+            AgentToolExecutorSelection::from_dispatch("web.search", ToolKind::Function, None),
+            AgentToolExecutorSelection::WebSearch
+        );
+
+        let dispatch = dispatch_plan(
+            "custom.web.alias",
+            "builtin.web.search",
+            ToolExecutorKind::Builtin,
+        );
+        assert_eq!(
+            AgentToolExecutorSelection::from_dispatch(
+                "custom.web.alias",
+                ToolKind::Function,
+                Some(&dispatch),
+            ),
+            AgentToolExecutorSelection::WebSearch
+        );
+    }
+
+    #[tokio::test]
+    async fn web_search_tool_returns_dry_run_when_provider_missing() {
+        let output =
+            execute_web_search_tool(&json!({"query": "latest Novex release", "limit": 3})).await;
+
+        assert!(output.succeeded_status());
+        assert!(output.dry_run);
+        assert_eq!(output.response_payload["dryRun"], true);
+        assert_eq!(output.response_payload["status"], "dry_run");
+        assert_eq!(output.response_payload["query"], "latest Novex release");
+        assert_eq!(output.response_payload["limit"], 3);
     }
 
     #[test]
