@@ -83,12 +83,18 @@ pub struct SecretRecordPublicResp {
 
 #[derive(Debug, Clone)]
 pub struct SecretService {
+    tenant_id: i64,
     repo: SystemSecretRepository,
 }
 
 impl SecretService {
     pub fn new(db: PgPool) -> Self {
+        Self::for_tenant(db, DEFAULT_TENANT_ID)
+    }
+
+    pub fn for_tenant(db: PgPool, tenant_id: i64) -> Self {
         Self {
+            tenant_id,
             repo: SystemSecretRepository::new(db),
         }
     }
@@ -99,7 +105,7 @@ impl SecretService {
     ) -> Result<PageResult<SecretRecordPublicResp>, AppError> {
         let page = query.page_query();
         let filter = SecretFilter {
-            tenant_id: DEFAULT_TENANT_ID,
+            tenant_id: self.tenant_id,
             scope_type: query.scope_type.as_deref(),
             scope_id: query.scope_id.as_deref(),
             code: query.code.as_deref(),
@@ -127,7 +133,7 @@ impl SecretService {
         let latest = self
             .repo
             .latest_key_version(
-                DEFAULT_TENANT_ID,
+                self.tenant_id,
                 &command.scope_type,
                 &command.scope_id,
                 &command.code,
@@ -136,7 +142,7 @@ impl SecretService {
         let now = Utc::now().naive_utc();
         let record = SecretSaveRecord {
             id: next_id(),
-            tenant_id: DEFAULT_TENANT_ID,
+            tenant_id: self.tenant_id,
             scope_type: command.scope_type,
             scope_id: command.scope_id,
             code: command.code,
@@ -152,6 +158,32 @@ impl SecretService {
         Ok(SecretRecordPublicResp::from(
             self.repo.create_version(&record).await?,
         ))
+    }
+
+    pub async fn write_plaintext_to_secret_ref(
+        &self,
+        user_id: i64,
+        secret_ref: &str,
+        plaintext: String,
+        metadata: Value,
+    ) -> Result<SecretRecordPublicResp, AppError> {
+        let target = parse_system_secret_ref(secret_ref)?;
+        if target.scope_type == "tenant" && target.scope_id != self.tenant_id.to_string() {
+            return Err(AppError::bad_request("系统密钥引用租户不匹配"));
+        }
+
+        self.upsert(
+            user_id,
+            SecretCommand {
+                scope_type: target.scope_type,
+                scope_id: target.scope_id,
+                code: target.code,
+                plaintext,
+                metadata,
+                status: ENABLED_STATUS,
+            },
+        )
+        .await
     }
 }
 
@@ -188,6 +220,38 @@ pub fn normalize_secret_command(mut command: SecretCommand) -> Result<SecretComm
     ensure_max_chars("密钥编码", &command.code, 128)?;
     ensure_max_chars("密钥明文", &command.plaintext, 4096)?;
     Ok(command)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SystemSecretRef {
+    scope_type: String,
+    scope_id: String,
+    code: String,
+}
+
+fn parse_system_secret_ref(secret_ref: &str) -> Result<SystemSecretRef, AppError> {
+    let raw = secret_ref
+        .trim()
+        .strip_prefix("sys:")
+        .ok_or_else(|| AppError::bad_request("系统密钥引用必须使用 sys: 前缀"))?;
+    let mut parts = raw.splitn(3, ':');
+    let scope_type = parts.next().unwrap_or_default().trim().to_ascii_lowercase();
+    let scope_id = parts.next().unwrap_or_default().trim().to_owned();
+    let code = parts.next().unwrap_or_default().trim().to_owned();
+    if scope_type.is_empty() || scope_id.is_empty() || code.is_empty() {
+        return Err(AppError::bad_request(
+            "系统密钥引用格式必须为 sys:<scopeType>:<scopeId>:<code>",
+        ));
+    }
+    if !matches!(scope_type.as_str(), "platform" | "tenant" | "user" | "app") {
+        return Err(AppError::bad_request("系统密钥引用作用域无效"));
+    }
+
+    Ok(SystemSecretRef {
+        scope_type,
+        scope_id,
+        code,
+    })
 }
 
 pub fn mask_secret_value(value: &str) -> String {
@@ -258,4 +322,26 @@ fn default_secret_size() -> u64 {
 
 fn default_enabled_status() -> i16 {
     ENABLED_STATUS
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn system_secret_ref_parses_scope_id_and_code() {
+        let target = parse_system_secret_ref("sys:tenant:42:mcp.docs.access")
+            .expect("valid system secret ref should parse");
+
+        assert_eq!(target.scope_type, "tenant");
+        assert_eq!(target.scope_id, "42");
+        assert_eq!(target.code, "mcp.docs.access");
+    }
+
+    #[test]
+    fn system_secret_ref_rejects_non_system_prefix() {
+        let err = parse_system_secret_ref("env:DOCS_MCP_ACCESS_TOKEN").unwrap_err();
+
+        assert!(err.to_string().contains("sys:"));
+    }
 }

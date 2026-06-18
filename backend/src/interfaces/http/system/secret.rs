@@ -28,7 +28,7 @@ async fn list(
     Query(query): Query<SecretQuery>,
 ) -> Result<Json<ApiResponse<PageResult<SecretRecordPublicResp>>>, AppError> {
     require_permission(&current_user, SECRET_LIST_PERMISSION)?;
-    let service = SecretService::new(state.db);
+    let service = SecretService::for_tenant(state.db, current_user.tenant_id);
 
     Ok(Json(ApiResponse::ok(service.list(query).await?)))
 }
@@ -39,7 +39,7 @@ async fn upsert(
     Json(command): Json<SecretCommand>,
 ) -> Result<Json<ApiResponse<SecretRecordPublicResp>>, AppError> {
     require_permission(&current_user, SECRET_UPSERT_PERMISSION)?;
-    let service = SecretService::new(state.db);
+    let service = SecretService::for_tenant(state.db, current_user.tenant_id);
 
     Ok(Json(ApiResponse::ok(
         service.upsert(current_user.id, command).await?,
@@ -94,6 +94,18 @@ mod tests {
 
         assert!(seed.contains(SECRET_LIST_PERMISSION));
         assert!(seed.contains(SECRET_UPSERT_PERMISSION));
+    }
+
+    #[test]
+    fn secret_handlers_bind_service_to_current_tenant() {
+        let source = include_str!("secret.rs");
+        let needle = [
+            "let service = SecretService::for_tenant(",
+            "state.db, current_user.tenant_id);",
+        ]
+        .concat();
+
+        assert_eq!(source.matches(&needle).count(), 2);
     }
 
     #[tokio::test]

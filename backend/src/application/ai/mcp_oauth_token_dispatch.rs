@@ -44,6 +44,14 @@ impl McpOAuthTokenDispatchOutcome {
     }
 }
 
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct McpOAuthTokenSecretMaterial {
+    pub access_token_secret_ref: String,
+    pub access_token: String,
+    pub refresh_token_secret_ref: Option<String>,
+    pub refresh_token: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct McpOAuthTokenDispatchError {
@@ -176,6 +184,37 @@ where
         FnOnce(McpOAuthTokenExchangePlan, McpOAuthTokenDispatchResolvedSecrets) -> DispatchFuture,
     DispatchFuture: Future<Output = Result<McpOAuthTokenDispatchHttpResponse, String>>,
 {
+    exchange_mcp_oauth_callback_with_dispatch_and_secret_writer(
+        command,
+        received_at_epoch_seconds,
+        env_get,
+        dispatch,
+        |_material| async { Ok(()) },
+    )
+    .await
+}
+
+pub(crate) async fn exchange_mcp_oauth_callback_with_dispatch_and_secret_writer<
+    EnvGet,
+    Dispatch,
+    DispatchFuture,
+    SecretWrite,
+    SecretFuture,
+>(
+    command: McpOAuthCallbackTokenCommand,
+    received_at_epoch_seconds: u64,
+    env_get: EnvGet,
+    dispatch: Dispatch,
+    secret_write: SecretWrite,
+) -> Result<McpOAuthCallbackTokenOutcome, McpOAuthCallbackTokenError>
+where
+    EnvGet: FnMut(&str) -> Option<String>,
+    Dispatch:
+        FnOnce(McpOAuthTokenExchangePlan, McpOAuthTokenDispatchResolvedSecrets) -> DispatchFuture,
+    DispatchFuture: Future<Output = Result<McpOAuthTokenDispatchHttpResponse, String>>,
+    SecretWrite: FnOnce(McpOAuthTokenSecretMaterial) -> SecretFuture,
+    SecretFuture: Future<Output = Result<(), String>>,
+{
     let provider_error = command
         .callback_error
         .as_deref()
@@ -248,13 +287,14 @@ where
         )
     })?;
 
-    let token = exchange_mcp_oauth_token_with_dispatch(
+    let token = exchange_mcp_oauth_token_with_dispatch_and_secret_writer(
         plan,
         received_at_epoch_seconds,
         &command.access_token_secret_ref,
         command.refresh_token_secret_ref.as_deref(),
         env_get,
         dispatch,
+        secret_write,
     )
     .await
     .map_err(|error| {
@@ -277,7 +317,7 @@ pub(crate) async fn exchange_mcp_oauth_token_with_dispatch<EnvGet, Dispatch, Dis
     received_at_epoch_seconds: u64,
     access_token_secret_ref: &str,
     refresh_token_secret_ref: Option<&str>,
-    mut env_get: EnvGet,
+    env_get: EnvGet,
     dispatch: Dispatch,
 ) -> Result<McpOAuthTokenDispatchOutcome, McpOAuthTokenDispatchError>
 where
@@ -285,6 +325,41 @@ where
     Dispatch:
         FnOnce(McpOAuthTokenExchangePlan, McpOAuthTokenDispatchResolvedSecrets) -> DispatchFuture,
     DispatchFuture: Future<Output = Result<McpOAuthTokenDispatchHttpResponse, String>>,
+{
+    exchange_mcp_oauth_token_with_dispatch_and_secret_writer(
+        plan,
+        received_at_epoch_seconds,
+        access_token_secret_ref,
+        refresh_token_secret_ref,
+        env_get,
+        dispatch,
+        |_material| async { Ok(()) },
+    )
+    .await
+}
+
+pub(crate) async fn exchange_mcp_oauth_token_with_dispatch_and_secret_writer<
+    EnvGet,
+    Dispatch,
+    DispatchFuture,
+    SecretWrite,
+    SecretFuture,
+>(
+    plan: McpOAuthTokenExchangePlan,
+    received_at_epoch_seconds: u64,
+    access_token_secret_ref: &str,
+    refresh_token_secret_ref: Option<&str>,
+    mut env_get: EnvGet,
+    dispatch: Dispatch,
+    secret_write: SecretWrite,
+) -> Result<McpOAuthTokenDispatchOutcome, McpOAuthTokenDispatchError>
+where
+    EnvGet: FnMut(&str) -> Option<String>,
+    Dispatch:
+        FnOnce(McpOAuthTokenExchangePlan, McpOAuthTokenDispatchResolvedSecrets) -> DispatchFuture,
+    DispatchFuture: Future<Output = Result<McpOAuthTokenDispatchHttpResponse, String>>,
+    SecretWrite: FnOnce(McpOAuthTokenSecretMaterial) -> SecretFuture,
+    SecretFuture: Future<Output = Result<(), String>>,
 {
     let server_code = plan.server_code.clone();
     let request_evidence = plan.sanitized_evidence();
@@ -352,6 +427,25 @@ where
         McpOAuthTokenDispatchError::new(
             error.field,
             error.message,
+            request_evidence.clone(),
+            response_meta.clone(),
+        )
+    })?;
+    let secret_material = McpOAuthTokenSecretMaterial {
+        access_token_secret_ref: session.access_token_secret_ref.clone(),
+        access_token: token_response.access_token.trim().to_owned(),
+        refresh_token_secret_ref: session.refresh_token_secret_ref.clone(),
+        refresh_token: token_response
+            .refresh_token
+            .as_deref()
+            .map(str::trim)
+            .filter(|token| !token.is_empty())
+            .map(str::to_owned),
+    };
+    secret_write(secret_material).await.map_err(|_| {
+        McpOAuthTokenDispatchError::new(
+            "token_secret_writer",
+            "MCP OAuth token secret writer failed",
             request_evidence.clone(),
             response_meta.clone(),
         )
@@ -804,6 +898,124 @@ mod tests {
         ] {
             assert!(!evidence.contains(secret), "leaked secret: {secret}");
         }
+    }
+
+    #[tokio::test]
+    async fn mcp_oauth_token_dispatch_writes_token_values_to_secret_refs_without_evidence_leakage()
+    {
+        let plan = token_exchange_plan("https://auth.example.com/oauth/token");
+        let written = Arc::new(Mutex::new(Vec::<McpOAuthTokenSecretMaterial>::new()));
+        let written_for_writer = Arc::clone(&written);
+
+        let outcome = exchange_mcp_oauth_token_with_dispatch_and_secret_writer(
+            plan,
+            1_700_000_000,
+            "sys:tenant:42:mcp.docs.access",
+            Some("sys:tenant:42:mcp.docs.refresh"),
+            |key| match key {
+                "MCP_OAUTH_CODE_VERIFIER" => Some("code-verifier-value".to_owned()),
+                "MCP_OAUTH_CLIENT_SECRET" => Some("client-secret-value".to_owned()),
+                _ => None,
+            },
+            |_plan, _secrets| async move {
+                Ok(McpOAuthTokenDispatchHttpResponse {
+                    http_status: 200,
+                    content_type: "application/json".to_owned(),
+                    body: json!({
+                        "access_token": "access-token-value",
+                        "token_type": "Bearer",
+                        "expires_in": 3600,
+                        "refresh_token": "refresh-token-value",
+                        "scope": "mcp:tools offline_access"
+                    })
+                    .to_string(),
+                })
+            },
+            move |material| {
+                let written_for_writer = Arc::clone(&written_for_writer);
+                async move {
+                    written_for_writer.lock().await.push(material);
+                    Ok(())
+                }
+            },
+        )
+        .await
+        .expect("valid token dispatch should persist token material through secret writer");
+
+        let written = written.lock().await;
+        assert_eq!(written.len(), 1);
+        assert_eq!(
+            written[0].access_token_secret_ref,
+            "sys:tenant:42:mcp.docs.access"
+        );
+        assert_eq!(written[0].access_token, "access-token-value");
+        assert_eq!(
+            written[0].refresh_token_secret_ref.as_deref(),
+            Some("sys:tenant:42:mcp.docs.refresh")
+        );
+        assert_eq!(
+            written[0].refresh_token.as_deref(),
+            Some("refresh-token-value")
+        );
+        assert_eq!(
+            outcome.session.access_token_secret_ref,
+            "sys:tenant:42:mcp.docs.access"
+        );
+        let evidence = serde_json::to_string(&outcome.sanitized_evidence()).unwrap();
+        for secret in [
+            "authorization-code-value",
+            "code-verifier-value",
+            "client-secret-value",
+            "access-token-value",
+            "refresh-token-value",
+        ] {
+            assert!(!evidence.contains(secret), "leaked secret: {secret}");
+        }
+    }
+
+    #[tokio::test]
+    async fn mcp_oauth_token_dispatch_secret_writer_failure_is_sanitized() {
+        let plan = token_exchange_plan("https://auth.example.com/oauth/token");
+
+        let err = exchange_mcp_oauth_token_with_dispatch_and_secret_writer(
+            plan,
+            1_700_000_000,
+            "sys:tenant:42:mcp.docs.access",
+            Some("sys:tenant:42:mcp.docs.refresh"),
+            |key| match key {
+                "MCP_OAUTH_CODE_VERIFIER" => Some("code-verifier-value".to_owned()),
+                "MCP_OAUTH_CLIENT_SECRET" => Some("client-secret-value".to_owned()),
+                _ => None,
+            },
+            |_plan, _secrets| async move {
+                Ok(McpOAuthTokenDispatchHttpResponse {
+                    http_status: 200,
+                    content_type: "application/json".to_owned(),
+                    body: json!({
+                        "access_token": "access-token-value",
+                        "token_type": "Bearer",
+                        "refresh_token": "refresh-token-value"
+                    })
+                    .to_string(),
+                })
+            },
+            |_material| async move { Err("kms write failed for access-token-value".to_owned()) },
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(err.field, "token_secret_writer");
+        let evidence = err.sanitized_evidence.to_string();
+        for secret in [
+            "authorization-code-value",
+            "code-verifier-value",
+            "client-secret-value",
+            "access-token-value",
+            "refresh-token-value",
+        ] {
+            assert!(!evidence.contains(secret), "leaked secret: {secret}");
+        }
+        assert!(!err.message.contains("access-token-value"));
     }
 
     #[tokio::test]

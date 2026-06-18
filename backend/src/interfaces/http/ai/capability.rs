@@ -8,10 +8,11 @@ use crate::{
     application::ai::capability_service::{
         CapabilityItemResp, CapabilityQuery, CapabilityService, CapabilitySummaryResp,
         ConnectorCredentialCommand, ConnectorCredentialQuery, ConnectorCredentialResp,
-        McpDiscoveryCommand, McpServerCommand, McpServerResp, McpToolResp, PluginInstallCommand,
-        PluginInstallationQuery, PluginInstallationResp, SkillImportFromSourceCommand,
-        SkillImportPreviewCommand, SkillImportPreviewResp, SkillImportResultResp,
-        ToolCallAuditQuery, ToolCallAuditResp, ToolDryRunCommand, ToolDryRunResp,
+        McpDiscoveryCommand, McpOAuthCallbackCommand, McpOAuthCallbackResp, McpServerCommand,
+        McpServerResp, McpToolResp, PluginInstallCommand, PluginInstallationQuery,
+        PluginInstallationResp, SkillImportFromSourceCommand, SkillImportPreviewCommand,
+        SkillImportPreviewResp, SkillImportResultResp, ToolCallAuditQuery, ToolCallAuditResp,
+        ToolDryRunCommand, ToolDryRunResp,
     },
     domain::auth::model::CurrentUser,
     interfaces::http::{middleware::permission::require_permission, AppState},
@@ -73,6 +74,10 @@ pub fn routes() -> Router<AppState> {
         .route(
             "/ai/capabilities/mcp/servers/:server_id/discover",
             post(discover_mcp_tools),
+        )
+        .route(
+            "/ai/capabilities/mcp/servers/:server_id/oauth/callback",
+            post(complete_mcp_oauth_callback),
         )
         .route(
             "/ai/capabilities/mcp/servers/:server_id/tools",
@@ -301,6 +306,22 @@ async fn discover_mcp_tools(
     Ok(Json(ApiResponse::ok(
         service
             .discover_mcp_tools(current_user.id, server_id, command)
+            .await?,
+    )))
+}
+
+async fn complete_mcp_oauth_callback(
+    State(state): State<AppState>,
+    current_user: CurrentUser,
+    Path(server_id): Path<i64>,
+    Json(command): Json<McpOAuthCallbackCommand>,
+) -> Result<Json<ApiResponse<McpOAuthCallbackResp>>, AppError> {
+    require_permission(&current_user, MCP_UPDATE_PERMISSION)?;
+    let service = CapabilityService::for_tenant(state.db, current_user.tenant_id);
+
+    Ok(Json(ApiResponse::ok(
+        service
+            .complete_mcp_oauth_callback(current_user.id, server_id, command)
             .await?,
     )))
 }
@@ -717,6 +738,26 @@ zip-bytes\r\n\
     }
 
     #[tokio::test]
+    async fn mcp_oauth_callback_handler_rejects_missing_permission() {
+        let err = complete_mcp_oauth_callback(
+            State(test_state()),
+            user_with_permissions(vec![]),
+            Path(42),
+            Json(McpOAuthCallbackCommand {
+                code: "authorization-code-value".to_owned(),
+                state: "state-secret-value".to_owned(),
+                redirect_uri: "https://novex.example.com/mcp/oauth/callback".to_owned(),
+                error: None,
+                error_description: None,
+            }),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(matches!(err, AppError::Forbidden));
+    }
+
+    #[tokio::test]
     async fn mcp_tool_list_handler_rejects_missing_permission() {
         let err = list_mcp_tools(State(test_state()), user_with_permissions(vec![]), Path(42))
             .await
@@ -729,6 +770,17 @@ zip-bytes\r\n\
     fn mcp_server_update_permission_seed_contains_update_permission() {
         let seed = include_str!("../../../../migrations/202606050001_seed_ai_foundation_menus.sql");
         assert!(seed.contains("ai:mcp:update"));
+    }
+
+    #[test]
+    fn mcp_oauth_callback_route_is_source_registered() {
+        let source = include_str!("capability.rs");
+
+        assert!(source.contains("/ai/capabilities/mcp/servers/:server_id/oauth/callback"));
+        assert!(source.contains("post(complete_mcp_oauth_callback)"));
+        assert!(
+            source.contains(".complete_mcp_oauth_callback(current_user.id, server_id, command)")
+        );
     }
 
     #[tokio::test]

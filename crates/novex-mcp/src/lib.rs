@@ -517,7 +517,7 @@ impl McpOAuthTokenExchangePlan {
         let redirect_uri = validate_oauth_redirect_uri(&config.redirect_uri)?;
         let authorization_code =
             required_oauth_field("authorization_code", &config.authorization_code)?;
-        let code_verifier_secret_ref = validate_oauth_session_secret_ref(
+        let code_verifier_secret_ref = validate_oauth_runtime_secret_ref(
             "code_verifier_secret_ref",
             &config.code_verifier_secret_ref,
         )?;
@@ -629,7 +629,7 @@ pub fn mcp_oauth_session_from_token_response(
         ));
     }
 
-    let access_token_secret_ref = validate_oauth_session_secret_ref(
+    let access_token_secret_ref = validate_oauth_token_storage_secret_ref(
         "access_token_secret_ref",
         access_token_secret_ref.as_ref(),
     )?;
@@ -639,7 +639,7 @@ pub fn mcp_oauth_session_from_token_response(
         .map(str::trim)
         .is_some_and(|value| !value.is_empty());
     let refresh_token_secret_ref = match (refresh_token_present, refresh_token_secret_ref) {
-        (true, Some(secret_ref)) => Some(validate_oauth_session_secret_ref(
+        (true, Some(secret_ref)) => Some(validate_oauth_token_storage_secret_ref(
             "refresh_token_secret_ref",
             secret_ref,
         )?),
@@ -649,7 +649,7 @@ pub fn mcp_oauth_session_from_token_response(
                 "MCP OAuth refresh_token_secret_ref is required when refresh_token is present",
             ))
         }
-        (false, Some(secret_ref)) => Some(validate_oauth_session_secret_ref(
+        (false, Some(secret_ref)) => Some(validate_oauth_token_storage_secret_ref(
             "refresh_token_secret_ref",
             secret_ref,
         )?),
@@ -701,7 +701,7 @@ impl From<McpOAuthAuthorizationError> for McpOAuthSessionError {
     }
 }
 
-fn validate_oauth_session_secret_ref(
+fn validate_oauth_runtime_secret_ref(
     field: &str,
     value: &str,
 ) -> Result<String, McpOAuthSessionError> {
@@ -710,6 +710,20 @@ fn validate_oauth_session_secret_ref(
         return Err(McpOAuthSessionError::new(
             field,
             format!("MCP OAuth {field} must use env: prefix"),
+        ));
+    }
+    Ok(value.to_owned())
+}
+
+fn validate_oauth_token_storage_secret_ref(
+    field: &str,
+    value: &str,
+) -> Result<String, McpOAuthSessionError> {
+    let value = value.trim();
+    if value.is_empty() || !(value.starts_with("env:") || value.starts_with("sys:")) {
+        return Err(McpOAuthSessionError::new(
+            field,
+            format!("MCP OAuth {field} must use env: or sys: prefix"),
         ));
     }
     Ok(value.to_owned())
@@ -1733,6 +1747,39 @@ mod tests {
         );
         assert!(!evidence.to_string().contains("access-token-value"));
         assert!(!evidence.to_string().contains("refresh-token-value"));
+    }
+
+    #[test]
+    fn mcp_oauth_session_accepts_system_secret_refs_for_token_storage() {
+        let response = McpOAuthTokenResponse {
+            access_token: "access-token-value".to_owned(),
+            token_type: "Bearer".to_owned(),
+            expires_in_seconds: Some(3600),
+            refresh_token: Some("refresh-token-value".to_owned()),
+            scope: Some("mcp:tools offline_access".to_owned()),
+        };
+
+        let session = mcp_oauth_session_from_token_response(
+            "docs",
+            &response,
+            1_700_000_000,
+            "sys:tenant:42:mcp.docs.access",
+            Some("sys:tenant:42:mcp.docs.refresh"),
+        )
+        .expect("OAuth token storage should accept system secret manager refs");
+
+        assert_eq!(
+            session.access_token_secret_ref,
+            "sys:tenant:42:mcp.docs.access"
+        );
+        assert_eq!(
+            session.refresh_token_secret_ref.as_deref(),
+            Some("sys:tenant:42:mcp.docs.refresh")
+        );
+        let evidence = session.sanitized_evidence().to_string();
+        assert!(evidence.contains("sys:tenant:42:mcp.docs.access"));
+        assert!(!evidence.contains("access-token-value"));
+        assert!(!evidence.contains("refresh-token-value"));
     }
 
     #[test]
