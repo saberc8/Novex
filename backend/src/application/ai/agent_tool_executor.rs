@@ -1100,7 +1100,19 @@ fn feishu_response_code(value: &Value) -> Option<i64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::{
+        extract::State,
+        http::{HeaderMap, Method, StatusCode},
+        response::IntoResponse,
+        routing::post,
+        Json, Router,
+    };
     use novex_tools::{ToolExecutorBinding, ToolExecutorKind};
+    use std::{collections::BTreeMap, sync::Arc};
+    use tokio::{
+        net::TcpListener,
+        sync::{oneshot, Mutex},
+    };
 
     fn dispatch_plan(
         tool_code: &str,
@@ -1133,6 +1145,87 @@ mod tests {
             permission_code: Some("ai:mcp:docs:search".to_owned()),
             metadata,
         }
+    }
+
+    #[derive(Debug)]
+    struct LocalMcpServerCapture {
+        method: String,
+        headers: BTreeMap<String, String>,
+        body: Value,
+    }
+
+    #[derive(Clone)]
+    struct LocalMcpServerState {
+        capture_tx: Arc<Mutex<Option<oneshot::Sender<LocalMcpServerCapture>>>>,
+        shutdown_tx: Arc<Mutex<Option<oneshot::Sender<()>>>>,
+    }
+
+    async fn run_one_shot_mcp_server() -> (String, oneshot::Receiver<LocalMcpServerCapture>) {
+        let (capture_tx, capture_rx) = oneshot::channel();
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let state = LocalMcpServerState {
+            capture_tx: Arc::new(Mutex::new(Some(capture_tx))),
+            shutdown_tx: Arc::new(Mutex::new(Some(shutdown_tx))),
+        };
+        let app = Router::new()
+            .route("/mcp", post(local_mcp_tools_call_handler))
+            .with_state(state);
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("local MCP server should bind");
+        let addr = listener
+            .local_addr()
+            .expect("local MCP server address should be available");
+        tokio::spawn(async move {
+            let server = axum::serve(listener, app).with_graceful_shutdown(async move {
+                let _ = shutdown_rx.await;
+            });
+            let _ = server.await;
+        });
+
+        (format!("http://{addr}/mcp"), capture_rx)
+    }
+
+    async fn local_mcp_tools_call_handler(
+        State(state): State<LocalMcpServerState>,
+        method: Method,
+        headers: HeaderMap,
+        Json(body): Json<Value>,
+    ) -> impl IntoResponse {
+        let captured_headers = headers
+            .iter()
+            .filter_map(|(name, value)| {
+                value
+                    .to_str()
+                    .ok()
+                    .map(|value| (name.as_str().to_owned(), value.to_owned()))
+            })
+            .collect::<BTreeMap<_, _>>();
+        let capture = LocalMcpServerCapture {
+            method: method.as_str().to_owned(),
+            headers: captured_headers,
+            body,
+        };
+        if let Some(sender) = state.capture_tx.lock().await.take() {
+            let _ = sender.send(capture);
+        }
+        if let Some(sender) = state.shutdown_tx.lock().await.take() {
+            let _ = sender.send(());
+        }
+
+        (
+            StatusCode::OK,
+            [("content-type", "application/json")],
+            Json(json!({
+                "jsonrpc": "2.0",
+                "id": "mcp-tool-21",
+                "result": {
+                    "content": [{"type": "text", "text": "Local MCP found Codex docs"}],
+                    "structuredContent": {"hits": 1, "source": "local-smoke"},
+                    "isError": false
+                }
+            })),
+        )
     }
 
     #[test]
@@ -1410,6 +1503,56 @@ mod tests {
             .response_payload
             .to_string()
             .contains("secret-token"));
+    }
+
+    #[tokio::test]
+    async fn mcp_tool_execution_live_http_dispatch_reaches_local_streamable_http_server() {
+        let (endpoint_url, captured_request) = run_one_shot_mcp_server().await;
+        let mut tool = live_mcp_tool_record(json!({"liveExecutionEnabled": true}));
+        tool.endpoint_url = Some(endpoint_url);
+
+        let execution = execute_mcp_tool_with_http_dispatch(
+            "mcp.docs.search",
+            &json!({"query": "codex", "limit": 3}),
+            Some(&tool),
+            |key| (key == "DOCS_MCP_TOKEN").then(|| "local-secret-token".to_owned()),
+            |plan, bearer_token| async move {
+                dispatch_mcp_streamable_http_request(plan, bearer_token).await
+            },
+        )
+        .await;
+        let captured = captured_request
+            .await
+            .expect("local MCP server should capture one request");
+
+        assert!(execution.succeeded_status());
+        assert!(!execution.dry_run);
+        assert_eq!(execution.response_payload["provider"], "mcp");
+        assert_eq!(execution.response_payload["live"], true);
+        assert_eq!(
+            execution.response_payload["response"]["structuredContent"]["hits"],
+            1
+        );
+        assert_eq!(captured.method, "POST");
+        assert_eq!(
+            captured.headers["authorization"],
+            "Bearer local-secret-token"
+        );
+        assert_eq!(
+            captured.headers["mcp-protocol-version"],
+            novex_mcp::MCP_PROTOCOL_VERSION
+        );
+        assert!(captured.headers["accept"].contains("application/json"));
+        assert!(captured.headers["accept"].contains("text/event-stream"));
+        assert!(captured.headers["content-type"].contains("application/json"));
+        assert_eq!(captured.body["method"], "tools/call");
+        assert_eq!(captured.body["params"]["name"], "search");
+        assert_eq!(captured.body["params"]["arguments"]["query"], "codex");
+        assert_eq!(captured.body["params"]["arguments"]["limit"], 3);
+        assert!(!execution
+            .response_payload
+            .to_string()
+            .contains("local-secret-token"));
     }
 
     #[test]
