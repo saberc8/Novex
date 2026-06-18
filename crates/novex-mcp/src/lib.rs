@@ -1,10 +1,13 @@
+use std::collections::BTreeMap;
+
 use novex_ai_core::FoundationModule;
 use novex_tools::{ApprovalPolicy, ToolConcurrencyPolicy, ToolDefinition, ToolRiskLevel};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{json, Value};
 use url::Url;
 
 pub const CRATE_ID: &str = "novex-mcp";
+pub const MCP_PROTOCOL_VERSION: &str = "2025-11-25";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -134,6 +137,247 @@ pub struct McpToolInvocationResult {
     pub status: String,
     pub output: Value,
     pub dry_run: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpJsonRpcRequest {
+    pub jsonrpc: String,
+    pub id: String,
+    pub method: String,
+    pub params: Value,
+}
+
+impl McpJsonRpcRequest {
+    pub fn tools_call(id: impl Into<String>, request: &McpToolInvocationRequest) -> Self {
+        Self {
+            jsonrpc: "2.0".to_owned(),
+            id: id.into(),
+            method: "tools/call".to_owned(),
+            params: json!({
+                "name": request.tool_name,
+                "arguments": request.arguments,
+            }),
+        }
+    }
+
+    pub fn into_value(self) -> Value {
+        serde_json::to_value(self).unwrap_or_else(|_| Value::Null)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpStreamableHttpRequestPlan {
+    pub endpoint_url: String,
+    pub http_method: String,
+    pub headers: BTreeMap<String, String>,
+    pub body: Value,
+    pub secret_ref: Option<String>,
+}
+
+impl McpStreamableHttpRequestPlan {
+    pub fn tools_call(
+        endpoint_url: impl Into<String>,
+        request_id: impl Into<String>,
+        request: &McpToolInvocationRequest,
+        secret_ref: Option<&str>,
+    ) -> Self {
+        let mut headers = BTreeMap::new();
+        headers.insert(
+            "Accept".to_owned(),
+            "application/json, text/event-stream".to_owned(),
+        );
+        headers.insert("Content-Type".to_owned(), "application/json".to_owned());
+        headers.insert(
+            "MCP-Protocol-Version".to_owned(),
+            MCP_PROTOCOL_VERSION.to_owned(),
+        );
+
+        Self {
+            endpoint_url: endpoint_url.into(),
+            http_method: "POST".to_owned(),
+            headers,
+            body: McpJsonRpcRequest::tools_call(request_id, request).into_value(),
+            secret_ref: secret_ref.map(ToOwned::to_owned),
+        }
+    }
+
+    pub fn header_value(&self, name: &str) -> Option<String> {
+        self.headers
+            .iter()
+            .find(|(header, _)| header.eq_ignore_ascii_case(name))
+            .map(|(_, value)| value.clone())
+    }
+
+    pub fn sanitized_evidence(&self) -> Value {
+        json!({
+            "endpointUrl": self.endpoint_url,
+            "httpMethod": self.http_method,
+            "headers": self.headers,
+            "body": self.body,
+            "secretRef": self.secret_ref,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpStreamableHttpResponse {
+    pub http_status: u16,
+    pub content_type: String,
+    pub body: String,
+}
+
+impl McpStreamableHttpResponse {
+    pub fn new(http_status: u16, content_type: impl Into<String>, body: impl Into<String>) -> Self {
+        Self {
+            http_status,
+            content_type: content_type.into(),
+            body: body.into(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum McpClientErrorKind {
+    HttpStatus,
+    UnsupportedContentType,
+    JsonRpcError,
+    MalformedJson,
+    MissingResult,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpClientError {
+    pub kind: McpClientErrorKind,
+    pub message: String,
+    pub http_status: Option<u16>,
+    pub rpc_code: Option<i64>,
+}
+
+impl McpClientError {
+    fn new(kind: McpClientErrorKind, message: impl Into<String>) -> Self {
+        Self {
+            kind,
+            message: message.into(),
+            http_status: None,
+            rpc_code: None,
+        }
+    }
+
+    fn with_http_status(mut self, http_status: u16) -> Self {
+        self.http_status = Some(http_status);
+        self
+    }
+
+    fn with_rpc_code(mut self, rpc_code: i64) -> Self {
+        self.rpc_code = Some(rpc_code);
+        self
+    }
+}
+
+pub fn parse_mcp_tool_call_response(
+    tool_code: impl Into<String>,
+    response: &McpStreamableHttpResponse,
+) -> Result<McpToolInvocationResult, McpClientError> {
+    let tool_code = tool_code.into();
+    if response.http_status >= 400 {
+        return Err(McpClientError::new(
+            McpClientErrorKind::HttpStatus,
+            format!("MCP server returned HTTP {}", response.http_status),
+        )
+        .with_http_status(response.http_status));
+    }
+
+    let content_type = response
+        .content_type
+        .split(';')
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase();
+    let payload = match content_type.as_str() {
+        "application/json" => parse_mcp_json_payload(&response.body)?,
+        "text/event-stream" => parse_mcp_sse_payload(&response.body)?,
+        _ => {
+            return Err(McpClientError::new(
+                McpClientErrorKind::UnsupportedContentType,
+                format!("Unsupported MCP content type `{}`", response.content_type),
+            ));
+        }
+    };
+
+    mcp_tool_result_from_json_rpc(tool_code, payload)
+}
+
+fn parse_mcp_json_payload(body: &str) -> Result<Value, McpClientError> {
+    serde_json::from_str(body).map_err(|error| {
+        McpClientError::new(
+            McpClientErrorKind::MalformedJson,
+            format!("MCP JSON response is invalid: {error}"),
+        )
+    })
+}
+
+fn parse_mcp_sse_payload(body: &str) -> Result<Value, McpClientError> {
+    for event in body.split("\n\n") {
+        let data = event
+            .lines()
+            .filter_map(|line| line.strip_prefix("data:"))
+            .map(str::trim)
+            .filter(|line| !line.is_empty() && *line != "[DONE]")
+            .collect::<Vec<_>>()
+            .join("\n");
+        if data.is_empty() {
+            continue;
+        }
+        return parse_mcp_json_payload(&data);
+    }
+    Err(McpClientError::new(
+        McpClientErrorKind::MissingResult,
+        "MCP event stream did not include a JSON-RPC data message",
+    ))
+}
+
+fn mcp_tool_result_from_json_rpc(
+    tool_code: String,
+    payload: Value,
+) -> Result<McpToolInvocationResult, McpClientError> {
+    if let Some(error) = payload.get("error") {
+        let code = error
+            .get("code")
+            .and_then(Value::as_i64)
+            .unwrap_or_default();
+        let message = error
+            .get("message")
+            .and_then(Value::as_str)
+            .unwrap_or("MCP JSON-RPC error");
+        return Err(
+            McpClientError::new(McpClientErrorKind::JsonRpcError, message.to_owned())
+                .with_rpc_code(code),
+        );
+    }
+
+    let result = payload.get("result").cloned().ok_or_else(|| {
+        McpClientError::new(
+            McpClientErrorKind::MissingResult,
+            "MCP JSON-RPC response missing result",
+        )
+    })?;
+    let is_error = result
+        .get("isError")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+
+    Ok(McpToolInvocationResult {
+        tool_code,
+        status: if is_error { "failed" } else { "succeeded" }.to_owned(),
+        output: result,
+        dry_run: false,
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -381,5 +625,109 @@ mod tests {
             definition.permission_code.as_deref(),
             Some("ai:mcp:docs:search")
         );
+    }
+
+    #[test]
+    fn mcp_streamable_http_request_plan_builds_sanitized_tools_call() {
+        let request = McpToolInvocationRequest {
+            server_code: "docs".to_owned(),
+            tool_name: "search".to_owned(),
+            arguments: serde_json::json!({"query": "codex"}),
+        };
+
+        let plan = McpStreamableHttpRequestPlan::tools_call(
+            "https://mcp.example.com/mcp",
+            "tool-call-1",
+            &request,
+            Some("env:DOCS_MCP_TOKEN"),
+        );
+
+        assert_eq!(plan.http_method, "POST");
+        assert_eq!(
+            plan.header_value("Accept").as_deref(),
+            Some("application/json, text/event-stream")
+        );
+        assert_eq!(
+            plan.header_value("Content-Type").as_deref(),
+            Some("application/json")
+        );
+        assert_eq!(
+            plan.header_value("MCP-Protocol-Version").as_deref(),
+            Some(MCP_PROTOCOL_VERSION)
+        );
+        assert_eq!(plan.body["jsonrpc"], "2.0");
+        assert_eq!(plan.body["method"], "tools/call");
+        assert_eq!(plan.body["params"]["name"], "search");
+        assert_eq!(plan.body["params"]["arguments"]["query"], "codex");
+        let evidence = plan.sanitized_evidence();
+        assert_eq!(evidence["secretRef"], "env:DOCS_MCP_TOKEN");
+        assert!(!evidence.to_string().contains("test-token"));
+    }
+
+    #[test]
+    fn mcp_streamable_http_json_response_maps_tool_result() {
+        let raw = McpStreamableHttpResponse::new(
+            200,
+            "application/json",
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": "tool-call-1",
+                "result": {
+                    "content": [{"type": "text", "text": "Found policy"}],
+                    "structuredContent": {"hits": 1},
+                    "isError": false
+                }
+            })
+            .to_string(),
+        );
+
+        let result = parse_mcp_tool_call_response("mcp.docs.search", &raw).unwrap();
+
+        assert_eq!(result.tool_code, "mcp.docs.search");
+        assert_eq!(result.status, "succeeded");
+        assert!(!result.dry_run);
+        assert_eq!(result.output["structuredContent"]["hits"], 1);
+        assert_eq!(result.output["content"][0]["text"], "Found policy");
+    }
+
+    #[test]
+    fn mcp_streamable_http_sse_response_maps_tool_result() {
+        let raw = McpStreamableHttpResponse::new(
+            200,
+            "text/event-stream",
+            concat!(
+                "event: message\n",
+                "data: {\"jsonrpc\":\"2.0\",\"id\":\"tool-call-1\",\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"streamed\"}],\"isError\":false}}\n\n"
+            )
+            .to_owned(),
+        );
+
+        let result = parse_mcp_tool_call_response("mcp.docs.search", &raw).unwrap();
+
+        assert_eq!(result.status, "succeeded");
+        assert_eq!(result.output["content"][0]["text"], "streamed");
+    }
+
+    #[test]
+    fn mcp_streamable_http_json_rpc_error_is_structured() {
+        let raw = McpStreamableHttpResponse::new(
+            200,
+            "application/json",
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": "tool-call-1",
+                "error": {
+                    "code": -32602,
+                    "message": "Invalid arguments"
+                }
+            })
+            .to_string(),
+        );
+
+        let err = parse_mcp_tool_call_response("mcp.docs.search", &raw).unwrap_err();
+
+        assert_eq!(err.kind, McpClientErrorKind::JsonRpcError);
+        assert_eq!(err.rpc_code, Some(-32602));
+        assert!(err.message.contains("Invalid arguments"));
     }
 }

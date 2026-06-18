@@ -5,7 +5,7 @@ use novex_connectors::{
     select_connector_credential, ConnectorCredentialBinding, FeishuTextMessage,
     ResolvedConnectorCredential,
 };
-use novex_mcp::{McpToolInvocationRequest, McpToolInvocationResult};
+use novex_mcp::{McpStreamableHttpRequestPlan, McpToolInvocationRequest, McpToolInvocationResult};
 use novex_model::ModelRoutePurpose;
 use novex_tools::{
     feishu_message_text_from_tool_input, github_read_request_from_tool_input,
@@ -241,6 +241,7 @@ async fn execute_mcp_tool(
         }),
         dry_run: true,
     };
+    let live_request = mcp_streamable_http_request_payload(tool, &request);
     AgentToolExecution::succeeded(
         json!({
             "dryRun": result.dry_run,
@@ -249,6 +250,7 @@ async fn execute_mcp_tool(
             "provider": "mcp",
             "server": mcp_server_payload(tool),
             "request": request,
+            "liveRequest": live_request,
             "response": result.output,
             "auth": auth,
             "mocked": false,
@@ -256,6 +258,26 @@ async fn execute_mcp_tool(
         result.dry_run,
         format!("Agent dry-run prepared MCP tool {}.", tool.tool_code),
     )
+}
+
+fn mcp_streamable_http_request_payload(
+    tool: &McpToolExecutionRecord,
+    request: &McpToolInvocationRequest,
+) -> Value {
+    let Some(endpoint_url) = tool.endpoint_url.as_deref() else {
+        return Value::Null;
+    };
+    if !matches!(tool.transport_kind.as_str(), "streamable_http" | "sse") {
+        return Value::Null;
+    }
+
+    McpStreamableHttpRequestPlan::tools_call(
+        endpoint_url,
+        format!("mcp-tool-{}", tool.id),
+        request,
+        tool.secret_ref.as_deref(),
+    )
+    .sanitized_evidence()
 }
 
 fn mcp_server_payload(tool: &McpToolExecutionRecord) -> Value {
@@ -959,6 +981,54 @@ mod tests {
         });
         assert_eq!(auth["resolved"], true);
         assert!(!auth.to_string().contains("test-token"));
+    }
+
+    #[tokio::test]
+    async fn mcp_tool_execution_dry_run_includes_sanitized_live_request_plan() {
+        let tool = McpToolExecutionRecord {
+            id: 12,
+            server_id: 43,
+            server_code: "docs".to_owned(),
+            server_name: "Docs".to_owned(),
+            endpoint_url: Some("https://mcp.example.com/mcp".to_owned()),
+            transport_kind: "streamable_http".to_owned(),
+            auth_type: "bearer_env".to_owned(),
+            secret_ref: Some("env:DOCS_MCP_TOKEN".to_owned()),
+            tool_name: "search".to_owned(),
+            tool_code: "mcp.docs.search".to_owned(),
+            description: "Search docs".to_owned(),
+            input_schema: json!({"type":"object"}),
+            output_schema: json!({"type":"object"}),
+            risk_level: 1,
+            permission_code: Some("ai:mcp:docs:search".to_owned()),
+            metadata: json!({}),
+        };
+
+        let execution =
+            execute_mcp_tool("mcp.docs.search", &json!({"query": "codex"}), Some(&tool)).await;
+
+        assert!(execution.succeeded_status());
+        assert!(execution.dry_run);
+        assert_eq!(
+            execution.response_payload["liveRequest"]["body"]["method"],
+            "tools/call"
+        );
+        assert_eq!(
+            execution.response_payload["liveRequest"]["headers"]["Accept"],
+            "application/json, text/event-stream"
+        );
+        assert_eq!(
+            execution.response_payload["liveRequest"]["body"]["params"]["arguments"]["query"],
+            "codex"
+        );
+        assert_eq!(
+            execution.response_payload["liveRequest"]["secretRef"],
+            "env:DOCS_MCP_TOKEN"
+        );
+        assert!(!execution
+            .response_payload
+            .to_string()
+            .contains("test-token"));
     }
 
     #[test]
