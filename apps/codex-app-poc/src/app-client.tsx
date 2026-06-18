@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   ArrowLeft,
   ArrowRight,
@@ -9,19 +9,26 @@ import {
   ChevronDown,
   Circle,
   Clock3,
+  FileText,
   Folder,
   FolderGit2,
+  Globe2,
   MessageCircle,
   PanelLeft,
   Plus,
   Search,
   Settings,
   ShieldAlert,
-  SquarePen
+  SquarePen,
+  Wrench
 } from "lucide-react";
 import { createConfiguredModelAgentRun, listAgentRunEvents } from "@/api/agent";
-import { summarizeModelDeltas } from "@/lib/agent-events";
-import type { AgentRunEventResp, AgentRunResp } from "@/types/agent";
+import { listMcpServers, listMcpTools, listSkills } from "@/api/capability";
+import { uploadKnowledgeFile } from "@/api/knowledge";
+import { ensureWorkbenchDataset } from "@/api/workbench";
+import { summarizeModelDeltas, summarizeWorkbenchEvent } from "@/lib/agent-events";
+import type { AgentRunEventResp, AgentRunResp, WorkbenchContext } from "@/types/agent";
+import type { CapabilityItemResp, McpToolResp } from "@/types/capability";
 
 const navigationItems = [
   { label: "新对话", icon: SquarePen, active: true },
@@ -74,6 +81,17 @@ const commandItems = [
   { name: "记忆", description: "使用开，生成开", icon: Blocks }
 ];
 
+type WorkbenchUploadedFile = {
+  id: string;
+  name: string;
+  datasetId: number;
+  documentId?: number;
+  fileId?: number;
+  parseJobId?: number;
+  status: "uploading" | "parsing" | "indexed" | "failed" | "unavailable";
+  message?: string;
+};
+
 export function CodexPocApp() {
   return (
     <main className="flex min-h-screen overflow-hidden bg-[#F3ECEC] text-[#111111]">
@@ -81,7 +99,7 @@ export function CodexPocApp() {
       <section className="relative min-w-0 flex-1 p-0">
         <TopRightControls />
         <div className="min-h-screen rounded-tl-[18px] border-l border-t border-[#E5E5E5] bg-white">
-          <div className="mx-auto min-h-screen w-full max-w-[960px] px-8 pb-12 pt-[30vh]">
+          <div className="mx-auto min-h-screen w-full max-w-[1180px] px-8 pb-12 pt-[22vh]">
             <div className="w-full">
               <h1 className="text-center text-[30px] font-medium leading-tight text-[#111111]">
                 我们应该在当前项目中做些什么？
@@ -221,7 +239,50 @@ function Composer() {
   const [runResult, setRunResult] = useState<AgentRunResp | null>(null);
   const [runEvents, setRunEvents] = useState<AgentRunEventResp[]>([]);
   const [runError, setRunError] = useState<string | null>(null);
+  const [skills, setSkills] = useState<CapabilityItemResp[]>([]);
+  const [mcpTools, setMcpTools] = useState<McpToolResp[]>([]);
+  const [selectedSkillCodes, setSelectedSkillCodes] = useState<string[]>([]);
+  const [selectedMcpToolCodes, setSelectedMcpToolCodes] = useState<string[]>([]);
+  const [webSearchEnabled, setWebSearchEnabled] = useState(false);
+  const [uploadedFiles, setUploadedFiles] = useState<WorkbenchUploadedFile[]>([]);
+  const [capabilityError, setCapabilityError] = useState<string | null>(null);
   const modelDeltaSummary = useMemo(() => summarizeModelDeltas(runEvents), [runEvents]);
+  const eventEvidence = useMemo(() => runEvents.map(summarizeWorkbenchEvent), [runEvents]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function loadCapabilities() {
+      try {
+        const [skillPage, serverPage] = await Promise.all([
+          listSkills({ page: 1, size: 20 }),
+          listMcpServers({ page: 1, size: 20 })
+        ]);
+        if (cancelled) {
+          return;
+        }
+        setSkills(skillPage.list);
+
+        const activeServers = serverPage.list.filter((server) => server.status !== 0);
+        const toolGroups = await Promise.all(
+          activeServers.map((server) => listMcpTools(server.id).catch(() => []))
+        );
+        if (!cancelled) {
+          setMcpTools(toolGroups.flat().filter((tool) => tool.status !== 0));
+        }
+      } catch (error) {
+        if (!cancelled) {
+          setCapabilityError(error instanceof Error ? error.message : "Capabilities unavailable");
+        }
+      }
+    }
+
+    void loadCapabilities();
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   function handleComposerChange(value: string) {
     setComposerValue(value);
@@ -270,7 +331,7 @@ function Composer() {
     setRunResult(null);
     setRunEvents([]);
     try {
-      const result = await createConfiguredModelAgentRun(input);
+      const result = await createConfiguredModelAgentRun(input, buildWorkbenchContext());
       setRunResult(result);
       try {
         const eventPage = await listAgentRunEvents(result.runId, { page: 1, size: 100 });
@@ -283,6 +344,80 @@ function Composer() {
     } finally {
       setIsSubmitting(false);
     }
+  }
+
+  async function handleUploadFiles(fileList: FileList | File[] | null) {
+    const files = Array.from(fileList ?? []);
+    if (files.length === 0) {
+      return;
+    }
+
+    try {
+      const dataset = await ensureWorkbenchDataset();
+      for (const file of files) {
+        const localId = `${file.name}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+        setUploadedFiles((items) => [
+          ...items,
+          { id: localId, name: file.name, datasetId: dataset.id, status: "uploading" }
+        ]);
+        try {
+          const uploaded = await uploadKnowledgeFile(dataset.id, file);
+          const nextStatus = uploaded.parseJob.status >= 2 ? "indexed" : "parsing";
+          setUploadedFiles((items) =>
+            items.map((item) =>
+              item.id === localId
+                ? {
+                    ...item,
+                    documentId: uploaded.parseJob.documentId,
+                    fileId: uploaded.file.id,
+                    parseJobId: uploaded.parseJob.id,
+                    status: nextStatus
+                  }
+                : item
+            )
+          );
+        } catch (error) {
+          setUploadedFiles((items) =>
+            items.map((item) =>
+              item.id === localId
+                ? {
+                    ...item,
+                    status: "failed",
+                    message: error instanceof Error ? error.message : "Upload failed"
+                  }
+                : item
+            )
+          );
+        }
+      }
+    } catch (error) {
+      setRunError(error instanceof Error ? error.message : "无法准备文件数据集");
+    }
+  }
+
+  function buildWorkbenchContext(): WorkbenchContext {
+    const activeFiles = uploadedFiles.filter((file) =>
+      ["indexed", "parsing"].includes(file.status)
+    );
+    const datasetId = activeFiles.find((file) => file.datasetId)?.datasetId;
+
+    return {
+      mode: "agent",
+      ...(datasetId ? { datasetId } : {}),
+      documentIds: activeFiles.flatMap((file) => (file.documentId ? [file.documentId] : [])),
+      fileIds: activeFiles.flatMap((file) => (file.fileId ? [file.fileId] : [])),
+      skillCodes: selectedSkillCodes,
+      mcpToolCodes: selectedMcpToolCodes,
+      webSearchEnabled
+    };
+  }
+
+  function toggleSkill(code: string) {
+    setSelectedSkillCodes((codes) => toggleString(codes, code));
+  }
+
+  function toggleMcpTool(code: string) {
+    setSelectedMcpToolCodes((codes) => toggleString(codes, code));
   }
 
   return (
@@ -347,6 +482,20 @@ function Composer() {
         </button>
       </div>
 
+      <ContextPanel
+        capabilityError={capabilityError}
+        mcpTools={mcpTools}
+        onToggleMcpTool={toggleMcpTool}
+        onToggleSkill={toggleSkill}
+        onToggleWebSearch={() => setWebSearchEnabled((enabled) => !enabled)}
+        onUploadFiles={handleUploadFiles}
+        selectedMcpToolCodes={selectedMcpToolCodes}
+        selectedSkillCodes={selectedSkillCodes}
+        skills={skills}
+        uploadedFiles={uploadedFiles}
+        webSearchEnabled={webSearchEnabled}
+      />
+
       {runError ? (
         <p className="mt-4 rounded-[10px] border border-[#F3B5B5] bg-[#FFF5F5] px-4 py-3 text-[14px] text-[#A12626]" role="alert">
           {runError}
@@ -378,6 +527,25 @@ function Composer() {
               </div>
             </section>
           ) : null}
+          {eventEvidence.length > 0 ? (
+            <section className="mt-3 space-y-2 rounded-[9px] border border-[#E8E8E8] bg-white px-3 py-3">
+              <h3 className="text-[13px] font-medium text-[#111111]">Run evidence</h3>
+              {eventEvidence.map((evidence) => (
+                <article
+                  className="rounded-[8px] border border-[#EFEFEF] px-3 py-2"
+                  key={`${evidence.sequenceNo}-${evidence.title}`}
+                >
+                  <div className="flex items-center justify-between gap-2 text-[13px]">
+                    <strong className="font-medium text-[#111111]">{evidence.title}</strong>
+                    <span className="text-[#8A8A8A]">{evidence.kind}</span>
+                  </div>
+                  <p className="mt-1 whitespace-pre-wrap text-[13px] leading-5 text-[#555555]">
+                    {evidence.text}
+                  </p>
+                </article>
+              ))}
+            </section>
+          ) : null}
         </section>
       ) : null}
 
@@ -399,6 +567,199 @@ function Composer() {
       </div>
     </div>
   );
+}
+
+function ContextPanel({
+  capabilityError,
+  mcpTools,
+  onToggleMcpTool,
+  onToggleSkill,
+  onToggleWebSearch,
+  onUploadFiles,
+  selectedMcpToolCodes,
+  selectedSkillCodes,
+  skills,
+  uploadedFiles,
+  webSearchEnabled
+}: {
+  capabilityError: string | null;
+  mcpTools: McpToolResp[];
+  onToggleMcpTool: (code: string) => void;
+  onToggleSkill: (code: string) => void;
+  onToggleWebSearch: () => void;
+  onUploadFiles: (files: FileList | null) => void;
+  selectedMcpToolCodes: string[];
+  selectedSkillCodes: string[];
+  skills: CapabilityItemResp[];
+  uploadedFiles: WorkbenchUploadedFile[];
+  webSearchEnabled: boolean;
+}) {
+  return (
+    <aside className="mt-4 rounded-[16px] border border-[#E5E5E5] bg-[#FBFBFB] px-4 py-4">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <h2 className="text-[16px] font-medium text-[#111111]">Context</h2>
+        <div className="flex items-center gap-2">
+          <button
+            className="inline-flex h-8 items-center gap-1.5 rounded-[9px] border border-[#E5E5E5] bg-white px-2 text-[13px] text-[#333333]"
+            type="button"
+          >
+            <FileText aria-hidden="true" className="h-4 w-4" strokeWidth={1.8} />
+            Files
+          </button>
+          <button
+            className="inline-flex h-8 items-center gap-1.5 rounded-[9px] border border-[#E5E5E5] bg-white px-2 text-[13px] text-[#333333]"
+            type="button"
+          >
+            <Blocks aria-hidden="true" className="h-4 w-4" strokeWidth={1.8} />
+            Skills
+          </button>
+          <button
+            className="inline-flex h-8 items-center gap-1.5 rounded-[9px] border border-[#E5E5E5] bg-white px-2 text-[13px] text-[#333333]"
+            type="button"
+          >
+            <Wrench aria-hidden="true" className="h-4 w-4" strokeWidth={1.8} />
+            MCP
+          </button>
+        </div>
+      </div>
+
+      <div className="mt-4 grid gap-4 md:grid-cols-2">
+        <section>
+          <div className="mb-2 flex items-center justify-between gap-2">
+            <h3 className="text-[13px] font-medium text-[#6F6F6F]">Files</h3>
+            <button
+              aria-label="选择文件"
+              className="inline-flex h-7 w-7 items-center justify-center rounded-full border border-[#E5E5E5] bg-white text-[#555555] hover:bg-[#F1F1F1]"
+              onClick={() => document.getElementById("workbench-file-input")?.click()}
+              type="button"
+            >
+              <Plus aria-hidden="true" className="h-4 w-4" strokeWidth={1.9} />
+            </button>
+            <input
+              aria-label="Upload files"
+              className="sr-only"
+              id="workbench-file-input"
+              multiple
+              onChange={(event) => onUploadFiles(event.currentTarget.files)}
+              type="file"
+            />
+          </div>
+          <div className="flex min-h-8 flex-wrap gap-2">
+            {uploadedFiles.length > 0 ? (
+              uploadedFiles.map((file) => (
+                <span
+                  className={[
+                    "inline-flex max-w-full items-center gap-1 rounded-[8px] border px-2 py-1 text-[13px]",
+                    file.status === "failed"
+                      ? "border-[#F3B5B5] bg-[#FFF5F5] text-[#A12626]"
+                      : "border-[#D7E7FF] bg-white text-[#333333]"
+                  ].join(" ")}
+                  key={file.id}
+                >
+                  <FileText aria-hidden="true" className="h-3.5 w-3.5 shrink-0" />
+                  <span className="min-w-0 truncate">{file.name}</span>
+                  <span className="text-[#8A8A8A]">{file.status}</span>
+                </span>
+              ))
+            ) : (
+              <span className="text-[13px] text-[#9A9A9A]">No files</span>
+            )}
+          </div>
+        </section>
+
+        <section>
+          <h3 className="mb-2 text-[13px] font-medium text-[#6F6F6F]">Skills</h3>
+          <div className="flex min-h-8 flex-wrap gap-2">
+            {skills.length > 0 ? (
+              skills.map((skill) => {
+                const selected = selectedSkillCodes.includes(skill.code);
+                return (
+                  <button
+                    className={[
+                      "rounded-[8px] border px-2 py-1 text-[13px]",
+                      selected
+                        ? "border-[#0A84FF] bg-[#F3F8FF] text-[#0A54A8]"
+                        : "border-[#E5E5E5] bg-white text-[#333333]"
+                    ].join(" ")}
+                    key={skill.code}
+                    onClick={() => onToggleSkill(skill.code)}
+                    type="button"
+                  >
+                    {skill.name || skill.code}
+                  </button>
+                );
+              })
+            ) : (
+              <span className="text-[13px] text-[#9A9A9A]">No skills</span>
+            )}
+          </div>
+        </section>
+
+        <section>
+          <h3 className="mb-2 text-[13px] font-medium text-[#6F6F6F]">MCP</h3>
+          <div className="flex min-h-8 flex-wrap gap-2">
+            {mcpTools.length > 0 ? (
+              mcpTools.map((tool) => {
+                const selected = selectedMcpToolCodes.includes(tool.toolCode);
+                return (
+                  <button
+                    className={[
+                      "rounded-[8px] border px-2 py-1 text-[13px]",
+                      selected
+                        ? "border-[#0A84FF] bg-[#F3F8FF] text-[#0A54A8]"
+                        : "border-[#E5E5E5] bg-white text-[#333333]"
+                    ].join(" ")}
+                    key={tool.toolCode}
+                    onClick={() => onToggleMcpTool(tool.toolCode)}
+                    type="button"
+                  >
+                    {tool.toolName || tool.toolCode}
+                  </button>
+                );
+              })
+            ) : (
+              <span className="text-[13px] text-[#9A9A9A]">No MCP tools</span>
+            )}
+          </div>
+        </section>
+
+        <section>
+          <h3 className="mb-2 text-[13px] font-medium text-[#6F6F6F]">Search</h3>
+          <button
+            aria-checked={webSearchEnabled}
+            aria-label="Web search"
+            className={[
+              "inline-flex h-8 items-center gap-2 rounded-[9px] border px-2 text-[13px]",
+              webSearchEnabled
+                ? "border-[#0A84FF] bg-[#F3F8FF] text-[#0A54A8]"
+                : "border-[#E5E5E5] bg-white text-[#333333]"
+            ].join(" ")}
+            onClick={onToggleWebSearch}
+            role="switch"
+            type="button"
+          >
+            <Globe2 aria-hidden="true" className="h-4 w-4" strokeWidth={1.8} />
+            Search web
+          </button>
+          <p className="mt-2 text-[12px] text-[#8A8A8A]">
+            {webSearchEnabled ? "enabled / dry-run capable" : "disabled"}
+          </p>
+        </section>
+      </div>
+
+      {capabilityError ? (
+        <p className="mt-3 rounded-[8px] border border-[#F3B5B5] bg-white px-3 py-2 text-[12px] text-[#A12626]">
+          {capabilityError}
+        </p>
+      ) : null}
+    </aside>
+  );
+}
+
+function toggleString(values: string[], value: string) {
+  return values.includes(value)
+    ? values.filter((current) => current !== value)
+    : [...values, value];
 }
 
 function CommandMenu({ activeIndex }: { activeIndex: number }) {
