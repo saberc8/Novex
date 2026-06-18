@@ -6772,6 +6772,23 @@ mod tests {
     }
 
     #[test]
+    fn agent_tool_executor_registry_boundary_lives_in_novex_tools() {
+        let source = include_str!("../../../../crates/novex-tools/src/lib.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+        let backend_source = include_str!("agent_service.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+
+        assert!(source.contains("pub struct ToolExecutorRegistry"));
+        assert!(source.contains("pub fn agent_model_loop_tool_executor_bindings"));
+        assert!(source.contains("ToolExecutorRegistryErrorKind::MissingExecutor"));
+        assert!(!backend_source.contains("struct ToolExecutorRegistry"));
+    }
+
+    #[test]
     fn agent_service_model_loop_records_tool_concurrency_policy() {
         let source = include_str!("agent_service.rs")
             .split("#[cfg(test)]")

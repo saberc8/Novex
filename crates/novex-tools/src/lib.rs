@@ -188,6 +188,162 @@ impl ToolBatchPlan {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+pub enum ToolExecutorKind {
+    Builtin,
+    Connector,
+    Mcp,
+    Model,
+    Http,
+    Sandbox,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolExecutorBinding {
+    pub tool_code: String,
+    pub executor_code: String,
+    pub kind: ToolExecutorKind,
+    pub supports_background_tasks: bool,
+    pub waits_for_runtime_cancellation: bool,
+}
+
+impl ToolExecutorBinding {
+    pub fn new(
+        tool_code: impl Into<String>,
+        executor_code: impl Into<String>,
+        kind: ToolExecutorKind,
+    ) -> Self {
+        Self {
+            tool_code: tool_code.into().trim().to_owned(),
+            executor_code: executor_code.into().trim().to_owned(),
+            kind,
+            supports_background_tasks: false,
+            waits_for_runtime_cancellation: false,
+        }
+    }
+
+    pub fn with_background_tasks(mut self) -> Self {
+        self.supports_background_tasks = true;
+        self
+    }
+
+    pub fn waits_for_runtime_cancellation(mut self) -> Self {
+        self.waits_for_runtime_cancellation = true;
+        self
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolExecutorRegistryErrorKind {
+    EmptyToolCode,
+    EmptyExecutorCode,
+    DuplicateToolCode,
+    MissingExecutor,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolExecutorRegistryError {
+    pub kind: ToolExecutorRegistryErrorKind,
+    pub tool_code: Option<String>,
+    pub executor_code: Option<String>,
+    pub message: String,
+}
+
+impl ToolExecutorRegistryError {
+    fn empty_tool_code() -> Self {
+        Self {
+            kind: ToolExecutorRegistryErrorKind::EmptyToolCode,
+            tool_code: None,
+            executor_code: None,
+            message: "tool code is empty".to_owned(),
+        }
+    }
+
+    fn empty_executor_code(tool_code: impl Into<String>) -> Self {
+        let tool_code = tool_code.into();
+        Self {
+            kind: ToolExecutorRegistryErrorKind::EmptyExecutorCode,
+            tool_code: Some(tool_code.clone()),
+            executor_code: None,
+            message: format!("executor code is empty for tool `{tool_code}`"),
+        }
+    }
+
+    fn duplicate_tool_code(tool_code: impl Into<String>) -> Self {
+        let tool_code = tool_code.into();
+        Self {
+            kind: ToolExecutorRegistryErrorKind::DuplicateToolCode,
+            tool_code: Some(tool_code.clone()),
+            executor_code: None,
+            message: format!("duplicate executor binding for tool `{tool_code}`"),
+        }
+    }
+
+    fn missing_executor(tool_code: impl Into<String>) -> Self {
+        let tool_code = tool_code.into();
+        Self {
+            kind: ToolExecutorRegistryErrorKind::MissingExecutor,
+            tool_code: Some(tool_code.clone()),
+            executor_code: None,
+            message: format!("tool `{tool_code}` has no registered executor"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolExecutorRegistry {
+    bindings: BTreeMap<String, ToolExecutorBinding>,
+}
+
+impl ToolExecutorRegistry {
+    pub fn from_bindings(
+        bindings: impl IntoIterator<Item = ToolExecutorBinding>,
+    ) -> Result<Self, ToolExecutorRegistryError> {
+        let mut registry = BTreeMap::new();
+        for mut binding in bindings {
+            binding.tool_code = binding.tool_code.trim().to_owned();
+            binding.executor_code = binding.executor_code.trim().to_owned();
+            if binding.tool_code.is_empty() {
+                return Err(ToolExecutorRegistryError::empty_tool_code());
+            }
+            if binding.executor_code.is_empty() {
+                return Err(ToolExecutorRegistryError::empty_executor_code(
+                    binding.tool_code,
+                ));
+            }
+            if registry.contains_key(&binding.tool_code) {
+                return Err(ToolExecutorRegistryError::duplicate_tool_code(
+                    binding.tool_code,
+                ));
+            }
+            registry.insert(binding.tool_code.clone(), binding);
+        }
+        Ok(Self { bindings: registry })
+    }
+
+    pub fn tool_codes(&self) -> Vec<String> {
+        self.bindings.keys().cloned().collect()
+    }
+
+    pub fn executor_for(
+        &self,
+        tool_code: impl AsRef<str>,
+    ) -> Result<&ToolExecutorBinding, ToolExecutorRegistryError> {
+        let tool_code = tool_code.as_ref().trim();
+        if tool_code.is_empty() {
+            return Err(ToolExecutorRegistryError::empty_tool_code());
+        }
+        self.bindings
+            .get(tool_code)
+            .ok_or_else(|| ToolExecutorRegistryError::missing_executor(tool_code))
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ToolRouteErrorKind {
     EmptyToolCode,
     DuplicateToolCode,
@@ -452,6 +608,37 @@ pub fn agent_model_loop_tool_definitions() -> Vec<ToolDefinition> {
             permission_code: Some("ai:agent:run".to_owned()),
             concurrency: ToolConcurrencyPolicy::exclusive("connector:feishu"),
         },
+    ]
+}
+
+pub fn agent_model_loop_tool_executor_bindings() -> Vec<ToolExecutorBinding> {
+    vec![
+        ToolExecutorBinding::new(
+            "rag.search",
+            "builtin.rag.search",
+            ToolExecutorKind::Builtin,
+        ),
+        ToolExecutorBinding::new(
+            "github.repo.search",
+            "connector.github.repo.search",
+            ToolExecutorKind::Connector,
+        ),
+        ToolExecutorBinding::new(
+            "github.repo.read",
+            "connector.github.repo.read",
+            ToolExecutorKind::Connector,
+        ),
+        ToolExecutorBinding::new(
+            "media.image.generate",
+            "model.media.image.generate",
+            ToolExecutorKind::Model,
+        )
+        .with_background_tasks(),
+        ToolExecutorBinding::new(
+            "feishu.message.send",
+            "connector.feishu.message.send",
+            ToolExecutorKind::Connector,
+        ),
     ]
 }
 
@@ -905,6 +1092,63 @@ mod tests {
         assert!(codes.contains(&"github.repo.read".to_owned()));
         assert!(codes.contains(&"media.image.generate".to_owned()));
         assert!(codes.contains(&"feishu.message.send".to_owned()));
+    }
+
+    #[test]
+    fn tool_executor_registry_routes_known_agent_tools() {
+        let registry =
+            ToolExecutorRegistry::from_bindings(agent_model_loop_tool_executor_bindings())
+                .expect("agent executor registry should build");
+
+        let rag = registry
+            .executor_for(" rag.search ")
+            .expect("rag.search should have an executor");
+        assert_eq!(rag.executor_code, "builtin.rag.search");
+        assert_eq!(rag.kind, ToolExecutorKind::Builtin);
+
+        let media = registry
+            .executor_for("media.image.generate")
+            .expect("media image should have an executor");
+        assert_eq!(media.kind, ToolExecutorKind::Model);
+        assert!(media.supports_background_tasks);
+    }
+
+    #[test]
+    fn tool_executor_registry_rejects_duplicate_and_missing_bindings() {
+        let duplicate = ToolExecutorRegistry::from_bindings(vec![
+            ToolExecutorBinding::new(
+                "rag.search",
+                "builtin.rag.search",
+                ToolExecutorKind::Builtin,
+            ),
+            ToolExecutorBinding::new(
+                "rag.search",
+                "builtin.rag.search.v2",
+                ToolExecutorKind::Builtin,
+            ),
+        ])
+        .unwrap_err();
+        assert_eq!(
+            duplicate.kind,
+            ToolExecutorRegistryErrorKind::DuplicateToolCode
+        );
+
+        let missing = ToolExecutorRegistry::default()
+            .executor_for("sandbox.exec")
+            .unwrap_err();
+        assert_eq!(missing.kind, ToolExecutorRegistryErrorKind::MissingExecutor);
+        assert_eq!(missing.tool_code.as_deref(), Some("sandbox.exec"));
+    }
+
+    #[test]
+    fn agent_model_loop_executor_bindings_cover_agent_model_loop_tools() {
+        let router = ToolRouter::from_definitions(agent_model_loop_tool_definitions())
+            .expect("agent model loop tools should build a router");
+        let registry =
+            ToolExecutorRegistry::from_bindings(agent_model_loop_tool_executor_bindings())
+                .expect("agent executor registry should build");
+
+        assert_eq!(registry.tool_codes(), router.tool_codes());
     }
 
     #[test]

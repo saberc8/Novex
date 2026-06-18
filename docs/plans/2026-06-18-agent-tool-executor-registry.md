@@ -33,7 +33,7 @@
 - `ToolExecutorRegistryErrorKind`
 - `agent_model_loop_tool_executor_bindings`
 
-- [ ] **Step 1: Add novex-tools RED tests**
+- [x] **Step 1: Add novex-tools RED tests**
 
 Add tests near the existing `ToolRouter` tests:
 
@@ -81,7 +81,7 @@ fn agent_model_loop_executor_bindings_cover_agent_model_loop_tools() {
 }
 ```
 
-- [ ] **Step 2: Add backend source-contract RED test**
+- [x] **Step 2: Add backend source-contract RED test**
 
 Add a source-contract test to `backend/src/application/ai/agent_service.rs`:
 
@@ -98,7 +98,7 @@ fn agent_tool_executor_registry_boundary_lives_in_novex_tools() {
 }
 ```
 
-- [ ] **Step 3: Verify RED**
+- [x] **Step 3: Verify RED**
 
 Run:
 
@@ -117,7 +117,7 @@ Expected: FAIL because the registry types do not exist yet.
 
 **Step Dependencies:** Task 1
 
-- [ ] **Step 1: Add executor kind and binding DTOs**
+- [x] **Step 1: Add executor kind and binding DTOs**
 
 Implement:
 
@@ -146,7 +146,7 @@ pub struct ToolExecutorBinding {
 
 Add a constructor that trims tool/executor codes and default-flags to false.
 
-- [ ] **Step 2: Add registry error vocabulary**
+- [x] **Step 2: Add registry error vocabulary**
 
 Implement `ToolExecutorRegistryErrorKind` and `ToolExecutorRegistryError` for:
 
@@ -155,7 +155,7 @@ Implement `ToolExecutorRegistryErrorKind` and `ToolExecutorRegistryError` for:
 - `DuplicateToolCode`
 - `MissingExecutor`
 
-- [ ] **Step 3: Add registry implementation**
+- [x] **Step 3: Add registry implementation**
 
 Implement:
 
@@ -165,7 +165,7 @@ Implement:
 
 Use `BTreeMap` so code ordering remains deterministic.
 
-- [ ] **Step 4: Add Agent model-loop default bindings**
+- [x] **Step 4: Add Agent model-loop default bindings**
 
 Implement `agent_model_loop_tool_executor_bindings()` with stable executor codes:
 
@@ -183,11 +183,11 @@ Implement `agent_model_loop_tool_executor_bindings()` with stable executor codes
 
 **Step Dependencies:** Task 2
 
-- [ ] **Step 1: Keep backend source-contract focused**
+- [x] **Step 1: Keep backend source-contract focused**
 
 The backend test should only prove the registry boundary lives in `novex-tools` and backend has not reintroduced a local registry type.
 
-- [ ] **Step 2: Do not change runtime behavior**
+- [x] **Step 2: Do not change runtime behavior**
 
 Do not call the registry from production backend code in this slice. That belongs to a follow-up dispatch-migration slice because real execution currently depends on tenant-bound repository/model-runtime state.
 
@@ -200,7 +200,7 @@ Do not call the registry from production backend code in this slice. That belong
 
 **Step Dependencies:** Tasks 1-3
 
-- [ ] **Step 1: Update migration matrix**
+- [x] **Step 1: Update migration matrix**
 
 Update the Tool router row to the next slice and note that `novex-tools` now owns executor registry vocabulary and default Agent model-loop executor bindings. Keep "backend dispatch migration and background join-handle control remain next".
 
@@ -211,7 +211,7 @@ cargo test -p novex-tools tool_executor_registry --offline
 cargo test -p backend-rust agent_tool_executor_registry_boundary_lives_in_novex_tools --offline
 ```
 
-- [ ] **Step 2: Run focused verification**
+- [x] **Step 2: Run focused verification**
 
 Run:
 
@@ -224,7 +224,7 @@ cargo test -p novex-tools --offline
 cargo test --workspace --offline
 ```
 
-- [ ] **Step 3: Commit implementation**
+- [x] **Step 3: Commit implementation**
 
 Commit:
 
