@@ -300,6 +300,93 @@ pub struct McpToolExecutionRecord {
     pub metadata: Value,
 }
 
+#[derive(Debug, Clone)]
+pub struct McpOAuthStateSaveRecord {
+    pub id: i64,
+    pub tenant_id: i64,
+    pub server_id: i64,
+    pub server_code: String,
+    pub scope_type: String,
+    pub scope_id: String,
+    pub state_hash: String,
+    pub redirect_uri: String,
+    pub requested_scopes: Value,
+    pub code_verifier_secret_ref: String,
+    pub client_auth: Value,
+    pub token_endpoint: String,
+    pub client_id: String,
+    pub access_token_secret_ref: String,
+    pub refresh_token_secret_ref: Option<String>,
+    pub expires_at: NaiveDateTime,
+    pub metadata: Value,
+    pub user_id: i64,
+    pub now: NaiveDateTime,
+}
+
+#[derive(Debug, Clone, FromRow)]
+pub struct McpOAuthStateRecord {
+    pub id: i64,
+    pub tenant_id: i64,
+    pub server_id: i64,
+    pub server_code: String,
+    pub scope_type: String,
+    pub scope_id: String,
+    pub state_hash: String,
+    pub redirect_uri: String,
+    pub requested_scopes: Value,
+    pub code_verifier_secret_ref: String,
+    pub client_auth: Value,
+    pub token_endpoint: String,
+    pub client_id: String,
+    pub access_token_secret_ref: String,
+    pub refresh_token_secret_ref: Option<String>,
+    pub expires_at: NaiveDateTime,
+    pub consumed_at: Option<NaiveDateTime>,
+    pub metadata: Value,
+}
+
+#[derive(Debug, Clone)]
+pub struct McpOAuthSessionSaveRecord {
+    pub id: i64,
+    pub tenant_id: i64,
+    pub server_id: i64,
+    pub server_code: String,
+    pub scope_type: String,
+    pub scope_id: String,
+    pub access_token_secret_ref: String,
+    pub refresh_token_secret_ref: Option<String>,
+    pub token_type: String,
+    pub scopes: Value,
+    pub expires_at: Option<NaiveDateTime>,
+    pub refresh_needed_after: Option<NaiveDateTime>,
+    pub metadata: Value,
+    pub status: i16,
+    pub user_id: i64,
+    pub now: NaiveDateTime,
+}
+
+#[derive(Debug, Clone, FromRow)]
+pub struct McpOAuthSessionRecord {
+    pub id: i64,
+    pub tenant_id: i64,
+    pub server_id: i64,
+    pub server_code: String,
+    pub scope_type: String,
+    pub scope_id: String,
+    pub access_token_secret_ref: String,
+    pub refresh_token_secret_ref: Option<String>,
+    pub token_type: String,
+    pub scopes: Value,
+    pub expires_at: Option<NaiveDateTime>,
+    pub refresh_needed_after: Option<NaiveDateTime>,
+    pub last_refreshed_at: Option<NaiveDateTime>,
+    pub revoked_at: Option<NaiveDateTime>,
+    pub status: i16,
+    pub metadata: Value,
+    pub create_time: NaiveDateTime,
+    pub update_time: Option<NaiveDateTime>,
+}
+
 #[derive(Debug, Clone, FromRow)]
 pub struct TriggerLookupRecord {
     pub id: i64,
@@ -407,6 +494,134 @@ pub struct ToolAuditRecord {
     pub permission_code: String,
     pub create_time: NaiveDateTime,
 }
+
+const MCP_OAUTH_STATE_INSERT_SQL: &str = r#"
+INSERT INTO ai_mcp_oauth_state (
+    id, tenant_id, server_id, server_code, scope_type, scope_id, state_hash,
+    redirect_uri, requested_scopes, code_verifier_secret_ref, client_auth,
+    token_endpoint, client_id, access_token_secret_ref, refresh_token_secret_ref,
+    expires_at, status, metadata, create_user, create_time
+)
+VALUES (
+    $1, $2, $3, $4, $5, $6, $7,
+    $8, $9, $10, $11,
+    $12, $13, $14, $15,
+    $16, 1, $17, $18, $19
+)
+ON CONFLICT (state_hash) DO NOTHING;
+"#;
+
+const MCP_OAUTH_STATE_CONSUME_SQL: &str = r#"
+UPDATE ai_mcp_oauth_state
+SET
+    consumed_at = NOW(),
+    update_time = NOW()
+WHERE tenant_id = $1
+  AND server_id = $2
+  AND state_hash = $3
+  AND redirect_uri = $4
+  AND status = 1
+  AND consumed_at IS NULL
+  AND expires_at > NOW()
+RETURNING
+    id,
+    tenant_id,
+    server_id,
+    server_code,
+    scope_type,
+    scope_id,
+    state_hash,
+    redirect_uri,
+    requested_scopes,
+    code_verifier_secret_ref,
+    client_auth,
+    token_endpoint,
+    client_id,
+    access_token_secret_ref,
+    refresh_token_secret_ref,
+    expires_at,
+    consumed_at,
+    metadata;
+"#;
+
+const MCP_OAUTH_SESSION_UPSERT_SQL: &str = r#"
+INSERT INTO ai_mcp_oauth_session (
+    id, tenant_id, server_id, server_code, scope_type, scope_id,
+    access_token_secret_ref, refresh_token_secret_ref, token_type, scopes,
+    expires_at, refresh_needed_after, last_refreshed_at, revoked_at, status,
+    metadata, create_user, create_time
+)
+VALUES (
+    $1, $2, $3, $4, $5, $6,
+    $7, $8, $9, $10,
+    $11, $12, $13, NULL, $14,
+    $15, $16, $17
+)
+ON CONFLICT (tenant_id, server_id, scope_type, scope_id)
+DO UPDATE SET
+    server_code = EXCLUDED.server_code,
+    access_token_secret_ref = EXCLUDED.access_token_secret_ref,
+    refresh_token_secret_ref = EXCLUDED.refresh_token_secret_ref,
+    token_type = EXCLUDED.token_type,
+    scopes = EXCLUDED.scopes,
+    expires_at = EXCLUDED.expires_at,
+    refresh_needed_after = EXCLUDED.refresh_needed_after,
+    last_refreshed_at = EXCLUDED.last_refreshed_at,
+    revoked_at = NULL,
+    status = EXCLUDED.status,
+    metadata = EXCLUDED.metadata,
+    update_user = $16,
+    update_time = $17
+RETURNING
+    id,
+    tenant_id,
+    server_id,
+    server_code,
+    scope_type,
+    scope_id,
+    access_token_secret_ref,
+    refresh_token_secret_ref,
+    token_type,
+    scopes,
+    expires_at,
+    refresh_needed_after,
+    last_refreshed_at,
+    revoked_at,
+    status,
+    metadata,
+    create_time,
+    update_time;
+"#;
+
+const MCP_OAUTH_SESSION_LOOKUP_SQL: &str = r#"
+SELECT
+    id,
+    tenant_id,
+    server_id,
+    server_code,
+    scope_type,
+    scope_id,
+    access_token_secret_ref,
+    refresh_token_secret_ref,
+    token_type,
+    scopes,
+    expires_at,
+    refresh_needed_after,
+    last_refreshed_at,
+    revoked_at,
+    status,
+    metadata,
+    create_time,
+    update_time
+FROM ai_mcp_oauth_session
+WHERE tenant_id = $1
+  AND server_id = $2
+  AND scope_type = $3
+  AND scope_id = $4
+  AND status = 1
+  AND revoked_at IS NULL
+LIMIT 1;
+"#;
 
 impl AiCapabilityRepository {
     pub fn new(db: PgPool) -> Self {
@@ -1280,6 +1495,99 @@ LIMIT 1;
         .await?)
     }
 
+    pub async fn save_mcp_oauth_state(
+        &self,
+        record: &McpOAuthStateSaveRecord,
+    ) -> Result<(), AppError> {
+        sqlx::query(MCP_OAUTH_STATE_INSERT_SQL)
+            .bind(record.id)
+            .bind(record.tenant_id)
+            .bind(record.server_id)
+            .bind(&record.server_code)
+            .bind(&record.scope_type)
+            .bind(&record.scope_id)
+            .bind(&record.state_hash)
+            .bind(&record.redirect_uri)
+            .bind(&record.requested_scopes)
+            .bind(&record.code_verifier_secret_ref)
+            .bind(&record.client_auth)
+            .bind(&record.token_endpoint)
+            .bind(&record.client_id)
+            .bind(&record.access_token_secret_ref)
+            .bind(&record.refresh_token_secret_ref)
+            .bind(record.expires_at)
+            .bind(&record.metadata)
+            .bind(record.user_id)
+            .bind(record.now)
+            .execute(&self.db)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn consume_mcp_oauth_state(
+        &self,
+        tenant_id: i64,
+        server_id: i64,
+        state_hash: &str,
+        redirect_uri: &str,
+    ) -> Result<Option<McpOAuthStateRecord>, AppError> {
+        Ok(
+            sqlx::query_as::<_, McpOAuthStateRecord>(MCP_OAUTH_STATE_CONSUME_SQL)
+                .bind(tenant_id)
+                .bind(server_id)
+                .bind(state_hash)
+                .bind(redirect_uri)
+                .fetch_optional(&self.db)
+                .await?,
+        )
+    }
+
+    pub async fn upsert_mcp_oauth_session(
+        &self,
+        record: &McpOAuthSessionSaveRecord,
+    ) -> Result<McpOAuthSessionRecord, AppError> {
+        Ok(
+            sqlx::query_as::<_, McpOAuthSessionRecord>(MCP_OAUTH_SESSION_UPSERT_SQL)
+                .bind(record.id)
+                .bind(record.tenant_id)
+                .bind(record.server_id)
+                .bind(&record.server_code)
+                .bind(&record.scope_type)
+                .bind(&record.scope_id)
+                .bind(&record.access_token_secret_ref)
+                .bind(&record.refresh_token_secret_ref)
+                .bind(&record.token_type)
+                .bind(&record.scopes)
+                .bind(record.expires_at)
+                .bind(record.refresh_needed_after)
+                .bind(record.now)
+                .bind(record.status)
+                .bind(&record.metadata)
+                .bind(record.user_id)
+                .bind(record.now)
+                .fetch_one(&self.db)
+                .await?,
+        )
+    }
+
+    pub async fn find_mcp_oauth_session_for_scope(
+        &self,
+        tenant_id: i64,
+        server_id: i64,
+        scope_type: &str,
+        scope_id: &str,
+    ) -> Result<Option<McpOAuthSessionRecord>, AppError> {
+        Ok(
+            sqlx::query_as::<_, McpOAuthSessionRecord>(MCP_OAUTH_SESSION_LOOKUP_SQL)
+                .bind(tenant_id)
+                .bind(server_id)
+                .bind(scope_type)
+                .bind(scope_id)
+                .fetch_optional(&self.db)
+                .await?,
+        )
+    }
+
     pub async fn find_webhook_trigger(
         &self,
         tenant_id: i64,
@@ -1860,5 +2168,72 @@ mod tests {
         assert!(migration.contains("input_schema"));
         assert!(migration.contains("output_schema"));
         assert!(migration.contains("uk_ai_mcp_tool_tenant_tool_code"));
+    }
+
+    #[test]
+    fn mcp_oauth_persistence_migration_defines_state_and_session_contract() {
+        let migration =
+            include_str!("../../../migrations/202606180001_create_ai_mcp_oauth_persistence.sql");
+
+        for required in [
+            "CREATE TABLE IF NOT EXISTS ai_mcp_oauth_state",
+            "CREATE TABLE IF NOT EXISTS ai_mcp_oauth_session",
+            "server_id",
+            "server_code",
+            "scope_type",
+            "scope_id",
+            "state_hash",
+            "redirect_uri",
+            "requested_scopes",
+            "code_verifier_secret_ref",
+            "client_auth",
+            "token_endpoint",
+            "client_id",
+            "access_token_secret_ref",
+            "refresh_token_secret_ref",
+            "expires_at",
+            "consumed_at",
+            "uk_ai_mcp_oauth_state_hash",
+            "uk_ai_mcp_oauth_session_scope",
+        ] {
+            assert!(migration.contains(required), "missing {required}");
+        }
+        for forbidden in [
+            "authorization_code",
+            "access_token_value",
+            "refresh_token_value",
+            "plain_state",
+        ] {
+            assert!(
+                !migration.contains(forbidden),
+                "migration must not persist {forbidden}"
+            );
+        }
+    }
+
+    #[test]
+    fn mcp_oauth_persistence_repository_consumes_state_once() {
+        assert!(MCP_OAUTH_STATE_INSERT_SQL.contains("INSERT INTO ai_mcp_oauth_state"));
+        assert!(MCP_OAUTH_STATE_INSERT_SQL.contains("ON CONFLICT (state_hash) DO NOTHING"));
+        assert!(MCP_OAUTH_STATE_CONSUME_SQL.contains("UPDATE ai_mcp_oauth_state"));
+        assert!(MCP_OAUTH_STATE_CONSUME_SQL.contains("consumed_at = NOW()"));
+        assert!(MCP_OAUTH_STATE_CONSUME_SQL.contains("consumed_at IS NULL"));
+        assert!(MCP_OAUTH_STATE_CONSUME_SQL.contains("expires_at > NOW()"));
+        assert!(MCP_OAUTH_STATE_CONSUME_SQL.contains("state_hash = $3"));
+        assert!(!MCP_OAUTH_STATE_CONSUME_SQL.contains("authorization_code"));
+    }
+
+    #[test]
+    fn mcp_oauth_persistence_repository_upserts_secret_ref_session_scope() {
+        assert!(MCP_OAUTH_SESSION_UPSERT_SQL.contains("INSERT INTO ai_mcp_oauth_session"));
+        assert!(MCP_OAUTH_SESSION_UPSERT_SQL
+            .contains("ON CONFLICT (tenant_id, server_id, scope_type, scope_id)"));
+        assert!(MCP_OAUTH_SESSION_UPSERT_SQL.contains("access_token_secret_ref"));
+        assert!(MCP_OAUTH_SESSION_UPSERT_SQL.contains("refresh_token_secret_ref"));
+        assert!(MCP_OAUTH_SESSION_LOOKUP_SQL.contains("revoked_at IS NULL"));
+        assert!(MCP_OAUTH_SESSION_LOOKUP_SQL.contains("scope_type = $3"));
+        assert!(MCP_OAUTH_SESSION_LOOKUP_SQL.contains("scope_id = $4"));
+        assert!(!MCP_OAUTH_SESSION_UPSERT_SQL.contains("access_token_value"));
+        assert!(!MCP_OAUTH_SESSION_UPSERT_SQL.contains("refresh_token_value"));
     }
 }
