@@ -192,6 +192,41 @@ impl EvalCaseCandidate {
                 json!(active_before_cancel),
             );
         }
+        let tool_io_task_summary = trace_tool_io_task_summary(bundle);
+        if tool_io_task_summary.count > 0 {
+            tags.insert(
+                "toolIoTaskCount".to_owned(),
+                json!(tool_io_task_summary.count),
+            );
+            tags.insert(
+                "parallelToolIoTaskCount".to_owned(),
+                json!(tool_io_task_summary.parallel_count),
+            );
+            tags.insert(
+                "serialToolIoTaskCount".to_owned(),
+                json!(tool_io_task_summary.serial_count),
+            );
+            tags.insert(
+                "cancelledToolIoTaskCount".to_owned(),
+                json!(tool_io_task_summary.cancelled_count),
+            );
+            tags.insert(
+                "timeoutToolIoTaskCount".to_owned(),
+                json!(tool_io_task_summary.timeout_count),
+            );
+            tags.insert(
+                "toolIoTaskMaxDurationMs".to_owned(),
+                json!(tool_io_task_summary.max_duration_ms),
+            );
+            tags.insert(
+                "toolIoTaskSupervisors".to_owned(),
+                json!(tool_io_task_summary
+                    .supervisors
+                    .iter()
+                    .cloned()
+                    .collect::<Vec<_>>()),
+            );
+        }
         let inference_summary = trace_inference_summary(bundle);
         tags.insert("inferenceCount".to_owned(), json!(inference_summary.count));
         if inference_summary.error_count > 0 {
@@ -869,6 +904,57 @@ fn trace_runtime_supervisor_summary(bundle: &TraceBundle) -> TraceRuntimeSupervi
 }
 
 #[derive(Debug, Default)]
+struct TraceToolIoTaskSummary {
+    count: usize,
+    parallel_count: usize,
+    serial_count: usize,
+    cancelled_count: usize,
+    timeout_count: usize,
+    max_duration_ms: i64,
+    supervisors: BTreeSet<String>,
+}
+
+fn trace_tool_io_task_summary(bundle: &TraceBundle) -> TraceToolIoTaskSummary {
+    let mut summary = TraceToolIoTaskSummary::default();
+    for event in bundle
+        .events
+        .iter()
+        .filter(|event| event.kind == TraceEventKind::Observation)
+    {
+        let Some(task) = trace_tool_io_task_payload(&event.payload) else {
+            continue;
+        };
+        summary.count += 1;
+        match trace_value_text(task.get("executionMode")).as_deref() {
+            Some("parallel") => summary.parallel_count += 1,
+            Some("serial") => summary.serial_count += 1,
+            _ => {}
+        }
+        if trace_value_text(task.get("terminalStatus")).as_deref() == Some("cancelled") {
+            summary.cancelled_count += 1;
+        }
+        if trace_value_text(task.get("cancelReason")).as_deref() == Some("tool_io_timeout") {
+            summary.timeout_count += 1;
+        }
+        if let Some(duration_ms) = trace_value_i64(task.get("durationMs")) {
+            summary.max_duration_ms = summary.max_duration_ms.max(duration_ms);
+        }
+        if let Some(supervisor) = trace_value_text(task.get("supervisor")) {
+            summary.supervisors.insert(supervisor);
+        }
+    }
+    summary
+}
+
+fn trace_tool_io_task_payload(payload: &Value) -> Option<&Value> {
+    payload.get("toolIoTask").or_else(|| {
+        payload
+            .get("output")
+            .and_then(|output| output.get("toolIoTask"))
+    })
+}
+
+#[derive(Debug, Default)]
 struct TraceInferenceSummary {
     count: usize,
     route_id: Option<String>,
@@ -1289,6 +1375,55 @@ mod tests {
         assert_eq!(candidate.tags["runtimeSupervisorTaskKind"], "model_loop");
         assert_eq!(candidate.tags["runtimeSupervisorCancelSignalSent"], true);
         assert_eq!(candidate.tags["runtimeSupervisorActiveBeforeCancel"], true);
+    }
+
+    #[test]
+    fn tool_io_observability_trace_eval_candidate_tags_task_metrics() {
+        let bundle = TraceBundle::new("agent-tool-io")
+            .with_event(TraceEvent {
+                sequence_no: 1,
+                kind: TraceEventKind::Observation,
+                payload: json!({
+                    "callId": "call-1",
+                    "output": {"status": "succeeded"},
+                    "toolIoTask": {
+                        "executionMode": "parallel",
+                        "taskRuntime": "tokio_task",
+                        "supervisor": "agent_tool_io_task_supervisor",
+                        "durationMs": 9,
+                        "terminalStatus": "succeeded"
+                    }
+                }),
+            })
+            .with_event(TraceEvent {
+                sequence_no: 2,
+                kind: TraceEventKind::Observation,
+                payload: json!({
+                    "callId": "call-2",
+                    "output": {"status": "cancelled"},
+                    "toolIoTask": {
+                        "executionMode": "serial",
+                        "taskRuntime": "inline",
+                        "supervisor": "agent_tool_io_task_supervisor",
+                        "durationMs": 15,
+                        "terminalStatus": "cancelled",
+                        "cancelReason": "tool_io_timeout"
+                    }
+                }),
+            });
+
+        let candidate = EvalCaseCandidate::from_trace_bundle(&bundle);
+
+        assert_eq!(candidate.tags["toolIoTaskCount"], 2);
+        assert_eq!(candidate.tags["parallelToolIoTaskCount"], 1);
+        assert_eq!(candidate.tags["serialToolIoTaskCount"], 1);
+        assert_eq!(candidate.tags["cancelledToolIoTaskCount"], 1);
+        assert_eq!(candidate.tags["timeoutToolIoTaskCount"], 1);
+        assert_eq!(candidate.tags["toolIoTaskMaxDurationMs"], 15);
+        assert_eq!(
+            candidate.tags["toolIoTaskSupervisors"],
+            json!(["agent_tool_io_task_supervisor"])
+        );
     }
 
     #[test]

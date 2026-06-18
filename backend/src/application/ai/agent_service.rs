@@ -43,7 +43,7 @@ use super::agent_tool_executor::{
     agent_tool_kind, agent_tool_requires_github_connector_credential,
     agent_tool_requires_mcp_lookup, execute_agent_tool, MEDIA_IMAGE_TOOL_CODE,
 };
-use super::agent_tool_io_runtime::execute_agent_tool_io_batch;
+use super::agent_tool_io_runtime::{execute_agent_tool_io_batch, AgentToolIoMetrics};
 use crate::{
     application::ai::model_service::{
         ModelChatCommand, ModelChatCompactionMetadata, ModelChatMessage, ModelChatRequestMetadata,
@@ -119,6 +119,7 @@ pub(super) struct ExecutedAgentToolCall {
     pub(super) prepared: PreparedAgentToolCall,
     pub(super) execution: AgentToolExecution,
     pub(super) terminal_status: RunStatus,
+    pub(super) tool_io_metrics: Option<AgentToolIoMetrics>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1684,6 +1685,12 @@ impl AgentService {
                             object.insert("auditId".to_owned(), json!(recorded.audit_id));
                             object.insert("dryRun".to_owned(), json!(recorded.execution.dry_run));
                             object.insert("runtimeMode".to_owned(), json!("model_loop"));
+                            if let Some(tool_io_metrics) = executed_call.tool_io_metrics.as_ref() {
+                                object.insert(
+                                    "toolIoTask".to_owned(),
+                                    tool_io_metrics_payload(tool_io_metrics),
+                                );
+                            }
                         }
                         self.append_event(
                             user_id,
@@ -2856,6 +2863,7 @@ impl AgentService {
             prepared,
             execution,
             terminal_status,
+            tool_io_metrics: None,
         })
     }
 
@@ -3880,6 +3888,10 @@ fn tool_observation_status_for_execution(execution: &AgentToolExecution) -> Tool
     ToolObservationStatus::Failed
 }
 
+fn tool_io_metrics_payload(metrics: &AgentToolIoMetrics) -> Value {
+    metrics.payload()
+}
+
 fn model_loop_cancel_requested(status: &str) -> bool {
     matches!(
         parse_run_status_code(status),
@@ -4872,11 +4884,7 @@ fn trace_event_from_run_event(event: &RunEventRecord) -> Option<TraceEvent> {
                 event.payload.clone(),
             ))
         }
-        "observation" => Some(TraceEvent::observation(
-            sequence_no,
-            trace_call_id(event),
-            trace_observation_output(&event.payload),
-        )),
+        "observation" => Some(trace_observation_event_from_run_event(sequence_no, event)),
         "approval_requested" => Some(TraceEvent {
             sequence_no,
             kind: novex_trace::TraceEventKind::ApprovalRequested,
@@ -4957,6 +4965,22 @@ fn trace_observation_output(payload: &Value) -> Value {
         .cloned()
         .or_else(|| payload.get("output").cloned())
         .unwrap_or_else(|| payload.clone())
+}
+
+fn trace_observation_event_from_run_event(sequence_no: i32, event: &RunEventRecord) -> TraceEvent {
+    let mut trace_event = TraceEvent::observation(
+        sequence_no,
+        trace_call_id(event),
+        trace_observation_output(&event.payload),
+    );
+    if let Some(object) = trace_event.payload.as_object_mut() {
+        for key in ["toolCode", "auditId", "dryRun", "runtimeMode", "toolIoTask"] {
+            if let Some(value) = event.payload.get(key) {
+                object.insert(key.to_owned(), value.clone());
+            }
+        }
+    }
+    trace_event
 }
 
 fn trace_payload_fallback(payload: &Value) -> String {
@@ -5194,6 +5218,7 @@ mod tests {
                 "ok".to_owned(),
             ),
             terminal_status: RunStatus::Succeeded,
+            tool_io_metrics: None,
         }
     }
 
@@ -5816,6 +5841,10 @@ mod tests {
 
         assert_eq!(result[0].prepared.call_id, "call-1");
         assert_eq!(result[1].prepared.call_id, "call-2");
+        let metrics = result[0].tool_io_metrics.as_ref().unwrap();
+        assert_eq!(metrics.execution_mode, ToolBatchExecutionMode::Parallel);
+        assert_eq!(metrics.task_runtime, "tokio_task");
+        assert_eq!(metrics.supervisor, "agent_tool_io_task_supervisor");
     }
 
     #[tokio::test]
@@ -5848,6 +5877,9 @@ mod tests {
             *order.lock().unwrap(),
             vec!["call-1".to_owned(), "call-2".to_owned()]
         );
+        let metrics = result[0].tool_io_metrics.as_ref().unwrap();
+        assert_eq!(metrics.execution_mode, ToolBatchExecutionMode::Serial);
+        assert_eq!(metrics.task_runtime, "inline");
     }
 
     #[tokio::test]
@@ -5875,6 +5907,10 @@ mod tests {
             result[0].execution.response_payload["cancelReason"],
             "tool_io_timeout"
         );
+        let metrics = result[0].tool_io_metrics.as_ref().unwrap();
+        assert_eq!(metrics.execution_mode, ToolBatchExecutionMode::Serial);
+        assert_eq!(metrics.terminal_status, RunStatus::Cancelled);
+        assert_eq!(metrics.cancel_reason.as_deref(), Some("tool_io_timeout"));
     }
 
     #[test]
@@ -6835,6 +6871,10 @@ mod tests {
             result[0].execution.response_payload["cancelStage"],
             "tool_io"
         );
+        let metrics = result[0].tool_io_metrics.as_ref().unwrap();
+        assert_eq!(metrics.execution_mode, ToolBatchExecutionMode::Serial);
+        assert_eq!(metrics.terminal_status, RunStatus::Cancelled);
+        assert_eq!(metrics.cancel_reason.as_deref(), Some("external_cancel"));
     }
 
     #[test]
@@ -6856,7 +6896,8 @@ mod tests {
             .next()
             .unwrap();
 
-        assert!(source.contains("agent_tool_io_runtime::execute_agent_tool_io_batch"));
+        assert!(source.contains("agent_tool_io_runtime::{"));
+        assert!(source.contains("execute_agent_tool_io_batch"));
         for needle in [
             "async fn execute_agent_tool_io_batch",
             "async fn execute_agent_tool_io_with_timeout_and_cancel",
@@ -6890,6 +6931,18 @@ mod tests {
         assert!(source.contains("execute_agent_tool_io_batch("));
         assert!(source.contains("batch_execution_mode"));
         assert!(source.contains("for executed_call in executed_calls"));
+    }
+
+    #[test]
+    fn agent_service_model_loop_attaches_tool_io_task_metrics_to_observations() {
+        let source = include_str!("agent_service.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+
+        assert!(source.contains("\"toolIoTask\""));
+        assert!(source.contains("executed_call.tool_io_metrics"));
+        assert!(source.contains("tool_io_metrics_payload"));
     }
 
     #[test]
@@ -7900,6 +7953,39 @@ mod tests {
             bundle.events[0].payload["item"]["toolCalls"][0]["toolCode"],
             "rag.search"
         );
+    }
+
+    #[test]
+    fn agent_run_events_convert_tool_io_task_observation_metrics_to_trace_bundle() {
+        let events = vec![fake_agent_event(
+            "observation",
+            3,
+            json!({
+                "item": {
+                    "type": "tool_observation",
+                    "callId": "call-1",
+                    "status": "succeeded",
+                    "output": {"status": "succeeded"}
+                },
+                "toolIoTask": {
+                    "executionMode": "parallel",
+                    "taskRuntime": "tokio_task",
+                    "supervisor": "agent_tool_io_task_supervisor",
+                    "batchIndex": 0,
+                    "durationMs": 12,
+                    "terminalStatus": "succeeded"
+                }
+            }),
+        )];
+
+        let bundle = agent_events_to_trace_bundle("agent-1", events);
+
+        assert_eq!(bundle.events[0].kind, TraceEventKind::Observation);
+        assert_eq!(
+            bundle.events[0].payload["toolIoTask"]["executionMode"],
+            "parallel"
+        );
+        assert_eq!(bundle.events[0].payload["toolIoTask"]["durationMs"], 12);
     }
 
     #[test]
