@@ -468,6 +468,265 @@ fn build_oauth_authorization_url(
     Ok(url.to_string())
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum McpOAuthGrantType {
+    AuthorizationCode,
+}
+
+impl McpOAuthGrantType {
+    fn as_form_value(self) -> &'static str {
+        match self {
+            Self::AuthorizationCode => "authorization_code",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpOAuthTokenExchangeConfig {
+    pub server_code: String,
+    pub token_endpoint: String,
+    pub client_id: String,
+    pub redirect_uri: String,
+    pub authorization_code: String,
+    pub code_verifier_secret_ref: String,
+    pub client_auth: McpOAuthClientAuth,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpOAuthTokenExchangePlan {
+    pub server_code: String,
+    pub token_endpoint: String,
+    pub http_method: String,
+    pub headers: BTreeMap<String, String>,
+    pub form: BTreeMap<String, String>,
+    pub grant_type: McpOAuthGrantType,
+    pub code_verifier_secret_ref: String,
+    pub client_auth: McpOAuthClientAuth,
+}
+
+impl McpOAuthTokenExchangePlan {
+    pub fn authorization_code(
+        config: McpOAuthTokenExchangeConfig,
+    ) -> Result<Self, McpOAuthSessionError> {
+        let server_code = required_oauth_field("server_code", &config.server_code)?;
+        let token_endpoint = validate_oauth_https_url("token_endpoint", &config.token_endpoint)?;
+        let client_id = required_oauth_field("client_id", &config.client_id)?;
+        let redirect_uri = validate_oauth_redirect_uri(&config.redirect_uri)?;
+        let authorization_code =
+            required_oauth_field("authorization_code", &config.authorization_code)?;
+        let code_verifier_secret_ref = validate_oauth_session_secret_ref(
+            "code_verifier_secret_ref",
+            &config.code_verifier_secret_ref,
+        )?;
+        let client_auth = normalize_oauth_client_auth(config.client_auth)?;
+
+        let mut headers = BTreeMap::new();
+        headers.insert("Accept".to_owned(), "application/json".to_owned());
+        headers.insert(
+            "Content-Type".to_owned(),
+            "application/x-www-form-urlencoded".to_owned(),
+        );
+
+        let grant_type = McpOAuthGrantType::AuthorizationCode;
+        let mut form = BTreeMap::new();
+        form.insert(
+            "grant_type".to_owned(),
+            grant_type.as_form_value().to_owned(),
+        );
+        form.insert("code".to_owned(), authorization_code);
+        form.insert("client_id".to_owned(), client_id.clone());
+        form.insert("redirect_uri".to_owned(), redirect_uri.clone());
+
+        Ok(Self {
+            server_code,
+            token_endpoint,
+            http_method: "POST".to_owned(),
+            headers,
+            form,
+            grant_type,
+            code_verifier_secret_ref,
+            client_auth,
+        })
+    }
+
+    pub fn sanitized_evidence(&self) -> Value {
+        json!({
+            "serverCode": self.server_code,
+            "tokenEndpoint": self.token_endpoint,
+            "httpMethod": self.http_method,
+            "headers": self.headers,
+            "form": {
+                "grantType": self.grant_type.as_form_value(),
+                "clientId": self.form.get("client_id"),
+                "redirectUri": self.form.get("redirect_uri"),
+                "authorizationCodePresent": self.form.contains_key("code"),
+            },
+            "codeVerifierSecretRef": self.code_verifier_secret_ref,
+            "clientAuth": oauth_client_auth_evidence(&self.client_auth),
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct McpOAuthTokenResponse {
+    #[serde(rename = "access_token")]
+    pub access_token: String,
+    #[serde(rename = "token_type")]
+    pub token_type: String,
+    #[serde(rename = "expires_in")]
+    pub expires_in_seconds: Option<u64>,
+    #[serde(rename = "refresh_token")]
+    pub refresh_token: Option<String>,
+    pub scope: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpOAuthSessionMaterial {
+    pub server_code: String,
+    pub access_token_secret_ref: String,
+    pub refresh_token_secret_ref: Option<String>,
+    pub token_type: String,
+    pub scopes: Vec<String>,
+    pub expires_at_epoch_seconds: Option<u64>,
+}
+
+impl McpOAuthSessionMaterial {
+    pub fn refresh_needed(&self, now_epoch_seconds: u64, skew_seconds: u64) -> bool {
+        self.expires_at_epoch_seconds
+            .is_some_and(|expires_at| now_epoch_seconds.saturating_add(skew_seconds) >= expires_at)
+    }
+
+    pub fn sanitized_evidence(&self) -> Value {
+        json!({
+            "serverCode": self.server_code,
+            "accessTokenSecretRef": self.access_token_secret_ref,
+            "refreshTokenSecretRef": self.refresh_token_secret_ref,
+            "tokenType": self.token_type,
+            "scopes": self.scopes,
+            "expiresAtEpochSeconds": self.expires_at_epoch_seconds,
+        })
+    }
+}
+
+pub fn mcp_oauth_session_from_token_response(
+    server_code: impl AsRef<str>,
+    response: &McpOAuthTokenResponse,
+    received_at_epoch_seconds: u64,
+    access_token_secret_ref: impl AsRef<str>,
+    refresh_token_secret_ref: Option<&str>,
+) -> Result<McpOAuthSessionMaterial, McpOAuthSessionError> {
+    let server_code = required_oauth_field("server_code", server_code.as_ref())?;
+    required_oauth_field("access_token", &response.access_token)?;
+    let token_type = required_oauth_field("token_type", &response.token_type)?;
+    if !token_type.eq_ignore_ascii_case("bearer") {
+        return Err(McpOAuthSessionError::new(
+            "token_type",
+            "MCP OAuth token_type must be Bearer",
+        ));
+    }
+
+    let access_token_secret_ref = validate_oauth_session_secret_ref(
+        "access_token_secret_ref",
+        access_token_secret_ref.as_ref(),
+    )?;
+    let refresh_token_present = response
+        .refresh_token
+        .as_deref()
+        .map(str::trim)
+        .is_some_and(|value| !value.is_empty());
+    let refresh_token_secret_ref = match (refresh_token_present, refresh_token_secret_ref) {
+        (true, Some(secret_ref)) => Some(validate_oauth_session_secret_ref(
+            "refresh_token_secret_ref",
+            secret_ref,
+        )?),
+        (true, None) => {
+            return Err(McpOAuthSessionError::new(
+                "refresh_token_secret_ref",
+                "MCP OAuth refresh_token_secret_ref is required when refresh_token is present",
+            ))
+        }
+        (false, Some(secret_ref)) => Some(validate_oauth_session_secret_ref(
+            "refresh_token_secret_ref",
+            secret_ref,
+        )?),
+        (false, None) => None,
+    };
+    let scopes = response
+        .scope
+        .as_deref()
+        .unwrap_or_default()
+        .split_whitespace()
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    let expires_at_epoch_seconds = response
+        .expires_in_seconds
+        .map(|expires_in| received_at_epoch_seconds.saturating_add(expires_in));
+
+    Ok(McpOAuthSessionMaterial {
+        server_code,
+        access_token_secret_ref,
+        refresh_token_secret_ref,
+        token_type: "Bearer".to_owned(),
+        scopes,
+        expires_at_epoch_seconds,
+    })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpOAuthSessionError {
+    pub field: String,
+    pub message: String,
+}
+
+impl McpOAuthSessionError {
+    fn new(field: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            field: field.into(),
+            message: message.into(),
+        }
+    }
+}
+
+impl From<McpOAuthAuthorizationError> for McpOAuthSessionError {
+    fn from(error: McpOAuthAuthorizationError) -> Self {
+        Self {
+            field: error.field,
+            message: error.message,
+        }
+    }
+}
+
+fn validate_oauth_session_secret_ref(
+    field: &str,
+    value: &str,
+) -> Result<String, McpOAuthSessionError> {
+    let value = value.trim();
+    if value.is_empty() || !value.starts_with("env:") {
+        return Err(McpOAuthSessionError::new(
+            field,
+            format!("MCP OAuth {field} must use env: prefix"),
+        ));
+    }
+    Ok(value.to_owned())
+}
+
+fn oauth_client_auth_evidence(client_auth: &McpOAuthClientAuth) -> Value {
+    match client_auth {
+        McpOAuthClientAuth::None => json!({
+            "kind": "none",
+        }),
+        McpOAuthClientAuth::ClientSecretRef(client_secret_ref) => json!({
+            "kind": "client_secret_ref",
+            "clientSecretRef": client_secret_ref,
+        }),
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "kind", content = "value")]
 pub enum McpStdioEnvValue {
@@ -1354,6 +1613,189 @@ mod tests {
 
         assert_eq!(no_scope.field, "scopes");
         assert_eq!(no_state.field, "state");
+    }
+
+    #[test]
+    fn mcp_oauth_session_token_exchange_plan_builds_authorization_code_form() {
+        let plan = McpOAuthTokenExchangePlan::authorization_code(McpOAuthTokenExchangeConfig {
+            server_code: "docs".to_owned(),
+            token_endpoint: "https://auth.example.com/oauth/token".to_owned(),
+            client_id: "novex-mcp-client".to_owned(),
+            redirect_uri: "https://novex.example.com/mcp/oauth/callback".to_owned(),
+            authorization_code: "authorization-code-value".to_owned(),
+            code_verifier_secret_ref: "env:MCP_OAUTH_CODE_VERIFIER".to_owned(),
+            client_auth: McpOAuthClientAuth::ClientSecretRef(
+                "env:MCP_OAUTH_CLIENT_SECRET".to_owned(),
+            ),
+        })
+        .expect("valid token exchange config should build a request plan");
+
+        assert_eq!(plan.server_code, "docs");
+        assert_eq!(plan.http_method, "POST");
+        assert_eq!(
+            plan.headers.get("Content-Type").map(String::as_str),
+            Some("application/x-www-form-urlencoded")
+        );
+        assert_eq!(
+            plan.headers.get("Accept").map(String::as_str),
+            Some("application/json")
+        );
+        assert_eq!(
+            plan.form.get("grant_type").map(String::as_str),
+            Some("authorization_code")
+        );
+        assert_eq!(
+            plan.form.get("code").map(String::as_str),
+            Some("authorization-code-value")
+        );
+        assert_eq!(
+            plan.form.get("client_id").map(String::as_str),
+            Some("novex-mcp-client")
+        );
+        assert_eq!(
+            plan.form.get("redirect_uri").map(String::as_str),
+            Some("https://novex.example.com/mcp/oauth/callback")
+        );
+        assert_eq!(plan.code_verifier_secret_ref, "env:MCP_OAUTH_CODE_VERIFIER");
+
+        let evidence = plan.sanitized_evidence();
+        assert_eq!(evidence["form"]["grantType"], "authorization_code");
+        assert_eq!(evidence["form"]["authorizationCodePresent"], true);
+        assert_eq!(
+            evidence["codeVerifierSecretRef"],
+            "env:MCP_OAUTH_CODE_VERIFIER"
+        );
+        assert_eq!(
+            evidence["clientAuth"]["clientSecretRef"],
+            "env:MCP_OAUTH_CLIENT_SECRET"
+        );
+        assert!(!evidence.to_string().contains("authorization-code-value"));
+        assert!(!evidence.to_string().contains("code-verifier-value"));
+        assert!(!evidence.to_string().contains("client-secret-value"));
+    }
+
+    #[test]
+    fn mcp_oauth_session_token_exchange_rejects_plain_code_verifier_secret_ref() {
+        let err = McpOAuthTokenExchangePlan::authorization_code(McpOAuthTokenExchangeConfig {
+            server_code: "docs".to_owned(),
+            token_endpoint: "https://auth.example.com/oauth/token".to_owned(),
+            client_id: "novex-mcp-client".to_owned(),
+            redirect_uri: "https://novex.example.com/mcp/oauth/callback".to_owned(),
+            authorization_code: "authorization-code-value".to_owned(),
+            code_verifier_secret_ref: "plain-code-verifier".to_owned(),
+            client_auth: McpOAuthClientAuth::None,
+        })
+        .unwrap_err();
+
+        assert_eq!(err.field, "code_verifier_secret_ref");
+    }
+
+    #[test]
+    fn mcp_oauth_session_parses_token_response_into_secret_backed_session() {
+        let response = McpOAuthTokenResponse {
+            access_token: "access-token-value".to_owned(),
+            token_type: "Bearer".to_owned(),
+            expires_in_seconds: Some(3600),
+            refresh_token: Some("refresh-token-value".to_owned()),
+            scope: Some("mcp:tools offline_access".to_owned()),
+        };
+
+        let session = mcp_oauth_session_from_token_response(
+            "docs",
+            &response,
+            1_700_000_000,
+            "env:DOCS_MCP_ACCESS_TOKEN",
+            Some("env:DOCS_MCP_REFRESH_TOKEN"),
+        )
+        .expect("valid token response should create secret-backed session material");
+
+        assert_eq!(session.server_code, "docs");
+        assert_eq!(session.access_token_secret_ref, "env:DOCS_MCP_ACCESS_TOKEN");
+        assert_eq!(
+            session.refresh_token_secret_ref.as_deref(),
+            Some("env:DOCS_MCP_REFRESH_TOKEN")
+        );
+        assert_eq!(session.token_type, "Bearer");
+        assert_eq!(
+            session.scopes,
+            vec!["mcp:tools".to_owned(), "offline_access".to_owned()]
+        );
+        assert_eq!(session.expires_at_epoch_seconds, Some(1_700_003_600));
+
+        let evidence = session.sanitized_evidence();
+        assert_eq!(
+            evidence["accessTokenSecretRef"],
+            "env:DOCS_MCP_ACCESS_TOKEN"
+        );
+        assert_eq!(
+            evidence["refreshTokenSecretRef"],
+            "env:DOCS_MCP_REFRESH_TOKEN"
+        );
+        assert!(!evidence.to_string().contains("access-token-value"));
+        assert!(!evidence.to_string().contains("refresh-token-value"));
+    }
+
+    #[test]
+    fn mcp_oauth_session_token_response_deserializes_oauth_json() {
+        let response: McpOAuthTokenResponse = serde_json::from_value(serde_json::json!({
+            "access_token": "access-token-value",
+            "token_type": "Bearer",
+            "expires_in": 3600,
+            "refresh_token": "refresh-token-value",
+            "scope": "mcp:tools offline_access"
+        }))
+        .expect("OAuth token response should use standard token endpoint field names");
+
+        assert_eq!(response.access_token, "access-token-value");
+        assert_eq!(response.token_type, "Bearer");
+        assert_eq!(response.expires_in_seconds, Some(3600));
+        assert_eq!(
+            response.refresh_token.as_deref(),
+            Some("refresh-token-value")
+        );
+        assert_eq!(response.scope.as_deref(), Some("mcp:tools offline_access"));
+    }
+
+    #[test]
+    fn mcp_oauth_session_requires_bearer_token_type() {
+        let response = McpOAuthTokenResponse {
+            access_token: "access-token-value".to_owned(),
+            token_type: "mac".to_owned(),
+            expires_in_seconds: Some(3600),
+            refresh_token: None,
+            scope: Some("mcp:tools".to_owned()),
+        };
+
+        let err = mcp_oauth_session_from_token_response(
+            "docs",
+            &response,
+            1_700_000_000,
+            "env:DOCS_MCP_ACCESS_TOKEN",
+            None,
+        )
+        .unwrap_err();
+
+        assert_eq!(err.field, "token_type");
+    }
+
+    #[test]
+    fn mcp_oauth_session_refresh_needed_uses_skew() {
+        let session = McpOAuthSessionMaterial {
+            server_code: "docs".to_owned(),
+            access_token_secret_ref: "env:DOCS_MCP_ACCESS_TOKEN".to_owned(),
+            refresh_token_secret_ref: Some("env:DOCS_MCP_REFRESH_TOKEN".to_owned()),
+            token_type: "Bearer".to_owned(),
+            scopes: vec!["mcp:tools".to_owned()],
+            expires_at_epoch_seconds: Some(1100),
+        };
+        let no_expiry = McpOAuthSessionMaterial {
+            expires_at_epoch_seconds: None,
+            ..session.clone()
+        };
+
+        assert!(session.refresh_needed(1045, 60));
+        assert!(!session.refresh_needed(1030, 60));
+        assert!(!no_expiry.refresh_needed(2_000, 60));
     }
 
     #[test]
