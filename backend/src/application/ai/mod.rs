@@ -9,6 +9,7 @@ pub mod eval_service;
 pub mod foundation_service;
 pub mod integration_service;
 pub mod knowledge_service;
+pub(crate) mod mcp_oauth_token_dispatch;
 pub mod memory_service;
 pub mod model_provider_transport;
 pub mod model_service;
