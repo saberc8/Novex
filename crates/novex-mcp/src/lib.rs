@@ -225,6 +225,249 @@ impl McpStreamableHttpRequestPlan {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum McpOAuthPkceMethod {
+    S256,
+}
+
+impl McpOAuthPkceMethod {
+    fn as_query_value(self) -> &'static str {
+        match self {
+            Self::S256 => "S256",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "kind", content = "value")]
+pub enum McpOAuthClientAuth {
+    None,
+    ClientSecretRef(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpOAuthAuthorizationConfig {
+    pub server_code: String,
+    pub authorization_endpoint: String,
+    pub token_endpoint: String,
+    pub client_id: String,
+    pub redirect_uri: String,
+    pub scopes: Vec<String>,
+    pub state: String,
+    pub pkce_challenge: String,
+    pub pkce_method: McpOAuthPkceMethod,
+    pub client_auth: McpOAuthClientAuth,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpOAuthAuthorizationPlan {
+    pub server_code: String,
+    pub authorization_endpoint: String,
+    pub token_endpoint: String,
+    pub authorization_url: String,
+    pub client_id: String,
+    pub redirect_uri: String,
+    pub scopes: Vec<String>,
+    pub state: String,
+    pub pkce_challenge: String,
+    pub pkce_method: McpOAuthPkceMethod,
+    pub client_auth: McpOAuthClientAuth,
+}
+
+impl McpOAuthAuthorizationPlan {
+    pub fn new(config: McpOAuthAuthorizationConfig) -> Result<Self, McpOAuthAuthorizationError> {
+        let server_code = required_oauth_field("server_code", &config.server_code)?;
+        let authorization_endpoint =
+            validate_oauth_https_url("authorization_endpoint", &config.authorization_endpoint)?;
+        let token_endpoint = validate_oauth_https_url("token_endpoint", &config.token_endpoint)?;
+        let client_id = required_oauth_field("client_id", &config.client_id)?;
+        let redirect_uri = validate_oauth_redirect_uri(&config.redirect_uri)?;
+        let scopes = normalize_oauth_scopes(config.scopes)?;
+        let state = required_oauth_field("state", &config.state)?;
+        let pkce_challenge = required_oauth_field("pkce_challenge", &config.pkce_challenge)?;
+        let client_auth = normalize_oauth_client_auth(config.client_auth)?;
+        let authorization_url = build_oauth_authorization_url(
+            &authorization_endpoint,
+            &client_id,
+            &redirect_uri,
+            &scopes,
+            &state,
+            &pkce_challenge,
+            config.pkce_method,
+        )?;
+
+        Ok(Self {
+            server_code,
+            authorization_endpoint,
+            token_endpoint,
+            authorization_url,
+            client_id,
+            redirect_uri,
+            scopes,
+            state,
+            pkce_challenge,
+            pkce_method: config.pkce_method,
+            client_auth,
+        })
+    }
+
+    pub fn sanitized_evidence(&self) -> Value {
+        let client_auth = match &self.client_auth {
+            McpOAuthClientAuth::None => json!({
+                "kind": "none",
+            }),
+            McpOAuthClientAuth::ClientSecretRef(client_secret_ref) => json!({
+                "kind": "client_secret_ref",
+                "clientSecretRef": client_secret_ref,
+            }),
+        };
+
+        json!({
+            "serverCode": self.server_code,
+            "authorizationEndpoint": self.authorization_endpoint,
+            "tokenEndpoint": self.token_endpoint,
+            "authorizationUrl": self.authorization_url,
+            "clientId": self.client_id,
+            "redirectUri": self.redirect_uri,
+            "scopes": self.scopes,
+            "state": self.state,
+            "pkce": {
+                "method": self.pkce_method.as_query_value(),
+                "challenge": self.pkce_challenge,
+            },
+            "clientAuth": client_auth,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpOAuthAuthorizationError {
+    pub field: String,
+    pub message: String,
+}
+
+impl McpOAuthAuthorizationError {
+    fn new(field: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            field: field.into(),
+            message: message.into(),
+        }
+    }
+}
+
+fn required_oauth_field(field: &str, value: &str) -> Result<String, McpOAuthAuthorizationError> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Err(McpOAuthAuthorizationError::new(
+            field,
+            format!("MCP OAuth {field} is required"),
+        ));
+    }
+    Ok(value.to_owned())
+}
+
+fn validate_oauth_https_url(
+    field: &str,
+    value: &str,
+) -> Result<String, McpOAuthAuthorizationError> {
+    let value = required_oauth_field(field, value)?;
+    let url = Url::parse(&value).map_err(|_| {
+        McpOAuthAuthorizationError::new(field, format!("MCP OAuth {field} is invalid"))
+    })?;
+    if url.scheme() != "https" {
+        return Err(McpOAuthAuthorizationError::new(
+            field,
+            format!("MCP OAuth {field} must use https"),
+        ));
+    }
+    if url.host_str().is_none() {
+        return Err(McpOAuthAuthorizationError::new(
+            field,
+            format!("MCP OAuth {field} missing host"),
+        ));
+    }
+    Ok(value)
+}
+
+fn validate_oauth_redirect_uri(value: &str) -> Result<String, McpOAuthAuthorizationError> {
+    let value = required_oauth_field("redirect_uri", value)?;
+    let url = Url::parse(&value).map_err(|_| {
+        McpOAuthAuthorizationError::new("redirect_uri", "MCP OAuth redirect_uri is invalid")
+    })?;
+    if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
+        return Err(McpOAuthAuthorizationError::new(
+            "redirect_uri",
+            "MCP OAuth redirect_uri must be an absolute http/https URL",
+        ));
+    }
+    Ok(value)
+}
+
+fn normalize_oauth_scopes(scopes: Vec<String>) -> Result<Vec<String>, McpOAuthAuthorizationError> {
+    let scopes = scopes
+        .into_iter()
+        .map(|scope| scope.trim().to_owned())
+        .filter(|scope| !scope.is_empty())
+        .collect::<Vec<_>>();
+    if scopes.is_empty() {
+        return Err(McpOAuthAuthorizationError::new(
+            "scopes",
+            "MCP OAuth scopes are required",
+        ));
+    }
+    Ok(scopes)
+}
+
+fn normalize_oauth_client_auth(
+    client_auth: McpOAuthClientAuth,
+) -> Result<McpOAuthClientAuth, McpOAuthAuthorizationError> {
+    match client_auth {
+        McpOAuthClientAuth::None => Ok(McpOAuthClientAuth::None),
+        McpOAuthClientAuth::ClientSecretRef(client_secret_ref) => {
+            let client_secret_ref = client_secret_ref.trim();
+            if client_secret_ref.is_empty() || !client_secret_ref.starts_with("env:") {
+                return Err(McpOAuthAuthorizationError::new(
+                    "client_auth.client_secret_ref",
+                    "MCP OAuth clientSecretRef must use env: prefix",
+                ));
+            }
+            Ok(McpOAuthClientAuth::ClientSecretRef(
+                client_secret_ref.to_owned(),
+            ))
+        }
+    }
+}
+
+fn build_oauth_authorization_url(
+    authorization_endpoint: &str,
+    client_id: &str,
+    redirect_uri: &str,
+    scopes: &[String],
+    state: &str,
+    pkce_challenge: &str,
+    pkce_method: McpOAuthPkceMethod,
+) -> Result<String, McpOAuthAuthorizationError> {
+    let mut url = Url::parse(authorization_endpoint).map_err(|_| {
+        McpOAuthAuthorizationError::new(
+            "authorization_endpoint",
+            "MCP OAuth authorization_endpoint is invalid",
+        )
+    })?;
+    url.query_pairs_mut()
+        .append_pair("response_type", "code")
+        .append_pair("client_id", client_id)
+        .append_pair("redirect_uri", redirect_uri)
+        .append_pair("scope", &scopes.join(" "))
+        .append_pair("state", state)
+        .append_pair("code_challenge", pkce_challenge)
+        .append_pair("code_challenge_method", pkce_method.as_query_value());
+    Ok(url.to_string())
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "kind", content = "value")]
 pub enum McpStdioEnvValue {
@@ -955,6 +1198,162 @@ mod tests {
         assert_eq!(err.kind, McpClientErrorKind::JsonRpcError);
         assert_eq!(err.rpc_code, Some(-32602));
         assert!(err.message.contains("Invalid arguments"));
+    }
+
+    #[test]
+    fn mcp_oauth_authorization_plan_builds_pkce_authorize_url() {
+        let plan = McpOAuthAuthorizationPlan::new(McpOAuthAuthorizationConfig {
+            server_code: "docs".to_owned(),
+            authorization_endpoint: "https://auth.example.com/oauth/authorize".to_owned(),
+            token_endpoint: "https://auth.example.com/oauth/token".to_owned(),
+            client_id: "novex-mcp-client".to_owned(),
+            redirect_uri: "https://novex.example.com/mcp/oauth/callback".to_owned(),
+            scopes: vec!["mcp:tools".to_owned(), "offline_access".to_owned()],
+            state: "tenant-42-state".to_owned(),
+            pkce_challenge: "s256-code-challenge".to_owned(),
+            pkce_method: McpOAuthPkceMethod::S256,
+            client_auth: McpOAuthClientAuth::ClientSecretRef(
+                "env:MCP_OAUTH_CLIENT_SECRET".to_owned(),
+            ),
+        })
+        .expect("valid OAuth config should build an authorization plan");
+
+        let authorization_url =
+            Url::parse(&plan.authorization_url).expect("authorization URL should be parseable");
+        let query = authorization_url.query_pairs().collect::<BTreeMap<_, _>>();
+
+        assert_eq!(plan.server_code, "docs");
+        assert_eq!(plan.token_endpoint, "https://auth.example.com/oauth/token");
+        assert_eq!(
+            query.get("response_type").map(|value| value.as_ref()),
+            Some("code")
+        );
+        assert_eq!(
+            query.get("client_id").map(|value| value.as_ref()),
+            Some("novex-mcp-client")
+        );
+        assert_eq!(
+            query.get("redirect_uri").map(|value| value.as_ref()),
+            Some("https://novex.example.com/mcp/oauth/callback")
+        );
+        assert_eq!(
+            query.get("scope").map(|value| value.as_ref()),
+            Some("mcp:tools offline_access")
+        );
+        assert_eq!(
+            query.get("state").map(|value| value.as_ref()),
+            Some("tenant-42-state")
+        );
+        assert_eq!(
+            query.get("code_challenge").map(|value| value.as_ref()),
+            Some("s256-code-challenge")
+        );
+        assert_eq!(
+            query
+                .get("code_challenge_method")
+                .map(|value| value.as_ref()),
+            Some("S256")
+        );
+    }
+
+    #[test]
+    fn mcp_oauth_authorization_plan_sanitizes_client_secret_ref() {
+        let plan = McpOAuthAuthorizationPlan::new(McpOAuthAuthorizationConfig {
+            server_code: "docs".to_owned(),
+            authorization_endpoint: "https://auth.example.com/oauth/authorize".to_owned(),
+            token_endpoint: "https://auth.example.com/oauth/token".to_owned(),
+            client_id: "novex-mcp-client".to_owned(),
+            redirect_uri: "https://novex.example.com/mcp/oauth/callback".to_owned(),
+            scopes: vec!["mcp:tools".to_owned()],
+            state: "tenant-42-state".to_owned(),
+            pkce_challenge: "s256-code-challenge".to_owned(),
+            pkce_method: McpOAuthPkceMethod::S256,
+            client_auth: McpOAuthClientAuth::ClientSecretRef(
+                "env:MCP_OAUTH_CLIENT_SECRET".to_owned(),
+            ),
+        })
+        .expect("valid OAuth config should build an authorization plan");
+
+        let evidence = plan.sanitized_evidence();
+
+        assert_eq!(evidence["clientAuth"]["kind"], "client_secret_ref");
+        assert_eq!(
+            evidence["clientAuth"]["clientSecretRef"],
+            "env:MCP_OAUTH_CLIENT_SECRET"
+        );
+        assert_eq!(evidence["pkce"]["method"], "S256");
+        assert!(!evidence.to_string().contains("super-secret-value"));
+    }
+
+    #[test]
+    fn mcp_oauth_authorization_plan_rejects_non_https_endpoint() {
+        let err = McpOAuthAuthorizationPlan::new(McpOAuthAuthorizationConfig {
+            server_code: "docs".to_owned(),
+            authorization_endpoint: "http://auth.example.com/oauth/authorize".to_owned(),
+            token_endpoint: "https://auth.example.com/oauth/token".to_owned(),
+            client_id: "novex-mcp-client".to_owned(),
+            redirect_uri: "https://novex.example.com/mcp/oauth/callback".to_owned(),
+            scopes: vec!["mcp:tools".to_owned()],
+            state: "tenant-42-state".to_owned(),
+            pkce_challenge: "s256-code-challenge".to_owned(),
+            pkce_method: McpOAuthPkceMethod::S256,
+            client_auth: McpOAuthClientAuth::None,
+        })
+        .unwrap_err();
+
+        assert_eq!(err.field, "authorization_endpoint");
+    }
+
+    #[test]
+    fn mcp_oauth_authorization_plan_rejects_invalid_client_secret_ref() {
+        let err = McpOAuthAuthorizationPlan::new(McpOAuthAuthorizationConfig {
+            server_code: "docs".to_owned(),
+            authorization_endpoint: "https://auth.example.com/oauth/authorize".to_owned(),
+            token_endpoint: "https://auth.example.com/oauth/token".to_owned(),
+            client_id: "novex-mcp-client".to_owned(),
+            redirect_uri: "https://novex.example.com/mcp/oauth/callback".to_owned(),
+            scopes: vec!["mcp:tools".to_owned()],
+            state: "tenant-42-state".to_owned(),
+            pkce_challenge: "s256-code-challenge".to_owned(),
+            pkce_method: McpOAuthPkceMethod::S256,
+            client_auth: McpOAuthClientAuth::ClientSecretRef("plain-secret".to_owned()),
+        })
+        .unwrap_err();
+
+        assert_eq!(err.field, "client_auth.client_secret_ref");
+    }
+
+    #[test]
+    fn mcp_oauth_authorization_plan_requires_scope_and_state() {
+        let no_scope = McpOAuthAuthorizationPlan::new(McpOAuthAuthorizationConfig {
+            server_code: "docs".to_owned(),
+            authorization_endpoint: "https://auth.example.com/oauth/authorize".to_owned(),
+            token_endpoint: "https://auth.example.com/oauth/token".to_owned(),
+            client_id: "novex-mcp-client".to_owned(),
+            redirect_uri: "https://novex.example.com/mcp/oauth/callback".to_owned(),
+            scopes: vec![" ".to_owned()],
+            state: "tenant-42-state".to_owned(),
+            pkce_challenge: "s256-code-challenge".to_owned(),
+            pkce_method: McpOAuthPkceMethod::S256,
+            client_auth: McpOAuthClientAuth::None,
+        })
+        .unwrap_err();
+        let no_state = McpOAuthAuthorizationPlan::new(McpOAuthAuthorizationConfig {
+            server_code: "docs".to_owned(),
+            authorization_endpoint: "https://auth.example.com/oauth/authorize".to_owned(),
+            token_endpoint: "https://auth.example.com/oauth/token".to_owned(),
+            client_id: "novex-mcp-client".to_owned(),
+            redirect_uri: "https://novex.example.com/mcp/oauth/callback".to_owned(),
+            scopes: vec!["mcp:tools".to_owned()],
+            state: " ".to_owned(),
+            pkce_challenge: "s256-code-challenge".to_owned(),
+            pkce_method: McpOAuthPkceMethod::S256,
+            client_auth: McpOAuthClientAuth::None,
+        })
+        .unwrap_err();
+
+        assert_eq!(no_scope.field, "scopes");
+        assert_eq!(no_state.field, "state");
     }
 
     #[test]
