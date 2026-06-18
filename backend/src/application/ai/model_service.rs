@@ -7010,11 +7010,11 @@ mod tests {
                     .map(|end| &model_source[start..start + end])
             })
             .unwrap_or_default();
-        let agent_source = include_str!("agent_service.rs");
-        let media_tool = &agent_source[agent_source
+        let agent_tool_executor_source = include_str!("agent_tool_executor.rs");
+        let media_tool = &agent_tool_executor_source[agent_tool_executor_source
             .find("async fn execute_media_image_tool")
             .unwrap()
-            ..agent_source
+            ..agent_tool_executor_source
                 .find("async fn execute_feishu_message_tool")
                 .unwrap()];
 
