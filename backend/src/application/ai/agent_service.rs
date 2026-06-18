@@ -1641,16 +1641,21 @@ impl AgentService {
                         return self.get_run(run_id).await;
                     }
 
-                    let executed_calls =
-                        execute_agent_tool_io_batch(
-                            batch_execution_mode,
-                            prepared_calls,
-                            cancel_token.clone(),
-                            |prepared| async move {
-                                self.execute_agent_tool_io(user_id, prepared).await
-                            },
-                        )
-                        .await?;
+                    let tool_io_service = self.clone();
+                    let executed_calls = execute_agent_tool_io_batch(
+                        batch_execution_mode,
+                        prepared_calls,
+                        cancel_token.clone(),
+                        move |prepared| {
+                            let tool_io_service = tool_io_service.clone();
+                            async move {
+                                tool_io_service
+                                    .execute_agent_tool_io(user_id, prepared)
+                                    .await
+                            }
+                        },
+                    )
+                    .await?;
                     for executed_call in executed_calls {
                         let prepared = executed_call.prepared.clone();
                         let executed_terminal_status = executed_call.terminal_status;
