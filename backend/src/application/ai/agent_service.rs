@@ -47,6 +47,11 @@ use serde_json::{json, Value};
 use sqlx::PgPool;
 use tokio::sync::watch;
 
+use super::agent_tool_executor::{
+    agent_tool_requires_github_connector_credential, agent_tool_requires_mcp_lookup,
+    AgentToolExecutorSelection, FEISHU_TOOL_CODE, GITHUB_REPO_READ_TOOL_CODE,
+    GITHUB_REPO_SEARCH_TOOL_CODE, MEDIA_IMAGE_TOOL_CODE,
+};
 use crate::{
     application::ai::model_service::{
         ModelChatCommand, ModelChatCompactionMetadata, ModelChatMessage, ModelChatRequestMetadata,
@@ -87,10 +92,6 @@ const MAX_EVENT_STREAM_POLL_MS: u64 = 5000;
 const DEFAULT_EVENT_STREAM_MAX_IDLE_MS: u64 = 30_000;
 const MAX_EVENT_STREAM_MAX_IDLE_MS: u64 = 300_000;
 const MAX_TRACE_REPLAY_EVENTS: i64 = 1000;
-const FEISHU_TOOL_CODE: &str = "feishu.message.send";
-const MEDIA_IMAGE_TOOL_CODE: &str = "media.image.generate";
-const GITHUB_REPO_SEARCH_TOOL_CODE: &str = "github.repo.search";
-const GITHUB_REPO_READ_TOOL_CODE: &str = "github.repo.read";
 const GITHUB_CONNECTOR_CODE: &str = "github.default";
 const FEISHU_WEBHOOK_TIMEOUT: Duration = Duration::from_secs(10);
 const GITHUB_CONNECTOR_TIMEOUT: Duration = Duration::from_secs(15);
@@ -2897,23 +2898,18 @@ impl AgentService {
             .executor_binding
             .as_ref()
             .map(ToolExecutorDispatchPlan::from_binding);
-        let uses_github_connector_executor = executor_dispatch.as_ref().is_some_and(|plan| {
-            plan.requires_connector_credential
-                && plan.executor_code.starts_with("connector.github.")
-        });
-        let connector_credential =
-            if uses_github_connector_executor || is_github_connector_tool(&tool.code) {
-                self.capability_repo
-                    .find_connector_credential(self.tenant_id, GITHUB_CONNECTOR_CODE, user_id)
-                    .await?
-            } else {
-                None
-            };
-        let mcp_tool = if executor_dispatch
-            .as_ref()
-            .is_some_and(|plan| plan.requires_mcp_tool)
-            || matches!(agent_tool_kind(tool), ToolKind::Mcp)
-        {
+        let tool_kind = agent_tool_kind(tool);
+        let connector_credential = if agent_tool_requires_github_connector_credential(
+            &tool.code,
+            executor_dispatch.as_ref(),
+        ) {
+            self.capability_repo
+                .find_connector_credential(self.tenant_id, GITHUB_CONNECTOR_CODE, user_id)
+                .await?
+        } else {
+            None
+        };
+        let mcp_tool = if agent_tool_requires_mcp_lookup(tool_kind, executor_dispatch.as_ref()) {
             self.capability_repo
                 .find_mcp_tool_for_execution(self.tenant_id, &tool.code)
                 .await?
@@ -3331,28 +3327,28 @@ async fn execute_agent_tool(
     executor_dispatch: Option<&ToolExecutorDispatchPlan>,
     model_runtime: Option<&ModelRuntimeService>,
 ) -> AgentToolExecution {
-    let executor_code = executor_dispatch.map(|plan| plan.executor_code.as_str());
-    if executor_dispatch.is_some_and(|plan| plan.requires_mcp_tool)
-        || matches!(agent_tool_kind(tool), ToolKind::Mcp)
-    {
-        return execute_mcp_tool(&tool.code, input, mcp_tool).await;
-    }
     let tool_code = tool.code.as_str();
-    if executor_code == Some("connector.feishu.message.send") || tool_code == FEISHU_TOOL_CODE {
-        return execute_feishu_message_tool(input).await;
-    }
-    if executor_code == Some("model.media.image.generate") || tool_code == MEDIA_IMAGE_TOOL_CODE {
-        return execute_media_image_tool(input, model_runtime).await;
-    }
-    if executor_code == Some("connector.github.repo.search")
-        || tool_code == GITHUB_REPO_SEARCH_TOOL_CODE
-    {
-        return execute_github_repo_search_tool(input, connector_credential).await;
-    }
-    if executor_code == Some("connector.github.repo.read")
-        || tool_code == GITHUB_REPO_READ_TOOL_CODE
-    {
-        return execute_github_repo_read_tool(input, connector_credential).await;
+    match AgentToolExecutorSelection::from_dispatch(
+        tool_code,
+        agent_tool_kind(tool),
+        executor_dispatch,
+    ) {
+        AgentToolExecutorSelection::Mcp => {
+            return execute_mcp_tool(&tool.code, input, mcp_tool).await;
+        }
+        AgentToolExecutorSelection::FeishuMessage => {
+            return execute_feishu_message_tool(input).await;
+        }
+        AgentToolExecutorSelection::MediaImage => {
+            return execute_media_image_tool(input, model_runtime).await;
+        }
+        AgentToolExecutorSelection::GitHubRepoSearch => {
+            return execute_github_repo_search_tool(input, connector_credential).await;
+        }
+        AgentToolExecutorSelection::GitHubRepoRead => {
+            return execute_github_repo_read_tool(input, connector_credential).await;
+        }
+        AgentToolExecutorSelection::DryRun => {}
     }
 
     AgentToolExecution::succeeded(
@@ -4447,13 +4443,6 @@ fn github_ref_keyword(token: &str) -> bool {
     matches!(
         token.to_ascii_lowercase().as_str(),
         "ref" | "reference" | "branch"
-    )
-}
-
-fn is_github_connector_tool(tool_code: &str) -> bool {
-    matches!(
-        tool_code,
-        GITHUB_REPO_SEARCH_TOOL_CODE | GITHUB_REPO_READ_TOOL_CODE
     )
 }
 
@@ -7996,20 +7985,20 @@ mod tests {
     }
 
     #[test]
-    fn agent_service_tool_executor_dispatch_plan_guides_tool_io() {
+    fn agent_service_tool_executor_dispatch_plan_selection_boundary_guides_tool_io() {
         let source = include_str!("agent_service.rs")
             .split("#[cfg(test)]")
             .next()
             .unwrap();
 
         assert!(source.contains("ToolExecutorDispatchPlan::from_binding"));
-        assert!(source.contains("executor_dispatch.as_ref().is_some_and"));
-        assert!(source.contains("plan.requires_connector_credential"));
-        assert!(source.contains("plan.requires_mcp_tool"));
+        assert!(source.contains("AgentToolExecutorSelection::from_dispatch"));
+        assert!(source.contains("agent_tool_requires_github_connector_credential"));
+        assert!(source.contains("agent_tool_requires_mcp_lookup"));
         assert!(source.contains("executor_dispatch.as_ref(),"));
-        assert!(source.contains("executor_code == Some(\"model.media.image.generate\")"));
-        assert!(source.contains("executor_code == Some(\"connector.github.repo.search\")"));
-        assert!(source.contains("tool_code == MEDIA_IMAGE_TOOL_CODE"));
+        assert!(source.contains("AgentToolExecutorSelection::MediaImage"));
+        assert!(source.contains("AgentToolExecutorSelection::GitHubRepoSearch"));
+        assert!(source.contains("AgentToolExecutorSelection::DryRun"));
     }
 
     #[test]
