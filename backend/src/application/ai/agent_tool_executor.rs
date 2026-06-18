@@ -1,11 +1,14 @@
-use std::{env, time::Duration};
+use std::{env, future::Future, time::Duration};
 
 use novex_connectors::{
     parse_credential_scope, parse_github_code_search_response, resolve_env_secret_ref,
     select_connector_credential, ConnectorCredentialBinding, FeishuTextMessage,
     ResolvedConnectorCredential,
 };
-use novex_mcp::{McpStreamableHttpRequestPlan, McpToolInvocationRequest, McpToolInvocationResult};
+use novex_mcp::{
+    parse_mcp_tool_call_response, McpStreamableHttpRequestPlan, McpStreamableHttpResponse,
+    McpToolInvocationRequest, McpToolInvocationResult,
+};
 use novex_model::ModelRoutePurpose;
 use novex_tools::{
     feishu_message_text_from_tool_input, github_read_request_from_tool_input,
@@ -21,6 +24,7 @@ use crate::infrastructure::persistence::ai_capability_repository::{
 
 const FEISHU_WEBHOOK_TIMEOUT: Duration = Duration::from_secs(10);
 const GITHUB_CONNECTOR_TIMEOUT: Duration = Duration::from_secs(15);
+const MCP_STREAMABLE_HTTP_TIMEOUT: Duration = Duration::from_secs(20);
 
 type GitHubConnectorAuth = ResolvedConnectorCredential;
 
@@ -182,6 +186,30 @@ async fn execute_mcp_tool(
     input: &Value,
     mcp_tool: Option<&McpToolExecutionRecord>,
 ) -> AgentToolExecution {
+    execute_mcp_tool_with_http_dispatch(
+        tool_code,
+        input,
+        mcp_tool,
+        |key| env::var(key).ok(),
+        |request_plan, bearer_token| async move {
+            dispatch_mcp_streamable_http_request(request_plan, bearer_token).await
+        },
+    )
+    .await
+}
+
+async fn execute_mcp_tool_with_http_dispatch<EnvGet, Dispatch, DispatchFuture>(
+    tool_code: &str,
+    input: &Value,
+    mcp_tool: Option<&McpToolExecutionRecord>,
+    mut env_get: EnvGet,
+    dispatch: Dispatch,
+) -> AgentToolExecution
+where
+    EnvGet: FnMut(&str) -> Option<String>,
+    Dispatch: FnOnce(McpStreamableHttpRequestPlan, Option<String>) -> DispatchFuture,
+    DispatchFuture: Future<Output = Result<McpStreamableHttpResponse, String>>,
+{
     let Some(tool) = mcp_tool else {
         return AgentToolExecution::failed(
             json!({
@@ -201,7 +229,15 @@ async fn execute_mcp_tool(
         tool_name: tool.tool_name.clone(),
         arguments: input.clone(),
     };
-    let auth = mcp_auth_payload(tool.secret_ref.as_deref(), &tool.auth_type);
+    let resolved_secret = tool
+        .secret_ref
+        .as_deref()
+        .and_then(|secret_ref| resolve_env_secret_ref(secret_ref, &mut env_get));
+    let auth = mcp_auth_payload_from_resolved(
+        tool.secret_ref.as_deref(),
+        &tool.auth_type,
+        resolved_secret.is_some(),
+    );
     if let Some(mock_response) = tool.metadata.get("mockResponse").cloned() {
         let result = McpToolInvocationResult {
             tool_code: tool.tool_code.clone(),
@@ -226,6 +262,114 @@ async fn execute_mcp_tool(
                 "Agent executed MCP tool {} via configured mock response.",
                 tool.tool_code
             ),
+        );
+    }
+
+    let live_request_plan = mcp_streamable_http_request_plan(tool, &request);
+    if mcp_live_execution_enabled(&tool.metadata) {
+        let live_request = live_request_plan
+            .as_ref()
+            .map(McpStreamableHttpRequestPlan::sanitized_evidence)
+            .unwrap_or(Value::Null);
+        let Some(live_request_plan) = live_request_plan else {
+            let error = "MCP Streamable HTTP endpoint is not configured".to_owned();
+            return failed_mcp_live_tool_execution(
+                tool,
+                &request,
+                &live_request,
+                &auth,
+                error,
+                None,
+                None,
+            );
+        };
+        if !mcp_live_auth_supported(&tool.auth_type) {
+            let error = format!(
+                "MCP live dispatch auth type `{}` is not supported",
+                tool.auth_type
+            );
+            return failed_mcp_live_tool_execution(
+                tool,
+                &request,
+                &live_request,
+                &auth,
+                error,
+                None,
+                None,
+            );
+        }
+        if mcp_auth_requires_secret(&tool.auth_type) && resolved_secret.is_none() {
+            let error = "MCP live dispatch secret is not resolved".to_owned();
+            return failed_mcp_live_tool_execution(
+                tool,
+                &request,
+                &live_request,
+                &auth,
+                error,
+                None,
+                None,
+            );
+        }
+        let bearer_token = if mcp_auth_uses_bearer_token(&tool.auth_type) {
+            resolved_secret
+        } else {
+            None
+        };
+        let response = match dispatch(live_request_plan, bearer_token).await {
+            Ok(response) => response,
+            Err(error) => {
+                return failed_mcp_live_tool_execution(
+                    tool,
+                    &request,
+                    &live_request,
+                    &auth,
+                    error,
+                    None,
+                    None,
+                );
+            }
+        };
+        let response_meta = json!({
+            "httpStatus": response.http_status,
+            "contentType": response.content_type,
+        });
+        let result = match parse_mcp_tool_call_response(&tool.tool_code, &response) {
+            Ok(result) => result,
+            Err(error) => {
+                let error_detail = serde_json::to_value(&error).unwrap_or_else(|_| {
+                    json!({
+                        "message": error.message,
+                    })
+                });
+                let message = format!("MCP live dispatch response parse failed: {}", error.message);
+                return failed_mcp_live_tool_execution(
+                    tool,
+                    &request,
+                    &live_request,
+                    &auth,
+                    message,
+                    Some(response_meta),
+                    Some(error_detail),
+                );
+            }
+        };
+        return AgentToolExecution::succeeded(
+            json!({
+                "dryRun": result.dry_run,
+                "toolCode": result.tool_code,
+                "status": result.status,
+                "provider": "mcp",
+                "live": true,
+                "server": mcp_server_payload(tool),
+                "request": request,
+                "liveRequest": live_request,
+                "responseMeta": response_meta,
+                "response": result.output,
+                "auth": auth,
+                "mocked": false,
+            }),
+            result.dry_run,
+            format!("Agent executed MCP tool {} via live HTTP.", tool.tool_code),
         );
     }
 
@@ -260,24 +404,141 @@ async fn execute_mcp_tool(
     )
 }
 
-fn mcp_streamable_http_request_payload(
+fn failed_mcp_live_tool_execution(
     tool: &McpToolExecutionRecord,
     request: &McpToolInvocationRequest,
-) -> Value {
-    let Some(endpoint_url) = tool.endpoint_url.as_deref() else {
-        return Value::Null;
-    };
-    if !matches!(tool.transport_kind.as_str(), "streamable_http" | "sse") {
-        return Value::Null;
+    live_request: &Value,
+    auth: &Value,
+    error: String,
+    response_meta: Option<Value>,
+    error_detail: Option<Value>,
+) -> AgentToolExecution {
+    let mut payload = json!({
+        "dryRun": false,
+        "toolCode": tool.tool_code,
+        "status": "failed",
+        "provider": "mcp",
+        "live": true,
+        "server": mcp_server_payload(tool),
+        "request": request,
+        "liveRequest": live_request,
+        "auth": auth,
+        "mocked": false,
+        "error": error,
+    });
+    if let Value::Object(payload) = &mut payload {
+        if let Some(response_meta) = response_meta {
+            payload.insert("responseMeta".to_owned(), response_meta);
+        }
+        if let Some(error_detail) = error_detail {
+            payload.insert("errorDetail".to_owned(), error_detail);
+        }
     }
 
-    McpStreamableHttpRequestPlan::tools_call(
+    AgentToolExecution::failed(
+        payload,
+        error,
+        "Agent failed to execute MCP tool.".to_owned(),
+    )
+}
+
+async fn dispatch_mcp_streamable_http_request(
+    request_plan: McpStreamableHttpRequestPlan,
+    bearer_token: Option<String>,
+) -> Result<McpStreamableHttpResponse, String> {
+    let client = reqwest::Client::builder()
+        .timeout(MCP_STREAMABLE_HTTP_TIMEOUT)
+        .user_agent("novex-mcp-streamable-http")
+        .build()
+        .map_err(|err| format!("MCP live dispatch client init failed: {err}"))?;
+    let mut request = client.post(&request_plan.endpoint_url);
+    for (header, value) in &request_plan.headers {
+        request = request.header(header.as_str(), value.as_str());
+    }
+    if let Some(token) = bearer_token
+        .as_deref()
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+    {
+        request = request.bearer_auth(token);
+    }
+
+    let response = request
+        .json(&request_plan.body)
+        .send()
+        .await
+        .map_err(|err| format!("MCP live dispatch failed: {err}"))?;
+    let status = response.status().as_u16();
+    let content_type = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("application/json")
+        .to_owned();
+    let body = response
+        .text()
+        .await
+        .map_err(|err| format!("MCP live dispatch response read failed: {err}"))?;
+
+    Ok(McpStreamableHttpResponse::new(status, content_type, body))
+}
+
+fn mcp_streamable_http_request_plan(
+    tool: &McpToolExecutionRecord,
+    request: &McpToolInvocationRequest,
+) -> Option<McpStreamableHttpRequestPlan> {
+    let endpoint_url = tool.endpoint_url.as_deref()?;
+    if !matches!(tool.transport_kind.as_str(), "streamable_http" | "sse") {
+        return None;
+    }
+
+    Some(McpStreamableHttpRequestPlan::tools_call(
         endpoint_url,
         format!("mcp-tool-{}", tool.id),
         request,
         tool.secret_ref.as_deref(),
+    ))
+}
+
+fn mcp_streamable_http_request_payload(
+    tool: &McpToolExecutionRecord,
+    request: &McpToolInvocationRequest,
+) -> Value {
+    mcp_streamable_http_request_plan(tool, request)
+        .map(|request_plan| request_plan.sanitized_evidence())
+        .unwrap_or(Value::Null)
+}
+
+fn mcp_live_execution_enabled(metadata: &Value) -> bool {
+    metadata
+        .get("liveExecutionEnabled")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+}
+
+fn mcp_normalized_auth_type(auth_type: &str) -> String {
+    auth_type.trim().to_ascii_lowercase()
+}
+
+fn mcp_live_auth_supported(auth_type: &str) -> bool {
+    matches!(
+        mcp_normalized_auth_type(auth_type).as_str(),
+        "" | "none" | "bearer" | "bearer_env"
     )
-    .sanitized_evidence()
+}
+
+fn mcp_auth_requires_secret(auth_type: &str) -> bool {
+    matches!(
+        mcp_normalized_auth_type(auth_type).as_str(),
+        "bearer" | "bearer_env" | "headers" | "oauth"
+    )
+}
+
+fn mcp_auth_uses_bearer_token(auth_type: &str) -> bool {
+    matches!(
+        mcp_normalized_auth_type(auth_type).as_str(),
+        "bearer" | "bearer_env"
+    )
 }
 
 fn mcp_server_payload(tool: &McpToolExecutionRecord) -> Value {
@@ -291,10 +552,7 @@ fn mcp_server_payload(tool: &McpToolExecutionRecord) -> Value {
     })
 }
 
-fn mcp_auth_payload(secret_ref: Option<&str>, auth_type: &str) -> Value {
-    mcp_auth_payload_from_sources(secret_ref, auth_type, |key| env::var(key).ok())
-}
-
+#[allow(dead_code)]
 pub(super) fn mcp_auth_payload_from_sources<F>(
     secret_ref: Option<&str>,
     auth_type: &str,
@@ -306,6 +564,14 @@ where
     let resolved = secret_ref
         .and_then(|secret_ref| resolve_env_secret_ref(secret_ref, &mut env_get))
         .is_some();
+    mcp_auth_payload_from_resolved(secret_ref, auth_type, resolved)
+}
+
+fn mcp_auth_payload_from_resolved(
+    secret_ref: Option<&str>,
+    auth_type: &str,
+    resolved: bool,
+) -> Value {
     json!({
         "type": auth_type,
         "secretRef": secret_ref,
@@ -848,6 +1114,27 @@ mod tests {
         ))
     }
 
+    fn live_mcp_tool_record(metadata: Value) -> McpToolExecutionRecord {
+        McpToolExecutionRecord {
+            id: 21,
+            server_id: 42,
+            server_code: "docs".to_owned(),
+            server_name: "Docs".to_owned(),
+            endpoint_url: Some("https://mcp.example.com/mcp".to_owned()),
+            transport_kind: "streamable_http".to_owned(),
+            auth_type: "bearer_env".to_owned(),
+            secret_ref: Some("env:DOCS_MCP_TOKEN".to_owned()),
+            tool_name: "search".to_owned(),
+            tool_code: "mcp.docs.search".to_owned(),
+            description: "Search docs".to_owned(),
+            input_schema: json!({"type":"object"}),
+            output_schema: json!({"type":"object"}),
+            risk_level: 1,
+            permission_code: Some("ai:mcp:docs:search".to_owned()),
+            metadata,
+        }
+    }
+
     #[test]
     fn agent_tool_executor_selection_prefers_executor_code_and_keeps_legacy_fallbacks() {
         let media_dispatch = dispatch_plan(
@@ -1029,6 +1316,100 @@ mod tests {
             .response_payload
             .to_string()
             .contains("test-token"));
+    }
+
+    #[tokio::test]
+    async fn mcp_tool_execution_live_http_dispatch_uses_streamable_http_plan() {
+        let tool = live_mcp_tool_record(json!({"liveExecutionEnabled": true}));
+
+        let execution = execute_mcp_tool_with_http_dispatch(
+            "mcp.docs.search",
+            &json!({"query": "codex"}),
+            Some(&tool),
+            |key| (key == "DOCS_MCP_TOKEN").then(|| "secret-token".to_owned()),
+            |plan, bearer_token| async move {
+                assert_eq!(bearer_token.as_deref(), Some("secret-token"));
+                assert_eq!(plan.endpoint_url, "https://mcp.example.com/mcp");
+                assert_eq!(plan.http_method, "POST");
+                assert_eq!(
+                    plan.header_value("MCP-Protocol-Version").as_deref(),
+                    Some(novex_mcp::MCP_PROTOCOL_VERSION)
+                );
+                assert_eq!(plan.body["method"], "tools/call");
+                assert_eq!(plan.body["params"]["name"], "search");
+                assert_eq!(plan.body["params"]["arguments"]["query"], "codex");
+                Ok(novex_mcp::McpStreamableHttpResponse::new(
+                    200,
+                    "application/json",
+                    json!({
+                        "jsonrpc": "2.0",
+                        "id": "mcp-tool-21",
+                        "result": {
+                            "content": [{"type": "text", "text": "Found Codex docs"}],
+                            "structuredContent": {"hits": 1},
+                            "isError": false
+                        }
+                    })
+                    .to_string(),
+                ))
+            },
+        )
+        .await;
+
+        assert!(execution.succeeded_status());
+        assert!(!execution.dry_run);
+        assert_eq!(execution.response_payload["provider"], "mcp");
+        assert_eq!(execution.response_payload["live"], true);
+        assert_eq!(execution.response_payload["mocked"], false);
+        assert_eq!(
+            execution.response_payload["response"]["structuredContent"]["hits"],
+            1
+        );
+        assert_eq!(
+            execution.response_payload["liveRequest"]["body"]["method"],
+            "tools/call"
+        );
+        assert_eq!(
+            execution.response_payload["auth"]["secretRef"],
+            "env:DOCS_MCP_TOKEN"
+        );
+        assert_eq!(execution.response_payload["auth"]["resolved"], true);
+        assert!(!execution
+            .response_payload
+            .to_string()
+            .contains("secret-token"));
+    }
+
+    #[tokio::test]
+    async fn mcp_tool_execution_live_http_dispatch_failure_returns_safe_payload() {
+        let tool = live_mcp_tool_record(json!({"liveExecutionEnabled": true}));
+
+        let execution = execute_mcp_tool_with_http_dispatch(
+            "mcp.docs.search",
+            &json!({"query": "codex"}),
+            Some(&tool),
+            |key| (key == "DOCS_MCP_TOKEN").then(|| "secret-token".to_owned()),
+            |_plan, _bearer_token| async move { Err("MCP dispatch failed: timeout".to_owned()) },
+        )
+        .await;
+
+        assert!(!execution.succeeded_status());
+        assert!(!execution.dry_run);
+        assert_eq!(execution.response_payload["provider"], "mcp");
+        assert_eq!(execution.response_payload["live"], true);
+        assert_eq!(
+            execution.response_payload["liveRequest"]["secretRef"],
+            "env:DOCS_MCP_TOKEN"
+        );
+        assert_eq!(execution.response_payload["auth"]["resolved"], true);
+        assert_eq!(
+            execution.response_payload["error"],
+            "MCP dispatch failed: timeout"
+        );
+        assert!(!execution
+            .response_payload
+            .to_string()
+            .contains("secret-token"));
     }
 
     #[test]
