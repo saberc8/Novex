@@ -52,6 +52,36 @@ pub struct SecretRecord {
     pub update_time: Option<NaiveDateTime>,
 }
 
+#[derive(Debug, Clone, FromRow)]
+pub struct SecretValueRecord {
+    pub id: i64,
+    pub scope_type: String,
+    pub scope_id: String,
+    pub code: String,
+    pub key_version: i32,
+    pub ciphertext: String,
+    pub metadata: Value,
+}
+
+const SECRET_LATEST_ACTIVE_VALUE_SQL: &str = r#"
+SELECT
+    id,
+    scope_type,
+    scope_id,
+    code,
+    key_version,
+    ciphertext,
+    metadata
+FROM sys_secret
+WHERE tenant_id = $1
+  AND scope_type = $2
+  AND scope_id = $3
+  AND code = $4
+  AND status = 1
+ORDER BY key_version DESC
+LIMIT 1;
+"#;
+
 impl SystemSecretRepository {
     pub fn new(db: PgPool) -> Self {
         Self { db }
@@ -123,6 +153,24 @@ WHERE tenant_id = $1 AND scope_type = $2 AND scope_id = $3 AND code = $4;
         .fetch_one(&self.db)
         .await?
         .unwrap_or(0))
+    }
+
+    pub async fn find_latest_active_value(
+        &self,
+        tenant_id: i64,
+        scope_type: &str,
+        scope_id: &str,
+        code: &str,
+    ) -> Result<Option<SecretValueRecord>, AppError> {
+        Ok(
+            sqlx::query_as::<_, SecretValueRecord>(SECRET_LATEST_ACTIVE_VALUE_SQL)
+                .bind(tenant_id)
+                .bind(scope_type)
+                .bind(scope_id)
+                .bind(code)
+                .fetch_optional(&self.db)
+                .await?,
+        )
     }
 
     pub async fn create_version(
@@ -198,4 +246,17 @@ fn push_secret_filters(query: &mut QueryBuilder<'_, Postgres>, filter: &SecretFi
 
 fn non_empty(value: Option<&str>) -> Option<&str> {
     value.map(str::trim).filter(|value| !value.is_empty())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn secret_latest_active_value_sql_reads_latest_ciphertext_only() {
+        assert!(SECRET_LATEST_ACTIVE_VALUE_SQL.contains("ciphertext"));
+        assert!(SECRET_LATEST_ACTIVE_VALUE_SQL.contains("status = 1"));
+        assert!(SECRET_LATEST_ACTIVE_VALUE_SQL.contains("ORDER BY key_version DESC"));
+        assert!(SECRET_LATEST_ACTIVE_VALUE_SQL.contains("LIMIT 1"));
+    }
 }

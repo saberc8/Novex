@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use sqlx::PgPool;
+use std::fmt;
 
 use crate::{
     application::system::{ensure_max_chars, format_datetime},
@@ -79,6 +80,21 @@ pub struct SecretRecordPublicResp {
     pub status: i16,
     pub create_time: String,
     pub update_time: Option<String>,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub struct SecretResolvedValue {
+    pub secret_ref: String,
+    pub plaintext: String,
+}
+
+impl fmt::Debug for SecretResolvedValue {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SecretResolvedValue")
+            .field("secret_ref", &self.secret_ref)
+            .field("plaintext_present", &!self.plaintext.trim().is_empty())
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -168,9 +184,7 @@ impl SecretService {
         metadata: Value,
     ) -> Result<SecretRecordPublicResp, AppError> {
         let target = parse_system_secret_ref(secret_ref)?;
-        if target.scope_type == "tenant" && target.scope_id != self.tenant_id.to_string() {
-            return Err(AppError::bad_request("系统密钥引用租户不匹配"));
-        }
+        self.ensure_system_secret_ref_allowed(&target)?;
 
         self.upsert(
             user_id,
@@ -184,6 +198,67 @@ impl SecretService {
             },
         )
         .await
+    }
+
+    pub async fn resolve_secret_ref(
+        &self,
+        secret_ref: &str,
+    ) -> Result<SecretResolvedValue, AppError> {
+        self.resolve_secret_ref_with_env_getter(secret_ref, |key| std::env::var(key).ok())
+            .await
+    }
+
+    pub async fn resolve_secret_ref_with_env_getter<EnvGet>(
+        &self,
+        secret_ref: &str,
+        mut env_get: EnvGet,
+    ) -> Result<SecretResolvedValue, AppError>
+    where
+        EnvGet: FnMut(&str) -> Option<String>,
+    {
+        let secret_ref = secret_ref.trim();
+        if let Some(env_key) = secret_ref.strip_prefix("env:") {
+            let env_key = env_key.trim();
+            if env_key.is_empty() {
+                return Err(AppError::bad_request("env secretRef key 不能为空"));
+            }
+            let plaintext = env_get(env_key)
+                .map(|value| value.trim().to_owned())
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| AppError::bad_request("env secretRef 未解析"))?;
+            return Ok(SecretResolvedValue {
+                secret_ref: secret_ref.to_owned(),
+                plaintext,
+            });
+        }
+
+        let target = parse_system_secret_ref(secret_ref)
+            .map_err(|_| AppError::bad_request("secretRef 必须使用 env: 或 sys: 前缀"))?;
+        self.ensure_system_secret_ref_allowed(&target)?;
+        let Some(record) = self
+            .repo
+            .find_latest_active_value(
+                self.tenant_id,
+                &target.scope_type,
+                &target.scope_id,
+                &target.code,
+            )
+            .await?
+        else {
+            return Err(AppError::NotFound);
+        };
+
+        Ok(SecretResolvedValue {
+            secret_ref: secret_ref.to_owned(),
+            plaintext: unseal_secret_value(&record.ciphertext)?,
+        })
+    }
+
+    fn ensure_system_secret_ref_allowed(&self, target: &SystemSecretRef) -> Result<(), AppError> {
+        if target.scope_type == "tenant" && target.scope_id != self.tenant_id.to_string() {
+            return Err(AppError::bad_request("系统密钥引用租户不匹配"));
+        }
+        Ok(())
     }
 }
 
@@ -285,6 +360,23 @@ fn seal_secret_value(plaintext: &str) -> String {
     )
 }
 
+fn unseal_secret_value(ciphertext: &str) -> Result<String, AppError> {
+    let parts = ciphertext.trim().splitn(4, ':').collect::<Vec<_>>();
+    if parts.len() != 4 || parts[0] != "novex" || parts[1] != "v1" || parts[2].is_empty() {
+        return Err(AppError::bad_request("密钥密文格式无效"));
+    }
+    let sealed = STANDARD_NO_PAD
+        .decode(parts[3])
+        .map_err(|_| AppError::bad_request("密钥密文格式无效"))?;
+    let key = secret_encryption_key();
+    let mut plaintext = Vec::with_capacity(sealed.len());
+    for (index, byte) in sealed.iter().enumerate() {
+        plaintext.push(byte ^ key[index % key.len()]);
+    }
+
+    String::from_utf8(plaintext).map_err(|_| AppError::bad_request("密钥密文格式无效"))
+}
+
 fn secret_encryption_key() -> Vec<u8> {
     let raw = std::env::var("NOVEX_SECRET_ENCRYPTION_KEY")
         .or_else(|_| std::env::var("AUTH_JWT_SECRET"))
@@ -343,5 +435,60 @@ mod tests {
         let err = parse_system_secret_ref("env:DOCS_MCP_ACCESS_TOKEN").unwrap_err();
 
         assert!(err.to_string().contains("sys:"));
+    }
+
+    #[test]
+    fn secret_value_seal_unseal_round_trips_without_plaintext_ciphertext_equality() {
+        let plaintext = "access-token-value";
+        let ciphertext = seal_secret_value(plaintext);
+
+        assert_ne!(ciphertext, plaintext);
+        assert_eq!(unseal_secret_value(&ciphertext).unwrap(), plaintext);
+    }
+
+    #[tokio::test]
+    async fn secret_resolver_reads_env_ref_through_injected_env_getter() {
+        let service = SecretService::for_tenant(test_db(), 42);
+
+        let resolved = service
+            .resolve_secret_ref_with_env_getter("env:DOCS_MCP_ACCESS_TOKEN", |key| {
+                (key == "DOCS_MCP_ACCESS_TOKEN").then(|| "access-token-value".to_owned())
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(resolved.secret_ref, "env:DOCS_MCP_ACCESS_TOKEN");
+        assert_eq!(resolved.plaintext, "access-token-value");
+        assert!(!format!("{resolved:?}").contains("access-token-value"));
+    }
+
+    #[tokio::test]
+    async fn secret_resolver_rejects_tenant_mismatch_before_database() {
+        let service = SecretService::for_tenant(test_db(), 42);
+
+        let err = service
+            .resolve_secret_ref_with_env_getter("sys:tenant:7:mcp.docs.access", |_key| None)
+            .await
+            .unwrap_err();
+
+        assert!(err.to_string().contains("租户不匹配"));
+    }
+
+    #[tokio::test]
+    async fn secret_resolver_rejects_unsupported_prefix() {
+        let service = SecretService::for_tenant(test_db(), 42);
+
+        let err = service
+            .resolve_secret_ref_with_env_getter("plain-secret-value", |_key| None)
+            .await
+            .unwrap_err();
+
+        assert!(err.to_string().contains("secretRef"));
+    }
+
+    fn test_db() -> PgPool {
+        sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://postgres:postgres@localhost:5432/avalon_admin")
+            .unwrap()
     }
 }
