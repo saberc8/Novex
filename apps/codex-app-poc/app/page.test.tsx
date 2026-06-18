@@ -125,9 +125,18 @@ describe("Codex app POC page", () => {
           modelRouteId: "runtime.llm.code_agent",
           budget: {
             maxSteps: 8,
-            maxToolCalls: 1,
-            maxSeconds: 60,
+            maxToolCalls: 2,
+            maxSeconds: 90,
             maxCostCents: 0
+          },
+          workbenchContext: {
+            mode: "agent",
+            documentIds: [],
+            fileIds: [],
+            skillCodes: [],
+            mcpToolCodes: [],
+            webSearchEnabled: false,
+            routeId: "runtime.llm.code_agent"
           }
         })
       })

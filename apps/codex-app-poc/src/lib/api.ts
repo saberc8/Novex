@@ -40,6 +40,36 @@ export async function apiRequest<T>(path: string, init: ApiRequestInit = {}): Pr
   return body.data as T;
 }
 
+export async function apiFormRequest<T>(
+  path: string,
+  form: FormData,
+  init: ApiRequestInit = {}
+): Promise<T> {
+  const { query, headers: initHeaders, ...requestInit } = init;
+  const headers: Record<string, string> = {};
+  new Headers(initHeaders).forEach((value, key) => {
+    headers[key] = value;
+  });
+  const token = getAuthToken();
+  if (token) {
+    headers.Authorization = `Bearer ${token}`;
+  }
+
+  const response = await fetch(apiUrl(path, query), {
+    method: "POST",
+    ...requestInit,
+    body: form,
+    headers
+  });
+  const body = (await response.json()) as ApiEnvelope<T>;
+
+  if (!response.ok || body.code !== "200") {
+    throw new Error(body.msg ?? body.message ?? "Request failed");
+  }
+
+  return body.data as T;
+}
+
 export function apiUrl(path: string, query?: Record<string, unknown>) {
   const url = new URL(path, apiBaseUrl());
   Object.entries(query ?? {}).forEach(([key, value]) => {

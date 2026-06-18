@@ -5,6 +5,17 @@ export type TaskBudget = {
   maxCostCents?: number;
 };
 
+export type WorkbenchContext = {
+  mode: "agent";
+  datasetId?: number;
+  documentIds: number[];
+  fileIds: number[];
+  skillCodes: string[];
+  mcpToolCodes: string[];
+  webSearchEnabled: boolean;
+  routeId?: string;
+};
+
 export type AgentRunCommand = {
   input: string;
   runtimeMode?: "model_loop";
@@ -12,6 +23,7 @@ export type AgentRunCommand = {
   modelRouteId?: string;
   autoApprove?: boolean;
   budget?: TaskBudget;
+  workbenchContext?: WorkbenchContext;
 };
 
 export type AgentRunEventStreamQuery = {

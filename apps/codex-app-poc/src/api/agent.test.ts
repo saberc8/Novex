@@ -59,9 +59,18 @@ describe("codex poc agent api", () => {
           modelRouteId: "runtime.llm.code_agent",
           budget: {
             maxSteps: 8,
-            maxToolCalls: 1,
-            maxSeconds: 60,
+            maxToolCalls: 2,
+            maxSeconds: 90,
             maxCostCents: 0
+          },
+          workbenchContext: {
+            mode: "agent",
+            documentIds: [],
+            fileIds: [],
+            skillCodes: [],
+            mcpToolCodes: [],
+            webSearchEnabled: false,
+            routeId: "runtime.llm.code_agent"
           }
         })
       })
@@ -91,13 +100,53 @@ describe("codex poc agent api", () => {
           autoApprove: false,
           budget: {
             maxSteps: 8,
-            maxToolCalls: 1,
-            maxSeconds: 60,
+            maxToolCalls: 2,
+            maxSeconds: 90,
             maxCostCents: 0
+          },
+          workbenchContext: {
+            mode: "agent",
+            documentIds: [],
+            fileIds: [],
+            skillCodes: [],
+            mcpToolCodes: [],
+            webSearchEnabled: false
           }
         })
       })
     );
+  });
+
+  it("sends workbench context with configured model run", async () => {
+    const fetchMock = vi.fn(async () => ({
+      ok: true,
+      json: async () => ({
+        code: "200",
+        data: { runId: 4, status: "queued", traceId: "agent-4" }
+      })
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await createConfiguredModelAgentRun("Summarize file", {
+      mode: "agent",
+      datasetId: 7,
+      documentIds: [11],
+      fileIds: [19],
+      skillCodes: ["support.refund"],
+      mcpToolCodes: ["mcp.docs.search"],
+      webSearchEnabled: true
+    });
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      expect.stringContaining("/ai/agents/runs"),
+      expect.objectContaining({
+        method: "POST",
+        body: expect.stringContaining('"workbenchContext"')
+      })
+    );
+    const [, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
+    expect(String(init.body)).toContain('"skillCodes":["support.refund"]');
+    expect(String(init.body)).toContain('"webSearchEnabled":true');
   });
 
   it("opens an agent event stream with cursor query", async () => {

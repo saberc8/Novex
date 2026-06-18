@@ -1,21 +1,17 @@
 import { apiRequest, apiUrl } from "@/lib/api";
 import { getAuthToken } from "@/lib/auth";
+import { buildWorkbenchAgentRunCommand, defaultWorkbenchContext } from "./workbench";
 import type {
   AgentRunCommand,
   AgentRunEventQuery,
   AgentRunEventResp,
   AgentRunEventStreamQuery,
   AgentRunResp,
-  PageResult
+  PageResult,
+  WorkbenchContext
 } from "@/types/agent";
 
 const AGENT_RUN_URL = "/ai/agents/runs";
-const CONFIGURED_MODEL_AGENT_BUDGET = {
-  maxSteps: 8,
-  maxToolCalls: 1,
-  maxSeconds: 60,
-  maxCostCents: 0
-};
 
 export interface AgentRunEventWebSocketTicketResp {
   ticket: string;
@@ -29,15 +25,10 @@ export function createAgentRun(data: AgentRunCommand) {
   });
 }
 
-export function createConfiguredModelAgentRun(input: string) {
-  const modelRouteId = configuredAgentModelRouteId();
-  return createAgentRun({
-    input,
-    runtimeMode: "model_loop",
-    autoApprove: false,
-    ...(modelRouteId ? { modelRouteId } : {}),
-    budget: CONFIGURED_MODEL_AGENT_BUDGET
-  });
+export function createConfiguredModelAgentRun(input: string, workbenchContext?: WorkbenchContext) {
+  return createAgentRun(
+    buildWorkbenchAgentRunCommand(input, workbenchContext ?? defaultWorkbenchContext())
+  );
 }
 
 export function fetchAgentRunEventStream(
@@ -79,8 +70,4 @@ export function agentRunEventWebSocketUrl(
   const url = new URL(apiUrl(`${AGENT_RUN_URL}/${runId}/events/ws`, { ...query, ticket }));
   url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
   return url.toString();
-}
-
-function configuredAgentModelRouteId() {
-  return (process.env.NEXT_PUBLIC_AGENT_MODEL_ROUTE_ID ?? "").trim() || undefined;
 }
