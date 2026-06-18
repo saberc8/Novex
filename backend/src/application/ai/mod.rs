@@ -1,6 +1,7 @@
 pub mod agent_queue_runtime;
 pub mod agent_service;
 mod agent_tool_executor;
+mod agent_tool_io_runtime;
 pub mod capability_service;
 pub mod chat_flow_service;
 pub mod customer_service_agent;

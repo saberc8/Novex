@@ -6,7 +6,6 @@ use std::{
 };
 
 use chrono::{NaiveDateTime, Utc};
-use futures_util::future::join_all;
 use novex_agent::{plan_react_run_with_memory, AgentIntent, AgentLoopKind};
 use novex_agent_protocol::{AgentTurnItem, ToolObservationStatus};
 use novex_agent_runtime::{
@@ -29,8 +28,8 @@ use novex_memory::{
 use novex_model::ModelRoutePurpose;
 use novex_tools::{
     agent_model_loop_tool_definitions, agent_model_loop_tool_executor_bindings,
-    evaluate_tool_execution_policy, AgentToolExecution, ApprovalPolicy, ToolBatchExecutionMode,
-    ToolBatchPlan, ToolExecutionPolicyDecision, ToolExecutionPolicyInput, ToolExecutorBinding,
+    evaluate_tool_execution_policy, AgentToolExecution, ApprovalPolicy, ToolBatchPlan,
+    ToolExecutionPolicyDecision, ToolExecutionPolicyInput, ToolExecutorBinding,
     ToolExecutorDispatchPlan, ToolExecutorRegistry, ToolExecutorRegistryError, ToolRiskLevel,
     ToolRouteError, ToolRouteErrorKind, ToolRouter,
 };
@@ -44,6 +43,7 @@ use super::agent_tool_executor::{
     agent_tool_kind, agent_tool_requires_github_connector_credential,
     agent_tool_requires_mcp_lookup, execute_agent_tool, MEDIA_IMAGE_TOOL_CODE,
 };
+use super::agent_tool_io_runtime::execute_agent_tool_io_batch;
 use crate::{
     application::ai::model_service::{
         ModelChatCommand, ModelChatCompactionMetadata, ModelChatMessage, ModelChatRequestMetadata,
@@ -104,21 +104,21 @@ struct RecordedToolExecution {
 }
 
 #[derive(Debug, Clone)]
-struct PreparedAgentToolCall {
-    batch_index: usize,
-    call_id: String,
-    tool: ToolLookupRecord,
-    arguments: Value,
-    executor_binding: Option<ToolExecutorBinding>,
-    concurrency_policy: Value,
-    timeout: Duration,
+pub(super) struct PreparedAgentToolCall {
+    pub(super) batch_index: usize,
+    pub(super) call_id: String,
+    pub(super) tool: ToolLookupRecord,
+    pub(super) arguments: Value,
+    pub(super) executor_binding: Option<ToolExecutorBinding>,
+    pub(super) concurrency_policy: Value,
+    pub(super) timeout: Duration,
 }
 
 #[derive(Debug, Clone)]
-struct ExecutedAgentToolCall {
-    prepared: PreparedAgentToolCall,
-    execution: AgentToolExecution,
-    terminal_status: RunStatus,
+pub(super) struct ExecutedAgentToolCall {
+    pub(super) prepared: PreparedAgentToolCall,
+    pub(super) execution: AgentToolExecution,
+    pub(super) terminal_status: RunStatus,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -3471,95 +3471,6 @@ fn model_loop_parse_turn_output(
         .map_err(|err| AppError::bad_request(format!("Agent 模型输出解析失败: {}", err.message)))
 }
 
-async fn execute_agent_tool_io_batch<F, Fut>(
-    mode: ToolBatchExecutionMode,
-    prepared_calls: Vec<PreparedAgentToolCall>,
-    cancel_token: AgentRunCancellationToken,
-    execute: F,
-) -> Result<Vec<ExecutedAgentToolCall>, AppError>
-where
-    F: Fn(PreparedAgentToolCall) -> Fut,
-    Fut: Future<Output = Result<ExecutedAgentToolCall, AppError>>,
-{
-    match mode {
-        ToolBatchExecutionMode::Parallel => {
-            let results = join_all(prepared_calls.into_iter().map(|prepared| {
-                execute_agent_tool_io_with_timeout_and_cancel(
-                    prepared,
-                    cancel_token.clone(),
-                    &execute,
-                )
-            }))
-            .await;
-            results.into_iter().collect()
-        }
-        ToolBatchExecutionMode::Serial => {
-            let mut executions = Vec::with_capacity(prepared_calls.len());
-            for prepared in prepared_calls {
-                executions.push(
-                    execute_agent_tool_io_with_timeout_and_cancel(
-                        prepared,
-                        cancel_token.clone(),
-                        &execute,
-                    )
-                    .await?,
-                );
-            }
-            Ok(executions)
-        }
-    }
-}
-
-async fn execute_agent_tool_io_with_timeout_and_cancel<F, Fut>(
-    prepared: PreparedAgentToolCall,
-    cancel_token: AgentRunCancellationToken,
-    execute: &F,
-) -> Result<ExecutedAgentToolCall, AppError>
-where
-    F: Fn(PreparedAgentToolCall) -> Fut,
-    Fut: Future<Output = Result<ExecutedAgentToolCall, AppError>>,
-{
-    let timeout = prepared.timeout;
-    tokio::select! {
-        biased;
-        _ = cancel_token.cancelled() => Ok(ExecutedAgentToolCall {
-            execution: AgentToolExecution::cancelled(
-                json!({
-                    "status": "cancelled",
-                    "cancelReason": "external_cancel",
-                    "cancelStage": "tool_io",
-                    "toolCode": prepared.tool.code,
-                    "callId": prepared.call_id,
-                }),
-                format!("Tool `{}` was cancelled by run cancellation.", prepared.tool.code),
-            ),
-            prepared,
-            terminal_status: RunStatus::Cancelled,
-        }),
-        result = tokio::time::timeout(timeout, execute(prepared.clone())) => match result {
-            Ok(result) => result,
-            Err(_) => Ok(ExecutedAgentToolCall {
-            execution: AgentToolExecution::cancelled(
-                json!({
-                    "status": "cancelled",
-                    "cancelReason": "tool_io_timeout",
-                    "toolCode": prepared.tool.code,
-                    "callId": prepared.call_id,
-                    "timeoutMs": timeout.as_millis() as u64,
-                }),
-                format!(
-                    "Tool `{}` was cancelled after {} ms.",
-                    prepared.tool.code,
-                    timeout.as_millis()
-                ),
-            ),
-            prepared,
-            terminal_status: RunStatus::Cancelled,
-            }),
-        },
-    }
-}
-
 fn media_records_from_tool_execution(
     tenant_id: i64,
     run_id: i64,
@@ -5240,6 +5151,7 @@ mod tests {
     use novex_tools::{
         feishu_message_text_from_tool_input, github_read_request_from_tool_input,
         github_search_request_from_tool_input, media_image_request_from_tool_input,
+        ToolBatchExecutionMode,
     };
     use novex_trace::TraceEventKind;
     use sqlx::postgres::PgPoolOptions;
@@ -5985,7 +5897,7 @@ mod tests {
 
     #[test]
     fn agent_service_model_loop_records_tool_timeout_cancel_reason() {
-        let source = include_str!("agent_service.rs")
+        let source = include_str!("agent_tool_io_runtime.rs")
             .split("#[cfg(test)]")
             .next()
             .unwrap();
@@ -6823,13 +6735,19 @@ mod tests {
 
     #[test]
     fn agent_service_tool_io_awaits_runtime_registry_cancel_token() {
-        let source = include_str!("agent_service.rs")
+        let service_source = include_str!("agent_service.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+        let runtime_source = include_str!("agent_tool_io_runtime.rs")
             .split("#[cfg(test)]")
             .next()
             .unwrap();
 
-        assert!(source.contains("execute_agent_tool_io_with_timeout_and_cancel"));
-        assert!(source.contains("\"cancelReason\": \"external_cancel\""));
+        assert!(service_source.contains("execute_agent_tool_io_batch"));
+        assert!(service_source.contains("cancel_token.clone()"));
+        assert!(runtime_source.contains("execute_agent_tool_io_with_timeout_and_cancel"));
+        assert!(runtime_source.contains("\"cancelReason\": \"external_cancel\""));
     }
 
     #[tokio::test]
@@ -6927,6 +6845,25 @@ mod tests {
     }
 
     #[test]
+    fn agent_tool_io_task_control_lives_in_runtime_module() {
+        let source = include_str!("agent_service.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+
+        assert!(source.contains("agent_tool_io_runtime::execute_agent_tool_io_batch"));
+        for needle in [
+            "async fn execute_agent_tool_io_batch",
+            "async fn execute_agent_tool_io_with_timeout_and_cancel",
+        ] {
+            assert!(
+                !source.contains(needle),
+                "{needle} should live in agent_tool_io_runtime.rs"
+            );
+        }
+    }
+
+    #[test]
     fn agent_service_model_loop_evaluates_batch_approval_before_execution() {
         let source = include_str!("agent_service.rs")
             .split("#[cfg(test)]")
@@ -6934,7 +6871,7 @@ mod tests {
             .unwrap();
 
         let approval_index = source.find("batch_policy.requires_approval").unwrap();
-        let execution_index = source.find("execute_agent_tool_io_batch").unwrap();
+        let execution_index = source.find("execute_agent_tool_io_batch(").unwrap();
         assert!(approval_index < execution_index);
     }
 
@@ -7044,9 +6981,14 @@ mod tests {
             .split("#[cfg(test)]")
             .next()
             .unwrap();
+        let runtime_source = include_str!("agent_tool_io_runtime.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
 
         assert!(service_source.contains("AgentToolExecution,"));
         assert!(executor_source.contains("AgentToolExecution,"));
+        assert!(runtime_source.contains("AgentToolExecution,"));
         assert!(
             !service_source.contains("struct AgentToolExecution"),
             "AgentToolExecution should live in novex-tools"
@@ -7055,9 +6997,13 @@ mod tests {
             !executor_source.contains("struct AgentToolExecution"),
             "AgentToolExecution should live in novex-tools"
         );
+        assert!(
+            !runtime_source.contains("struct AgentToolExecution"),
+            "AgentToolExecution should live in novex-tools"
+        );
         assert!(executor_source.contains("AgentToolExecution::succeeded("));
         assert!(executor_source.contains("AgentToolExecution::failed("));
-        assert!(service_source.contains("AgentToolExecution::cancelled("));
+        assert!(runtime_source.contains("AgentToolExecution::cancelled("));
     }
 
     #[test]
@@ -7726,7 +7672,7 @@ mod tests {
         let batch_branch = &source[source.find("if batch_policy.requires_approval").unwrap()
             ..source.find("let mut last_recorded_step_id").unwrap()];
         let normalized_batch_branch = batch_branch.split_whitespace().collect::<String>();
-        let execution_index = source.find("execute_agent_tool_io_batch").unwrap();
+        let execution_index = source.find("execute_agent_tool_io_batch(").unwrap();
         let gate_index = source
             .find("guardian_auto_approval_allows_execution(&guardian_review_decision)")
             .unwrap();
