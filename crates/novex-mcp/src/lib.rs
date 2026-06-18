@@ -472,12 +472,14 @@ fn build_oauth_authorization_url(
 #[serde(rename_all = "snake_case")]
 pub enum McpOAuthGrantType {
     AuthorizationCode,
+    RefreshToken,
 }
 
 impl McpOAuthGrantType {
     fn as_form_value(self) -> &'static str {
         match self {
             Self::AuthorizationCode => "authorization_code",
+            Self::RefreshToken => "refresh_token",
         }
     }
 }
@@ -491,6 +493,16 @@ pub struct McpOAuthTokenExchangeConfig {
     pub redirect_uri: String,
     pub authorization_code: String,
     pub code_verifier_secret_ref: String,
+    pub client_auth: McpOAuthClientAuth,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpOAuthTokenRefreshConfig {
+    pub server_code: String,
+    pub token_endpoint: String,
+    pub client_id: String,
+    pub refresh_token: String,
     pub client_auth: McpOAuthClientAuth,
 }
 
@@ -552,6 +564,41 @@ impl McpOAuthTokenExchangePlan {
         })
     }
 
+    pub fn refresh_token(config: McpOAuthTokenRefreshConfig) -> Result<Self, McpOAuthSessionError> {
+        let server_code = required_oauth_field("server_code", &config.server_code)?;
+        let token_endpoint = validate_oauth_https_url("token_endpoint", &config.token_endpoint)?;
+        let client_id = required_oauth_field("client_id", &config.client_id)?;
+        let refresh_token = required_oauth_field("refresh_token", &config.refresh_token)?;
+        let client_auth = normalize_oauth_client_auth(config.client_auth)?;
+
+        let mut headers = BTreeMap::new();
+        headers.insert("Accept".to_owned(), "application/json".to_owned());
+        headers.insert(
+            "Content-Type".to_owned(),
+            "application/x-www-form-urlencoded".to_owned(),
+        );
+
+        let grant_type = McpOAuthGrantType::RefreshToken;
+        let mut form = BTreeMap::new();
+        form.insert(
+            "grant_type".to_owned(),
+            grant_type.as_form_value().to_owned(),
+        );
+        form.insert("refresh_token".to_owned(), refresh_token);
+        form.insert("client_id".to_owned(), client_id.clone());
+
+        Ok(Self {
+            server_code,
+            token_endpoint,
+            http_method: "POST".to_owned(),
+            headers,
+            form,
+            grant_type,
+            code_verifier_secret_ref: String::new(),
+            client_auth,
+        })
+    }
+
     pub fn sanitized_evidence(&self) -> Value {
         json!({
             "serverCode": self.server_code,
@@ -563,6 +610,7 @@ impl McpOAuthTokenExchangePlan {
                 "clientId": self.form.get("client_id"),
                 "redirectUri": self.form.get("redirect_uri"),
                 "authorizationCodePresent": self.form.contains_key("code"),
+                "refreshTokenPresent": self.form.contains_key("refresh_token"),
             },
             "codeVerifierSecretRef": self.code_verifier_secret_ref,
             "clientAuth": oauth_client_auth_evidence(&self.client_auth),
@@ -1702,6 +1750,59 @@ mod tests {
         .unwrap_err();
 
         assert_eq!(err.field, "code_verifier_secret_ref");
+    }
+
+    #[test]
+    fn mcp_oauth_session_token_exchange_plan_builds_refresh_token_form_without_leakage() {
+        let plan = McpOAuthTokenExchangePlan::refresh_token(McpOAuthTokenRefreshConfig {
+            server_code: "docs".to_owned(),
+            token_endpoint: "https://auth.example.com/oauth/token".to_owned(),
+            client_id: "novex-mcp-client".to_owned(),
+            refresh_token: "refresh-token-secret-value".to_owned(),
+            client_auth: McpOAuthClientAuth::ClientSecretRef(
+                "env:MCP_OAUTH_CLIENT_SECRET".to_owned(),
+            ),
+        })
+        .expect("valid refresh-token config should build a request plan");
+
+        assert_eq!(plan.server_code, "docs");
+        assert_eq!(plan.grant_type, McpOAuthGrantType::RefreshToken);
+        assert_eq!(
+            plan.form.get("grant_type").map(String::as_str),
+            Some("refresh_token")
+        );
+        assert_eq!(
+            plan.form.get("refresh_token").map(String::as_str),
+            Some("refresh-token-secret-value")
+        );
+        assert_eq!(
+            plan.form.get("client_id").map(String::as_str),
+            Some("novex-mcp-client")
+        );
+
+        let evidence = plan.sanitized_evidence();
+        assert_eq!(evidence["form"]["grantType"], "refresh_token");
+        assert_eq!(evidence["form"]["refreshTokenPresent"], true);
+        assert_eq!(
+            evidence["clientAuth"]["clientSecretRef"],
+            "env:MCP_OAUTH_CLIENT_SECRET"
+        );
+        assert!(!evidence.to_string().contains("refresh-token-secret-value"));
+        assert!(!evidence.to_string().contains("client-secret-value"));
+    }
+
+    #[test]
+    fn mcp_oauth_session_token_exchange_rejects_missing_refresh_token() {
+        let err = McpOAuthTokenExchangePlan::refresh_token(McpOAuthTokenRefreshConfig {
+            server_code: "docs".to_owned(),
+            token_endpoint: "https://auth.example.com/oauth/token".to_owned(),
+            client_id: "novex-mcp-client".to_owned(),
+            refresh_token: " ".to_owned(),
+            client_auth: McpOAuthClientAuth::None,
+        })
+        .unwrap_err();
+
+        assert_eq!(err.field, "refresh_token");
     }
 
     #[test]

@@ -25,7 +25,8 @@ use crate::{
         ai::mcp_oauth_token_dispatch::{
             dispatch_mcp_oauth_token_request,
             exchange_mcp_oauth_callback_with_dispatch_and_secret_writer,
-            McpOAuthCallbackTokenCommand, McpOAuthTokenSecretMaterial,
+            refresh_mcp_oauth_session_with_dispatch_and_secret_writer,
+            McpOAuthCallbackTokenCommand, McpOAuthRefreshTokenCommand, McpOAuthTokenSecretMaterial,
         },
         system::{ensure_max_chars, format_datetime, secret_service::SecretService},
     },
@@ -474,6 +475,15 @@ pub struct McpOAuthCallbackCommand {
     pub error: Option<String>,
     #[serde(default)]
     pub error_description: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpOAuthRefreshCommand {
+    #[serde(default)]
+    pub scope_type: String,
+    #[serde(default)]
+    pub scope_id: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -956,6 +966,7 @@ impl CapabilityService {
                     write_mcp_oauth_token_secret_material(
                         secret_service,
                         user_id,
+                        "mcp_oauth_callback",
                         secret_server_id,
                         &secret_server_code,
                         &secret_scope_type,
@@ -985,6 +996,81 @@ impl CapabilityService {
             session,
             token.sanitized_evidence(),
         ))
+    }
+
+    pub async fn refresh_mcp_oauth_session(
+        &self,
+        user_id: i64,
+        server_id: i64,
+        command: McpOAuthRefreshCommand,
+    ) -> Result<McpOAuthCallbackResp, AppError> {
+        let scope_type = required_trimmed("MCP OAuth scope_type", &command.scope_type)?;
+        let scope_id = required_trimmed("MCP OAuth scope_id", &command.scope_id)?;
+        let Some(current_session) = self
+            .repo
+            .find_mcp_oauth_session_for_scope(self.tenant_id, server_id, &scope_type, &scope_id)
+            .await?
+        else {
+            return Err(AppError::NotFound);
+        };
+        let token_command =
+            mcp_oauth_refresh_token_command_from_session_metadata(&current_session)?;
+        let received_at_epoch_seconds = Utc::now().timestamp().max(0) as u64;
+        let secret_service = SecretService::for_tenant(self.db.clone(), self.tenant_id);
+        let resolver_secret_service = secret_service.clone();
+        let secret_server_id = current_session.server_id;
+        let secret_server_code = current_session.server_code.clone();
+        let secret_scope_type = current_session.scope_type.clone();
+        let secret_scope_id = current_session.scope_id.clone();
+        let token = refresh_mcp_oauth_session_with_dispatch_and_secret_writer(
+            token_command,
+            received_at_epoch_seconds,
+            move |secret_ref| {
+                let resolver_secret_service = resolver_secret_service.clone();
+                let secret_ref = secret_ref.to_owned();
+                async move {
+                    resolver_secret_service
+                        .resolve_secret_ref(&secret_ref)
+                        .await
+                        .map(|resolved| resolved.plaintext)
+                        .map_err(|_| "secret resolve failed".to_owned())
+                }
+            },
+            |key| env::var(key).ok(),
+            |plan, secrets| async move { dispatch_mcp_oauth_token_request(plan, secrets).await },
+            move |material| {
+                let secret_service = secret_service.clone();
+                async move {
+                    write_mcp_oauth_token_secret_material(
+                        secret_service,
+                        user_id,
+                        "mcp_oauth_refresh",
+                        secret_server_id,
+                        &secret_server_code,
+                        &secret_scope_type,
+                        &secret_scope_id,
+                        material,
+                    )
+                    .await
+                    .map_err(|_| "secret write failed".to_owned())
+                }
+            },
+        )
+        .await
+        .map_err(|error| AppError::bad_request(error.message))?;
+        let now = Utc::now().naive_utc();
+        let evidence = token.sanitized_evidence();
+        let save_record = mcp_oauth_session_save_record_from_refresh(
+            self.tenant_id,
+            user_id,
+            &current_session,
+            &token.session,
+            evidence.clone(),
+            now,
+        )?;
+        let session = self.repo.upsert_mcp_oauth_session(&save_record).await?;
+
+        Ok(McpOAuthCallbackResp::from_session(session, evidence))
     }
 
     pub async fn dry_run_tool(
@@ -1201,6 +1287,7 @@ fn mcp_oauth_client_auth_from_state(value: &Value) -> Result<McpOAuthClientAuth,
 async fn write_mcp_oauth_token_secret_material(
     secret_service: SecretService,
     user_id: i64,
+    source: &str,
     server_id: i64,
     server_code: &str,
     scope_type: &str,
@@ -1212,7 +1299,14 @@ async fn write_mcp_oauth_token_secret_material(
             user_id,
             &material.access_token_secret_ref,
             material.access_token,
-            mcp_oauth_secret_metadata(server_id, server_code, scope_type, scope_id, "access"),
+            mcp_oauth_secret_metadata(
+                source,
+                server_id,
+                server_code,
+                scope_type,
+                scope_id,
+                "access",
+            ),
         )
         .await?;
 
@@ -1225,7 +1319,14 @@ async fn write_mcp_oauth_token_secret_material(
                 user_id,
                 secret_ref,
                 refresh_token,
-                mcp_oauth_secret_metadata(server_id, server_code, scope_type, scope_id, "refresh"),
+                mcp_oauth_secret_metadata(
+                    source,
+                    server_id,
+                    server_code,
+                    scope_type,
+                    scope_id,
+                    "refresh",
+                ),
             )
             .await?;
     }
@@ -1234,6 +1335,7 @@ async fn write_mcp_oauth_token_secret_material(
 }
 
 fn mcp_oauth_secret_metadata(
+    source: &str,
     server_id: i64,
     server_code: &str,
     scope_type: &str,
@@ -1241,7 +1343,7 @@ fn mcp_oauth_secret_metadata(
     token_kind: &str,
 ) -> Value {
     json!({
-        "source": "mcp_oauth_callback",
+        "source": source,
         "serverId": server_id,
         "serverCode": server_code,
         "scopeType": scope_type,
@@ -1283,12 +1385,121 @@ fn mcp_oauth_session_save_record_from_callback(
             "source": "mcp_oauth_callback",
             "oauthStateId": state.id,
             "requestedScopes": state.requested_scopes,
+            "refreshConfig": {
+                "tokenEndpoint": state.token_endpoint,
+                "clientId": state.client_id,
+                "clientAuth": state.client_auth,
+                "accessTokenSecretRef": state.access_token_secret_ref,
+                "refreshTokenSecretRef": session.refresh_token_secret_ref,
+            },
             "evidence": evidence,
         }),
         status: ENABLED_STATUS,
         user_id,
         now,
     })
+}
+
+fn mcp_oauth_refresh_token_command_from_session_metadata(
+    record: &McpOAuthSessionRecord,
+) -> Result<McpOAuthRefreshTokenCommand, AppError> {
+    let refresh_config = record
+        .metadata
+        .get("refreshConfig")
+        .and_then(Value::as_object)
+        .ok_or_else(|| AppError::bad_request("MCP OAuth refreshConfig 缺失"))?;
+    let token_endpoint = required_json_string(
+        refresh_config,
+        "tokenEndpoint",
+        "MCP OAuth refreshConfig.tokenEndpoint",
+    )?;
+    let client_id = required_json_string(
+        refresh_config,
+        "clientId",
+        "MCP OAuth refreshConfig.clientId",
+    )?;
+    let client_auth = refresh_config
+        .get("clientAuth")
+        .map(mcp_oauth_client_auth_from_state)
+        .transpose()?
+        .unwrap_or(McpOAuthClientAuth::None);
+    let access_token_secret_ref = optional_json_string(refresh_config, "accessTokenSecretRef")
+        .unwrap_or_else(|| record.access_token_secret_ref.clone());
+    let refresh_token_secret_ref = optional_json_string(refresh_config, "refreshTokenSecretRef")
+        .or_else(|| record.refresh_token_secret_ref.clone())
+        .ok_or_else(|| AppError::bad_request("MCP OAuth refresh_token_secret_ref 缺失"))?;
+
+    Ok(McpOAuthRefreshTokenCommand {
+        server_code: record.server_code.clone(),
+        token_endpoint,
+        client_id,
+        refresh_token_secret_ref: refresh_token_secret_ref.clone(),
+        client_auth,
+        access_token_secret_ref,
+        new_refresh_token_secret_ref: Some(refresh_token_secret_ref),
+    })
+}
+
+fn mcp_oauth_session_save_record_from_refresh(
+    tenant_id: i64,
+    user_id: i64,
+    current: &McpOAuthSessionRecord,
+    session: &McpOAuthSessionMaterial,
+    evidence: Value,
+    now: NaiveDateTime,
+) -> Result<McpOAuthSessionSaveRecord, AppError> {
+    let expires_at = session
+        .expires_at_epoch_seconds
+        .map(epoch_seconds_to_naive_utc)
+        .transpose()?;
+    let refresh_needed_after = expires_at
+        .map(|expires_at| expires_at - ChronoDuration::seconds(MCP_OAUTH_REFRESH_SKEW_SECONDS));
+
+    Ok(McpOAuthSessionSaveRecord {
+        id: next_id(),
+        tenant_id,
+        server_id: current.server_id,
+        server_code: current.server_code.clone(),
+        scope_type: current.scope_type.clone(),
+        scope_id: current.scope_id.clone(),
+        access_token_secret_ref: session.access_token_secret_ref.clone(),
+        refresh_token_secret_ref: session.refresh_token_secret_ref.clone(),
+        token_type: session.token_type.clone(),
+        scopes: json!(session.scopes),
+        expires_at,
+        refresh_needed_after,
+        metadata: json!({
+            "source": "mcp_oauth_refresh",
+            "previousSessionId": current.id,
+            "refreshConfig": current
+                .metadata
+                .get("refreshConfig")
+                .cloned()
+                .unwrap_or(Value::Null),
+            "evidence": evidence,
+        }),
+        status: ENABLED_STATUS,
+        user_id,
+        now,
+    })
+}
+
+fn required_json_string(
+    object: &Map<String, Value>,
+    key: &str,
+    field: &str,
+) -> Result<String, AppError> {
+    optional_json_string(object, key)
+        .ok_or_else(|| AppError::bad_request(format!("{field} 不能为空")))
+}
+
+fn optional_json_string(object: &Map<String, Value>, key: &str) -> Option<String> {
+    object
+        .get(key)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
 }
 
 fn epoch_seconds_to_naive_utc(seconds: u64) -> Result<NaiveDateTime, AppError> {
@@ -3016,18 +3227,143 @@ mod tests {
         );
         let metadata = record.metadata.to_string();
         assert!(metadata.contains("mcp_oauth_callback"));
+        assert_eq!(
+            record.metadata["refreshConfig"]["tokenEndpoint"],
+            "https://auth.example.com/oauth/token"
+        );
+        assert_eq!(
+            record.metadata["refreshConfig"]["clientId"],
+            "novex-mcp-client"
+        );
+        assert_eq!(
+            record.metadata["refreshConfig"]["refreshTokenSecretRef"],
+            "sys:tenant:42:mcp.docs.refresh"
+        );
         assert!(!metadata.contains("access-token-value"));
         assert!(!metadata.contains("refresh-token-value"));
     }
 
     #[test]
+    fn mcp_oauth_refresh_token_command_uses_persisted_session_metadata() {
+        let record = mcp_oauth_session_record_fixture(json!({
+            "source": "mcp_oauth_callback",
+            "refreshConfig": {
+                "tokenEndpoint": "https://auth.example.com/oauth/token",
+                "clientId": "novex-mcp-client",
+                "clientAuth": {
+                    "kind": "client_secret_ref",
+                    "clientSecretRef": "env:MCP_OAUTH_CLIENT_SECRET"
+                },
+                "accessTokenSecretRef": "sys:tenant:42:mcp.docs.access",
+                "refreshTokenSecretRef": "sys:tenant:42:mcp.docs.refresh"
+            }
+        }));
+
+        let command = mcp_oauth_refresh_token_command_from_session_metadata(&record).unwrap();
+
+        assert_eq!(command.server_code, "docs");
+        assert_eq!(
+            command.token_endpoint,
+            "https://auth.example.com/oauth/token"
+        );
+        assert_eq!(command.client_id, "novex-mcp-client");
+        assert_eq!(
+            command.refresh_token_secret_ref,
+            "sys:tenant:42:mcp.docs.refresh"
+        );
+        assert_eq!(
+            command.access_token_secret_ref,
+            "sys:tenant:42:mcp.docs.access"
+        );
+        assert_eq!(
+            command.new_refresh_token_secret_ref.as_deref(),
+            Some("sys:tenant:42:mcp.docs.refresh")
+        );
+        assert_eq!(
+            command.client_auth,
+            McpOAuthClientAuth::ClientSecretRef("env:MCP_OAUTH_CLIENT_SECRET".to_owned())
+        );
+    }
+
+    #[test]
+    fn mcp_oauth_refresh_session_save_record_preserves_scope_and_sanitized_metadata() {
+        let current = mcp_oauth_session_record_fixture(json!({
+            "source": "mcp_oauth_callback",
+            "refreshConfig": {
+                "tokenEndpoint": "https://auth.example.com/oauth/token",
+                "clientId": "novex-mcp-client",
+                "clientAuth": {"kind": "none"},
+                "accessTokenSecretRef": "sys:tenant:42:mcp.docs.access",
+                "refreshTokenSecretRef": "sys:tenant:42:mcp.docs.refresh"
+            }
+        }));
+        let refreshed = novex_mcp::McpOAuthSessionMaterial {
+            server_code: "docs".to_owned(),
+            access_token_secret_ref: "sys:tenant:42:mcp.docs.access".to_owned(),
+            refresh_token_secret_ref: Some("sys:tenant:42:mcp.docs.refresh".to_owned()),
+            token_type: "Bearer".to_owned(),
+            scopes: vec!["mcp:tools".to_owned()],
+            expires_at_epoch_seconds: Some(1_700_007_200),
+        };
+        let now = chrono::NaiveDate::from_ymd_opt(2026, 6, 18)
+            .unwrap()
+            .and_hms_opt(13, 0, 0)
+            .unwrap();
+
+        let record = mcp_oauth_session_save_record_from_refresh(
+            42,
+            7,
+            &current,
+            &refreshed,
+            json!({"request": {"form": {"refreshTokenPresent": true}}}),
+            now,
+        )
+        .unwrap();
+
+        assert_eq!(record.server_id, current.server_id);
+        assert_eq!(record.scope_type, current.scope_type);
+        assert_eq!(record.scope_id, current.scope_id);
+        assert_eq!(
+            record.refresh_needed_after.unwrap().and_utc().timestamp(),
+            1_700_006_900
+        );
+        assert_eq!(record.metadata["source"], "mcp_oauth_refresh");
+        assert_eq!(record.metadata["previousSessionId"], current.id);
+        assert_eq!(
+            record.metadata["refreshConfig"]["refreshTokenSecretRef"],
+            "sys:tenant:42:mcp.docs.refresh"
+        );
+        let metadata = record.metadata.to_string();
+        assert!(!metadata.contains("old-refresh-token"));
+        assert!(!metadata.contains("new-refresh-token"));
+    }
+
+    #[test]
     fn mcp_oauth_callback_service_wires_state_secret_and_session_boundaries() {
-        let source = include_str!("capability_service.rs");
+        let source = include_str!("capability_service.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
 
         assert!(source.contains("consume_mcp_oauth_state"));
         assert!(source.contains("exchange_mcp_oauth_callback_with_dispatch_and_secret_writer"));
         assert!(source.contains("write_mcp_oauth_token_secret_material"));
         assert!(source.contains("upsert_mcp_oauth_session"));
+    }
+
+    #[test]
+    fn mcp_oauth_refresh_service_wires_session_secret_dispatch_and_upsert_boundaries() {
+        let source = include_str!("capability_service.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+
+        assert!(source.contains("pub async fn refresh_mcp_oauth_session"));
+        assert!(source.contains(".find_mcp_oauth_session_for_scope("));
+        assert!(source.contains(".resolve_secret_ref("));
+        assert!(source.contains("refresh_mcp_oauth_session_with_dispatch_and_secret_writer"));
+        assert!(source.contains("write_mcp_oauth_token_secret_material"));
+        assert!(source.contains(".upsert_mcp_oauth_session("));
     }
 
     #[test]
@@ -3622,6 +3958,34 @@ Use the referenced methodology before drafting.
             expires_at: now,
             consumed_at: Some(now),
             metadata: json!({"source": "unit-test"}),
+        }
+    }
+
+    fn mcp_oauth_session_record_fixture(metadata: Value) -> McpOAuthSessionRecord {
+        let now = chrono::NaiveDate::from_ymd_opt(2026, 6, 18)
+            .unwrap()
+            .and_hms_opt(12, 0, 0)
+            .unwrap();
+
+        McpOAuthSessionRecord {
+            id: 199,
+            tenant_id: 42,
+            server_id: 77,
+            server_code: "docs".to_owned(),
+            scope_type: "tenant".to_owned(),
+            scope_id: "42".to_owned(),
+            access_token_secret_ref: "sys:tenant:42:mcp.docs.access".to_owned(),
+            refresh_token_secret_ref: Some("sys:tenant:42:mcp.docs.refresh".to_owned()),
+            token_type: "Bearer".to_owned(),
+            scopes: json!(["mcp:tools", "offline_access"]),
+            expires_at: Some(now),
+            refresh_needed_after: Some(now - ChronoDuration::seconds(300)),
+            last_refreshed_at: None,
+            revoked_at: None,
+            status: ENABLED_STATUS,
+            metadata,
+            create_time: now,
+            update_time: None,
         }
     }
 

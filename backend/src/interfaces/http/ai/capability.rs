@@ -8,11 +8,11 @@ use crate::{
     application::ai::capability_service::{
         CapabilityItemResp, CapabilityQuery, CapabilityService, CapabilitySummaryResp,
         ConnectorCredentialCommand, ConnectorCredentialQuery, ConnectorCredentialResp,
-        McpDiscoveryCommand, McpOAuthCallbackCommand, McpOAuthCallbackResp, McpServerCommand,
-        McpServerResp, McpToolResp, PluginInstallCommand, PluginInstallationQuery,
-        PluginInstallationResp, SkillImportFromSourceCommand, SkillImportPreviewCommand,
-        SkillImportPreviewResp, SkillImportResultResp, ToolCallAuditQuery, ToolCallAuditResp,
-        ToolDryRunCommand, ToolDryRunResp,
+        McpDiscoveryCommand, McpOAuthCallbackCommand, McpOAuthCallbackResp, McpOAuthRefreshCommand,
+        McpServerCommand, McpServerResp, McpToolResp, PluginInstallCommand,
+        PluginInstallationQuery, PluginInstallationResp, SkillImportFromSourceCommand,
+        SkillImportPreviewCommand, SkillImportPreviewResp, SkillImportResultResp,
+        ToolCallAuditQuery, ToolCallAuditResp, ToolDryRunCommand, ToolDryRunResp,
     },
     domain::auth::model::CurrentUser,
     interfaces::http::{middleware::permission::require_permission, AppState},
@@ -78,6 +78,10 @@ pub fn routes() -> Router<AppState> {
         .route(
             "/ai/capabilities/mcp/servers/:server_id/oauth/callback",
             post(complete_mcp_oauth_callback),
+        )
+        .route(
+            "/ai/capabilities/mcp/servers/:server_id/oauth/refresh",
+            post(refresh_mcp_oauth_session),
         )
         .route(
             "/ai/capabilities/mcp/servers/:server_id/tools",
@@ -322,6 +326,22 @@ async fn complete_mcp_oauth_callback(
     Ok(Json(ApiResponse::ok(
         service
             .complete_mcp_oauth_callback(current_user.id, server_id, command)
+            .await?,
+    )))
+}
+
+async fn refresh_mcp_oauth_session(
+    State(state): State<AppState>,
+    current_user: CurrentUser,
+    Path(server_id): Path<i64>,
+    Json(command): Json<McpOAuthRefreshCommand>,
+) -> Result<Json<ApiResponse<McpOAuthCallbackResp>>, AppError> {
+    require_permission(&current_user, MCP_UPDATE_PERMISSION)?;
+    let service = CapabilityService::for_tenant(state.db, current_user.tenant_id);
+
+    Ok(Json(ApiResponse::ok(
+        service
+            .refresh_mcp_oauth_session(current_user.id, server_id, command)
             .await?,
     )))
 }
@@ -758,6 +778,23 @@ zip-bytes\r\n\
     }
 
     #[tokio::test]
+    async fn mcp_oauth_refresh_handler_rejects_missing_permission() {
+        let err = refresh_mcp_oauth_session(
+            State(test_state()),
+            user_with_permissions(vec![]),
+            Path(42),
+            Json(McpOAuthRefreshCommand {
+                scope_type: "tenant".to_owned(),
+                scope_id: "42".to_owned(),
+            }),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(matches!(err, AppError::Forbidden));
+    }
+
+    #[tokio::test]
     async fn mcp_tool_list_handler_rejects_missing_permission() {
         let err = list_mcp_tools(State(test_state()), user_with_permissions(vec![]), Path(42))
             .await
@@ -774,13 +811,28 @@ zip-bytes\r\n\
 
     #[test]
     fn mcp_oauth_callback_route_is_source_registered() {
-        let source = include_str!("capability.rs");
+        let source = include_str!("capability.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
 
         assert!(source.contains("/ai/capabilities/mcp/servers/:server_id/oauth/callback"));
         assert!(source.contains("post(complete_mcp_oauth_callback)"));
         assert!(
             source.contains(".complete_mcp_oauth_callback(current_user.id, server_id, command)")
         );
+    }
+
+    #[test]
+    fn mcp_oauth_refresh_route_is_source_registered() {
+        let source = include_str!("capability.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+
+        assert!(source.contains("/ai/capabilities/mcp/servers/:server_id/oauth/refresh"));
+        assert!(source.contains("post(refresh_mcp_oauth_session)"));
+        assert!(source.contains(".refresh_mcp_oauth_session(current_user.id, server_id, command)"));
     }
 
     #[tokio::test]

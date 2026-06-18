@@ -4,7 +4,8 @@ use std::{collections::BTreeMap, future::Future, time::Duration};
 
 use novex_mcp::{
     mcp_oauth_session_from_token_response, McpOAuthClientAuth, McpOAuthSessionMaterial,
-    McpOAuthTokenExchangeConfig, McpOAuthTokenExchangePlan, McpOAuthTokenResponse,
+    McpOAuthTokenExchangeConfig, McpOAuthTokenExchangePlan, McpOAuthTokenRefreshConfig,
+    McpOAuthTokenResponse,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -14,7 +15,7 @@ const MCP_OAUTH_TOKEN_TIMEOUT: Duration = Duration::from_secs(15);
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct McpOAuthTokenDispatchResolvedSecrets {
-    pub code_verifier: String,
+    pub code_verifier: Option<String>,
     pub client_secret: Option<String>,
 }
 
@@ -106,6 +107,18 @@ pub(crate) struct McpOAuthCallbackTokenCommand {
     pub client_auth: McpOAuthClientAuth,
     pub access_token_secret_ref: String,
     pub refresh_token_secret_ref: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct McpOAuthRefreshTokenCommand {
+    pub server_code: String,
+    pub token_endpoint: String,
+    pub client_id: String,
+    pub refresh_token_secret_ref: String,
+    pub client_auth: McpOAuthClientAuth,
+    pub access_token_secret_ref: String,
+    pub new_refresh_token_secret_ref: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -361,7 +374,6 @@ where
     SecretWrite: FnOnce(McpOAuthTokenSecretMaterial) -> SecretFuture,
     SecretFuture: Future<Output = Result<(), String>>,
 {
-    let server_code = plan.server_code.clone();
     let request_evidence = plan.sanitized_evidence();
     let code_verifier = resolve_env_secret_ref(
         "code_verifier_secret_ref",
@@ -379,10 +391,144 @@ where
         )?),
     };
     let secrets = McpOAuthTokenDispatchResolvedSecrets {
-        code_verifier,
+        code_verifier: Some(code_verifier),
         client_secret,
     };
 
+    exchange_mcp_oauth_token_plan_with_resolved_secrets(
+        plan,
+        received_at_epoch_seconds,
+        access_token_secret_ref,
+        refresh_token_secret_ref,
+        secrets,
+        dispatch,
+        secret_write,
+    )
+    .await
+}
+
+pub(crate) async fn refresh_mcp_oauth_session_with_dispatch_and_secret_writer<
+    SecretResolve,
+    SecretResolveFuture,
+    EnvGet,
+    Dispatch,
+    DispatchFuture,
+    SecretWrite,
+    SecretFuture,
+>(
+    command: McpOAuthRefreshTokenCommand,
+    received_at_epoch_seconds: u64,
+    mut secret_resolve: SecretResolve,
+    mut env_get: EnvGet,
+    dispatch: Dispatch,
+    secret_write: SecretWrite,
+) -> Result<McpOAuthTokenDispatchOutcome, McpOAuthTokenDispatchError>
+where
+    SecretResolve: FnMut(&str) -> SecretResolveFuture,
+    SecretResolveFuture: Future<Output = Result<String, String>>,
+    EnvGet: FnMut(&str) -> Option<String>,
+    Dispatch:
+        FnOnce(McpOAuthTokenExchangePlan, McpOAuthTokenDispatchResolvedSecrets) -> DispatchFuture,
+    DispatchFuture: Future<Output = Result<McpOAuthTokenDispatchHttpResponse, String>>,
+    SecretWrite: FnOnce(McpOAuthTokenSecretMaterial) -> SecretFuture,
+    SecretFuture: Future<Output = Result<(), String>>,
+{
+    let command_evidence = mcp_oauth_refresh_token_evidence(&command);
+    let refresh_token_secret_ref = command.refresh_token_secret_ref.trim().to_owned();
+    if refresh_token_secret_ref.is_empty() {
+        return Err(McpOAuthTokenDispatchError::new(
+            "refresh_token_secret_ref",
+            "MCP OAuth refresh_token_secret_ref is required",
+            command_evidence,
+            Value::Null,
+        ));
+    }
+    let refresh_token = secret_resolve(&refresh_token_secret_ref)
+        .await
+        .map(|token| token.trim().to_owned())
+        .ok()
+        .filter(|token| !token.is_empty())
+        .ok_or_else(|| {
+            McpOAuthTokenDispatchError::new(
+                "refresh_token_secret_ref",
+                "MCP OAuth refresh_token_secret_ref is not resolved",
+                command_evidence.clone(),
+                Value::Null,
+            )
+        })?;
+
+    let plan = McpOAuthTokenExchangePlan::refresh_token(McpOAuthTokenRefreshConfig {
+        server_code: command.server_code.clone(),
+        token_endpoint: command.token_endpoint.clone(),
+        client_id: command.client_id.clone(),
+        refresh_token,
+        client_auth: command.client_auth.clone(),
+    })
+    .map_err(|error| {
+        McpOAuthTokenDispatchError::new(
+            error.field,
+            error.message,
+            command_evidence.clone(),
+            Value::Null,
+        )
+    })?;
+    let request_evidence = plan.sanitized_evidence();
+    let client_secret = match &plan.client_auth {
+        McpOAuthClientAuth::None => None,
+        McpOAuthClientAuth::ClientSecretRef(client_secret_ref) => Some(resolve_env_secret_ref(
+            "client_auth.client_secret_ref",
+            client_secret_ref,
+            &mut env_get,
+            &request_evidence,
+        )?),
+    };
+    let secrets = McpOAuthTokenDispatchResolvedSecrets {
+        code_verifier: None,
+        client_secret,
+    };
+    let refresh_token_storage_ref = command
+        .new_refresh_token_secret_ref
+        .as_deref()
+        .map(str::trim)
+        .filter(|secret_ref| !secret_ref.is_empty())
+        .unwrap_or(&refresh_token_secret_ref)
+        .to_owned();
+
+    exchange_mcp_oauth_token_plan_with_resolved_secrets(
+        plan,
+        received_at_epoch_seconds,
+        &command.access_token_secret_ref,
+        Some(&refresh_token_storage_ref),
+        secrets,
+        dispatch,
+        secret_write,
+    )
+    .await
+}
+
+async fn exchange_mcp_oauth_token_plan_with_resolved_secrets<
+    Dispatch,
+    DispatchFuture,
+    SecretWrite,
+    SecretFuture,
+>(
+    plan: McpOAuthTokenExchangePlan,
+    received_at_epoch_seconds: u64,
+    access_token_secret_ref: &str,
+    refresh_token_secret_ref: Option<&str>,
+    secrets: McpOAuthTokenDispatchResolvedSecrets,
+    dispatch: Dispatch,
+    secret_write: SecretWrite,
+) -> Result<McpOAuthTokenDispatchOutcome, McpOAuthTokenDispatchError>
+where
+    Dispatch:
+        FnOnce(McpOAuthTokenExchangePlan, McpOAuthTokenDispatchResolvedSecrets) -> DispatchFuture,
+    DispatchFuture: Future<Output = Result<McpOAuthTokenDispatchHttpResponse, String>>,
+    SecretWrite: FnOnce(McpOAuthTokenSecretMaterial) -> SecretFuture,
+    SecretFuture: Future<Output = Result<(), String>>,
+{
+    let server_code = plan.server_code.clone();
+    let request_evidence = plan.sanitized_evidence();
     let response = dispatch(plan, secrets).await.map_err(|error| {
         McpOAuthTokenDispatchError::new(
             "token_endpoint",
@@ -468,7 +614,12 @@ pub(crate) async fn dispatch_mcp_oauth_token_request(
         .build()
         .map_err(|err| format!("MCP OAuth token client init failed: {err}"))?;
     let mut form = plan.form.clone();
-    form.insert("code_verifier".to_owned(), secrets.code_verifier);
+    if let Some(code_verifier) = secrets
+        .code_verifier
+        .filter(|code_verifier| !code_verifier.trim().is_empty())
+    {
+        form.insert("code_verifier".to_owned(), code_verifier);
+    }
     if let Some(client_secret) = secrets
         .client_secret
         .filter(|client_secret| !client_secret.trim().is_empty())
@@ -532,6 +683,21 @@ fn mcp_oauth_callback_evidence(
         "clientAuth": mcp_oauth_client_auth_evidence(&command.client_auth),
         "accessTokenSecretRef": command.access_token_secret_ref.trim(),
         "refreshTokenSecretRef": command.refresh_token_secret_ref.as_deref().map(str::trim),
+    })
+}
+
+fn mcp_oauth_refresh_token_evidence(command: &McpOAuthRefreshTokenCommand) -> Value {
+    json!({
+        "serverCode": command.server_code.trim(),
+        "tokenEndpoint": command.token_endpoint.trim(),
+        "clientId": command.client_id.trim(),
+        "refreshTokenSecretRef": command.refresh_token_secret_ref.trim(),
+        "clientAuth": mcp_oauth_client_auth_evidence(&command.client_auth),
+        "accessTokenSecretRef": command.access_token_secret_ref.trim(),
+        "newRefreshTokenSecretRef": command
+            .new_refresh_token_secret_ref
+            .as_deref()
+            .map(str::trim),
     })
 }
 
@@ -711,7 +877,10 @@ mod tests {
                     plan.form.get("redirect_uri").map(String::as_str),
                     Some("https://novex.example.com/mcp/oauth/callback")
                 );
-                assert_eq!(secrets.code_verifier, "code-verifier-value");
+                assert_eq!(
+                    secrets.code_verifier.as_deref(),
+                    Some("code-verifier-value")
+                );
                 assert_eq!(
                     secrets.client_secret.as_deref(),
                     Some("client-secret-value")
@@ -848,7 +1017,10 @@ mod tests {
             },
             |plan, secrets| async move {
                 assert_eq!(plan.token_endpoint, "https://auth.example.com/oauth/token");
-                assert_eq!(secrets.code_verifier, "code-verifier-value");
+                assert_eq!(
+                    secrets.code_verifier.as_deref(),
+                    Some("code-verifier-value")
+                );
                 assert_eq!(
                     secrets.client_secret.as_deref(),
                     Some("client-secret-value")
@@ -1016,6 +1188,172 @@ mod tests {
             assert!(!evidence.contains(secret), "leaked secret: {secret}");
         }
         assert!(!err.message.contains("access-token-value"));
+    }
+
+    #[tokio::test]
+    async fn mcp_oauth_refresh_token_dispatch_resolves_refresh_secret_and_writes_new_tokens_without_leakage(
+    ) {
+        let resolved_refs = Arc::new(Mutex::new(Vec::<String>::new()));
+        let resolved_refs_for_resolver = Arc::clone(&resolved_refs);
+        let written = Arc::new(Mutex::new(Vec::<McpOAuthTokenSecretMaterial>::new()));
+        let written_for_writer = Arc::clone(&written);
+
+        let outcome = refresh_mcp_oauth_session_with_dispatch_and_secret_writer(
+            McpOAuthRefreshTokenCommand {
+                server_code: "docs".to_owned(),
+                token_endpoint: "https://auth.example.com/oauth/token".to_owned(),
+                client_id: "novex-mcp-client".to_owned(),
+                refresh_token_secret_ref: "sys:tenant:42:mcp.docs.refresh".to_owned(),
+                client_auth: McpOAuthClientAuth::ClientSecretRef(
+                    "env:MCP_OAUTH_CLIENT_SECRET".to_owned(),
+                ),
+                access_token_secret_ref: "sys:tenant:42:mcp.docs.access".to_owned(),
+                new_refresh_token_secret_ref: Some("sys:tenant:42:mcp.docs.refresh".to_owned()),
+            },
+            1_700_000_000,
+            move |secret_ref| {
+                let resolved_refs_for_resolver = Arc::clone(&resolved_refs_for_resolver);
+                let secret_ref = secret_ref.to_owned();
+                async move {
+                    resolved_refs_for_resolver.lock().await.push(secret_ref);
+                    Ok("old-refresh-token".to_owned())
+                }
+            },
+            |key| (key == "MCP_OAUTH_CLIENT_SECRET").then(|| "client-secret-value".to_owned()),
+            |plan, secrets| async move {
+                assert_eq!(plan.server_code, "docs");
+                assert_eq!(plan.grant_type, McpOAuthGrantType::RefreshToken);
+                assert_eq!(
+                    plan.form.get("grant_type").map(String::as_str),
+                    Some("refresh_token")
+                );
+                assert_eq!(
+                    plan.form.get("refresh_token").map(String::as_str),
+                    Some("old-refresh-token")
+                );
+                assert_eq!(secrets.code_verifier, None);
+                assert_eq!(
+                    secrets.client_secret.as_deref(),
+                    Some("client-secret-value")
+                );
+                Ok(McpOAuthTokenDispatchHttpResponse {
+                    http_status: 200,
+                    content_type: "application/json".to_owned(),
+                    body: json!({
+                        "access_token": "new-access-token",
+                        "token_type": "Bearer",
+                        "expires_in": 3600,
+                        "refresh_token": "new-refresh-token",
+                        "scope": "mcp:tools offline_access"
+                    })
+                    .to_string(),
+                })
+            },
+            move |material| {
+                let written_for_writer = Arc::clone(&written_for_writer);
+                async move {
+                    written_for_writer.lock().await.push(material);
+                    Ok(())
+                }
+            },
+        )
+        .await
+        .expect("valid refresh dispatch should return refreshed session");
+
+        assert_eq!(
+            resolved_refs.lock().await.as_slice(),
+            ["sys:tenant:42:mcp.docs.refresh"]
+        );
+        let written = written.lock().await;
+        assert_eq!(written.len(), 1);
+        assert_eq!(
+            written[0].access_token_secret_ref,
+            "sys:tenant:42:mcp.docs.access"
+        );
+        assert_eq!(written[0].access_token, "new-access-token");
+        assert_eq!(
+            written[0].refresh_token_secret_ref.as_deref(),
+            Some("sys:tenant:42:mcp.docs.refresh")
+        );
+        assert_eq!(
+            written[0].refresh_token.as_deref(),
+            Some("new-refresh-token")
+        );
+        assert_eq!(
+            outcome.session.refresh_token_secret_ref.as_deref(),
+            Some("sys:tenant:42:mcp.docs.refresh")
+        );
+        let evidence = outcome.sanitized_evidence().to_string();
+        for secret in [
+            "old-refresh-token",
+            "new-access-token",
+            "new-refresh-token",
+            "client-secret-value",
+        ] {
+            assert!(!evidence.contains(secret), "leaked secret: {secret}");
+        }
+    }
+
+    #[tokio::test]
+    async fn mcp_oauth_refresh_token_dispatch_rejects_unresolved_refresh_secret_without_dispatch() {
+        let err = refresh_mcp_oauth_session_with_dispatch_and_secret_writer(
+            McpOAuthRefreshTokenCommand {
+                server_code: "docs".to_owned(),
+                token_endpoint: "https://auth.example.com/oauth/token".to_owned(),
+                client_id: "novex-mcp-client".to_owned(),
+                refresh_token_secret_ref: "sys:tenant:42:mcp.docs.refresh".to_owned(),
+                client_auth: McpOAuthClientAuth::None,
+                access_token_secret_ref: "sys:tenant:42:mcp.docs.access".to_owned(),
+                new_refresh_token_secret_ref: Some("sys:tenant:42:mcp.docs.refresh".to_owned()),
+            },
+            1_700_000_000,
+            |_secret_ref| async move { Err("secret store unavailable".to_owned()) },
+            |_key| None,
+            |_plan, _secrets| async move {
+                panic!("token dispatch must not run when refresh secret is unresolved")
+            },
+            |_material| async move { Ok(()) },
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(err.field, "refresh_token_secret_ref");
+        let evidence = err.sanitized_evidence.to_string();
+        assert!(evidence.contains("sys:tenant:42:mcp.docs.refresh"));
+        assert!(!evidence.contains("old-refresh-token"));
+        assert!(!err.message.contains("secret store unavailable"));
+    }
+
+    #[tokio::test]
+    async fn mcp_oauth_refresh_token_dispatch_rejects_missing_refresh_ref_without_dispatch() {
+        let err = refresh_mcp_oauth_session_with_dispatch_and_secret_writer(
+            McpOAuthRefreshTokenCommand {
+                server_code: "docs".to_owned(),
+                token_endpoint: "https://auth.example.com/oauth/token".to_owned(),
+                client_id: "novex-mcp-client".to_owned(),
+                refresh_token_secret_ref: " ".to_owned(),
+                client_auth: McpOAuthClientAuth::None,
+                access_token_secret_ref: "sys:tenant:42:mcp.docs.access".to_owned(),
+                new_refresh_token_secret_ref: None,
+            },
+            1_700_000_000,
+            |_secret_ref| async move {
+                panic!("secret resolver must not run when refresh ref is missing")
+            },
+            |_key| None,
+            |_plan, _secrets| async move {
+                panic!("token dispatch must not run when refresh ref is missing")
+            },
+            |_material| async move { Ok(()) },
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(err.field, "refresh_token_secret_ref");
+        assert!(!err
+            .sanitized_evidence
+            .to_string()
+            .contains("old-refresh-token"));
     }
 
     #[tokio::test]
