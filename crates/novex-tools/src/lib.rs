@@ -233,6 +233,34 @@ impl ToolExecutorBinding {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolExecutorDispatchPlan {
+    pub tool_code: String,
+    pub executor_code: String,
+    pub kind: ToolExecutorKind,
+    pub requires_connector_credential: bool,
+    pub requires_mcp_tool: bool,
+    pub requires_model_runtime: bool,
+    pub supports_background_tasks: bool,
+    pub waits_for_runtime_cancellation: bool,
+}
+
+impl ToolExecutorDispatchPlan {
+    pub fn from_binding(binding: &ToolExecutorBinding) -> Self {
+        Self {
+            tool_code: binding.tool_code.trim().to_owned(),
+            executor_code: binding.executor_code.trim().to_owned(),
+            kind: binding.kind,
+            requires_connector_credential: matches!(binding.kind, ToolExecutorKind::Connector),
+            requires_mcp_tool: matches!(binding.kind, ToolExecutorKind::Mcp),
+            requires_model_runtime: matches!(binding.kind, ToolExecutorKind::Model),
+            supports_background_tasks: binding.supports_background_tasks,
+            waits_for_runtime_cancellation: binding.waits_for_runtime_cancellation,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ToolExecutorRegistryErrorKind {
@@ -1111,6 +1139,40 @@ mod tests {
             .expect("media image should have an executor");
         assert_eq!(media.kind, ToolExecutorKind::Model);
         assert!(media.supports_background_tasks);
+    }
+
+    #[test]
+    fn tool_executor_dispatch_plan_derives_runtime_dependencies() {
+        let connector = ToolExecutorDispatchPlan::from_binding(&ToolExecutorBinding::new(
+            "github.repo.search",
+            "connector.github.repo.search",
+            ToolExecutorKind::Connector,
+        ));
+        assert_eq!(connector.tool_code, "github.repo.search");
+        assert_eq!(connector.executor_code, "connector.github.repo.search");
+        assert!(connector.requires_connector_credential);
+        assert!(!connector.requires_mcp_tool);
+        assert!(!connector.requires_model_runtime);
+
+        let model = ToolExecutorDispatchPlan::from_binding(
+            &ToolExecutorBinding::new(
+                "media.image.generate",
+                "model.media.image.generate",
+                ToolExecutorKind::Model,
+            )
+            .with_background_tasks()
+            .waits_for_runtime_cancellation(),
+        );
+        assert!(model.requires_model_runtime);
+        assert!(model.supports_background_tasks);
+        assert!(model.waits_for_runtime_cancellation);
+
+        let mcp = ToolExecutorDispatchPlan::from_binding(&ToolExecutorBinding::new(
+            "mcp.repo.lookup",
+            "mcp.repo.lookup",
+            ToolExecutorKind::Mcp,
+        ));
+        assert!(mcp.requires_mcp_tool);
     }
 
     #[test]

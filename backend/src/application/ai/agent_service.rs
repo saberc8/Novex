@@ -38,8 +38,8 @@ use novex_tools::{
     agent_model_loop_tool_definitions, agent_model_loop_tool_executor_bindings,
     evaluate_tool_execution_policy, ApprovalPolicy, MediaImageGenerationRequest,
     ToolBatchExecutionMode, ToolBatchPlan, ToolExecutionPolicyDecision, ToolExecutionPolicyInput,
-    ToolExecutorBinding, ToolExecutorRegistry, ToolExecutorRegistryError, ToolKind, ToolRiskLevel,
-    ToolRouteError, ToolRouteErrorKind, ToolRouter,
+    ToolExecutorBinding, ToolExecutorDispatchPlan, ToolExecutorRegistry, ToolExecutorRegistryError,
+    ToolKind, ToolRiskLevel, ToolRouteError, ToolRouteErrorKind, ToolRouter,
 };
 use novex_trace::{TraceBundle, TraceEvent, TraceReplaySummary};
 use serde::{Deserialize, Serialize};
@@ -2893,14 +2893,27 @@ impl AgentService {
         prepared: PreparedAgentToolCall,
     ) -> Result<ExecutedAgentToolCall, AppError> {
         let tool = &prepared.tool;
-        let connector_credential = if is_github_connector_tool(&tool.code) {
-            self.capability_repo
-                .find_connector_credential(self.tenant_id, GITHUB_CONNECTOR_CODE, user_id)
-                .await?
-        } else {
-            None
-        };
-        let mcp_tool = if matches!(agent_tool_kind(tool), ToolKind::Mcp) {
+        let executor_dispatch = prepared
+            .executor_binding
+            .as_ref()
+            .map(ToolExecutorDispatchPlan::from_binding);
+        let uses_github_connector_executor = executor_dispatch.as_ref().is_some_and(|plan| {
+            plan.requires_connector_credential
+                && plan.executor_code.starts_with("connector.github.")
+        });
+        let connector_credential =
+            if uses_github_connector_executor || is_github_connector_tool(&tool.code) {
+                self.capability_repo
+                    .find_connector_credential(self.tenant_id, GITHUB_CONNECTOR_CODE, user_id)
+                    .await?
+            } else {
+                None
+            };
+        let mcp_tool = if executor_dispatch
+            .as_ref()
+            .is_some_and(|plan| plan.requires_mcp_tool)
+            || matches!(agent_tool_kind(tool), ToolKind::Mcp)
+        {
             self.capability_repo
                 .find_mcp_tool_for_execution(self.tenant_id, &tool.code)
                 .await?
@@ -2912,6 +2925,7 @@ impl AgentService {
             &prepared.arguments,
             connector_credential.as_ref(),
             mcp_tool.as_ref(),
+            executor_dispatch.as_ref(),
             Some(&self.model_runtime),
         )
         .await;
@@ -3314,22 +3328,30 @@ async fn execute_agent_tool(
     input: &Value,
     connector_credential: Option<&ConnectorCredentialLookupRecord>,
     mcp_tool: Option<&McpToolExecutionRecord>,
+    executor_dispatch: Option<&ToolExecutorDispatchPlan>,
     model_runtime: Option<&ModelRuntimeService>,
 ) -> AgentToolExecution {
-    if matches!(agent_tool_kind(tool), ToolKind::Mcp) {
+    let executor_code = executor_dispatch.map(|plan| plan.executor_code.as_str());
+    if executor_dispatch.is_some_and(|plan| plan.requires_mcp_tool)
+        || matches!(agent_tool_kind(tool), ToolKind::Mcp)
+    {
         return execute_mcp_tool(&tool.code, input, mcp_tool).await;
     }
     let tool_code = tool.code.as_str();
-    if tool_code == FEISHU_TOOL_CODE {
+    if executor_code == Some("connector.feishu.message.send") || tool_code == FEISHU_TOOL_CODE {
         return execute_feishu_message_tool(input).await;
     }
-    if tool_code == MEDIA_IMAGE_TOOL_CODE {
+    if executor_code == Some("model.media.image.generate") || tool_code == MEDIA_IMAGE_TOOL_CODE {
         return execute_media_image_tool(input, model_runtime).await;
     }
-    if tool_code == GITHUB_REPO_SEARCH_TOOL_CODE {
+    if executor_code == Some("connector.github.repo.search")
+        || tool_code == GITHUB_REPO_SEARCH_TOOL_CODE
+    {
         return execute_github_repo_search_tool(input, connector_credential).await;
     }
-    if tool_code == GITHUB_REPO_READ_TOOL_CODE {
+    if executor_code == Some("connector.github.repo.read")
+        || tool_code == GITHUB_REPO_READ_TOOL_CODE
+    {
         return execute_github_repo_read_tool(input, connector_credential).await;
     }
 
@@ -7971,6 +7993,23 @@ mod tests {
         assert!(source.contains("executor_binding: Some(executor_binding.clone())"));
         assert!(source.contains("\"executorBinding\""));
         assert!(source.contains("prepared.executor_binding"));
+    }
+
+    #[test]
+    fn agent_service_tool_executor_dispatch_plan_guides_tool_io() {
+        let source = include_str!("agent_service.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+
+        assert!(source.contains("ToolExecutorDispatchPlan::from_binding"));
+        assert!(source.contains("executor_dispatch.as_ref().is_some_and"));
+        assert!(source.contains("plan.requires_connector_credential"));
+        assert!(source.contains("plan.requires_mcp_tool"));
+        assert!(source.contains("executor_dispatch.as_ref(),"));
+        assert!(source.contains("executor_code == Some(\"model.media.image.generate\")"));
+        assert!(source.contains("executor_code == Some(\"connector.github.repo.search\")"));
+        assert!(source.contains("tool_code == MEDIA_IMAGE_TOOL_CODE"));
     }
 
     #[test]
