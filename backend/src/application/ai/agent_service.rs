@@ -35,10 +35,11 @@ use novex_memory::{
 };
 use novex_model::ModelRoutePurpose;
 use novex_tools::{
-    agent_model_loop_tool_definitions, evaluate_tool_execution_policy, ApprovalPolicy,
-    MediaImageGenerationRequest, ToolBatchExecutionMode, ToolBatchPlan,
-    ToolExecutionPolicyDecision, ToolExecutionPolicyInput, ToolKind, ToolRiskLevel, ToolRouteError,
-    ToolRouteErrorKind, ToolRouter,
+    agent_model_loop_tool_definitions, agent_model_loop_tool_executor_bindings,
+    evaluate_tool_execution_policy, ApprovalPolicy, MediaImageGenerationRequest,
+    ToolBatchExecutionMode, ToolBatchPlan, ToolExecutionPolicyDecision, ToolExecutionPolicyInput,
+    ToolExecutorBinding, ToolExecutorRegistry, ToolExecutorRegistryError, ToolKind, ToolRiskLevel,
+    ToolRouteError, ToolRouteErrorKind, ToolRouter,
 };
 use novex_trace::{TraceBundle, TraceEvent, TraceReplaySummary};
 use serde::{Deserialize, Serialize};
@@ -150,6 +151,7 @@ struct PreparedAgentToolCall {
     call_id: String,
     tool: ToolLookupRecord,
     arguments: Value,
+    executor_binding: Option<ToolExecutorBinding>,
     concurrency_policy: Value,
     timeout: Duration,
 }
@@ -1148,6 +1150,8 @@ impl AgentService {
         }
 
         let tool_router = build_model_loop_tool_router().map_err(tool_route_error_to_app_error)?;
+        let executor_registry = build_model_loop_tool_executor_registry()
+            .map_err(tool_executor_registry_error_to_app_error)?;
         let tool_codes = tool_router.tool_codes();
         let mut last_tool_terminal_status = RunStatus::Succeeded;
 
@@ -1533,6 +1537,12 @@ impl AgentService {
                         let concurrency_policy_payload =
                             serde_json::to_value(&routed_call.tool.concurrency)
                                 .unwrap_or(Value::Null);
+                        let executor_binding = executor_registry
+                            .executor_for(&routed_call.tool.code)
+                            .map_err(tool_executor_registry_error_to_app_error)?
+                            .clone();
+                        let executor_binding_payload =
+                            model_loop_tool_executor_binding_payload(Some(&executor_binding));
                         let tool_code = routed_call.tool.code;
                         let arguments = routed_call.arguments;
                         let Some(tool) = self
@@ -1548,6 +1558,7 @@ impl AgentService {
                             call_id: call_id.clone(),
                             tool,
                             arguments: arguments.clone(),
+                            executor_binding: Some(executor_binding.clone()),
                             concurrency_policy: concurrency_policy_payload.clone(),
                             timeout: AGENT_TOOL_IO_TIMEOUT,
                         };
@@ -1578,6 +1589,8 @@ impl AgentService {
                                     "concurrencyPolicy".to_owned(),
                                     concurrency_policy_payload,
                                 );
+                                object
+                                    .insert("executorBinding".to_owned(), executor_binding_payload);
                                 object.insert(
                                     "batchExecutionMode".to_owned(),
                                     batch_execution_mode_payload.clone(),
@@ -1661,6 +1674,12 @@ impl AgentService {
                             object.insert(
                                 "concurrencyPolicy".to_owned(),
                                 prepared_call.concurrency_policy.clone(),
+                            );
+                            object.insert(
+                                "executorBinding".to_owned(),
+                                model_loop_tool_executor_binding_payload(
+                                    prepared_call.executor_binding.as_ref(),
+                                ),
                             );
                             object.insert(
                                 "batchExecutionMode".to_owned(),
@@ -2859,6 +2878,7 @@ impl AgentService {
             call_id: "single-tool-call".to_owned(),
             tool: tool.clone(),
             arguments: input,
+            executor_binding: None,
             concurrency_policy: Value::Null,
             timeout: AGENT_TOOL_IO_TIMEOUT,
         };
@@ -2937,6 +2957,9 @@ impl AgentService {
                 request_payload: json!({
                     "runId": run_id,
                     "toolCode": tool.code,
+                    "executorBinding": model_loop_tool_executor_binding_payload(
+                        prepared.executor_binding.as_ref()
+                    ),
                     "input": input.clone()
                 }),
                 response_payload: execution.response_payload.clone(),
@@ -4893,6 +4916,17 @@ fn build_model_loop_tool_router() -> Result<ToolRouter, ToolRouteError> {
     ToolRouter::from_definitions(agent_model_loop_tool_definitions())
 }
 
+fn build_model_loop_tool_executor_registry(
+) -> Result<ToolExecutorRegistry, ToolExecutorRegistryError> {
+    ToolExecutorRegistry::from_bindings(agent_model_loop_tool_executor_bindings())
+}
+
+fn model_loop_tool_executor_binding_payload(binding: Option<&ToolExecutorBinding>) -> Value {
+    binding
+        .and_then(|binding| serde_json::to_value(binding).ok())
+        .unwrap_or(Value::Null)
+}
+
 fn build_model_loop_system_prompt(tool_codes: &[String]) -> String {
     format!(
         "You are Novex Agent Runtime. You may answer directly or request tool calls while staying within the run budget. Available tools: {}. After each tool observation, decide whether another tool call is necessary or produce the final answer. To call one tool, reply with compact JSON exactly like {{\"type\":\"tool_call\",\"callId\":\"call-1\",\"toolCode\":\"rag.search\",\"arguments\":{{\"query\":\"...\"}}}}. To call multiple independent tools in the same turn, reply with compact JSON exactly like {{\"type\":\"tool_calls\",\"calls\":[{{\"callId\":\"call-1\",\"toolCode\":\"rag.search\",\"arguments\":{{\"query\":\"...\"}}}},{{\"callId\":\"call-2\",\"toolCode\":\"github.repo.read\",\"arguments\":{{\"repository\":\"org/repo\",\"path\":\"README.md\"}}}}]}}. Otherwise reply with the final answer. Never request a tool outside the available tools or after the tool-call budget is exhausted.",
@@ -5628,6 +5662,13 @@ fn tool_route_error_to_app_error(err: ToolRouteError) -> AppError {
     AppError::bad_request(format!("Agent 工具路由初始化失败: {}", err.message))
 }
 
+fn tool_executor_registry_error_to_app_error(err: ToolExecutorRegistryError) -> AppError {
+    AppError::Anyhow(anyhow::anyhow!(
+        "Agent 工具执行器注册表初始化失败: {}",
+        err.message
+    ))
+}
+
 fn tool_route_stop_reason(kind: ToolRouteErrorKind) -> &'static str {
     match kind {
         ToolRouteErrorKind::UnknownTool => "unknown_tool",
@@ -6207,6 +6248,7 @@ mod tests {
                 permission_code: Some("ai:tool:dryRun".to_owned()),
             },
             arguments: json!({ "batchIndex": batch_index }),
+            executor_binding: None,
             concurrency_policy: Value::Null,
             timeout: AGENT_TOOL_IO_TIMEOUT,
         }
@@ -7892,6 +7934,43 @@ mod tests {
         assert!(source.contains("execute_agent_tool_io_batch("));
         assert!(source.contains("batch_execution_mode"));
         assert!(source.contains("for executed_call in executed_calls"));
+    }
+
+    #[test]
+    fn model_loop_tool_executor_binding_payload_serializes_dispatch_metadata() {
+        let binding = novex_tools::ToolExecutorBinding::new(
+            "media.image.generate",
+            "model.media.image.generate",
+            novex_tools::ToolExecutorKind::Model,
+        )
+        .with_background_tasks()
+        .waits_for_runtime_cancellation();
+
+        let payload = model_loop_tool_executor_binding_payload(Some(&binding));
+
+        assert_eq!(payload["toolCode"], "media.image.generate");
+        assert_eq!(payload["executorCode"], "model.media.image.generate");
+        assert_eq!(payload["kind"], "model");
+        assert_eq!(payload["supportsBackgroundTasks"], true);
+        assert_eq!(payload["waitsForRuntimeCancellation"], true);
+        assert_eq!(model_loop_tool_executor_binding_payload(None), Value::Null);
+    }
+
+    #[test]
+    fn agent_service_model_loop_uses_tool_executor_registry_for_dispatch_metadata() {
+        let source = include_str!("agent_service.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+
+        assert!(source.contains(
+            "ToolExecutorRegistry::from_bindings(agent_model_loop_tool_executor_bindings())"
+        ));
+        assert!(source.contains("executor_registry"));
+        assert!(source.contains(".executor_for(&routed_call.tool.code)"));
+        assert!(source.contains("executor_binding: Some(executor_binding.clone())"));
+        assert!(source.contains("\"executorBinding\""));
+        assert!(source.contains("prepared.executor_binding"));
     }
 
     #[test]
