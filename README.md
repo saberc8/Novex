@@ -1,135 +1,195 @@
-# Novex AI Agent Foundation Architecture
+# Novex
 
-## 1. 定位
+Novex 是一套面向企业交付的 AI Agent 基座。它不是单点 AI 应用，而是把账号、租户、权限、知识库、模型路由、Agent 运行时、工具、MCP、连接器、记忆、评测、模板和交付流程沉淀成可复用平台能力，再按客户、行业和场景组合成具体应用。
 
-Novex 的目标不是再做一个单点 AI 应用，而是做一套可复用的 AI Agent 基座。它面向的交付方式是：底层能力统一沉淀，上层按客户、行业、场景快速组合。例如客户需要一个 AI 员工培训系统、企业知识库问答、客服辅助、研发助手、运营自动化系统时，都复用同一套权限、知识库、工具、技能、记忆、评测和交付体系。
+当前仓库已经具备 Rust + Next.js 的 RBAC 控制平面、AI Foundation Rust crates、前台应用模板、parser worker、POC Docker 运行环境和交付模板。完整架构长文见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)，本 README 只保留项目首页需要的入口信息。
 
-当前 Novex 已经有一个 Rust + Next.js 的 RBAC 启动模板：
+## 能力范围
 
-- `backend`: Rust / Axum / SQLx / PostgreSQL，已有认证、用户、角色、菜单、部门、文件、配置、调度、日志、在线用户等模块。
-- `admin`: Next.js / React / Tailwind / shadcn 风格组件，已有登录、后台布局、系统管理、权限控制和基础测试。
-- `migrations`: 已有系统表、种子数据、权限和调度表。
+- 控制平面：租户、用户、角色、菜单、部门、文件、配置、调度、审计、在线用户和系统日志。
+- AI 基座：模型注册与路由、RAG、Agent Runtime、Run Graph、工具执行、MCP 网关、连接器、插件、触发器、记忆、评测和 trace。
+- 客户应用：管理后台、知识库问答、员工培训、Agent 工作台、客服 Agent 和 Codex-like POC 应用。
+- 交付体系：行业模板、客户模板、默认角色/菜单/技能/评测集、环境配置和交付文档。
+- 运行支撑：PostgreSQL、Milvus、Redis、RabbitMQ、MinIO、Neo4j、Parser Worker 和可选模型运行时。
 
-AI 基座应当接在这套 RBAC 模板之上，而不是绕开它重做账号体系。Novex 负责控制平面、权限平面、业务编排平面和交付平面；Dify、FastGPT、Codex、Hive 的设计可以作为参考或局部适配对象，但不建议让它们成为不可替换的核心依赖。
+## 快速启动
 
-## 2. 设计原则
+POC 默认复用外部 `docker-common` 基础设施。先启动共享基础服务，再启动 Novex 项目服务。
 
-1. 权限优先：所有知识库、工具、技能、记忆、会话、评测数据都必须经过租户、用户、角色和资源权限过滤。
-2. 基座复用：客户差异尽量沉淀为配置、模板、技能包、运行编排策略、连接器和前台页面，而不是 fork 一套代码。
-3. RAG 和 Agent 分离：知识库问答走 RAG；源码、工具执行、任务自动化走 Agentic Search 和 Tool Use，不把所有问题都抽象成向量召回。
-4. 资源可控：POC 阶段优先使用 PostgreSQL + Milvus Standalone、外部模型 API 或一个 OpenAI-compatible 内网模型端点、独立 parser worker，避免一次性引入 Dify 全家桶、K8s、GPU 服务。
-5. 可观测和可评测：每一次检索、重排、模型调用、工具调用、意图路由、ReAct 步骤都必须可追踪、可回放、可评测。
-6. 可交付：每个客户项目必须能从标准模板生成独立配置，包括菜单、角色、知识库、技能、连接器、品牌、前台页面和评测集。
-7. 模型可替换：LLM、Embedding、Rerank、VLM 等模型必须通过统一模型适配层接入，支持公有云 API、客户内网 OpenAI-compatible endpoint、本地开源模型服务和租户级模型路由。
+```bash
+cd /Users/yusenlin/Avalon/freedom/2026/aimanju/aether-loom
+docker compose up -d postgres redis rabbitmq etcd minio milvus attu neo4j
 
-## 3. 总体架构
-
-```text
-┌────────────────────────────────────────────────────────────────┐
-│ Customer Apps                                                   │
-│ 培训系统 / 知识库问答 / 客服辅助 / 研发助手 / 运营自动化          │
-└────────────────────────────────────────────────────────────────┘
-                                │
-┌────────────────────────────────────────────────────────────────┐
-│ App Template Layer                                              │
-│ 标准前台模板 / 客户品牌 / 行业页面 / 业务工作台 / 管理后台         │
-└────────────────────────────────────────────────────────────────┘
-                                │
-┌────────────────────────────────────────────────────────────────┐
-│ AI Foundation Layer                                             │
-│ Agent Runtime / Run Graph / RAG / Model / Tools / MCP           │
-│ Connectors / Plugins / Triggers / Memory / Eval                 │
-└────────────────────────────────────────────────────────────────┘
-                                │
-┌────────────────────────────────────────────────────────────────┐
-│ Control Plane                                                   │
-│ RBAC / Tenant / Audit / Config / Scheduler / File / Observability│
-└────────────────────────────────────────────────────────────────┘
-                                │
-┌────────────────────────────────────────────────────────────────┐
-│ Infrastructure                                                  │
-│ PostgreSQL / Milvus / Object Storage / Queue / Parser Worker    │
-│ Model Gateway / Model Runtime / Embedding / Rerank / Connector  │
-└────────────────────────────────────────────────────────────────┘
+cd /Users/yusenlin/Avalon/freedom/github/zm-agent/Novex
+./scripts/run-poc.sh
 ```
 
-### 3.1 Novex 在架构中的角色
+`scripts/run-poc.sh` 会读取 `infra/.env.poc`；如果该文件不存在，会从 `infra/.env.poc.example` 复制生成。脚本还会检查共享容器、创建缺失的 `novex` 数据库、校验 AI 相关环境变量，并启动 backend、parser-worker 和 POC 前端应用。
 
-Novex 不是单纯的后台管理模板，而是 AI 项目的控制平面：
+常用命令：
 
-- 管用户：租户、用户、角色、部门、菜单、数据权限、资源权限、身份提供商、外部账号绑定。
-- 管资产：文件、知识库、文档、chunk、embedding、工具、技能、MCP server、连接器、插件、媒体资产。
-- 管运行：Run Graph、Agent run、RAG run、工具调用、插件调用、触发器、任务队列、定时任务、审批、人机协同。
-- 管质量：离线评测、线上反馈、回归测试、成本、延迟、命中率、引用准确率。
-- 管交付：客户模板、行业模板、开通向导、品牌配置、环境配置、版本升级。
+```bash
+./scripts/run-poc.sh env       # 检查 LLM / Embedding / Reranker / Parser 等配置
+./scripts/run-poc.sh status    # 查看服务状态
+./scripts/run-poc.sh logs      # 跟踪日志
+./scripts/run-poc.sh down      # 停止 POC 服务
+./scripts/run-poc.sh pull      # 在可访问镜像源时拉取缺失镜像
+```
 
-### 3.2 仓库和代码边界
+默认访问地址：
 
-第一阶段建议 Novex 保持一个 monorepo，不要过早拆成多个独立仓库。但代码边界必须从一开始拆清楚，不能把 AI 基建能力都堆进 `backend/src`。`backend` 应该承担 HTTP API、RBAC、租户、身份登录、配置、审计、调度和编排；Model、RAG、Agent、Run Graph、Tools、MCP、Connectors、Plugins、Triggers、Memory、Eval 这些可复用基建能力应放在独立 Rust workspace crates；MinerU、LibreOffice、OCR、部分本地模型 adapter 这类重依赖能力放在 worker 或 runtime service。
+| 服务 | 地址 |
+| --- | --- |
+| Backend | `http://localhost:4398` |
+| Admin | `http://localhost:4399` |
+| Training Web | `http://localhost:4401` |
+| Chat Web | `http://localhost:4402` |
+| Agent Workspace | `http://localhost:4403` |
+| RabbitMQ UI | `http://localhost:15673` |
+| MinIO Console | `http://localhost:19011` |
+| Attu | `http://localhost:18000` |
+| Neo4j Browser | `http://localhost:17474` |
 
-推荐目录结构：
+健康检查：
+
+```bash
+curl http://localhost:4398/health
+curl http://localhost:4398/ready
+```
+
+更多基础设施说明见 [infra/README.md](infra/README.md)。
+
+## 环境配置
+
+本地 POC 的唯一环境入口是 `infra/.env.poc`，提交到仓库的是 schema/defaults 文件 `infra/.env.poc.example`。不要把真实密钥写入 example 文件。
+
+主要配置组：
+
+- 基础运行：`AUTH_JWT_SECRET`、`BACKEND_PORT`、`ADMIN_PORT`、`CHAT_WEB_PORT`、`TRAINING_WEB_PORT`、`AGENT_WORKSPACE_PORT`
+- 共享基础设施：`COMMON_DOCKER_NETWORK`、`DATABASE_URL`、`REDIS_URL`、`RABBITMQ_URL`、`MILVUS_ENDPOINT`、`MINIO_ENDPOINT`
+- 模型能力：`LLM_API_KEY`、`LLM_BASE_URL`、`LLM_MODEL`
+- 向量与重排：`EMBEDDING_API_KEY`、`EMBEDDING_BASE_URL`、`EMBEDDING_MODEL`、`RERANKER_API_KEY`、`RERANKER_BASE_URL`、`RERANKER_MODEL`
+- Parser：`PARSER_CALLBACK_TOKEN`、`PARSER_WORKER_MODE`、`MINERU_TOKEN`、`MINERU_TIMEOUT_SECONDS`
+- 外部连接器：`GITHUB_CONNECTOR_TOKEN`、`GITHUB_OAUTH_CLIENT_ID`、`GITHUB_OAUTH_CLIENT_SECRET`、`FEISHU_WEBHOOK_URL`
+- 媒体工具：`RIGHT_CODE_DRAW_BASE_URL`、`RIGHT_CODE_DRAW_API_KEY`
+
+如果缺少部分外部 AI 配置，平台仍可启动；对应的 live chat、RAG embedding、rerank、PDF/Office/Image 解析或媒体工具能力会降级或不可用。
+
+## 本地开发
+
+后端是 Cargo workspace：
+
+```bash
+cargo run -p backend-rust
+cargo test --workspace
+```
+
+单独运行后端时，使用 `backend/.env.example` 作为本地 `.env` 模板，并确保 PostgreSQL、Redis、RabbitMQ、Milvus 等依赖地址与实际运行方式一致。
+
+前端应用分别维护 `package.json`，使用 pnpm：
+
+```bash
+cd admin && pnpm install && pnpm dev
+cd apps/training-web && pnpm install && pnpm dev
+cd apps/chat-web && pnpm install && pnpm dev
+cd apps/agent-workspace && pnpm install && pnpm dev
+```
+
+常用前端检查：
+
+```bash
+pnpm typecheck
+pnpm test
+pnpm lint
+pnpm build
+```
+
+在对应前端目录内执行这些命令。
+
+## 仓库结构
 
 ```text
 Novex/
-  backend/                 Rust API，控制平面和业务编排
-  crates/
-    novex-ai-core/         Rust，AI 通用领域模型、Run Graph、Trace、Policy
-    novex-model/           Rust，模型注册、能力描述、路由、适配器、用量和健康检查
-    novex-rag/             Rust，chunk、embedding、检索、rerank、context builder
-    novex-agent/           Rust，intent router、ReAct、planner、tool loop
-    novex-tools/           Rust，tool registry、tool executor、工具权限策略
-    novex-connectors/      Rust，GitHub、飞书、网页、数据库等连接器和凭据绑定
-    novex-mcp/             Rust，MCP gateway、server/tool discovery、授权
-    novex-plugin/          Rust，插件 manifest、安装、版本、权限、能力声明
-    novex-trigger/         Rust，webhook、schedule、plugin event、外部事件路由
-    novex-memory/          Rust，session/user/org/project memory
-    novex-eval/            Rust，eval runner、指标、报告
-    novex-trace/           Rust，agent trace、rollout bundle、replay summary、eval capture boundary
-  services/
-    parser-worker/         Python，MinerU、LibreOffice、OCR、格式转换
-    model-runtime/         可选，Python 或独立进程，内网开源模型和本地 embedding/rerank adapter
-    sandbox-runner/        Rust 优先，可选，代码/命令执行隔离
-  admin/                   Next.js + TypeScript，管理后台
+  backend/                 Rust Axum API，RBAC、控制平面、业务编排和 HTTP 接口
+  crates/                  AI Foundation Rust crates
+    novex-ai-core/         通用领域模型、Run Graph、Trace、Policy
+    novex-model/           模型注册、路由、能力描述、健康检查、用量
+    novex-provider-client/ 模型 provider HTTP/stream/media transport
+    novex-rag/             chunk、embedding、检索、rerank、context builder
+    novex-agent*/          Agent 协议、运行时、planner、tool loop
+    novex-tools/           tool registry、tool executor、权限策略
+    novex-connectors/      GitHub、飞书、网页、数据库等连接器
+    novex-mcp/             MCP gateway、server/tool discovery、授权
+    novex-plugin/          插件 manifest、安装、版本和能力声明
+    novex-skill/           技能包定义、导入和策略
+    novex-trigger/         webhook、schedule、plugin event、外部事件路由
+    novex-memory/          session/user/org/project memory
+    novex-eval/            eval runner、指标、报告
+    novex-trace/           trace bundle、replay、eval capture boundary
+  admin/                   Next.js 管理后台
   apps/
-    chat-web/              Next.js + TypeScript，默认 LLM Chat / 知识库问答前台
-    training-web/          Next.js + TypeScript，员工培训模板
-    agent-workspace/       Next.js + TypeScript，Agent 工作台模板
-  templates/               客户交付模板、默认角色、默认 skills、默认 eval set
-  infra/                   docker-compose、部署脚本、环境样例
-  docs/                    架构、实施计划、交付手册
+    training-web/          员工培训模板
+    chat-web/              默认 LLM Chat / 知识库问答前台
+    agent-workspace/       Agent 工作台模板
+    codex-app-poc/         Codex-like POC 应用
+    customer-service-agent/客服 Agent 模板应用
+  services/
+    parser-worker/         Python sidecar，文档解析、MinerU、OCR、格式转换
+    model-runtime/         可选模型运行时 adapter
+  templates/               客户交付模板、默认菜单、技能、评测集和 smoke 脚本
+  infra/                   Docker Compose、POC env、基础设施说明
+  docs/                    架构、计划和交付文档
+  scripts/                 POC 启动和 smoke 脚本
 ```
 
-这个结构的原则是：仓库先不拆，模块先拆；部署先简单，服务边界先清楚。等某个模块需要独立团队、独立扩容、独立 SDK 或独立私有化交付时，再从 monorepo 中拆成独立仓库。
+## 架构边界
 
-### 3.3 语言和运行时边界
+Novex 采用 Rust first、Python sidecar、Next.js frontend：
 
-Novex 的默认语言策略是 Rust first、Python sidecar、Next.js frontend。
+- Rust 负责长期稳定、强权限、强并发、强审计的核心控制面和 AI 编排能力。
+- Python 只作为插件型 sidecar，承载 MinerU、LibreOffice、OCR、文档版面分析、本地模型 adapter 或实验性 connector。
+- Next.js 负责管理后台和客户可交付前台模板。
+- 跨语言调用通过 HTTP、queue job、MCP/tool schema 或稳定 API 完成；sidecar 不直接绕过后端访问核心业务表。
 
-Rust 负责所有需要长期稳定、强权限、强并发、强审计的核心能力：
+总体分层：
 
-- HTTP API 和 RBAC。
-- tenant、ACL、policy、audit。
-- identity provider、OAuth/OIDC 登录、外部账号绑定。
-- model registry、model route、provider credential、capability policy。
-- RAG 编排、检索、引用构建。
-- Agent runtime、ReAct 状态机、intent router。
-- tool registry、tool executor、MCP gateway。
-- connector registry、plugin registry、trigger routing。
-- memory policy 和 eval runner。
-- scheduler、trace、成本、限流。
+```text
+Customer Apps
+  培训系统 / 知识库问答 / 客服辅助 / 研发助手 / 运营自动化
+        |
+App Template Layer
+  标准前台模板 / 客户品牌 / 行业页面 / 业务工作台 / 管理后台
+        |
+AI Foundation Layer
+  Agent Runtime / Run Graph / RAG / Model / Tools / MCP / Eval / Trace
+        |
+Control Plane
+  RBAC / Tenant / Audit / Config / Scheduler / File / Observability
+        |
+Infrastructure
+  PostgreSQL / Milvus / Redis / RabbitMQ / MinIO / Parser Worker / Model Runtime
+```
 
-Python 只作为插件型运行时或 sidecar 使用，不进入核心控制面：
+设计原则：
 
-- MinerU。
-- LibreOffice 转换调度。
-- OCR。
-- 文档版面分析。
-- ML 生态依赖较重的 parser、rerank、本地 embedding adapter。
-- 内网部署时对 vLLM、Ollama、TGI、llama.cpp、Xinference 等模型服务的轻量 adapter。
-- 客户临时插件或实验性 connector。
+1. 权限优先：知识库、工具、技能、记忆、会话和评测数据都必须经过租户、用户、角色和资源权限过滤。
+2. 基座复用：客户差异优先沉淀为配置、模板、技能包、连接器、页面和运行策略。
+3. RAG 与 Agent 分离：知识问答走 RAG，源码检索、工具执行和任务自动化走 Agentic Search + Tool Use。
+4. 资源可控：POC 阶段优先复用 PostgreSQL、Milvus Standalone、外部模型 API、OpenAI-compatible endpoint 和独立 parser worker。
+5. 可观测、可评测、可回放：检索、重排、模型调用、工具调用、意图路由和 ReAct 步骤都要留下 trace。
+6. 模型可替换：LLM、Embedding、Rerank、VLM 等通过统一模型适配层接入，支持公有云、内网 endpoint、本地模型和租户级路由。
 
-前端统一使用 Next.js + TypeScript：
+## 文档索引
 
-- `admin` 是平台管理后台。
-- `apps/*` 是客户可交付前台模板。
-- 默认模板、客户模板和行业模板都复用同一套前端组件、认证、权限和 API client。
+- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)：完整 AI Agent Foundation 架构说明。
+- [infra/README.md](infra/README.md)：共享 Docker 基础设施、默认端口和 POC 运行说明。
+- [docs/delivery/novex-customer-delivery.md](docs/delivery/novex-customer-delivery.md)：客户交付边界和交付包说明。
+- [docs/plans](docs/plans)：按日期沉淀的设计和实施计划。
+- [templates/README.md](templates/README.md)：客户模板和 smoke 脚本入口。
+
+## 维护约定
+
+- 根 README 保持入口级别，不承载完整架构长文；深入设计写入 `docs/`。
+- 新增运行依赖时，同步更新 `infra/.env.poc.example`、`infra/README.md` 和本 README 的环境配置摘要。
+- 新增前台应用时，同步更新 `apps/` 目录说明、默认端口和 POC 启动脚本。
+- 新增客户模板时，同步更新 `templates/` 下的 README、`template.json` 和 smoke 脚本。
