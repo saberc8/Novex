@@ -1,5 +1,8 @@
 import type { AgentRunEventResp } from "@/types/agent";
 
+export { summarizeWorkbenchEvent } from "./workbench-events";
+export type { WorkbenchEventEvidence } from "./workbench-events";
+
 export interface ModelDeltaSummary {
   text: string;
   chunkCount: number;
