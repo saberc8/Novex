@@ -59,6 +59,56 @@ pub struct ToolExecutionPolicyDecision {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct AgentToolExecution {
+    pub response_payload: Value,
+    pub status: String,
+    pub dry_run: bool,
+    pub error_message: Option<String>,
+    pub final_output: String,
+}
+
+impl AgentToolExecution {
+    pub fn succeeded(response_payload: Value, dry_run: bool, final_output: String) -> Self {
+        Self {
+            response_payload,
+            status: "succeeded".to_owned(),
+            dry_run,
+            error_message: None,
+            final_output,
+        }
+    }
+
+    pub fn failed(response_payload: Value, error_message: String, final_output: String) -> Self {
+        Self {
+            response_payload,
+            status: "failed".to_owned(),
+            dry_run: false,
+            error_message: Some(error_message),
+            final_output,
+        }
+    }
+
+    pub fn cancelled(response_payload: Value, final_output: String) -> Self {
+        Self {
+            response_payload,
+            status: "cancelled".to_owned(),
+            dry_run: false,
+            error_message: Some(final_output.clone()),
+            final_output,
+        }
+    }
+
+    pub fn succeeded_status(&self) -> bool {
+        self.status == "succeeded"
+    }
+
+    pub fn cancelled_status(&self) -> bool {
+        self.status == "cancelled"
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ToolDefinition {
     pub code: String,
     pub name: String,
@@ -1298,6 +1348,48 @@ mod tests {
         assert_eq!(natural_language.repository, "acme/app");
         assert_eq!(natural_language.path, "src/lib.rs");
         assert_eq!(natural_language.reference.as_deref(), Some("main"));
+    }
+
+    #[test]
+    fn agent_tool_execution_envelope_builds_success_failure_and_cancelled_statuses() {
+        let succeeded = AgentToolExecution::succeeded(
+            serde_json::json!({"status": "succeeded", "answer": "ok"}),
+            true,
+            "Agent dry-run executed.".to_owned(),
+        );
+        assert_eq!(succeeded.status, "succeeded");
+        assert!(succeeded.dry_run);
+        assert_eq!(succeeded.error_message, None);
+        assert_eq!(succeeded.final_output, "Agent dry-run executed.");
+        assert_eq!(succeeded.response_payload["answer"], "ok");
+        assert!(succeeded.succeeded_status());
+        assert!(!succeeded.cancelled_status());
+
+        let failed = AgentToolExecution::failed(
+            serde_json::json!({"status": "failed", "error": "boom"}),
+            "boom".to_owned(),
+            "Agent failed.".to_owned(),
+        );
+        assert_eq!(failed.status, "failed");
+        assert!(!failed.dry_run);
+        assert_eq!(failed.error_message.as_deref(), Some("boom"));
+        assert_eq!(failed.final_output, "Agent failed.");
+        assert!(!failed.succeeded_status());
+        assert!(!failed.cancelled_status());
+
+        let cancelled = AgentToolExecution::cancelled(
+            serde_json::json!({"status": "cancelled"}),
+            "Tool was cancelled.".to_owned(),
+        );
+        assert_eq!(cancelled.status, "cancelled");
+        assert!(!cancelled.dry_run);
+        assert_eq!(
+            cancelled.error_message.as_deref(),
+            Some("Tool was cancelled.")
+        );
+        assert_eq!(cancelled.final_output, "Tool was cancelled.");
+        assert!(!cancelled.succeeded_status());
+        assert!(cancelled.cancelled_status());
     }
 
     #[test]

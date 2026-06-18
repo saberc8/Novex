@@ -38,10 +38,10 @@ use novex_tools::{
     agent_model_loop_tool_definitions, agent_model_loop_tool_executor_bindings,
     evaluate_tool_execution_policy, feishu_message_text_from_tool_input,
     github_read_request_from_tool_input, github_search_request_from_tool_input,
-    media_image_request_from_tool_input, ApprovalPolicy, ToolBatchExecutionMode, ToolBatchPlan,
-    ToolExecutionPolicyDecision, ToolExecutionPolicyInput, ToolExecutorBinding,
-    ToolExecutorDispatchPlan, ToolExecutorRegistry, ToolExecutorRegistryError, ToolKind,
-    ToolRiskLevel, ToolRouteError, ToolRouteErrorKind, ToolRouter,
+    media_image_request_from_tool_input, AgentToolExecution, ApprovalPolicy,
+    ToolBatchExecutionMode, ToolBatchPlan, ToolExecutionPolicyDecision, ToolExecutionPolicyInput,
+    ToolExecutorBinding, ToolExecutorDispatchPlan, ToolExecutorRegistry, ToolExecutorRegistryError,
+    ToolKind, ToolRiskLevel, ToolRouteError, ToolRouteErrorKind, ToolRouter,
 };
 use novex_trace::{TraceBundle, TraceEvent, TraceReplaySummary};
 use serde::{Deserialize, Serialize};
@@ -129,15 +129,6 @@ impl FeishuWebhookConfig {
 
         Some(Self { webhook_url })
     }
-}
-
-#[derive(Debug, Clone)]
-struct AgentToolExecution {
-    response_payload: Value,
-    status: String,
-    dry_run: bool,
-    error_message: Option<String>,
-    final_output: String,
 }
 
 #[derive(Debug, Clone)]
@@ -391,46 +382,6 @@ impl AgentRunCancellationToken {
             }
         }
         std::future::pending::<()>().await;
-    }
-}
-
-impl AgentToolExecution {
-    fn succeeded(response_payload: Value, dry_run: bool, final_output: String) -> Self {
-        Self {
-            response_payload,
-            status: "succeeded".to_owned(),
-            dry_run,
-            error_message: None,
-            final_output,
-        }
-    }
-
-    fn failed(response_payload: Value, error_message: String, final_output: String) -> Self {
-        Self {
-            response_payload,
-            status: "failed".to_owned(),
-            dry_run: false,
-            error_message: Some(error_message),
-            final_output,
-        }
-    }
-
-    fn cancelled(response_payload: Value, final_output: String) -> Self {
-        Self {
-            response_payload,
-            status: "cancelled".to_owned(),
-            dry_run: false,
-            error_message: Some(final_output.clone()),
-            final_output,
-        }
-    }
-
-    fn succeeded_status(&self) -> bool {
-        self.status == "succeeded"
-    }
-
-    fn cancelled_status(&self) -> bool {
-        self.status == "cancelled"
     }
 }
 
@@ -7808,6 +7759,23 @@ mod tests {
                 "{local_definition} should live in novex-tools"
             );
         }
+    }
+
+    #[test]
+    fn agent_tool_execution_envelope_lives_in_novex_tools() {
+        let source = include_str!("agent_service.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+
+        assert!(source.contains("AgentToolExecution,"));
+        assert!(
+            !source.contains("struct AgentToolExecution"),
+            "AgentToolExecution should live in novex-tools"
+        );
+        assert!(source.contains("AgentToolExecution::succeeded("));
+        assert!(source.contains("AgentToolExecution::failed("));
+        assert!(source.contains("AgentToolExecution::cancelled("));
     }
 
     #[test]
