@@ -57,4 +57,36 @@ mod tests {
     fn disabled_auto_migrate_uses_lazy_connection_mode() {
         assert_eq!(connection_mode(false), ConnectionMode::Lazy);
     }
+
+    #[test]
+    fn migration_filenames_use_unique_versions() {
+        let migration_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("migrations");
+        let mut versions = std::collections::BTreeMap::<String, Vec<String>>::new();
+
+        for entry in std::fs::read_dir(&migration_dir).expect("read migrations directory") {
+            let entry = entry.expect("read migration entry");
+            let file_name = entry.file_name().to_string_lossy().into_owned();
+            if !file_name.ends_with(".sql") {
+                continue;
+            }
+
+            let Some((version, _description)) = file_name.split_once('_') else {
+                panic!("migration filename must start with version_: {file_name}");
+            };
+            versions
+                .entry(version.to_owned())
+                .or_default()
+                .push(file_name);
+        }
+
+        let duplicates: Vec<_> = versions
+            .into_iter()
+            .filter_map(|(version, names)| (names.len() > 1).then_some((version, names)))
+            .collect();
+
+        assert!(
+            duplicates.is_empty(),
+            "duplicate migration versions: {duplicates:?}"
+        );
+    }
 }

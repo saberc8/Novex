@@ -1461,7 +1461,7 @@ mod tests {
     fn agent_turn_item_migration_defines_response_item_ledger_contract() {
         let migration_path = concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/migrations/202606170009_create_ai_agent_turn_item.sql"
+            "/migrations/202606180003_create_ai_agent_turn_item.sql"
         );
         let migration = std::fs::read_to_string(migration_path)
             .expect("missing AI agent turn item ledger migration");
