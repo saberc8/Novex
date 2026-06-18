@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{BTreeSet, HashMap},
     future::Future,
     sync::{Arc, Mutex},
     time::{Duration, Instant},
@@ -348,6 +348,27 @@ impl AgentRunCancellationToken {
     }
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentWorkbenchContext {
+    #[serde(default)]
+    pub mode: String,
+    #[serde(default)]
+    pub dataset_id: Option<i64>,
+    #[serde(default)]
+    pub document_ids: Vec<i64>,
+    #[serde(default)]
+    pub file_ids: Vec<i64>,
+    #[serde(default)]
+    pub skill_codes: Vec<String>,
+    #[serde(default)]
+    pub mcp_tool_codes: Vec<String>,
+    #[serde(default)]
+    pub web_search_enabled: bool,
+    #[serde(default)]
+    pub route_id: Option<String>,
+}
+
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentRunCommand {
@@ -363,6 +384,8 @@ pub struct AgentRunCommand {
     pub auto_approve: bool,
     #[serde(default)]
     pub budget: TaskBudget,
+    #[serde(default)]
+    pub workbench_context: Option<AgentWorkbenchContext>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -1026,6 +1049,10 @@ impl AgentService {
         if let Some(object) = input_payload.as_object_mut() {
             object.insert("input".to_owned(), json!(&command.input));
             object.insert("runtimeMode".to_owned(), json!("model_loop"));
+            object.insert(
+                "workbenchContext".to_owned(),
+                json!(&command.workbench_context),
+            );
         }
         self.append_event(
             user_id,
@@ -1089,6 +1116,7 @@ impl AgentService {
                 let messages = build_model_loop_messages_from_history(
                     &command.input,
                     &tool_codes,
+                    command.workbench_context.as_ref(),
                     &runtime_state.items,
                 );
                 let model_stream_call = self
@@ -3758,6 +3786,7 @@ pub fn normalize_agent_run_command(
     command.model_route_id = normalize_optional_agent_model_route_id(command.model_route_id)?;
     command.budget = novex_ai_core::normalize_task_budget(command.budget)
         .map_err(|err| AppError::bad_request(format!("任务预算超出限制: {}", err.field)))?;
+    command.workbench_context = normalize_agent_workbench_context(command.workbench_context);
     Ok(command)
 }
 
@@ -3802,6 +3831,62 @@ fn normalize_agent_execution_mode(execution_mode: Option<String>) -> Result<Stri
     Err(AppError::bad_request("Agent executionMode 不支持"))
 }
 
+const WORKBENCH_CONTEXT_MAX_IDS: usize = 16;
+const WORKBENCH_CONTEXT_MAX_CODES: usize = 16;
+
+fn normalize_agent_workbench_context(
+    context: Option<AgentWorkbenchContext>,
+) -> Option<AgentWorkbenchContext> {
+    let mut context = context?;
+    let mode = context.mode.trim();
+    context.mode = if mode.is_empty() {
+        "agent".to_owned()
+    } else {
+        mode.to_owned()
+    };
+    context.document_ids =
+        normalized_positive_i64_list(context.document_ids, WORKBENCH_CONTEXT_MAX_IDS);
+    context.file_ids = normalized_positive_i64_list(context.file_ids, WORKBENCH_CONTEXT_MAX_IDS);
+    context.skill_codes = normalized_code_list(context.skill_codes, WORKBENCH_CONTEXT_MAX_CODES);
+    context.mcp_tool_codes =
+        normalized_code_list(context.mcp_tool_codes, WORKBENCH_CONTEXT_MAX_CODES);
+    context.route_id = context
+        .route_id
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty());
+
+    let has_context = context.dataset_id.is_some()
+        || !context.document_ids.is_empty()
+        || !context.file_ids.is_empty()
+        || !context.skill_codes.is_empty()
+        || !context.mcp_tool_codes.is_empty()
+        || context.web_search_enabled
+        || context.route_id.is_some();
+
+    has_context.then_some(context)
+}
+
+fn normalized_positive_i64_list(values: Vec<i64>, limit: usize) -> Vec<i64> {
+    let mut seen = BTreeSet::new();
+    values
+        .into_iter()
+        .filter(|value| *value > 0)
+        .filter(|value| seen.insert(*value))
+        .take(limit)
+        .collect()
+}
+
+fn normalized_code_list(values: Vec<String>, limit: usize) -> Vec<String> {
+    let mut seen = BTreeSet::new();
+    values
+        .into_iter()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+        .filter(|value| seen.insert(value.clone()))
+        .take(limit)
+        .collect()
+}
+
 fn agent_run_command_payload(command: &AgentRunCommand) -> Value {
     json!({
         "input": command.input,
@@ -3809,7 +3894,8 @@ fn agent_run_command_payload(command: &AgentRunCommand) -> Value {
         "executionMode": command.execution_mode,
         "modelRouteId": command.model_route_id,
         "autoApprove": command.auto_approve,
-        "budget": command.budget
+        "budget": command.budget,
+        "workbenchContext": command.workbench_context
     })
 }
 
@@ -3866,6 +3952,65 @@ fn build_model_loop_system_prompt(tool_codes: &[String]) -> String {
         "You are Novex Agent Runtime. You may answer directly or request tool calls while staying within the run budget. Available tools: {}. After each tool observation, decide whether another tool call is necessary or produce the final answer. To call one tool, reply with compact JSON exactly like {{\"type\":\"tool_call\",\"callId\":\"call-1\",\"toolCode\":\"rag.search\",\"arguments\":{{\"query\":\"...\"}}}}. To call multiple independent tools in the same turn, reply with compact JSON exactly like {{\"type\":\"tool_calls\",\"calls\":[{{\"callId\":\"call-1\",\"toolCode\":\"rag.search\",\"arguments\":{{\"query\":\"...\"}}}},{{\"callId\":\"call-2\",\"toolCode\":\"github.repo.read\",\"arguments\":{{\"repository\":\"org/repo\",\"path\":\"README.md\"}}}}]}}. Otherwise reply with the final answer. Never request a tool outside the available tools or after the tool-call budget is exhausted.",
         tool_codes.join(", ")
     )
+}
+
+fn build_model_loop_system_prompt_with_context(
+    tool_codes: &[String],
+    context: Option<&AgentWorkbenchContext>,
+) -> String {
+    let mut prompt = build_model_loop_system_prompt(tool_codes);
+    if let Some(context) = context {
+        let mut lines = Vec::new();
+        lines.push("Workbench context:".to_owned());
+        if let Some(dataset_id) = context.dataset_id {
+            lines.push(format!(
+                "Use rag.search with datasetId {dataset_id} for file-grounded questions."
+            ));
+        }
+        if !context.document_ids.is_empty() {
+            lines.push(format!(
+                "Selected document ids: {}.",
+                join_i64_values(&context.document_ids)
+            ));
+        }
+        if !context.file_ids.is_empty() {
+            lines.push(format!(
+                "Selected file ids: {}.",
+                join_i64_values(&context.file_ids)
+            ));
+        }
+        if !context.skill_codes.is_empty() {
+            lines.push(format!(
+                "Selected skill codes: {}.",
+                context.skill_codes.join(", ")
+            ));
+        }
+        if !context.mcp_tool_codes.is_empty() {
+            lines.push(format!(
+                "Selected MCP tool codes: {}.",
+                context.mcp_tool_codes.join(", ")
+            ));
+        }
+        if context.web_search_enabled {
+            lines.push(
+                "Web search is enabled; web.search may be used for fresh external facts."
+                    .to_owned(),
+            );
+        } else {
+            lines.push("Web search is disabled for this run.".to_owned());
+        }
+        prompt.push(' ');
+        prompt.push_str(&lines.join(" "));
+    }
+    prompt
+}
+
+fn join_i64_values(values: &[i64]) -> String {
+    values
+        .iter()
+        .map(|value| value.to_string())
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn agent_runtime_budget_from_task_budget(budget: TaskBudget) -> AgentRuntimeBudget {
@@ -4290,11 +4435,12 @@ struct ModelLoopToolObservationProjection {
 fn build_model_loop_messages_from_history(
     original_input: &str,
     tool_codes: &[String],
+    workbench_context: Option<&AgentWorkbenchContext>,
     history: &[AgentTurnItem],
 ) -> Vec<ModelChatMessage> {
     let mut messages = vec![ModelChatMessage {
         role: "system".to_owned(),
-        content: build_model_loop_system_prompt(tool_codes),
+        content: build_model_loop_system_prompt_with_context(tool_codes, workbench_context),
     }];
     let original_user_input = history
         .iter()
@@ -5392,6 +5538,7 @@ mod tests {
             model_route_id: None,
             auto_approve: false,
             budget: TaskBudget::default(),
+            workbench_context: None,
         })
         .unwrap_err();
 
@@ -5419,6 +5566,7 @@ mod tests {
             model_route_id: None,
             auto_approve: false,
             budget: TaskBudget::default(),
+            workbench_context: None,
         })
         .unwrap();
 
@@ -5434,10 +5582,126 @@ mod tests {
             model_route_id: None,
             auto_approve: false,
             budget: TaskBudget::default(),
+            workbench_context: None,
         })
         .unwrap_err();
 
         assert!(err.to_string().contains("Agent executionMode 不支持"));
+    }
+
+    #[test]
+    fn workbench_context_normalization_bounds_lists_and_trims_values() {
+        let context = AgentWorkbenchContext {
+            mode: " agent ".to_owned(),
+            dataset_id: Some(42),
+            document_ids: vec![1, 2, 2, 0, -5, 3],
+            file_ids: vec![9, 9, 0, 10],
+            skill_codes: vec![
+                " support.refund ".to_owned(),
+                "".to_owned(),
+                "support.refund".to_owned(),
+                " knowledge.writer ".to_owned(),
+            ],
+            mcp_tool_codes: (0..24)
+                .map(|index| format!(" mcp.docs.search.{index} "))
+                .collect(),
+            web_search_enabled: true,
+            route_id: Some(" runtime.llm.code_agent ".to_owned()),
+        };
+
+        let normalized = normalize_agent_workbench_context(Some(context)).expect("context present");
+
+        assert_eq!(normalized.mode, "agent");
+        assert_eq!(normalized.dataset_id, Some(42));
+        assert_eq!(normalized.document_ids, vec![1, 2, 3]);
+        assert_eq!(normalized.file_ids, vec![9, 10]);
+        assert_eq!(
+            normalized.skill_codes,
+            vec!["support.refund".to_owned(), "knowledge.writer".to_owned()]
+        );
+        assert_eq!(normalized.mcp_tool_codes.len(), 16);
+        assert_eq!(normalized.mcp_tool_codes[0], "mcp.docs.search.0");
+        assert!(normalized.web_search_enabled);
+        assert_eq!(
+            normalized.route_id.as_deref(),
+            Some("runtime.llm.code_agent")
+        );
+    }
+
+    #[test]
+    fn workbench_context_normalization_drops_empty_context() {
+        let context = AgentWorkbenchContext::default();
+
+        assert_eq!(normalize_agent_workbench_context(Some(context)), None);
+    }
+
+    #[test]
+    fn agent_run_command_payload_preserves_workbench_context() {
+        let command = AgentRunCommand {
+            input: "What changed in the handbook?".to_owned(),
+            runtime_mode: Some("model_loop".to_owned()),
+            workbench_context: normalize_agent_workbench_context(Some(AgentWorkbenchContext {
+                mode: "agent".to_owned(),
+                dataset_id: Some(7),
+                document_ids: vec![11],
+                file_ids: vec![19],
+                skill_codes: vec!["support.refund".to_owned()],
+                mcp_tool_codes: vec!["mcp.docs.search".to_owned()],
+                web_search_enabled: true,
+                route_id: Some("runtime.llm.code_agent".to_owned()),
+            })),
+            ..AgentRunCommand::default()
+        };
+
+        let payload = agent_run_command_payload(&command);
+
+        assert_eq!(payload["workbenchContext"]["mode"], "agent");
+        assert_eq!(payload["workbenchContext"]["datasetId"], 7);
+        assert_eq!(payload["workbenchContext"]["documentIds"], json!([11]));
+        assert_eq!(payload["workbenchContext"]["fileIds"], json!([19]));
+        assert_eq!(
+            payload["workbenchContext"]["skillCodes"],
+            json!(["support.refund"])
+        );
+        assert_eq!(
+            payload["workbenchContext"]["mcpToolCodes"],
+            json!(["mcp.docs.search"])
+        );
+        assert_eq!(payload["workbenchContext"]["webSearchEnabled"], true);
+        assert_eq!(
+            payload["workbenchContext"]["routeId"],
+            "runtime.llm.code_agent"
+        );
+    }
+
+    #[test]
+    fn model_loop_system_prompt_includes_workbench_context_without_user_text_mutation() {
+        let context = normalize_agent_workbench_context(Some(AgentWorkbenchContext {
+            mode: "agent".to_owned(),
+            dataset_id: Some(7),
+            document_ids: vec![11, 12],
+            file_ids: vec![19],
+            skill_codes: vec!["support.refund".to_owned()],
+            mcp_tool_codes: vec!["mcp.docs.search".to_owned()],
+            web_search_enabled: true,
+            route_id: Some("runtime.llm.code_agent".to_owned()),
+        }));
+
+        let prompt = build_model_loop_system_prompt_with_context(
+            &[
+                "rag.search".to_owned(),
+                "web.search".to_owned(),
+                "mcp.docs.search".to_owned(),
+            ],
+            context.as_ref(),
+        );
+
+        assert!(prompt.contains("Workbench context:"));
+        assert!(prompt.contains("Use rag.search with datasetId 7"));
+        assert!(prompt.contains("Selected skill codes: support.refund"));
+        assert!(prompt.contains("Selected MCP tool codes: mcp.docs.search"));
+        assert!(prompt.contains("Web search is enabled; web.search may be used"));
+        assert!(!prompt.contains("What changed in the handbook?"));
     }
 
     #[test]
@@ -7140,7 +7404,7 @@ mod tests {
 
         assert!(source.contains("build_model_loop_messages_from_history"));
         assert!(normalized_source.contains(
-            "build_model_loop_messages_from_history( &command.input, &tool_codes, &runtime_state.items, )"
+            "build_model_loop_messages_from_history( &command.input, &tool_codes, command.workbench_context.as_ref(), &runtime_state.items, )"
         ));
         assert!(!model_loop.contains("let mut messages = vec!"));
         assert!(!model_loop.contains("messages.push(ModelChatMessage"));
@@ -7173,8 +7437,12 @@ mod tests {
             ),
         ];
 
-        let messages =
-            build_model_loop_messages_from_history("Find refund policy", &tool_codes, &history);
+        let messages = build_model_loop_messages_from_history(
+            "Find refund policy",
+            &tool_codes,
+            None,
+            &history,
+        );
 
         assert_eq!(messages.len(), 4);
         assert_eq!(messages[0].role, "system");
@@ -7209,8 +7477,12 @@ mod tests {
             AgentTurnItem::tool_call("call-2", "github.repo.read", json!({ "path": "README.md" })),
         ];
 
-        let messages =
-            build_model_loop_messages_from_history("Find refund policy", &tool_codes, &history);
+        let messages = build_model_loop_messages_from_history(
+            "Find refund policy",
+            &tool_codes,
+            None,
+            &history,
+        );
 
         assert_eq!(messages[0].role, "system");
         assert_eq!(messages[1].role, "user");
@@ -7375,6 +7647,7 @@ mod tests {
                 max_seconds: Some(30),
                 max_cost_cents: Some(0),
             },
+            workbench_context: None,
         })
         .unwrap();
         let plan = build_agent_plan(&command, MemoryContext::empty()).unwrap();
@@ -7398,6 +7671,7 @@ mod tests {
                 max_seconds: Some(30),
                 max_cost_cents: Some(0),
             },
+            workbench_context: None,
         })
         .unwrap();
         let plan = build_agent_plan(&command, MemoryContext::empty()).unwrap();
@@ -7429,6 +7703,7 @@ mod tests {
             model_route_id: None,
             auto_approve: false,
             budget: TaskBudget::default(),
+            workbench_context: None,
         })
         .unwrap();
 
@@ -8364,6 +8639,7 @@ mod tests {
                 max_seconds: Some(30),
                 max_cost_cents: Some(0),
             },
+            workbench_context: None,
         })
         .and_then(|command| build_agent_plan(&command, MemoryContext::empty()).map(|_| command))
         .unwrap_err();
