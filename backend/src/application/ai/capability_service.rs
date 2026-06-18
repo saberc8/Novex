@@ -54,6 +54,8 @@ const MAX_SKILL_PACKAGE_FILES: usize = 200;
 const MAX_SKILL_PACKAGE_TEXT_BYTES: usize = 2 * 1024 * 1024;
 const MAX_SKILL_PREVIEW_ITEMS: usize = 20;
 const MCP_OAUTH_REFRESH_SKEW_SECONDS: i64 = 300;
+const MCP_OAUTH_REFRESH_SCHEDULER_USER_ID: i64 = 0;
+const MCP_OAUTH_REFRESH_SCHEDULER_MAX_BATCH_SIZE: i64 = 50;
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -501,6 +503,14 @@ pub struct McpOAuthCallbackResp {
     pub expires_at: Option<String>,
     pub refresh_needed_after: Option<String>,
     pub evidence: Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpOAuthRefreshBatchSummary {
+    pub attempted: usize,
+    pub refreshed: usize,
+    pub failed: usize,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -1071,6 +1081,53 @@ impl CapabilityService {
         let session = self.repo.upsert_mcp_oauth_session(&save_record).await?;
 
         Ok(McpOAuthCallbackResp::from_session(session, evidence))
+    }
+
+    pub async fn refresh_due_mcp_oauth_sessions(
+        db: PgPool,
+        limit: i64,
+    ) -> Result<McpOAuthRefreshBatchSummary, AppError> {
+        let limit = limit.clamp(1, MCP_OAUTH_REFRESH_SCHEDULER_MAX_BATCH_SIZE);
+        let repo = AiCapabilityRepository::new(db.clone());
+        let sessions = repo
+            .list_due_mcp_oauth_sessions(Utc::now().naive_utc(), limit)
+            .await?;
+        let mut summary = McpOAuthRefreshBatchSummary {
+            attempted: 0,
+            refreshed: 0,
+            failed: 0,
+        };
+
+        for session in sessions {
+            summary.attempted += 1;
+            let service = CapabilityService::for_tenant(db.clone(), session.tenant_id);
+            let command = McpOAuthRefreshCommand {
+                scope_type: session.scope_type.clone(),
+                scope_id: session.scope_id.clone(),
+            };
+            match service
+                .refresh_mcp_oauth_session(
+                    MCP_OAUTH_REFRESH_SCHEDULER_USER_ID,
+                    session.server_id,
+                    command,
+                )
+                .await
+            {
+                Ok(_) => summary.refreshed += 1,
+                Err(error) => {
+                    summary.failed += 1;
+                    tracing::warn!(
+                        tenant_id = session.tenant_id,
+                        server_id = session.server_id,
+                        session_id = session.id,
+                        error = ?error,
+                        "scheduled MCP OAuth refresh failed"
+                    );
+                }
+            }
+        }
+
+        Ok(summary)
     }
 
     pub async fn dry_run_tool(
@@ -3364,6 +3421,37 @@ mod tests {
         assert!(source.contains("refresh_mcp_oauth_session_with_dispatch_and_secret_writer"));
         assert!(source.contains("write_mcp_oauth_token_secret_material"));
         assert!(source.contains(".upsert_mcp_oauth_session("));
+    }
+
+    #[test]
+    fn mcp_oauth_refresh_scheduler_service_uses_due_query_and_existing_refresh_path() {
+        let source = include_str!("capability_service.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+
+        assert!(source.contains("pub async fn refresh_due_mcp_oauth_sessions"));
+        assert!(source.contains("list_due_mcp_oauth_sessions"));
+        assert!(source.contains("CapabilityService::for_tenant"));
+        assert!(source.contains(".refresh_mcp_oauth_session("));
+        assert!(source.contains("MCP_OAUTH_REFRESH_SCHEDULER_USER_ID"));
+    }
+
+    #[test]
+    fn mcp_oauth_refresh_batch_summary_serializes_counts_without_session_details() {
+        let summary = McpOAuthRefreshBatchSummary {
+            attempted: 3,
+            refreshed: 2,
+            failed: 1,
+        };
+
+        let value = serde_json::to_value(&summary).unwrap();
+
+        assert_eq!(value["attempted"], 3);
+        assert_eq!(value["refreshed"], 2);
+        assert_eq!(value["failed"], 1);
+        assert!(value.get("sessions").is_none());
+        assert!(!value.to_string().contains("token"));
     }
 
     #[test]

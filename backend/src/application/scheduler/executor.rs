@@ -7,7 +7,7 @@ use sqlx::PgPool;
 
 use crate::{
     application::{
-        ai::model_service::ModelRuntimeService,
+        ai::{capability_service::CapabilityService, model_service::ModelRuntimeService},
         scheduler::{
             http_safety::{validate_http_target, HttpSafetyConfig},
             service::{JOB_TYPE_BUILTIN, JOB_TYPE_HTTP},
@@ -192,6 +192,13 @@ async fn execute_builtin_job(db: &PgPool, key: &str) -> Result<HttpOutput, AppEr
                 body: serde_json::to_string(&summary).unwrap_or_else(|_| "{}".to_owned()),
             })
         }
+        "ai.mcp.oauth_refresh" => {
+            let summary = CapabilityService::refresh_due_mcp_oauth_sessions(db.clone(), 50).await?;
+            Ok(HttpOutput {
+                status: Some(200),
+                body: serde_json::to_string(&summary).unwrap_or_else(|_| "{}".to_owned()),
+            })
+        }
         _ => Err(AppError::bad_request(format!("未知内置任务: {key}"))),
     }
 }
@@ -247,5 +254,16 @@ mod tests {
 
         assert!(source.contains("ai.model.alert_delivery"));
         assert!(source.contains("ModelRuntimeService::deliver_active_model_ops_alerts"));
+    }
+
+    #[test]
+    fn mcp_oauth_refresh_key_source_contract_routes_scheduler_builtin() {
+        let source = include_str!("executor.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+
+        assert!(source.contains("ai.mcp.oauth_refresh"));
+        assert!(source.contains("CapabilityService::refresh_due_mcp_oauth_sessions"));
     }
 }

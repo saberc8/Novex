@@ -623,6 +623,35 @@ WHERE tenant_id = $1
 LIMIT 1;
 "#;
 
+const MCP_OAUTH_SESSION_DUE_REFRESH_SQL: &str = r#"
+SELECT
+    id,
+    tenant_id,
+    server_id,
+    server_code,
+    scope_type,
+    scope_id,
+    access_token_secret_ref,
+    refresh_token_secret_ref,
+    token_type,
+    scopes,
+    expires_at,
+    refresh_needed_after,
+    last_refreshed_at,
+    revoked_at,
+    status,
+    metadata,
+    create_time,
+    update_time
+FROM ai_mcp_oauth_session
+WHERE status = 1
+  AND revoked_at IS NULL
+  AND refresh_token_secret_ref IS NOT NULL
+  AND refresh_needed_after IS NOT NULL
+  AND refresh_needed_after <= $1
+ORDER BY refresh_needed_after ASC, id ASC LIMIT $2;
+"#;
+
 impl AiCapabilityRepository {
     pub fn new(db: PgPool) -> Self {
         Self { db }
@@ -1588,6 +1617,20 @@ LIMIT 1;
         )
     }
 
+    pub async fn list_due_mcp_oauth_sessions(
+        &self,
+        now: NaiveDateTime,
+        limit: i64,
+    ) -> Result<Vec<McpOAuthSessionRecord>, AppError> {
+        Ok(
+            sqlx::query_as::<_, McpOAuthSessionRecord>(MCP_OAUTH_SESSION_DUE_REFRESH_SQL)
+                .bind(now)
+                .bind(limit.max(1))
+                .fetch_all(&self.db)
+                .await?,
+        )
+    }
+
     pub async fn find_webhook_trigger(
         &self,
         tenant_id: i64,
@@ -2235,5 +2278,19 @@ mod tests {
         assert!(MCP_OAUTH_SESSION_LOOKUP_SQL.contains("scope_id = $4"));
         assert!(!MCP_OAUTH_SESSION_UPSERT_SQL.contains("access_token_value"));
         assert!(!MCP_OAUTH_SESSION_UPSERT_SQL.contains("refresh_token_value"));
+    }
+
+    #[test]
+    fn mcp_oauth_persistence_repository_lists_due_refresh_sessions() {
+        let source = include_str!("ai_capability_repository.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+
+        assert!(source.contains("list_due_mcp_oauth_sessions"));
+        assert!(source.contains("refresh_needed_after <= "));
+        assert!(source.contains("refresh_token_secret_ref IS NOT NULL"));
+        assert!(source.contains("revoked_at IS NULL"));
+        assert!(source.contains("ORDER BY refresh_needed_after ASC, id ASC LIMIT"));
     }
 }

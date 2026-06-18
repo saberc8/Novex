@@ -620,6 +620,29 @@ mod tests {
     }
 
     #[test]
+    fn mcp_oauth_refresh_key_builtin_job_is_accepted() {
+        let mut command = base_command();
+        command.task_type = JOB_TYPE_BUILTIN;
+        command.builtin_key = "ai.mcp.oauth_refresh".to_owned();
+
+        let command = normalize_job_command(command, &safety_config()).unwrap();
+
+        assert_eq!(command.builtin_key, "ai.mcp.oauth_refresh");
+    }
+
+    #[test]
+    fn mcp_oauth_refresh_scheduler_seed_registers_default_builtin_job() {
+        let migration =
+            include_str!("../../../migrations/202606180002_seed_mcp_oauth_refresh_scheduler.sql");
+
+        assert!(migration.contains("3600003"));
+        assert!(migration.contains("'AI MCP OAuth Refresh'"));
+        assert!(migration.contains("'ai.mcp.oauth_refresh'"));
+        assert!(migration.contains("'*/60 * * * * *'"));
+        assert!(migration.contains("ON CONFLICT DO NOTHING"));
+    }
+
+    #[test]
     fn normalize_job_rejects_retry_outside_range() {
         let mut command = base_command();
         command.max_retry = 11;
