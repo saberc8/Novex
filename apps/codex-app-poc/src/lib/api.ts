@@ -1,4 +1,4 @@
-import { getAuthToken } from "./auth";
+import { ensureDevAuthToken, getAuthToken } from "./auth";
 
 const DEFAULT_API_BASE_URL = "http://localhost:4398";
 
@@ -14,6 +14,14 @@ type ApiRequestInit = RequestInit & {
 };
 
 export async function apiRequest<T>(path: string, init: ApiRequestInit = {}): Promise<T> {
+  return apiRequestWithAuthRetry<T>(path, init, true);
+}
+
+async function apiRequestWithAuthRetry<T>(
+  path: string,
+  init: ApiRequestInit,
+  allowDevAuthRetry: boolean
+): Promise<T> {
   const { query, ...requestInit } = init;
   const headers: Record<string, string> = {};
   new Headers(requestInit.headers).forEach((value, key) => {
@@ -33,6 +41,14 @@ export async function apiRequest<T>(path: string, init: ApiRequestInit = {}): Pr
   });
   const body = (await response.json()) as ApiEnvelope<T>;
 
+  if (allowDevAuthRetry && isUnauthorized(response, body)) {
+    clearAuthHeader(headers);
+    const token = await ensureDevAuthToken();
+    if (token) {
+      return apiRequestWithAuthRetry<T>(path, init, false);
+    }
+  }
+
   if (!response.ok || body.code !== "200") {
     throw new Error(body.msg ?? body.message ?? "Request failed");
   }
@@ -44,6 +60,15 @@ export async function apiFormRequest<T>(
   path: string,
   form: FormData,
   init: ApiRequestInit = {}
+): Promise<T> {
+  return apiFormRequestWithAuthRetry<T>(path, form, init, true);
+}
+
+async function apiFormRequestWithAuthRetry<T>(
+  path: string,
+  form: FormData,
+  init: ApiRequestInit,
+  allowDevAuthRetry: boolean
 ): Promise<T> {
   const { query, headers: initHeaders, ...requestInit } = init;
   const headers: Record<string, string> = {};
@@ -62,6 +87,14 @@ export async function apiFormRequest<T>(
     headers
   });
   const body = (await response.json()) as ApiEnvelope<T>;
+
+  if (allowDevAuthRetry && isUnauthorized(response, body)) {
+    clearAuthHeader(headers);
+    const token = await ensureDevAuthToken();
+    if (token) {
+      return apiFormRequestWithAuthRetry<T>(path, form, init, false);
+    }
+  }
 
   if (!response.ok || body.code !== "200") {
     throw new Error(body.msg ?? body.message ?? "Request failed");
@@ -83,4 +116,14 @@ export function apiUrl(path: string, query?: Record<string, unknown>) {
 
 function apiBaseUrl() {
   return (process.env.NEXT_PUBLIC_API_BASE_URL ?? DEFAULT_API_BASE_URL).replace(/\/$/, "");
+}
+
+function isUnauthorized<T>(response: Response, body: ApiEnvelope<T>) {
+  const message = body.msg ?? body.message ?? "";
+  return response.status === 401 || body.code === "401" || message.includes("未授权");
+}
+
+function clearAuthHeader(headers: Record<string, string>) {
+  delete headers.Authorization;
+  delete headers.authorization;
 }

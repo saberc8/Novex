@@ -359,6 +359,7 @@ Admin:            http://localhost:${ADMIN_PORT:-4399}
 Training Web:     http://localhost:${TRAINING_WEB_PORT:-4401}
 Chat Web:         http://localhost:${CHAT_WEB_PORT:-4402}
 Agent Workspace:  http://localhost:${AGENT_WORKSPACE_PORT:-4403}
+Codex App POC:    http://localhost:${CODEX_APP_POC_PORT:-4413} (standalone: apps/codex-app-poc)
 RabbitMQ UI:      ${RABBITMQ_MANAGEMENT_URL:-http://localhost:15673}
 MinIO Console:    ${MINIO_CONSOLE_URL:-http://localhost:19011}
 Attu:             ${ATTU_URL:-http://localhost:18000}

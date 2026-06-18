@@ -169,6 +169,12 @@ async fn mail(Query(query): Query<MailQuery>) -> Json<ApiResponse<bool>> {
 }
 
 async fn is_login_captcha_enabled(db: &PgPool) -> Result<bool, AppError> {
+    if let Some(enabled) = login_captcha_enabled_override(
+        std::env::var("LOGIN_CAPTCHA_ENABLED").ok().as_deref(),
+    ) {
+        return Ok(enabled);
+    }
+
     let value = sqlx::query_scalar::<_, Option<String>>(
         r#"
 SELECT COALESCE(value, default_value)
@@ -205,6 +211,13 @@ fn parse_login_captcha_enabled(value: Option<&str>) -> bool {
         value.map(str::trim).map(str::to_ascii_lowercase).as_deref(),
         Some("1" | "true" | "yes" | "y" | "on")
     )
+}
+
+fn login_captcha_enabled_override(value: Option<&str>) -> Option<bool> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| parse_login_captcha_enabled(Some(value)))
 }
 
 fn disabled_image_captcha_response(expire_time: i64) -> ImageCaptchaResp {
@@ -319,6 +332,15 @@ mod tests {
         assert!(svg.contains("height=\"40\""));
         assert!(svg.contains(">1234<"));
         assert!(!svg.contains("width=\"1\" height=\"1\""));
+    }
+
+    #[test]
+    fn login_captcha_env_override_accepts_false_for_poc() {
+        assert_eq!(login_captcha_enabled_override(Some("false")), Some(false));
+        assert_eq!(login_captcha_enabled_override(Some("0")), Some(false));
+        assert_eq!(login_captcha_enabled_override(Some("true")), Some(true));
+        assert_eq!(login_captcha_enabled_override(Some("  ")), None);
+        assert_eq!(login_captcha_enabled_override(None), None);
     }
 
     #[test]

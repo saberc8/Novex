@@ -381,6 +381,28 @@ mod tests {
     }
 
     #[test]
+    fn poc_compose_allows_codex_app_origin() {
+        let compose_path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../infra/docker-compose.yml");
+        let compose =
+            std::fs::read_to_string(compose_path).expect("read POC docker compose config");
+
+        assert!(compose.contains("CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-"));
+        assert!(compose.contains("http://localhost:${CODEX_APP_POC_PORT:-4413}"));
+        assert!(compose.contains("http://127.0.0.1:${CODEX_APP_POC_PORT:-4413}"));
+    }
+
+    #[test]
+    fn poc_compose_disables_login_captcha_for_dev_auto_login() {
+        let compose_path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../infra/docker-compose.yml");
+        let compose =
+            std::fs::read_to_string(compose_path).expect("read POC docker compose config");
+
+        assert!(compose.contains("LOGIN_CAPTCHA_ENABLED: ${LOGIN_CAPTCHA_ENABLED:-false}"));
+    }
+
+    #[test]
     fn jwt_ttl_rejects_zero() {
         let err = parse_positive_u64_env("AUTH_JWT_TTL_HOURS", "0").unwrap_err();
 
