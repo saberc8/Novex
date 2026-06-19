@@ -370,6 +370,13 @@ mod tests {
             agent_queue_lease_seconds: 120,
             agent_queue_max_attempts: 3,
             agent_queue_worker_id: "agent-worker-1".to_owned(),
+            eval_queue_enabled: false,
+            eval_queue_publisher_enabled: false,
+            eval_queue_tick_seconds: 5,
+            eval_queue_batch_size: 50,
+            eval_worker_enabled: false,
+            eval_worker_id: "eval-worker-1".to_owned(),
+            eval_task_timeout_seconds: 180,
             redis_url: "redis://127.0.0.1:16379/0".to_owned(),
             rabbitmq_parser_exchange: "novex.parser".to_owned(),
             rabbitmq_parser_execute_queue: "novex.parser.execute".to_owned(),
@@ -387,6 +394,14 @@ mod tests {
             rabbitmq_agent_retry_routing_key: "agent.retry".to_owned(),
             rabbitmq_agent_dead_routing_key: "agent.dead".to_owned(),
             rabbitmq_agent_retry_ttl_ms: 30_000,
+            rabbitmq_eval_exchange: "novex.eval".to_owned(),
+            rabbitmq_eval_execute_queue: "novex.eval.execute".to_owned(),
+            rabbitmq_eval_retry_queue: "novex.eval.retry".to_owned(),
+            rabbitmq_eval_dead_queue: "novex.eval.dead".to_owned(),
+            rabbitmq_eval_execute_routing_key: "eval.execute".to_owned(),
+            rabbitmq_eval_retry_routing_key: "eval.retry".to_owned(),
+            rabbitmq_eval_dead_routing_key: "eval.dead".to_owned(),
+            rabbitmq_eval_retry_ttl_ms: 30_000,
         }
     }
 }

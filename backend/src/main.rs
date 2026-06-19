@@ -6,6 +6,9 @@ use backend_rust::{
         spawn_agent_queue_outbox_publisher, spawn_agent_queue_worker,
     },
     application::ai::agent_service::AgentRuntimeRegistry,
+    application::ai::eval_queue_runtime::{
+        eval_queue_from_config, eval_rabbitmq_from_config, spawn_eval_queue_publisher,
+    },
     application::ai::parser_queue_runtime::{
         parser_queue_from_config, parser_rabbitmq_from_config, spawn_parser_queue_publisher,
     },
@@ -65,6 +68,11 @@ async fn main() -> anyhow::Result<()> {
         db.clone(),
         parser_queue_from_config(&config),
         parser_rabbitmq_from_config(&config),
+    );
+    spawn_eval_queue_publisher(
+        db.clone(),
+        eval_queue_from_config(&config),
+        eval_rabbitmq_from_config(&config),
     );
     let app = build_router_with_agent_runtime_and_scheduler_http_safety(
         db,

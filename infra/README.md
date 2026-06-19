@@ -1,6 +1,6 @@
 # Infra
 
-Novex uses the shared `docker-common` infrastructure stack by default. The Novex compose file only runs project services: backend, parser-worker, and frontend apps.
+Novex uses the shared `docker-common` infrastructure stack by default. The Novex compose file runs project services: backend, eval-worker, parser-worker, and frontend apps.
 
 Shared stack location:
 
@@ -50,7 +50,7 @@ Start the full Novex POC runtime:
 ./scripts/run-poc.sh
 ```
 
-The script loads only `infra/.env.poc`, checks the `docker-common` containers, creates the `novex` PostgreSQL database when missing, checks live AI variables without printing raw secrets, verifies required Novex runtime images already exist locally, then starts backend, parser-worker, and the POC frontends.
+The script loads only `infra/.env.poc`, checks the `docker-common` containers, creates the `novex` PostgreSQL database when missing, checks live AI variables without printing raw secrets, verifies required Novex runtime images already exist locally, then starts backend, eval-worker, parser-worker, and the POC frontends. `up` runs with `--pull never`; use `./scripts/run-poc.sh pull` explicitly when you want to fetch only missing images.
 
 Useful commands:
 
@@ -62,10 +62,10 @@ Useful commands:
 ./scripts/run-poc.sh pull
 ```
 
-Minimal backend runtime:
+Minimal backend and eval runtime:
 
 ```bash
-docker compose --env-file infra/.env.poc -f infra/docker-compose.yml up backend
+docker compose --env-file infra/.env.poc -f infra/docker-compose.yml up backend eval-worker
 ```
 
 Run the durable parser pipeline:
@@ -73,6 +73,10 @@ Run the durable parser pipeline:
 ```bash
 docker compose --env-file infra/.env.poc -f infra/docker-compose.yml --profile parser up backend parser-worker
 ```
+
+The backend writes parser jobs to PostgreSQL outbox and publishes them to RabbitMQ. `parser-worker` consumes `novex.parser.execute`, coordinates in Redis, and callbacks the backend with `PARSER_CALLBACK_TOKEN`. Use a non-default token outside local POC.
+
+Eval runs are outbox-backed. `POST /ai/evals/runs` creates `ai_eval_run`, `ai_eval_task`, and `ai_eval_outbox` rows. The backend publisher sends pending eval outbox rows to RabbitMQ, and `eval-worker` consumes `novex.eval.execute` to execute deterministic, `trace_replay`, and real `live_rag` tasks.
 
 Run Admin and the customer-facing app templates:
 
@@ -104,4 +108,4 @@ curl http://localhost:4398/health
 curl http://localhost:4398/ready
 ```
 
-The backend container sets `MILVUS_ENDPOINT=http://milvus:19530`; host-run backend uses `MILVUS_ENDPOINT=http://127.0.0.1:19540`. Parser queue publishing is enabled in POC config through `PARSER_QUEUE_ENABLED=true` and `PARSER_QUEUE_PUBLISHER_ENABLED=true`. External GitHub, Feishu, draw, and MinerU credentials are optional. Without MinerU, text-like uploads still parse through the native parser path; PDF/Office/Image jobs stay retry/dead-letter governed by RabbitMQ.
+The backend and eval-worker containers set `MILVUS_ENDPOINT=http://milvus:19530`; host-run backend uses `MILVUS_ENDPOINT=http://127.0.0.1:19540`. Parser queue publishing is enabled in POC config through `PARSER_QUEUE_ENABLED=true` and `PARSER_QUEUE_PUBLISHER_ENABLED=true`. Eval queue publishing is enabled through `EVAL_QUEUE_ENABLED=true` and `EVAL_QUEUE_PUBLISHER_ENABLED=true`, with execution handled by `eval-worker`. External GitHub, Feishu, draw, and MinerU credentials are optional. Without MinerU, text-like uploads still parse through the native parser path; PDF/Office/Image jobs stay retry/dead-letter governed by RabbitMQ.

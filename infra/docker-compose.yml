@@ -44,6 +44,11 @@ services:
       AGENT_QUEUE_BATCH_SIZE: ${AGENT_QUEUE_BATCH_SIZE:-10}
       AGENT_QUEUE_LEASE_SECONDS: ${AGENT_QUEUE_LEASE_SECONDS:-120}
       AGENT_QUEUE_MAX_ATTEMPTS: ${AGENT_QUEUE_MAX_ATTEMPTS:-3}
+      EVAL_QUEUE_ENABLED: "true"
+      EVAL_QUEUE_PUBLISHER_ENABLED: "true"
+      EVAL_QUEUE_TICK_SECONDS: "5"
+      EVAL_QUEUE_BATCH_SIZE: "50"
+      EVAL_WORKER_ENABLED: "false"
       PARSER_CALLBACK_TOKEN: ${PARSER_CALLBACK_TOKEN:-local-parser-callback-token-change-me}
       PARSER_CALLBACK_USER_ID: ${PARSER_CALLBACK_USER_ID:-1}
       RABBITMQ_URL: amqp://${RABBITMQ_DEFAULT_USER:-guest}:${RABBITMQ_DEFAULT_PASS:-guest}@rabbitmq:5672/%2f
@@ -64,9 +69,65 @@ services:
       RABBITMQ_AGENT_RETRY_ROUTING_KEY: agent.retry
       RABBITMQ_AGENT_DEAD_ROUTING_KEY: agent.dead
       RABBITMQ_AGENT_RETRY_TTL_MS: "30000"
+      RABBITMQ_EVAL_EXCHANGE: novex.eval
+      RABBITMQ_EVAL_EXECUTE_QUEUE: novex.eval.execute
+      RABBITMQ_EVAL_RETRY_QUEUE: novex.eval.retry
+      RABBITMQ_EVAL_DEAD_QUEUE: novex.eval.dead
+      RABBITMQ_EVAL_EXECUTE_ROUTING_KEY: eval.execute
+      RABBITMQ_EVAL_RETRY_ROUTING_KEY: eval.retry
+      RABBITMQ_EVAL_DEAD_ROUTING_KEY: eval.dead
+      RABBITMQ_EVAL_RETRY_TTL_MS: "30000"
       RUST_LOG: ${RUST_LOG:-backend_rust=debug,tower_http=info}
     ports:
       - "${BACKEND_PORT:-4398}:${HTTP_PORT:-4398}"
+    volumes:
+      - ..:/workspace:cached
+      - cargo-registry:/usr/local/cargo/registry
+      - cargo-git:/usr/local/cargo/git
+      - cargo-target:/workspace/target
+    networks:
+      - default
+      - common
+
+  eval-worker:
+    image: ${RUST_IMAGE:-rust:bookworm}
+    working_dir: /workspace
+    command: bash -lc "source /usr/local/cargo/env && cargo run -p backend-rust --bin eval_worker"
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgres://${COMMON_POSTGRES_USER:-postgres}:${COMMON_POSTGRES_PASSWORD:-postgres}@postgres:5432/${COMMON_POSTGRES_DATABASE:-novex}
+      DATABASE_MAX_CONNECTIONS: ${DATABASE_MAX_CONNECTIONS:-5}
+      DB_AUTO_MIGRATE: "false"
+      AUTH_JWT_SECRET: ${AUTH_JWT_SECRET:-local-compose-change-this-secret-32chars-min}
+      AUTH_JWT_TTL_HOURS: ${AUTH_JWT_TTL_HOURS:-24}
+      CORS_ALLOWED_ORIGINS: http://localhost:${ADMIN_PORT:-4399}
+      MILVUS_ENDPOINT: http://milvus:19530
+      MILVUS_TOKEN: ${MILVUS_TOKEN:-root:Milvus}
+      LLM_API_KEY: ${LLM_API_KEY:-}
+      LLM_BASE_URL: ${LLM_BASE_URL:-}
+      LLM_MODEL: ${LLM_MODEL:-}
+      EMBEDDING_API_KEY: ${EMBEDDING_API_KEY:-}
+      EMBEDDING_BASE_URL: ${EMBEDDING_BASE_URL:-}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-}
+      RERANKER_API_KEY: ${RERANKER_API_KEY:-}
+      RERANKER_BASE_URL: ${RERANKER_BASE_URL:-}
+      RERANKER_MODEL: ${RERANKER_MODEL:-}
+      EVAL_WORKER_ENABLED: "true"
+      EVAL_WORKER_ID: ${EVAL_WORKER_ID:-eval-worker-1}
+      EVAL_TASK_TIMEOUT_SECONDS: ${EVAL_TASK_TIMEOUT_SECONDS:-180}
+      RABBITMQ_URL: amqp://${RABBITMQ_DEFAULT_USER:-guest}:${RABBITMQ_DEFAULT_PASS:-guest}@rabbitmq:5672/%2f
+      RABBITMQ_EVAL_EXCHANGE: novex.eval
+      RABBITMQ_EVAL_EXECUTE_QUEUE: novex.eval.execute
+      RABBITMQ_EVAL_RETRY_QUEUE: novex.eval.retry
+      RABBITMQ_EVAL_DEAD_QUEUE: novex.eval.dead
+      RABBITMQ_EVAL_EXECUTE_ROUTING_KEY: eval.execute
+      RABBITMQ_EVAL_RETRY_ROUTING_KEY: eval.retry
+      RABBITMQ_EVAL_DEAD_ROUTING_KEY: eval.dead
+      RABBITMQ_EVAL_RETRY_TTL_MS: "30000"
+      RUST_LOG: ${RUST_LOG:-backend_rust=debug,tower_http=info}
+    depends_on:
+      backend:
+        condition: service_started
     volumes:
       - ..:/workspace:cached
       - cargo-registry:/usr/local/cargo/registry

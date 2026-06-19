@@ -7,7 +7,11 @@ use sqlx::PgPool;
 
 use crate::{
     application::{
-        ai::{capability_service::CapabilityService, model_service::ModelRuntimeService},
+        ai::{
+            capability_service::CapabilityService,
+            eval_service::{EvalRunCommand, EvalService},
+            model_service::ModelRuntimeService,
+        },
         scheduler::{
             http_safety::{validate_http_target, HttpSafetyConfig},
             service::{JOB_TYPE_BUILTIN, JOB_TYPE_HTTP},
@@ -51,7 +55,7 @@ pub async fn execute_scheduler_message(
 
     let result = match job.task_type {
         JOB_TYPE_HTTP => execute_http_job(&job, http_safety).await,
-        JOB_TYPE_BUILTIN => execute_builtin_job(&db, &job.builtin_key).await,
+        JOB_TYPE_BUILTIN => execute_builtin_job(db.clone(), &job).await,
         _ => Err(AppError::bad_request("任务类型不正确")),
     };
 
@@ -168,14 +172,17 @@ async fn execute_http_job(
     })
 }
 
-async fn execute_builtin_job(db: &PgPool, key: &str) -> Result<HttpOutput, AppError> {
-    match key {
+async fn execute_builtin_job(
+    db: PgPool,
+    job: &crate::infrastructure::persistence::scheduler_repository::JobRecord,
+) -> Result<HttpOutput, AppError> {
+    match job.builtin_key.as_str() {
         "system.noop" => Ok(HttpOutput {
             status: Some(200),
             body: "ok".to_owned(),
         }),
         "ai.model.health_check" => {
-            let health_rows = ModelRuntimeService::refresh_active_tenant_model_health(db).await?;
+            let health_rows = ModelRuntimeService::refresh_active_tenant_model_health(&db).await?;
             Ok(HttpOutput {
                 status: Some(200),
                 body: json!({
@@ -185,8 +192,21 @@ async fn execute_builtin_job(db: &PgPool, key: &str) -> Result<HttpOutput, AppEr
                 .to_string(),
             })
         }
+        "eval.run_dataset" => {
+            let command = eval_run_command_from_builtin_payload(&job.http_body)?;
+            let run = EvalService::new(db.clone()).run_eval(1, command).await?;
+            Ok(HttpOutput {
+                status: Some(200),
+                body: json!({
+                    "runId": run.run_id,
+                    "datasetCode": run.dataset_code,
+                    "status": run.status
+                })
+                .to_string(),
+            })
+        }
         "ai.model.alert_delivery" => {
-            let summary = ModelRuntimeService::deliver_active_model_ops_alerts(db).await?;
+            let summary = ModelRuntimeService::deliver_active_model_ops_alerts(&db).await?;
             Ok(HttpOutput {
                 status: Some(200),
                 body: serde_json::to_string(&summary).unwrap_or_else(|_| "{}".to_owned()),
@@ -199,8 +219,19 @@ async fn execute_builtin_job(db: &PgPool, key: &str) -> Result<HttpOutput, AppEr
                 body: serde_json::to_string(&summary).unwrap_or_else(|_| "{}".to_owned()),
             })
         }
-        _ => Err(AppError::bad_request(format!("未知内置任务: {key}"))),
+        _ => Err(AppError::bad_request(format!(
+            "未知内置任务: {}",
+            job.builtin_key
+        ))),
     }
+}
+
+fn eval_run_command_from_builtin_payload(payload: &str) -> Result<EvalRunCommand, AppError> {
+    if payload.trim().is_empty() {
+        return Err(AppError::bad_request("eval.run_dataset 缺少任务参数"));
+    }
+    serde_json::from_str::<EvalRunCommand>(payload)
+        .map_err(|error| AppError::bad_request(format!("eval.run_dataset 参数格式错误: {error}")))
 }
 
 fn truncate_body(mut body: String) -> String {
@@ -242,7 +273,7 @@ mod tests {
 
         assert!(source.contains("ai.model.health_check"));
         assert!(source.contains("ModelRuntimeService::refresh_active_tenant_model_health"));
-        assert!(source.contains("execute_builtin_job(&db, &job.builtin_key)"));
+        assert!(source.contains("execute_builtin_job(db.clone(), &job)"));
     }
 
     #[test]
@@ -265,5 +296,16 @@ mod tests {
 
         assert!(source.contains("ai.mcp.oauth_refresh"));
         assert!(source.contains("CapabilityService::refresh_due_mcp_oauth_sessions"));
+    }
+
+    #[test]
+    fn eval_builtin_payload_parses_dataset_and_run_mode() {
+        let command = eval_run_command_from_builtin_payload(
+            r#"{"datasetCode":"rag_regression_live","runMode":"live_rag"}"#,
+        )
+        .unwrap();
+
+        assert_eq!(command.dataset_code, "rag_regression_live");
+        assert_eq!(command.run_mode, "live_rag");
     }
 }

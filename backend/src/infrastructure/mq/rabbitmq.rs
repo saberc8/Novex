@@ -96,6 +96,35 @@ impl Default for AgentRabbitMqConfig {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct EvalRabbitMqConfig {
+    pub url: String,
+    pub exchange: String,
+    pub execute_queue: String,
+    pub retry_queue: String,
+    pub dead_queue: String,
+    pub execute_routing_key: String,
+    pub retry_routing_key: String,
+    pub dead_routing_key: String,
+    pub retry_ttl_ms: u32,
+}
+
+impl Default for EvalRabbitMqConfig {
+    fn default() -> Self {
+        Self {
+            url: "amqp://guest:guest@127.0.0.1:5673/%2f".to_owned(),
+            exchange: "novex.eval".to_owned(),
+            execute_queue: "novex.eval.execute".to_owned(),
+            retry_queue: "novex.eval.retry".to_owned(),
+            dead_queue: "novex.eval.dead".to_owned(),
+            execute_routing_key: "eval.execute".to_owned(),
+            retry_routing_key: "eval.retry".to_owned(),
+            dead_routing_key: "eval.dead".to_owned(),
+            retry_ttl_ms: 30_000,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SchedulerMessage {
@@ -117,6 +146,19 @@ pub struct ParserJobMessage {
     pub attempt: i32,
     pub max_attempts: i32,
     pub parser_request: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EvalTaskMessage {
+    pub outbox_id: i64,
+    pub tenant_id: i64,
+    pub run_id: i64,
+    pub task_id: i64,
+    pub case_id: i64,
+    pub run_mode: String,
+    pub attempt: i32,
+    pub max_attempts: i32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -610,6 +652,161 @@ impl AgentRabbitMqClient {
     }
 }
 
+#[derive(Clone)]
+pub struct EvalRabbitMqClient {
+    channel: Channel,
+    config: EvalRabbitMqConfig,
+}
+
+impl EvalRabbitMqClient {
+    pub async fn connect(config: EvalRabbitMqConfig) -> Result<Self, AppError> {
+        let connection = Connection::connect(&config.url, ConnectionProperties::default())
+            .await
+            .map_err(|error| AppError::Anyhow(anyhow::anyhow!("connect eval RabbitMQ: {error}")))?;
+        let channel = connection.create_channel().await.map_err(|error| {
+            AppError::Anyhow(anyhow::anyhow!("create eval RabbitMQ channel: {error}"))
+        })?;
+        channel
+            .confirm_select(ConfirmSelectOptions::default())
+            .await
+            .map_err(|error| {
+                AppError::Anyhow(anyhow::anyhow!(
+                    "enable eval RabbitMQ publisher confirms: {error}"
+                ))
+            })?;
+        let client = Self { channel, config };
+        client.declare_eval_topology().await?;
+        Ok(client)
+    }
+
+    pub fn channel(&self) -> &Channel {
+        &self.channel
+    }
+
+    pub fn config(&self) -> &EvalRabbitMqConfig {
+        &self.config
+    }
+
+    pub async fn publish_eval_execute(&self, message: &EvalTaskMessage) -> Result<(), AppError> {
+        self.publish(&self.config.execute_routing_key, message)
+            .await
+    }
+
+    pub async fn publish_eval_retry(&self, message: &EvalTaskMessage) -> Result<(), AppError> {
+        self.publish(&self.config.retry_routing_key, message).await
+    }
+
+    pub async fn publish_eval_dead(&self, message: &EvalTaskMessage) -> Result<(), AppError> {
+        self.publish(&self.config.dead_routing_key, message).await
+    }
+
+    async fn publish(&self, routing_key: &str, message: &EvalTaskMessage) -> Result<(), AppError> {
+        let payload = serde_json::to_vec(message).map_err(|error| {
+            AppError::Anyhow(anyhow::anyhow!("encode eval task message: {error}"))
+        })?;
+        let confirmation = self
+            .channel
+            .basic_publish(
+                &self.config.exchange,
+                routing_key,
+                BasicPublishOptions::default(),
+                &payload,
+                BasicProperties::default().with_content_type("application/json".into()),
+            )
+            .await
+            .map_err(|error| {
+                AppError::Anyhow(anyhow::anyhow!("publish eval task message: {error}"))
+            })?
+            .await
+            .map_err(|error| {
+                AppError::Anyhow(anyhow::anyhow!("confirm eval task message: {error}"))
+            })?;
+        if !matches!(confirmation, Confirmation::Ack(_)) {
+            return Err(AppError::Anyhow(anyhow::anyhow!(
+                "RabbitMQ did not ack eval task message"
+            )));
+        }
+        Ok(())
+    }
+
+    async fn declare_eval_topology(&self) -> Result<(), AppError> {
+        self.channel
+            .exchange_declare(
+                &self.config.exchange,
+                ExchangeKind::Direct,
+                ExchangeDeclareOptions {
+                    durable: true,
+                    ..Default::default()
+                },
+                FieldTable::default(),
+            )
+            .await
+            .map_err(|error| AppError::Anyhow(anyhow::anyhow!("declare eval exchange: {error}")))?;
+
+        self.declare_queue(&self.config.execute_queue, FieldTable::default())
+            .await?;
+        self.bind_queue(&self.config.execute_queue, &self.config.execute_routing_key)
+            .await?;
+
+        let mut retry_args = FieldTable::default();
+        retry_args.insert(
+            "x-message-ttl".into(),
+            AMQPValue::LongUInt(self.config.retry_ttl_ms),
+        );
+        retry_args.insert(
+            "x-dead-letter-exchange".into(),
+            AMQPValue::LongString(self.config.exchange.clone().into()),
+        );
+        retry_args.insert(
+            "x-dead-letter-routing-key".into(),
+            AMQPValue::LongString(self.config.execute_routing_key.clone().into()),
+        );
+        self.declare_queue(&self.config.retry_queue, retry_args)
+            .await?;
+        self.bind_queue(&self.config.retry_queue, &self.config.retry_routing_key)
+            .await?;
+
+        self.declare_queue(&self.config.dead_queue, FieldTable::default())
+            .await?;
+        self.bind_queue(&self.config.dead_queue, &self.config.dead_routing_key)
+            .await?;
+        Ok(())
+    }
+
+    async fn declare_queue(&self, queue: &str, args: FieldTable) -> Result<(), AppError> {
+        self.channel
+            .queue_declare(
+                queue,
+                QueueDeclareOptions {
+                    durable: true,
+                    ..Default::default()
+                },
+                args,
+            )
+            .await
+            .map_err(|error| {
+                AppError::Anyhow(anyhow::anyhow!("declare eval queue {queue}: {error}"))
+            })?;
+        Ok(())
+    }
+
+    async fn bind_queue(&self, queue: &str, routing_key: &str) -> Result<(), AppError> {
+        self.channel
+            .queue_bind(
+                queue,
+                &self.config.exchange,
+                routing_key,
+                QueueBindOptions::default(),
+                FieldTable::default(),
+            )
+            .await
+            .map_err(|error| {
+                AppError::Anyhow(anyhow::anyhow!("bind eval queue {queue}: {error}"))
+            })?;
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -653,6 +850,30 @@ mod tests {
         assert_eq!(value["parserJobId"], 5);
         assert_eq!(value["maxAttempts"], 5);
         assert_eq!(value["parserRequest"]["source"]["name"], "handbook.md");
+    }
+
+    #[test]
+    fn eval_task_message_serializes_with_camel_case_fields() {
+        let message = EvalTaskMessage {
+            outbox_id: 10,
+            tenant_id: 1,
+            run_id: 20,
+            task_id: 30,
+            case_id: 40,
+            run_mode: "live_rag".to_owned(),
+            attempt: 0,
+            max_attempts: 3,
+        };
+
+        let value = serde_json::to_value(message).unwrap();
+
+        assert_eq!(value["outboxId"], 10);
+        assert_eq!(value["tenantId"], 1);
+        assert_eq!(value["runId"], 20);
+        assert_eq!(value["taskId"], 30);
+        assert_eq!(value["caseId"], 40);
+        assert_eq!(value["runMode"], "live_rag");
+        assert_eq!(value["maxAttempts"], 3);
     }
 
     #[test]
@@ -706,6 +927,20 @@ mod tests {
     }
 
     #[test]
+    fn eval_rabbitmq_config_defaults_to_dedicated_topology() {
+        let config = EvalRabbitMqConfig::default();
+
+        assert_eq!(config.exchange, "novex.eval");
+        assert_eq!(config.execute_queue, "novex.eval.execute");
+        assert_eq!(config.retry_queue, "novex.eval.retry");
+        assert_eq!(config.dead_queue, "novex.eval.dead");
+        assert_eq!(config.execute_routing_key, "eval.execute");
+        assert_eq!(config.retry_routing_key, "eval.retry");
+        assert_eq!(config.dead_routing_key, "eval.dead");
+        assert_eq!(config.retry_ttl_ms, 30_000);
+    }
+
+    #[test]
     fn rabbitmq_module_defines_parser_client_publish_path() {
         let source = include_str!("rabbitmq.rs")
             .split("#[cfg(test)]")
@@ -748,6 +983,27 @@ mod tests {
     }
 
     #[test]
+    fn eval_rabbitmq_module_defines_publish_path() {
+        let source = include_str!("rabbitmq.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+
+        for needle in [
+            "EvalRabbitMqClient",
+            "publish_eval_execute",
+            "declare_eval_topology",
+            "eval task message",
+            "novex.eval.execute",
+        ] {
+            assert!(
+                source.contains(needle),
+                "{needle} missing from RabbitMQ module"
+            );
+        }
+    }
+
+    #[test]
     fn rabbitmq_clients_enable_publisher_confirms_before_publishing() {
         let source = include_str!("rabbitmq.rs")
             .split("#[cfg(test)]")
@@ -757,8 +1013,8 @@ mod tests {
         let confirm_select_calls = source.matches(".confirm_select(").count();
 
         assert!(
-            confirm_select_calls >= 3,
-            "scheduler, parser, and agent RabbitMQ clients must enable publisher confirms"
+            confirm_select_calls >= 4,
+            "scheduler, parser, agent, and eval RabbitMQ clients must enable publisher confirms"
         );
     }
 }

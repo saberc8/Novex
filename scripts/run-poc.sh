@@ -10,6 +10,7 @@ COMMAND="${1:-up}"
 COMPOSE=()
 POC_SERVICES=(
   backend
+  eval-worker
   parser-worker
   admin
   training-web

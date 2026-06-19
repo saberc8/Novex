@@ -43,6 +43,13 @@ pub struct AppConfig {
     pub agent_queue_lease_seconds: u64,
     pub agent_queue_max_attempts: i32,
     pub agent_queue_worker_id: String,
+    pub eval_queue_enabled: bool,
+    pub eval_queue_publisher_enabled: bool,
+    pub eval_queue_tick_seconds: u64,
+    pub eval_queue_batch_size: i64,
+    pub eval_worker_enabled: bool,
+    pub eval_worker_id: String,
+    pub eval_task_timeout_seconds: u64,
     pub redis_url: String,
     pub rabbitmq_parser_exchange: String,
     pub rabbitmq_parser_execute_queue: String,
@@ -60,6 +67,14 @@ pub struct AppConfig {
     pub rabbitmq_agent_retry_routing_key: String,
     pub rabbitmq_agent_dead_routing_key: String,
     pub rabbitmq_agent_retry_ttl_ms: u32,
+    pub rabbitmq_eval_exchange: String,
+    pub rabbitmq_eval_execute_queue: String,
+    pub rabbitmq_eval_retry_queue: String,
+    pub rabbitmq_eval_dead_queue: String,
+    pub rabbitmq_eval_execute_routing_key: String,
+    pub rabbitmq_eval_retry_routing_key: String,
+    pub rabbitmq_eval_dead_routing_key: String,
+    pub rabbitmq_eval_retry_ttl_ms: u32,
 }
 
 impl AppConfig {
@@ -163,6 +178,28 @@ impl AppConfig {
         )? as i32;
         let agent_queue_worker_id = env::var("AGENT_QUEUE_WORKER_ID")
             .unwrap_or_else(|_| format!("agent-worker-{}", std::process::id()));
+        let eval_queue_enabled =
+            parse_bool_env(env::var("EVAL_QUEUE_ENABLED").ok().as_deref(), false)?;
+        let eval_queue_publisher_enabled = parse_bool_env(
+            env::var("EVAL_QUEUE_PUBLISHER_ENABLED").ok().as_deref(),
+            eval_queue_enabled,
+        )?;
+        let eval_queue_tick_seconds = parse_positive_u64_env(
+            "EVAL_QUEUE_TICK_SECONDS",
+            &env::var("EVAL_QUEUE_TICK_SECONDS").unwrap_or_else(|_| "5".to_owned()),
+        )?;
+        let eval_queue_batch_size = parse_positive_i64_env(
+            "EVAL_QUEUE_BATCH_SIZE",
+            &env::var("EVAL_QUEUE_BATCH_SIZE").unwrap_or_else(|_| "50".to_owned()),
+        )?;
+        let eval_worker_enabled =
+            parse_bool_env(env::var("EVAL_WORKER_ENABLED").ok().as_deref(), false)?;
+        let eval_worker_id = env::var("EVAL_WORKER_ID")
+            .unwrap_or_else(|_| format!("eval-worker-{}", std::process::id()));
+        let eval_task_timeout_seconds = parse_positive_u64_env(
+            "EVAL_TASK_TIMEOUT_SECONDS",
+            &env::var("EVAL_TASK_TIMEOUT_SECONDS").unwrap_or_else(|_| "180".to_owned()),
+        )?;
         let redis_url =
             env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:16379/0".to_owned());
         let rabbitmq_parser_exchange =
@@ -200,6 +237,24 @@ impl AppConfig {
         let rabbitmq_agent_retry_ttl_ms = parse_positive_u32_env(
             "RABBITMQ_AGENT_RETRY_TTL_MS",
             &env::var("RABBITMQ_AGENT_RETRY_TTL_MS").unwrap_or_else(|_| "30000".to_owned()),
+        )?;
+        let rabbitmq_eval_exchange =
+            env::var("RABBITMQ_EVAL_EXCHANGE").unwrap_or_else(|_| "novex.eval".to_owned());
+        let rabbitmq_eval_execute_queue = env::var("RABBITMQ_EVAL_EXECUTE_QUEUE")
+            .unwrap_or_else(|_| "novex.eval.execute".to_owned());
+        let rabbitmq_eval_retry_queue =
+            env::var("RABBITMQ_EVAL_RETRY_QUEUE").unwrap_or_else(|_| "novex.eval.retry".to_owned());
+        let rabbitmq_eval_dead_queue =
+            env::var("RABBITMQ_EVAL_DEAD_QUEUE").unwrap_or_else(|_| "novex.eval.dead".to_owned());
+        let rabbitmq_eval_execute_routing_key = env::var("RABBITMQ_EVAL_EXECUTE_ROUTING_KEY")
+            .unwrap_or_else(|_| "eval.execute".to_owned());
+        let rabbitmq_eval_retry_routing_key =
+            env::var("RABBITMQ_EVAL_RETRY_ROUTING_KEY").unwrap_or_else(|_| "eval.retry".to_owned());
+        let rabbitmq_eval_dead_routing_key =
+            env::var("RABBITMQ_EVAL_DEAD_ROUTING_KEY").unwrap_or_else(|_| "eval.dead".to_owned());
+        let rabbitmq_eval_retry_ttl_ms = parse_positive_u32_env(
+            "RABBITMQ_EVAL_RETRY_TTL_MS",
+            &env::var("RABBITMQ_EVAL_RETRY_TTL_MS").unwrap_or_else(|_| "30000".to_owned()),
         )?;
 
         if cors_allowed_origins.is_empty() {
@@ -241,6 +296,13 @@ impl AppConfig {
             agent_queue_lease_seconds,
             agent_queue_max_attempts,
             agent_queue_worker_id,
+            eval_queue_enabled,
+            eval_queue_publisher_enabled,
+            eval_queue_tick_seconds,
+            eval_queue_batch_size,
+            eval_worker_enabled,
+            eval_worker_id,
+            eval_task_timeout_seconds,
             redis_url,
             rabbitmq_parser_exchange,
             rabbitmq_parser_execute_queue,
@@ -258,6 +320,14 @@ impl AppConfig {
             rabbitmq_agent_retry_routing_key,
             rabbitmq_agent_dead_routing_key,
             rabbitmq_agent_retry_ttl_ms,
+            rabbitmq_eval_exchange,
+            rabbitmq_eval_execute_queue,
+            rabbitmq_eval_retry_queue,
+            rabbitmq_eval_dead_queue,
+            rabbitmq_eval_execute_routing_key,
+            rabbitmq_eval_retry_routing_key,
+            rabbitmq_eval_dead_routing_key,
+            rabbitmq_eval_retry_ttl_ms,
         })
     }
 }
@@ -462,5 +532,13 @@ mod tests {
         assert!(source.contains("agent_queue_publisher_enabled"));
         assert!(source.contains("AGENT_QUEUE_PUBLISHER_ENABLED"));
         assert!(source.contains("agent_queue_enabled"));
+    }
+
+    #[test]
+    fn eval_queue_config_defaults_are_safe() {
+        assert!(!parse_bool_env(None, false).unwrap());
+        assert!(parse_positive_u64_env("EVAL_TASK_TIMEOUT_SECONDS", "180").unwrap() > 0);
+        assert!(parse_positive_i64_env("EVAL_QUEUE_BATCH_SIZE", "50").unwrap() > 0);
+        assert!(parse_positive_u32_env("RABBITMQ_EVAL_RETRY_TTL_MS", "30000").unwrap() > 0);
     }
 }
