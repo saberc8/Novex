@@ -391,6 +391,11 @@ crates/novex-trigger/
   module.rs        FoundationModule constructor
   lib.rs           crate facade 和 CRATE_ID
 
+crates/novex-skill/
+  path.rs          skill package path normalization、SKILL.md selection、root stripping
+  resource.rs      SkillResourceKind、resource layout classification
+  lib.rs           crate facade
+
 crates/novex-memory/
   policy/          写入策略、TTL、脱敏、删除
   store/           session/user/org/project memory
