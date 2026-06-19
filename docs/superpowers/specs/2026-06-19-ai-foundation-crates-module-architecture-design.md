@@ -14,7 +14,7 @@ The goal is structural normalization, not new product behavior. The refactor sho
   - `novex-rag/src/lib.rs`: parsing, chunking, Milvus request shaping, keyword/BM25 retrieval, answer building, and tests.
   - `novex-mcp/src/lib.rs`: MCP core types, JSON-RPC, Streamable HTTP planning/parsing, OAuth planning/session logic, stdio launch planning, registration validation, and tests.
   - `novex-eval/src/lib.rs`: eval DTOs, trace extraction, metric scoring, regression reporting, trace summary helpers, and tests.
-  - `novex-tools/src/lib.rs`: registry types, execution policy, concurrency/batch planning, executor binding/dispatch planning, tool definitions, input adapters, media parsing, and tests.
+  - `novex-tools/src/lib.rs` at the start of the effort: registry types, execution policy, concurrency/batch planning, executor binding/dispatch planning, tool definitions, input adapters, media parsing, and tests. The target shape moves those responsibilities into `types`, `policy`, `concurrency`, `executor`, `router`, `definitions`, `adapters`, and `media` modules behind a facade.
   - `novex-model/src/lib.rs`: model taxonomy, runtime routes/config, provider DTOs, usage/cost accounting, route policy, env loading, URL/key helpers, and tests.
 - `docs/ARCHITECTURE.md` already defines the intended crate responsibilities and submodule names. The implementation should converge on that document instead of inventing a competing layout.
 - Some backend tests inspect crate source files with `include_str!` or file reads. Those tests must be updated when behavior moves out of `lib.rs`.
@@ -69,7 +69,7 @@ Target modules:
 - `stdio`: env values, lifecycle policy, launch plans, tool-call plans, stdio validation errors.
 - `client_error`: MCP client error kinds and helpers.
 - `registration`: registration policy, discovery plan, endpoint allow-list validation.
-- `module`: `FoundationModule` constructor if needed.
+- `lib.rs`: facade and `FoundationModule` constructor.
 
 OAuth and stdio should not stay intertwined with HTTP response parsing once split.
 
@@ -98,7 +98,7 @@ Target modules:
 - `definitions`: built-in agent model-loop and customer-service tool definitions.
 - `adapters`: Feishu, GitHub, media image input parsing.
 - `media`: image request/result DTOs and provider response parsing.
-- `module`: `FoundationModule` constructor if needed.
+- `lib.rs`: facade and `FoundationModule` constructor.
 
 Connector-specific parsing can remain in `novex-tools` only where it adapts tool input to connector DTOs. Connector transport and provider semantics stay in `novex-connectors`.
 

@@ -349,9 +349,15 @@ crates/novex-agent/
   runtime/         基于 novex-ai-core run graph 的 agent run 编排
 
 crates/novex-tools/
-  registry/        tool schema、风险等级、权限码
-  executor/        HTTP、function、connector、sandbox、media executor
-  audit/           tool call log、approval、回放
+  types.rs         tool kind、risk、approval policy、definition、execution envelope
+  policy.rs        tool risk / approval policy evaluation
+  concurrency.rs   shared/exclusive lock、parallel batch planning
+  executor.rs      executor binding、dispatch plan、registry、registry errors
+  router.rs        model-visible tool spec、tool router、routed tool call
+  definitions.rs   built-in agent model-loop / customer-service tool definitions
+  adapters.rs      Feishu、GitHub、media tool input normalization
+  media.rs         image request/result DTO、provider response parsing
+  lib.rs           crate facade 和 FoundationModule constructor
 
 crates/novex-connectors/
   registry/        connector schema、provider、auth type、resource type
