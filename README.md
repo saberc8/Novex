@@ -1,8 +1,8 @@
 # Novex
 
-Novex 是一套面向企业交付的 AI Agent 基座。它不是单点 AI 应用，而是把账号、租户、权限、知识库、模型路由、Agent 运行时、工具、MCP、连接器、记忆、评测、模板和交付流程沉淀成可复用平台能力，再按客户、行业和场景组合成具体应用。
+Novex 是一套面向企业交付的 AI Agent 基座。它不是单点 AI 应用，而是把账号、租户、权限、知识库、模型路由、Agent 运行时、工具、MCP、连接器、记忆、评测和交付流程沉淀成可复用平台能力，再按客户、行业和场景组合成具体应用。
 
-当前仓库是一个 Rust first 的 monorepo：`backend` 负责控制平面、HTTP API 和业务编排，`crates/*` 承载可复用 AI Foundation 能力，`admin` 和 `apps/*` 提供管理后台与客户前台模板，`services/*` 作为 Python/模型 sidecar，`scripts`、`.env.example` 与 `templates` 支撑本地 POC 和客户交付。完整架构长文见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)，本 README 保持项目首页、模块地图和开发规范入口。
+当前仓库是一个 Rust first 的 monorepo：`backend` 负责控制平面、HTTP API 和业务编排，`crates/*` 承载可复用 AI Foundation 能力，`admin` 和 `apps/*` 提供管理后台与客户前台应用，`services/*` 作为 Python/模型 sidecar，`scripts` 与 `.env.example` 支撑本地 POC。完整架构长文见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)，本 README 保持项目首页、模块地图和开发规范入口。
 
 ## 产品截图
 
@@ -42,8 +42,8 @@ Novex 是一套面向企业交付的 AI Agent 基座。它不是单点 AI 应用
 - 控制平面：认证、RBAC、数据权限、租户资源、用户/角色/菜单/部门、文件/对象存储、系统配置、密钥占位、身份提供商、审计日志、在线用户、调度任务和 API 兼容响应封装。
 - AI Foundation：模型注册与路由、provider 调用、RAG、知识库、Agent run、Agent queue、turn item ledger、Run Graph、工具注册与执行、审批策略、MCP gateway、连接器、插件、trigger、memory、eval、trace 和成本/用量记录。
 - 运行链路：backend、eval-worker、parser-worker、RabbitMQ outbox、Milvus 向量召回、Redis 协调、MinIO 文件资产、PostgreSQL 事实源和可选 model-runtime adapter。
-- 前台应用：管理后台、员工培训、知识库问答、Agent 工作台、Codex-like POC、客服 Agent 交付模板。
-- 交付体系：客户模板、默认菜单/权限、技能 manifest、评测集、smoke 脚本、POC 环境 schema 和交付文档。
+- 前台应用：管理后台、员工培训、知识库问答、Agent 工作台、Codex-like POC、客服 Agent 应用。
+- 交付体系：客户差异统一通过后台配置租户、角色、菜单、模型路由、知识库、技能、连接器、评测集和前台应用配置，不再维护独立模板配置包。
 
 ## 快速启动
 
@@ -213,7 +213,6 @@ Novex/
   services/
     parser-worker/         Python sidecar，文档解析、MinerU、OCR、格式转换和 worker .env.example
     model-runtime/         可选模型运行时 adapter
-  templates/               客户交付模板、默认菜单、技能、评测集和 smoke 脚本
   docs/                    架构、计划和交付文档
   scripts/                 POC 启动和 smoke 脚本
   .env.example             本地 POC 汇总环境 schema/defaults；真实值写入未提交的 .env
@@ -237,7 +236,7 @@ backend/src/
 | --- | --- | --- |
 | 控制平面与 RBAC | `backend/src/application/{auth,rbac,system,identity,data_scope}` | 认证、用户、角色、菜单、部门、数据权限、密钥占位、身份提供商和外部账号绑定。 |
 | 监控与调度 | `backend/src/application/{monitor,scheduler}`、`backend/src/bin/*` | 系统日志、在线用户、定时任务、安全 HTTP 调度、独立 scheduler/eval worker 入口。 |
-| AI 编排 API | `backend/src/application/ai`、`backend/src/interfaces/http/ai` | 知识库、模型、Agent、工具、MCP、memory、eval、trigger、notebook、studio、template、客服 Agent 等 HTTP/API 编排。 |
+| AI 编排 API | `backend/src/application/ai`、`backend/src/interfaces/http/ai` | 知识库、模型、Agent、工具、MCP、memory、eval、trigger、notebook、studio、客服 Agent 等 HTTP/API 编排。 |
 | Run Graph 与核心上下文 | `crates/novex-ai-core` | 租户上下文、资源引用、预算、集成用量、Foundation module 状态和 AI run graph 的通用结构。 |
 | 模型路由与 provider 调用 | `crates/novex-model`、`crates/novex-provider-client` | 模型注册、能力分类、路由策略、成本/用量、chat/media/RAG/native cancel/compaction transport。 |
 | RAG 与知识库 | `crates/novex-rag`、`backend/src/application/ai/knowledge_service.rs` | 文档解析结果入库、chunk、embedding、Milvus 召回、关键词 fallback、rerank、引用和答案构建。 |
@@ -249,7 +248,7 @@ backend/src/
 | Parser Worker | `services/parser-worker` | RabbitMQ parser job 消费、Redis lease/idempotency、MinerU v4 client、文本解析 fallback、backend callback。 |
 | Model Runtime | `services/model-runtime` | 可选模型运行时 adapter，用于内网开源模型、本地 embedding/rerank 或实验性模型服务接入。 |
 | 前台应用 | `admin`、`apps/*` | Admin 控制台、Training Web、Chat Web、Agent Workspace、Codex-like POC、客服 Agent route contract。 |
-| 客户模板 | `templates/*` | 交付模板、默认权限/菜单、技能 manifest、评测集和 smoke 契约。 |
+| 统一交付配置 | `admin`、`backend/src/application/ai/*` | 客户交付差异通过后台配置租户、RBAC、模型路由、知识库、技能、连接器、插件、触发器、评测集和前台应用入口。 |
 
 ## 架构边界
 
@@ -330,13 +329,11 @@ novex-plugin
 
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)：完整 AI Agent Foundation 架构说明。
 - [backend/README.md](backend/README.md)：后端本地账号、迁移 smoke、Milvus、GitHub、飞书、媒体工具和 API 响应契约。
-- [docs/delivery/novex-customer-delivery.md](docs/delivery/novex-customer-delivery.md)：客户交付边界和交付包说明。
 - [docs/plans](docs/plans)：按日期沉淀的设计和实施计划。
-- [templates/README.md](templates/README.md)：客户模板和 smoke 脚本入口。
 
 ## 维护约定
 
 - 根 README 保持入口级别，不承载完整架构长文；深入设计写入 `docs/`。
 - 新增运行依赖时，同步更新对应项目的 `.env.example`；如果完整 POC 也需要该变量，再同步更新根目录 `.env.example`、`scripts/run-poc.sh` 和本 README。
 - 新增前台应用时，同步更新 `apps/` 目录说明、默认端口、该 app 的 `.env.example` 和 POC 启动脚本。
-- 新增客户模板时，同步更新 `templates/` 下的 README、`template.json` 和 smoke 脚本。
+- 新增客户前台应用时，同步更新对应 `apps/*` README、环境模板、后台菜单/权限和 smoke/test 脚本。

@@ -19,6 +19,5 @@ pub mod model_service;
 pub mod notebook_service;
 pub mod parser_queue_runtime;
 pub mod studio_service;
-pub mod template_service;
 pub mod training_service;
 pub mod trigger_service;

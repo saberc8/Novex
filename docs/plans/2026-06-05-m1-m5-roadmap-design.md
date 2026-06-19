@@ -94,7 +94,7 @@ Deliver quality measurement:
 
 M4 should run against deterministic M1/M3 outputs first. LLM judge can be an adapter.
 
-### M5: Customer Delivery Templates
+### M5: Unified Admin Delivery
 
 Deliver customer initialization:
 

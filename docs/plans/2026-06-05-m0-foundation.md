@@ -219,11 +219,11 @@ git commit -m "feat: seed ai foundation menus"
 - Create: `apps/chat-web/README.md`
 - Create: `apps/training-web/README.md`
 - Create: `apps/agent-workspace/README.md`
-- Create: `templates/README.md`
-- Create: `templates/llm-chat/README.md`
-- Create: `templates/knowledge-base-chat/README.md`
-- Create: `templates/agent-workspace/README.md`
-- Create: `templates/training-app/README.md`
+- Create: `README.md`
+- Create: `apps/chat-web/README.md`
+- Create: `apps/chat-web/README.md`
+- Create: `apps/agent-workspace/README.md`
+- Create: `apps/training-web/README.md`
 - Create: `README.md`
 
 **Step 1: Add boundary docs**
@@ -232,14 +232,14 @@ Each README states ownership, allowed dependencies, and M0 non-goals.
 
 **Step 2: Run repository checks**
 
-Run: `find services apps templates infra -maxdepth 2 -type f | sort`
+Run: `find services apps apps scripts -maxdepth 2 -type f | sort`
 
 Expected: all skeleton files listed.
 
 **Step 3: Commit**
 
 ```bash
-git add services apps templates infra
+git add services apps apps scripts
 git commit -m "docs: add foundation service and app skeletons"
 ```
 
@@ -256,7 +256,7 @@ git commit -m "docs: add foundation service and app skeletons"
 - Create: `admin/app/(main)/ai/triggers/page.tsx`
 - Create: `admin/app/(main)/ai/evals/page.tsx`
 - Create: `admin/app/(main)/ai/traces/page.tsx`
-- Create: `admin/app/(main)/ai/templates/page.tsx`
+- Create: `admin app AI control-plane pages`
 - Create: `admin/app/(main)/system/identity/providers/page.tsx`
 - Create: `admin/app/(main)/system/identity/accounts/page.tsx`
 - Create: `admin/app/(main)/system/identity/policies/page.tsx`

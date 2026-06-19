@@ -6,7 +6,7 @@
 
 **Architecture:** Customer service is a packaged agent flow on top of Run Graph, KnowledgeService, Agent Runtime, tools, eval, and templates. It must not fork a separate chatbot engine. Read-only FAQ/customer lookup tools are low/medium risk; ticket creation, handoff, and outbound messages are high risk or approval-gated depending on tenant policy.
 
-**Tech Stack:** Rust/Axum/SQLx, existing `chat_flow_service`, `agent_service`, `knowledge_service`, `template_service`, `novex-eval`, and `novex-tools`.
+**Tech Stack:** Rust/Axum/SQLx, existing `chat_flow_service`, `agent_service`, `knowledge_service`, `customer_service_agent`, `novex-eval`, and `novex-tools`.
 
 ---
 
@@ -169,7 +169,7 @@ git commit -m "feat: add customer service agent flow"
 **Files:**
 - Add: `backend/src/interfaces/http/ai/customer_service.rs`
 - Modify: `backend/src/interfaces/http/ai/mod.rs`
-- Modify: `backend/src/application/ai/template_service.rs`
+- Modify: `backend/src/application/ai/customer_service_agent.rs`
 - Create: `backend/migrations/202606160006_seed_customer_service_template.sql`
 
 **Step 1: Write failing route/template tests**
@@ -222,7 +222,7 @@ Expected: PASS.
 **Step 6: Commit**
 
 ```bash
-git add backend/src/interfaces/http/ai/customer_service.rs backend/src/interfaces/http/ai/mod.rs backend/src/application/ai/template_service.rs backend/migrations/202606160006_seed_customer_service_template.sql
+git add backend/src/interfaces/http/ai/customer_service.rs backend/src/interfaces/http/ai/mod.rs backend/src/application/ai/customer_service_agent.rs backend/migrations/202606160006_seed_customer_service_template.sql
 git commit -m "feat: expose customer service agent template"
 ```
 

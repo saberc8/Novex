@@ -29,7 +29,7 @@ Directory boundaries:
 - `services/parser-worker/`: Python parser and ML sidecar skeleton.
 - `services/model-runtime/`: optional model adapter/runtime sidecar skeleton.
 - `apps/*`: customer-facing Next.js app skeleton placeholders.
-- `templates/`: deliverable template skeletons.
+- ``: deliverable template skeletons.
 - `infra/`: local deployment and environment skeletons.
 
 ## Admin Control Plane
@@ -48,7 +48,7 @@ Top-level admin routes:
 - `/ai/triggers`
 - `/ai/evals`
 - `/ai/traces`
-- `/ai/templates`
+- `/ai/dashboard`
 
 System identity provider routes belong under system security rather than the AI menu:
 

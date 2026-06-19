@@ -61,10 +61,7 @@ VALUES
     (3091, '列表', 3090, 3, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, 'ai:eval:list', 1, 1, 1, NOW()),
 
     (3100, '运行追踪', 3000, 2, '/ai/traces', 'AiTraces', 'ai/traces/index', NULL, 'history', FALSE, FALSE, FALSE, NULL, 10, 1, 1, NOW()),
-    (3101, '列表', 3100, 3, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, 'ai:trace:list', 1, 1, 1, NOW()),
-
-    (3110, '交付模板', 3000, 2, '/ai/templates', 'AiTemplates', 'ai/templates/index', NULL, 'storage', FALSE, FALSE, FALSE, NULL, 11, 1, 1, NOW()),
-    (3111, '列表', 3110, 3, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, 'ai:template:list', 1, 1, 1, NOW())
+    (3101, '列表', 3100, 3, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, 'ai:trace:list', 1, 1, 1, NOW())
 ON CONFLICT DO NOTHING;
 
 INSERT INTO sys_role_menu (role_id, menu_id)

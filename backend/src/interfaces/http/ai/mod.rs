@@ -14,7 +14,6 @@ pub mod memory;
 pub mod model;
 pub mod notebook;
 pub mod studio;
-pub mod template;
 pub mod training;
 pub mod trigger;
 
@@ -32,7 +31,6 @@ pub fn routes() -> Router<AppState> {
         .merge(model::routes())
         .merge(notebook::routes())
         .merge(studio::routes())
-        .merge(template::routes())
         .merge(trigger::routes())
         .merge(training::routes())
 }

@@ -3740,58 +3740,6 @@ Use the referenced methodology before drafting.
     }
 
     #[test]
-    fn skill_registry_seed_contains_every_template_skill_manifest() {
-        let seed =
-            include_str!("../../../migrations/202606050006_create_ai_capability_registry.sql");
-        let templates = crate::application::ai::template_service::delivery_templates().unwrap();
-
-        for template in templates {
-            for skill in template.skills {
-                assert!(
-                    seed.contains(&format!("'{}'", skill.code)),
-                    "skill seed missing template skill {} from {}",
-                    skill.code,
-                    template.code
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn capability_registry_seed_contains_every_template_connector_plugin_and_trigger() {
-        let seed =
-            include_str!("../../../migrations/202606050006_create_ai_capability_registry.sql");
-        let templates = crate::application::ai::template_service::delivery_templates().unwrap();
-
-        for template in templates {
-            for connector in template.connectors {
-                assert!(
-                    seed.contains(&format!("'{}'", connector.code)),
-                    "connector seed missing template connector {} from {}",
-                    connector.code,
-                    template.code
-                );
-            }
-            for plugin in template.plugins {
-                assert!(
-                    seed.contains(&format!("'{}'", plugin.code)),
-                    "plugin seed missing template plugin {} from {}",
-                    plugin.code,
-                    template.code
-                );
-            }
-            for trigger in template.triggers {
-                assert!(
-                    seed.contains(&format!("'{}'", trigger.code)),
-                    "trigger seed missing template trigger {} from {}",
-                    trigger.code,
-                    template.code
-                );
-            }
-        }
-    }
-
-    #[test]
     fn capability_registry_seed_plugin_manifests_match_builtin_contracts() {
         let seeds = [
             (

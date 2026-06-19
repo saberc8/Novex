@@ -118,7 +118,7 @@ fn milestone_coverage() -> Vec<FoundationMilestoneCoverage> {
             evidence: vec![
                 "novex-eval metric contracts",
                 "eval runtime APIs",
-                "template eval seeds",
+                "eval seeds",
                 "training/chat feedback endpoints",
             ],
             limitations: vec![
@@ -127,27 +127,18 @@ fn milestone_coverage() -> Vec<FoundationMilestoneCoverage> {
         },
         FoundationMilestoneCoverage {
             id: "M5",
-            name: "Customer Delivery Templates",
-            status: "poc_limited",
-            summary: "Default LLM chat, knowledge chat, agent workspace, training templates, brand/navigation config, roles, skills, connectors, plugins, triggers, eval sets, docs, smoke scripts, structured provisioning plans, tenant/package snapshots, tenant role/menu apply, tenant frontend config apply, tenant capability enablement apply, tenant eval set selection apply, and template smoke runner API are present.",
+            name: "Unified Admin Delivery",
+            status: "poc_ready",
+            summary: "Customer delivery is handled through the unified Admin control plane: tenants, roles, menus, model routes, knowledge resources, skills, connectors, plugins, triggers, eval sets, and frontend app configuration are managed directly instead of through separate template manifests.",
             evidence: vec![
-                "templates directory metadata",
-                "apps template entry routes",
-                "customer delivery docs",
-                "machine-readable provisioning plan",
-                "tenant/package snapshot apply API",
-                "tenant role/menu apply API",
-                "tenant frontend config apply API",
-                "tenant capability enablement apply API",
-                "tenant eval set selection apply API",
-                "template smoke scripts",
-                "template smoke runner API",
+                "Admin control plane pages",
+                "tenant and RBAC configuration",
+                "model route configuration",
+                "knowledge and agent configuration",
+                "skills, tools, connectors, plugins, triggers, and eval configuration",
+                "customer-facing frontend apps",
             ],
-            limitations: vec![
-                "frontend deployment remains operator-applied until template deployment runners are wired.",
-                "eval execution and smoke execution are available through explicit runtime APIs but are not automatically triggered by the template apply endpoint.",
-                "Deployment depends on operator-provided environment and external model credentials.",
-            ],
+            limitations: vec!["Deployment remains operator-applied and environment-specific."],
         },
     ]
 }
@@ -194,33 +185,23 @@ mod tests {
             .milestone_coverage
             .iter()
             .any(|milestone| milestone.id == "M5"
+                && milestone.name == "Unified Admin Delivery"
+                && milestone.status == "poc_ready"
                 && milestone
                     .evidence
                     .iter()
-                    .any(|evidence| evidence.contains("tenant role/menu apply"))
+                    .any(|evidence| evidence.contains("Admin control plane"))
                 && milestone
                     .evidence
                     .iter()
-                    .any(|evidence| evidence.contains("tenant frontend config apply"))
+                    .any(|evidence| evidence.contains("tenant and RBAC"))
                 && milestone
                     .evidence
                     .iter()
-                    .any(|evidence| evidence.contains("tenant capability enablement apply"))
-                && milestone
-                    .evidence
-                    .iter()
-                    .any(|evidence| evidence.contains("tenant eval set selection apply"))
-                && milestone
-                    .evidence
-                    .iter()
-                    .any(|evidence| evidence.contains("template smoke runner"))
+                    .any(|evidence| evidence.contains("skills, tools, connectors"))
                 && milestone
                     .limitations
                     .iter()
-                    .any(|limitation| limitation.contains("frontend deployment"))
-                && milestone
-                    .limitations
-                    .iter()
-                    .any(|limitation| limitation.contains("eval execution"))));
+                    .any(|limitation| limitation.contains("operator-applied"))));
     }
 }

@@ -1656,7 +1656,7 @@ mod tests {
         let command = normalize_openapi_chat_input(&json!({
             "messages": [
                 {"role": " system ", "content": "  You are Novex.  "},
-                {"role": "user", "content": "  Explain M5 templates.  "}
+                {"role": "user", "content": "  Explain M5 unified delivery.  "}
             ]
         }))
         .unwrap();
@@ -1665,7 +1665,7 @@ mod tests {
         assert_eq!(command.messages[0].role, "system");
         assert_eq!(command.messages[0].content, "You are Novex.");
         assert_eq!(command.messages[1].role, "user");
-        assert_eq!(command.messages[1].content, "Explain M5 templates.");
+        assert_eq!(command.messages[1].content, "Explain M5 unified delivery.");
     }
 
     #[test]

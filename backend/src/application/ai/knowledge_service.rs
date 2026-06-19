@@ -6670,7 +6670,7 @@ mod tests {
         let plan = retrieval_plan_from_model_answer(
             r#"```json
             {
-              "queries": ["知识库 MVP", "Agent Runtime", "客户交付模板"],
+              "queries": ["知识库 MVP", "Agent Runtime", "统一后台交付"],
               "requiredSections": ["Foundation Skeleton", "Knowledge MVP", "Eval"]
             }
             ```"#,
@@ -6683,7 +6683,7 @@ mod tests {
                 "总结 M0 到 M5 方案是否合理",
                 "知识库 MVP",
                 "Agent Runtime",
-                "客户交付模板",
+                "统一后台交付",
                 "Foundation Skeleton",
                 "Knowledge MVP",
                 "Eval"

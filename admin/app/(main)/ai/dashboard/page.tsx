@@ -58,7 +58,6 @@ const controlLinks = [
   { label: "知识库", href: "/ai/knowledge", permission: "ai:knowledge:list" },
   { label: "Agent Runs", href: "/ai/agents", permission: "ai:agent:list" },
   { label: "评测报告", href: "/ai/evals", permission: "ai:eval:report" },
-  { label: "交付模板", href: "/ai/templates", permission: "ai:template:list" },
   { label: "集成入口", href: "/ai/integrations", permission: "ai:integration:list" }
 ];
 
@@ -128,7 +127,7 @@ export default function AiDashboardPage() {
           <MetricCard
             title="Control Entries"
             value={String(controlLinks.length)}
-            detail="models, knowledge, agent, eval, templates"
+            detail="models, knowledge, agent, eval, integrations"
             icon={Route}
           />
         </section>

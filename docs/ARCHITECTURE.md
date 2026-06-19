@@ -94,7 +94,6 @@ Novex/
     chat-web/              Next.js + TypeScript，默认 LLM Chat / 知识库问答前台
     training-web/          Next.js + TypeScript，员工培训模板
     agent-workspace/       Next.js + TypeScript，Agent 工作台模板
-  templates/               客户交付模板、默认角色、默认 skills、默认 eval set
   docs/                    架构、实施计划、交付手册
   scripts/                 POC 启动、smoke、migration、seed、export/import 工具
   .env.example             本地 POC 汇总环境 schema/defaults；项目独立 env 由各目录 .env.example 维护
@@ -1371,7 +1370,7 @@ POC 不做：
 - `services/parser-worker/` Python 目录骨架，限定为解析和 ML sidecar。
 - `services/model-runtime/` 可选目录骨架，限定为内网模型和 ML adapter。
 - `apps/` Next.js + TypeScript 目录骨架。
-- `templates/` 客户模板目录骨架。
+- 统一后台交付配置，不再维护独立客户模板目录。
 - 权限码规范。
 - 菜单和角色初始化规范。
 - 控制面租户、租户用户、租户角色、资源 ACL 设计。
@@ -1471,27 +1470,16 @@ POC 不做：
 - Admin 评测报告页。
 - C 端反馈入口：问答有用/无用、引用问题、测验错题反馈，进入 eval dataset 或 feedback 表。
 
-### M5: 客户交付模板
+### M5: 统一后台交付
 
-目标：能快速落地一个客户项目。
+目标：能快速落地一个客户项目，同时避免维护独立模板配置包。客户差异统一在后台配置，不再通过 manifest 配置包交付。
 
 交付：
 
-- LLM Chat 默认模板。
-- Knowledge Base Chat 默认模板。
-- Agent Workspace 默认模板。
-- 培训系统前台模板。
-- 客户初始化向导。
-- 品牌配置。
-- 默认角色和菜单。
-- 默认 skill。
-- 默认 connector、plugin、trigger 配置。
-- 默认 eval set。
-- 部署手册。
-- `apps/*` 模板发布配置：入口 URL、品牌、导航、默认页面、允许访问角色。
-- `templates/*` 必须包含前台页面清单和 smoke test 脚本。
-- 模板 apply 入口必须能幂等写入租户、角色、菜单、前台配置快照、能力 registry、内置插件安装、默认 eval set 选择和客户包快照，并返回剩余操作员步骤。
-- 模板 smoke runner 必须能按 manifest 中的 smoke checks 生成 dry-run 计划或执行检查，并记录 run/result 明细。
+- LLM Chat、Knowledge Base Chat、Agent Workspace、培训系统、客服 Agent 等前台应用保留为 `apps/*`。
+- 客户初始化走后台：租户、用户、角色、菜单、数据权限、模型路由、知识库、技能、连接器、插件、触发器、评测集和前台入口都在 Admin 配置。
+- 品牌、导航、默认页面、允许访问角色等前台差异作为后台配置项管理。
+- smoke/test 跟随实际 app 或后端模块维护，不再通过模板 manifest 间接触发。
 
 ## 17. 客户交付方法
 
@@ -1648,7 +1636,7 @@ POC：
 
 ## 21. 第一阶段行动清单
 
-1. 建立 monorepo 模块边界：Rust `crates/`、Python `services/parser-worker/`、可选 `services/model-runtime/`、Next.js `apps/`、`templates/`、`scripts/`、根目录 POC 汇总 `.env.example` 和各项目独立 `.env.example`。
+1. 建立 monorepo 模块边界：Rust `crates/`、Python `services/parser-worker/`、可选 `services/model-runtime/`、Next.js `apps/`、`scripts/`、根目录 POC 汇总 `.env.example` 和各项目独立 `.env.example`。
 2. 配置 Rust workspace，把 `backend` 接入 workspace，但保持现有 RBAC 功能可运行。
 3. 在现有 RBAC 模板中加入控制面租户、`tenant_id`、资源 ACL 和 AI 权限码规划。
 4. 设计资源权限表、成员组、权限继承、配额、用量计量和限流策略。

@@ -1299,27 +1299,6 @@ mod tests {
     }
 
     #[test]
-    fn eval_runtime_seed_contains_every_template_default_eval_set() {
-        let seed = format!(
-            "{}\n{}",
-            include_str!("../../../migrations/202606050010_create_ai_eval_runtime.sql"),
-            include_str!("../../../migrations/202606160007_seed_customer_service_eval.sql")
-        );
-        let templates = crate::application::ai::template_service::delivery_templates().unwrap();
-
-        for template in templates {
-            for eval_set in template.eval_sets {
-                assert!(
-                    seed.contains(&format!("'{}'", eval_set.code)),
-                    "eval seed missing template eval set {} from {}",
-                    eval_set.code,
-                    template.code
-                );
-            }
-        }
-    }
-
-    #[test]
     fn customer_service_eval_seed_contains_resolution_and_handoff_cases() {
         let seed_path = concat!(
             env!("CARGO_MANIFEST_DIR"),

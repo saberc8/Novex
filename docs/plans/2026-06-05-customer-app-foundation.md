@@ -219,8 +219,8 @@ git commit -m "feat: connect training app knowledge ask"
 ## Task 5: Update Delivery Template Metadata
 
 **Files:**
-- Modify: `templates/training-app/template.json`
-- Modify: `templates/training-app/README.md`
+- Modify: `apps/training-web/.env.example`
+- Modify: `apps/training-web/README.md`
 - Modify: `apps/training-web/README.md`
 
 **Step 1: Write existing backend template test expectation**
@@ -250,7 +250,7 @@ Expected: PASS.
 **Step 5: Commit**
 
 ```bash
-git add templates/training-app apps/training-web backend/src/application/ai/template_service.rs
+git add apps/training-web apps/training-web backend/src/application/ai/customer_service_agent.rs
 git commit -m "feat: register training frontend template"
 ```
 
