@@ -153,6 +153,22 @@ pub struct McpJsonRpcRequest {
 }
 
 impl McpJsonRpcRequest {
+    pub fn initialize(id: impl Into<String>) -> Self {
+        Self {
+            jsonrpc: "2.0".to_owned(),
+            id: id.into(),
+            method: "initialize".to_owned(),
+            params: json!({
+                "protocolVersion": MCP_PROTOCOL_VERSION,
+                "capabilities": {},
+                "clientInfo": {
+                    "name": "novex",
+                    "version": env!("CARGO_PKG_VERSION"),
+                },
+            }),
+        }
+    }
+
     pub fn tools_call(id: impl Into<String>, request: &McpToolInvocationRequest) -> Self {
         Self {
             jsonrpc: "2.0".to_owned(),
@@ -162,6 +178,28 @@ impl McpJsonRpcRequest {
                 "name": request.tool_name,
                 "arguments": request.arguments,
             }),
+        }
+    }
+
+    pub fn into_value(self) -> Value {
+        serde_json::to_value(self).unwrap_or_else(|_| Value::Null)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpJsonRpcNotification {
+    pub jsonrpc: String,
+    pub method: String,
+    pub params: Value,
+}
+
+impl McpJsonRpcNotification {
+    pub fn initialized() -> Self {
+        Self {
+            jsonrpc: "2.0".to_owned(),
+            method: "notifications/initialized".to_owned(),
+            params: json!({}),
         }
     }
 
@@ -938,6 +976,42 @@ impl McpStdioLaunchPlan {
             "workingDir": self.working_dir,
             "lifecyclePolicy": self.lifecycle_policy,
             "lifecyclePhases": lifecycle_phases,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpStdioToolCallPlan {
+    pub launch: McpStdioLaunchPlan,
+    pub initialize: Value,
+    pub initialized: Value,
+    pub tools_call: Value,
+}
+
+impl McpStdioToolCallPlan {
+    pub fn new(
+        launch: McpStdioLaunchPlan,
+        request_id: impl Into<String>,
+        request: &McpToolInvocationRequest,
+    ) -> Self {
+        let request_id = request_id.into();
+        Self {
+            launch,
+            initialize: McpJsonRpcRequest::initialize(format!("{request_id}-initialize"))
+                .into_value(),
+            initialized: McpJsonRpcNotification::initialized().into_value(),
+            tools_call: McpJsonRpcRequest::tools_call(request_id, request).into_value(),
+        }
+    }
+
+    pub fn sanitized_evidence(&self) -> Value {
+        json!({
+            "transportKind": "stdio",
+            "launch": self.launch.sanitized_evidence(),
+            "initialize": self.initialize,
+            "initialized": self.initialized,
+            "request": self.tools_call,
         })
     }
 }
@@ -2066,5 +2140,62 @@ mod tests {
                 "shutdown"
             ])
         );
+    }
+
+    #[test]
+    fn mcp_stdio_tool_call_plan_builds_initialize_and_call_messages() {
+        let launch = McpStdioLaunchPlan::new(McpStdioLaunchConfig {
+            command: "node".to_owned(),
+            args: vec!["server.js".to_owned()],
+            env: BTreeMap::new(),
+            working_dir: None,
+            lifecycle_policy: McpStdioLifecyclePolicy::new(2_000, 1_000)
+                .expect("timeouts should be in range"),
+        })
+        .expect("stdio launch plan should be valid");
+        let request = McpToolInvocationRequest {
+            server_code: "docs".to_owned(),
+            tool_name: "search".to_owned(),
+            arguments: serde_json::json!({"query": "codex"}),
+        };
+
+        let plan = McpStdioToolCallPlan::new(launch, "tool-call-1", &request);
+
+        assert_eq!(plan.initialize["method"], "initialize");
+        assert_eq!(plan.initialized["method"], "notifications/initialized");
+        assert_eq!(plan.tools_call["method"], "tools/call");
+        assert_eq!(plan.tools_call["params"]["name"], "search");
+        assert_eq!(plan.tools_call["params"]["arguments"]["query"], "codex");
+    }
+
+    #[test]
+    fn mcp_stdio_tool_call_plan_sanitized_evidence_hides_env_literals() {
+        let mut env = BTreeMap::new();
+        env.insert(
+            "MCP_TOKEN".to_owned(),
+            McpStdioEnvValue::Literal("plain-secret".to_owned()),
+        );
+        let launch = McpStdioLaunchPlan::new(McpStdioLaunchConfig {
+            command: "node".to_owned(),
+            args: vec!["server.js".to_owned()],
+            env,
+            working_dir: None,
+            lifecycle_policy: McpStdioLifecyclePolicy::new(2_000, 1_000)
+                .expect("timeouts should be in range"),
+        })
+        .expect("stdio launch plan should be valid");
+        let request = McpToolInvocationRequest {
+            server_code: "docs".to_owned(),
+            tool_name: "search".to_owned(),
+            arguments: serde_json::json!({"query": "codex"}),
+        };
+
+        let evidence =
+            McpStdioToolCallPlan::new(launch, "tool-call-1", &request).sanitized_evidence();
+
+        assert_eq!(evidence["transportKind"], "stdio");
+        assert_eq!(evidence["request"]["method"], "tools/call");
+        assert_eq!(evidence["request"]["params"]["arguments"]["query"], "codex");
+        assert!(!evidence.to_string().contains("plain-secret"));
     }
 }

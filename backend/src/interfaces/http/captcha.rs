@@ -169,9 +169,9 @@ async fn mail(Query(query): Query<MailQuery>) -> Json<ApiResponse<bool>> {
 }
 
 async fn is_login_captcha_enabled(db: &PgPool) -> Result<bool, AppError> {
-    if let Some(enabled) = login_captcha_enabled_override(
-        std::env::var("LOGIN_CAPTCHA_ENABLED").ok().as_deref(),
-    ) {
+    if let Some(enabled) =
+        login_captcha_enabled_override(std::env::var("LOGIN_CAPTCHA_ENABLED").ok().as_deref())
+    {
         return Ok(enabled);
     }
 
