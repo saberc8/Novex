@@ -10,7 +10,7 @@ The goal is structural normalization, not new product behavior. The refactor sho
 
 - `crates/novex-provider-client` already follows the intended facade pattern: `src/lib.rs` declares private modules and re-exports the public API.
 - Most other AI Foundation crates still keep implementation and tests in `src/lib.rs`.
-- The largest single files are:
+- At the start of this architecture effort, the largest single files were:
   - `novex-rag/src/lib.rs`: parsing, chunking, Milvus request shaping, keyword/BM25 retrieval, answer building, and tests.
   - `novex-mcp/src/lib.rs`: MCP core types, JSON-RPC, Streamable HTTP planning/parsing, OAuth planning/session logic, stdio launch planning, registration validation, and tests.
   - `novex-eval/src/lib.rs`: eval DTOs, trace extraction, metric scoring, regression reporting, trace summary helpers, and tests.

@@ -25,7 +25,7 @@ This keeps the change small and safe, and it immediately improves local fallback
 
 ## Testing
 
-Use TDD in `crates/novex-rag/src/lib.rs`:
+Use TDD in `crates/novex-rag/src/retrieval.rs` and `crates/novex-rag/tests/retrieval.rs`:
 
 - Preserve existing English keyword ranking behavior.
 - Preserve numbered range recall for `p0` to `p5`.

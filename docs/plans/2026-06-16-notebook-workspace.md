@@ -195,7 +195,7 @@ git commit -m "feat: expose notebook workspace api"
 **Files:**
 - Modify: `backend/src/application/ai/notebook_service.rs`
 - Modify: `backend/src/application/ai/knowledge_service.rs`
-- Modify: `crates/novex-rag/src/lib.rs`
+- Modify: `crates/novex-rag/src/retrieval.rs`
 
 **Step 1: Write failing tests**
 
@@ -253,7 +253,7 @@ Expected: PASS.
 **Step 6: Commit**
 
 ```bash
-git add backend/src/application/ai/notebook_service.rs backend/src/application/ai/knowledge_service.rs crates/novex-rag/src/lib.rs backend/src/interfaces/http/ai/notebook.rs
+git add backend/src/application/ai/notebook_service.rs backend/src/application/ai/knowledge_service.rs crates/novex-rag/src/retrieval.rs backend/src/interfaces/http/ai/notebook.rs
 git commit -m "feat: answer notebook questions with citations"
 ```
 

@@ -13,7 +13,7 @@
 ### Task 1: Extend novex-rag Domain Types
 
 **Files:**
-- Modify: `crates/novex-rag/src/lib.rs`
+- Modify: `crates/novex-rag/src/knowledge.rs`
 
 **Step 1: Write failing tests**
 
@@ -51,7 +51,7 @@ Expected: PASS.
 **Step 5: Commit**
 
 ```bash
-git add crates/novex-rag/src/lib.rs
+git add crates/novex-rag/src/knowledge.rs
 git commit -m "feat: extend rag knowledge domain types"
 ```
 
