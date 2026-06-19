@@ -6,8 +6,9 @@ use novex_connectors::{
     ResolvedConnectorCredential,
 };
 use novex_mcp::{
-    parse_mcp_tool_call_response, McpStreamableHttpRequestPlan, McpStreamableHttpResponse,
-    McpToolInvocationRequest, McpToolInvocationResult,
+    parse_mcp_tool_call_response, McpStdioLaunchConfig, McpStdioLaunchPlan, McpStdioToolCallPlan,
+    McpStreamableHttpRequestPlan, McpStreamableHttpResponse, McpToolInvocationRequest,
+    McpToolInvocationResult,
 };
 use novex_model::ModelRoutePurpose;
 use novex_tools::{
@@ -17,7 +18,10 @@ use novex_tools::{
 };
 use serde_json::{json, Value};
 
-use super::model_service::ModelRuntimeService;
+use super::{
+    mcp_stdio_process::{execute_mcp_stdio_tool_with_env, McpStdioProcessError},
+    model_service::ModelRuntimeService,
+};
 use crate::infrastructure::persistence::ai_capability_repository::{
     ConnectorCredentialLookupRecord, McpToolExecutionRecord, ToolLookupRecord,
 };
@@ -186,7 +190,7 @@ async fn execute_mcp_tool(
     input: &Value,
     mcp_tool: Option<&McpToolExecutionRecord>,
 ) -> AgentToolExecution {
-    execute_mcp_tool_with_http_dispatch(
+    execute_mcp_tool_with_dispatch(
         tool_code,
         input,
         mcp_tool,
@@ -194,21 +198,63 @@ async fn execute_mcp_tool(
         |request_plan, bearer_token| async move {
             dispatch_mcp_streamable_http_request(request_plan, bearer_token).await
         },
+        |plan, tool_code, env_get| async move {
+            execute_mcp_stdio_tool_with_env(plan, &tool_code, env_get).await
+        },
     )
     .await
 }
 
+#[allow(dead_code)]
 async fn execute_mcp_tool_with_http_dispatch<EnvGet, Dispatch, DispatchFuture>(
     tool_code: &str,
     input: &Value,
     mcp_tool: Option<&McpToolExecutionRecord>,
-    mut env_get: EnvGet,
+    env_get: EnvGet,
     dispatch: Dispatch,
 ) -> AgentToolExecution
 where
     EnvGet: FnMut(&str) -> Option<String>,
     Dispatch: FnOnce(McpStreamableHttpRequestPlan, Option<String>) -> DispatchFuture,
     DispatchFuture: Future<Output = Result<McpStreamableHttpResponse, String>>,
+{
+    execute_mcp_tool_with_dispatch(
+        tool_code,
+        input,
+        mcp_tool,
+        env_get,
+        dispatch,
+        |_plan, _tool_code, _env_get| async move {
+            Err(McpStdioProcessError {
+                phase: "stdio".to_owned(),
+                message: "MCP stdio dispatch is not configured".to_owned(),
+                evidence: Value::Null,
+            })
+        },
+    )
+    .await
+}
+
+async fn execute_mcp_tool_with_dispatch<
+    EnvGet,
+    HttpDispatch,
+    HttpFuture,
+    StdioDispatch,
+    StdioFuture,
+>(
+    tool_code: &str,
+    input: &Value,
+    mcp_tool: Option<&McpToolExecutionRecord>,
+    mut env_get: EnvGet,
+    http_dispatch: HttpDispatch,
+    stdio_dispatch: StdioDispatch,
+) -> AgentToolExecution
+where
+    EnvGet: FnMut(&str) -> Option<String>,
+    HttpDispatch: FnOnce(McpStreamableHttpRequestPlan, Option<String>) -> HttpFuture,
+    HttpFuture: Future<Output = Result<McpStreamableHttpResponse, String>>,
+    StdioDispatch: FnOnce(McpStdioToolCallPlan, String, EnvGet) -> StdioFuture,
+    StdioFuture: Future<Output = Result<McpToolInvocationResult, McpStdioProcessError>>,
 {
     let Some(tool) = mcp_tool else {
         return AgentToolExecution::failed(
@@ -265,112 +311,205 @@ where
         );
     }
 
-    let live_request_plan = mcp_streamable_http_request_plan(tool, &request);
     if mcp_live_execution_enabled(&tool.metadata) {
-        let live_request = live_request_plan
-            .as_ref()
-            .map(McpStreamableHttpRequestPlan::sanitized_evidence)
-            .unwrap_or(Value::Null);
-        let Some(live_request_plan) = live_request_plan else {
-            let error = "MCP Streamable HTTP endpoint is not configured".to_owned();
-            return failed_mcp_live_tool_execution(
-                tool,
-                &request,
-                &live_request,
-                &auth,
-                error,
-                None,
-                None,
-            );
-        };
-        if !mcp_live_auth_supported(&tool.auth_type) {
-            let error = format!(
-                "MCP live dispatch auth type `{}` is not supported",
-                tool.auth_type
-            );
-            return failed_mcp_live_tool_execution(
-                tool,
-                &request,
-                &live_request,
-                &auth,
-                error,
-                None,
-                None,
-            );
-        }
-        if mcp_auth_requires_secret(&tool.auth_type) && resolved_secret.is_none() {
-            let error = "MCP live dispatch secret is not resolved".to_owned();
-            return failed_mcp_live_tool_execution(
-                tool,
-                &request,
-                &live_request,
-                &auth,
-                error,
-                None,
-                None,
-            );
-        }
-        let bearer_token = if mcp_auth_uses_bearer_token(&tool.auth_type) {
-            resolved_secret
-        } else {
-            None
-        };
-        let response = match dispatch(live_request_plan, bearer_token).await {
-            Ok(response) => response,
-            Err(error) => {
+        let transport_kind = tool.transport_kind.trim().to_ascii_lowercase();
+        match transport_kind.as_str() {
+            "stdio" => {
+                let live_request_plan = match mcp_stdio_tool_call_plan(tool, &request) {
+                    Ok(plan) => plan,
+                    Err(error) => {
+                        return failed_mcp_live_tool_execution(
+                            tool,
+                            &request,
+                            &Value::Null,
+                            &auth,
+                            error,
+                            None,
+                            None,
+                        );
+                    }
+                };
+                let live_request = live_request_plan.sanitized_evidence();
+                if mcp_auth_requires_secret(&tool.auth_type) {
+                    let error = format!(
+                        "MCP stdio live dispatch auth type `{}` must be supplied through stdioLaunch.env",
+                        tool.auth_type
+                    );
+                    return failed_mcp_live_tool_execution(
+                        tool,
+                        &request,
+                        &live_request,
+                        &auth,
+                        error,
+                        None,
+                        None,
+                    );
+                }
+                let result = match stdio_dispatch(
+                    live_request_plan,
+                    tool.tool_code.clone(),
+                    env_get,
+                )
+                .await
+                {
+                    Ok(result) => result,
+                    Err(error) => {
+                        let error_detail = json!({
+                            "phase": error.phase,
+                        });
+                        return failed_mcp_live_tool_execution(
+                            tool,
+                            &request,
+                            &error.evidence,
+                            &auth,
+                            error.message,
+                            None,
+                            Some(error_detail),
+                        );
+                    }
+                };
+                return AgentToolExecution::succeeded(
+                    json!({
+                        "dryRun": result.dry_run,
+                        "toolCode": result.tool_code,
+                        "status": result.status,
+                        "provider": "mcp",
+                        "live": true,
+                        "server": mcp_server_payload(tool),
+                        "request": request,
+                        "liveRequest": live_request,
+                        "response": result.output,
+                        "auth": auth,
+                        "mocked": false,
+                    }),
+                    result.dry_run,
+                    format!("Agent executed MCP tool {} via live stdio.", tool.tool_code),
+                );
+            }
+            "streamable_http" | "sse" => {
+                let live_request_plan = mcp_streamable_http_request_plan(tool, &request);
+                let live_request = live_request_plan
+                    .as_ref()
+                    .map(McpStreamableHttpRequestPlan::sanitized_evidence)
+                    .unwrap_or(Value::Null);
+                let Some(live_request_plan) = live_request_plan else {
+                    let error = "MCP Streamable HTTP endpoint is not configured".to_owned();
+                    return failed_mcp_live_tool_execution(
+                        tool,
+                        &request,
+                        &live_request,
+                        &auth,
+                        error,
+                        None,
+                        None,
+                    );
+                };
+                if !mcp_live_auth_supported(&tool.auth_type) {
+                    let error = format!(
+                        "MCP live dispatch auth type `{}` is not supported",
+                        tool.auth_type
+                    );
+                    return failed_mcp_live_tool_execution(
+                        tool,
+                        &request,
+                        &live_request,
+                        &auth,
+                        error,
+                        None,
+                        None,
+                    );
+                }
+                if mcp_auth_requires_secret(&tool.auth_type) && resolved_secret.is_none() {
+                    let error = "MCP live dispatch secret is not resolved".to_owned();
+                    return failed_mcp_live_tool_execution(
+                        tool,
+                        &request,
+                        &live_request,
+                        &auth,
+                        error,
+                        None,
+                        None,
+                    );
+                }
+                let bearer_token = if mcp_auth_uses_bearer_token(&tool.auth_type) {
+                    resolved_secret
+                } else {
+                    None
+                };
+                let response = match http_dispatch(live_request_plan, bearer_token).await {
+                    Ok(response) => response,
+                    Err(error) => {
+                        return failed_mcp_live_tool_execution(
+                            tool,
+                            &request,
+                            &live_request,
+                            &auth,
+                            error,
+                            None,
+                            None,
+                        );
+                    }
+                };
+                let response_meta = json!({
+                    "httpStatus": response.http_status,
+                    "contentType": response.content_type,
+                });
+                let result = match parse_mcp_tool_call_response(&tool.tool_code, &response) {
+                    Ok(result) => result,
+                    Err(error) => {
+                        let error_detail = serde_json::to_value(&error).unwrap_or_else(|_| {
+                            json!({
+                                "message": error.message,
+                            })
+                        });
+                        let message =
+                            format!("MCP live dispatch response parse failed: {}", error.message);
+                        return failed_mcp_live_tool_execution(
+                            tool,
+                            &request,
+                            &live_request,
+                            &auth,
+                            message,
+                            Some(response_meta),
+                            Some(error_detail),
+                        );
+                    }
+                };
+                return AgentToolExecution::succeeded(
+                    json!({
+                        "dryRun": result.dry_run,
+                        "toolCode": result.tool_code,
+                        "status": result.status,
+                        "provider": "mcp",
+                        "live": true,
+                        "server": mcp_server_payload(tool),
+                        "request": request,
+                        "liveRequest": live_request,
+                        "responseMeta": response_meta,
+                        "response": result.output,
+                        "auth": auth,
+                        "mocked": false,
+                    }),
+                    result.dry_run,
+                    format!("Agent executed MCP tool {} via live HTTP.", tool.tool_code),
+                );
+            }
+            _ => {
+                let error = format!(
+                    "MCP live dispatch transport `{}` is not supported",
+                    tool.transport_kind
+                );
                 return failed_mcp_live_tool_execution(
                     tool,
                     &request,
-                    &live_request,
+                    &Value::Null,
                     &auth,
                     error,
                     None,
                     None,
                 );
             }
-        };
-        let response_meta = json!({
-            "httpStatus": response.http_status,
-            "contentType": response.content_type,
-        });
-        let result = match parse_mcp_tool_call_response(&tool.tool_code, &response) {
-            Ok(result) => result,
-            Err(error) => {
-                let error_detail = serde_json::to_value(&error).unwrap_or_else(|_| {
-                    json!({
-                        "message": error.message,
-                    })
-                });
-                let message = format!("MCP live dispatch response parse failed: {}", error.message);
-                return failed_mcp_live_tool_execution(
-                    tool,
-                    &request,
-                    &live_request,
-                    &auth,
-                    message,
-                    Some(response_meta),
-                    Some(error_detail),
-                );
-            }
-        };
-        return AgentToolExecution::succeeded(
-            json!({
-                "dryRun": result.dry_run,
-                "toolCode": result.tool_code,
-                "status": result.status,
-                "provider": "mcp",
-                "live": true,
-                "server": mcp_server_payload(tool),
-                "request": request,
-                "liveRequest": live_request,
-                "responseMeta": response_meta,
-                "response": result.output,
-                "auth": auth,
-                "mocked": false,
-            }),
-            result.dry_run,
-            format!("Agent executed MCP tool {} via live HTTP.", tool.tool_code),
-        );
+        }
     }
 
     let result = McpToolInvocationResult {
@@ -385,7 +524,7 @@ where
         }),
         dry_run: true,
     };
-    let live_request = mcp_streamable_http_request_payload(tool, &request);
+    let live_request = mcp_tool_live_request_payload(tool, &request);
     AgentToolExecution::succeeded(
         json!({
             "dryRun": result.dry_run,
@@ -507,6 +646,43 @@ fn mcp_streamable_http_request_payload(
     mcp_streamable_http_request_plan(tool, request)
         .map(|request_plan| request_plan.sanitized_evidence())
         .unwrap_or(Value::Null)
+}
+
+fn mcp_stdio_tool_call_plan(
+    tool: &McpToolExecutionRecord,
+    request: &McpToolInvocationRequest,
+) -> Result<McpStdioToolCallPlan, String> {
+    let launch = tool
+        .metadata
+        .get("stdioLaunch")
+        .cloned()
+        .ok_or_else(|| "MCP stdio launch config is not configured".to_owned())?;
+    let launch_config = serde_json::from_value::<McpStdioLaunchConfig>(launch)
+        .map_err(|err| format!("MCP stdio launch config is invalid: {err}"))?;
+    let launch_plan = McpStdioLaunchPlan::new(launch_config).map_err(|err| {
+        format!(
+            "MCP stdio launch config `{}` is invalid: {}",
+            err.field, err.message
+        )
+    })?;
+
+    Ok(McpStdioToolCallPlan::new(
+        launch_plan,
+        format!("mcp-tool-{}", tool.id),
+        request,
+    ))
+}
+
+fn mcp_tool_live_request_payload(
+    tool: &McpToolExecutionRecord,
+    request: &McpToolInvocationRequest,
+) -> Value {
+    match tool.transport_kind.trim().to_ascii_lowercase().as_str() {
+        "stdio" => mcp_stdio_tool_call_plan(tool, request)
+            .map(|request_plan| request_plan.sanitized_evidence())
+            .unwrap_or(Value::Null),
+        _ => mcp_streamable_http_request_payload(tool, request),
+    }
 }
 
 fn mcp_live_execution_enabled(metadata: &Value) -> bool {
@@ -1555,6 +1731,58 @@ mod tests {
             .contains("local-secret-token"));
     }
 
+    #[tokio::test]
+    async fn mcp_tool_execution_live_stdio_dispatch_uses_stdio_plan() {
+        let mut tool = live_mcp_tool_record(json!({"liveExecutionEnabled": true}));
+        tool.transport_kind = "stdio".to_owned();
+        tool.endpoint_url = None;
+        tool.auth_type = "none".to_owned();
+        tool.secret_ref = None;
+        tool.metadata["stdioLaunch"] = json!({
+            "command": "/bin/echo",
+            "args": [],
+            "env": {},
+            "workingDir": null,
+            "lifecyclePolicy": {
+                "startupTimeoutMs": 2_000,
+                "shutdownTimeoutMs": 1_000
+            }
+        });
+
+        let execution = execute_mcp_tool_with_dispatch(
+            "mcp.docs.search",
+            &json!({"query": "codex"}),
+            Some(&tool),
+            |_| None,
+            |_plan, _bearer_token| async move { unreachable!("stdio should not use HTTP") },
+            |plan, tool_code, _env_get| async move {
+                assert_eq!(tool_code, "mcp.docs.search");
+                assert_eq!(plan.tools_call["params"]["name"], "search");
+                assert_eq!(plan.tools_call["params"]["arguments"]["query"], "codex");
+                Ok(McpToolInvocationResult {
+                    tool_code: "mcp.docs.search".to_owned(),
+                    status: "succeeded".to_owned(),
+                    output: json!({
+                        "structuredContent": {"hits": 1},
+                        "isError": false
+                    }),
+                    dry_run: false,
+                })
+            },
+        )
+        .await;
+
+        assert!(execution.succeeded_status());
+        assert_eq!(
+            execution.response_payload["liveRequest"]["transportKind"],
+            "stdio"
+        );
+        assert_eq!(
+            execution.response_payload["response"]["structuredContent"]["hits"],
+            1
+        );
+    }
+
     #[test]
     fn feishu_webhook_config_reads_env_map_without_leaking_url_to_payload() {
         let config = FeishuWebhookConfig::from_env_map(|key| match key {
@@ -1627,5 +1855,19 @@ mod tests {
         ] {
             assert!(source.contains(needle), "{needle} missing");
         }
+    }
+
+    #[test]
+    fn mcp_tool_execution_live_dispatch_routes_stdio_separately_from_http() {
+        let source = include_str!("agent_tool_executor.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+
+        assert!(source.contains("execute_mcp_tool_with_dispatch"));
+        assert!(source.contains("transport_kind.as_str()"));
+        assert!(source.contains("\"stdio\""));
+        assert!(source.contains("execute_mcp_stdio_tool_with_env"));
+        assert!(source.contains("dispatch_mcp_streamable_http_request"));
     }
 }
