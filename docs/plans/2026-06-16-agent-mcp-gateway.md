@@ -108,13 +108,14 @@ git commit -m "feat: persist mcp gateway registration records"
 ## Task 2: Extend `novex-mcp` Discovery and Tool Spec Mapping
 
 **Files:**
-- Modify: `crates/novex-mcp/src/lib.rs`
+- Modify: `crates/novex-mcp/src/types.rs`
+- Modify: `crates/novex-mcp/src/registration.rs`
 - Modify: `crates/novex-mcp/Cargo.toml`
 - Modify: `crates/novex-tools/src/lib.rs`
 
 **Step 1: Write failing tests**
 
-Add to `crates/novex-mcp/src/lib.rs`:
+Add to `crates/novex-mcp/src/types.rs`:
 
 ```rust
 #[test]
@@ -256,7 +257,8 @@ git commit -m "feat: add mcp gateway registration api"
 **Files:**
 - Modify: `backend/src/application/ai/agent_service.rs`
 - Modify: `backend/src/application/ai/capability_service.rs`
-- Modify: `crates/novex-mcp/src/lib.rs`
+- Modify: `crates/novex-mcp/src/streamable_http.rs`
+- Modify: `crates/novex-mcp/src/types.rs`
 
 **Step 1: Write failing tests**
 
@@ -307,7 +309,7 @@ Expected: PASS.
 **Step 5: Commit**
 
 ```bash
-git add backend/src/application/ai/agent_service.rs backend/src/application/ai/capability_service.rs crates/novex-mcp/src/lib.rs
+git add backend/src/application/ai/agent_service.rs backend/src/application/ai/capability_service.rs crates/novex-mcp/src/streamable_http.rs crates/novex-mcp/src/types.rs
 git commit -m "feat: route mcp tools through agent observations"
 ```
 

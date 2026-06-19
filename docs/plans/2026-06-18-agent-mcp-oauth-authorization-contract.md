@@ -37,9 +37,9 @@ This is an adapter-port slice from Codex MCP infrastructure and MCP authorizatio
 
 ## Implementation Steps
 
-1. Add RED tests in `crates/novex-mcp/src/lib.rs` for PKCE URL construction, sanitized evidence, HTTPS enforcement, secret-ref validation, and required state/scopes.
+1. Add RED tests in `crates/novex-mcp/tests/oauth.rs` for PKCE URL construction, sanitized evidence, HTTPS enforcement, secret-ref validation, and required state/scopes.
 2. Run `cargo test -p novex-mcp mcp_oauth --offline` and confirm the tests fail because the OAuth plan contract does not exist.
-3. Add OAuth plan, client auth, PKCE, and error types in `crates/novex-mcp/src/lib.rs`.
+3. Add OAuth plan, client auth, PKCE, and error types in `crates/novex-mcp/src/oauth.rs`.
 4. Implement validation helpers for HTTPS URLs, non-empty fields, scope normalization, S256 PKCE challenge, redirect URI parsing, and `env:` client secret refs.
 5. Implement `McpOAuthAuthorizationPlan::new`, `authorization_url`, and `sanitized_evidence`.
 6. Run focused `novex-mcp` tests, then backend MCP tests to confirm existing MCP execution remains unchanged.

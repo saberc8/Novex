@@ -39,7 +39,7 @@ This is an adapter port from Codex MCP ideas and current MCP Streamable HTTP tra
 
 ## Implementation Steps
 
-1. Add RED tests in `crates/novex-mcp/src/lib.rs` for request planning, JSON response parsing, SSE response parsing, and JSON-RPC errors.
+1. Add RED tests in `crates/novex-mcp/tests/streamable_http.rs` for request planning, JSON response parsing, SSE response parsing, and JSON-RPC errors.
 2. Add backend RED test in `backend/src/application/ai/agent_tool_executor.rs` for sanitized `liveRequest` evidence in non-mocked MCP dry-runs.
 3. Implement the request-plan and response-parser types in `novex-mcp`.
 4. Wire backend non-mocked MCP dry-run payloads to include the sanitized request plan.

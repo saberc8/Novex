@@ -21,7 +21,7 @@
 
 ## File Structure
 
-- Modify: `crates/novex-mcp/src/lib.rs`
+- Modify: `crates/novex-mcp/src/oauth.rs`
   - Add refresh-token grant vocabulary, config, plan builder, validation, and evidence.
 - Modify: `backend/src/application/ai/mcp_oauth_token_dispatch.rs`
   - Add refresh command, resolved refresh-token secret handling, optional PKCE verifier support, and secret-writer dispatch path.
@@ -35,7 +35,7 @@
 ## Task 1: Pure Refresh Grant Contract
 
 **Files:**
-- Modify: `crates/novex-mcp/src/lib.rs`
+- Modify: `crates/novex-mcp/src/oauth.rs`
 
 **Interfaces:**
 - Produces: `McpOAuthGrantType::RefreshToken`

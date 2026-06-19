@@ -38,9 +38,9 @@ This is an adapter-port slice from Codex MCP infrastructure: command launch meta
 
 ## Implementation Steps
 
-1. Add RED tests in `crates/novex-mcp/src/lib.rs` for stdio launch sanitization, empty command rejection, invalid secret refs, timeout bounds, and lifecycle phases.
+1. Add RED tests in `crates/novex-mcp/tests/stdio.rs` for stdio launch sanitization, empty command rejection, invalid secret refs, timeout bounds, and lifecycle phases.
 2. Run `cargo test -p novex-mcp mcp_stdio --offline` and confirm the tests fail because the stdio contract does not exist.
-3. Add stdio env value, launch config, lifecycle policy, lifecycle phase, launch plan, and error types in `crates/novex-mcp/src/lib.rs`.
+3. Add stdio env value, launch config, lifecycle policy, lifecycle phase, launch plan, and error types in `crates/novex-mcp/src/stdio.rs`.
 4. Implement validation helpers for command, env names, env secret refs, working directory trimming, and timeout bounds.
 5. Implement `McpStdioLaunchPlan::new` and `sanitized_evidence`.
 6. Run focused `novex-mcp` tests, then backend MCP tests to confirm existing HTTP execution remains untouched.

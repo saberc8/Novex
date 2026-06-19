@@ -22,7 +22,8 @@
 ## Task 1: Protocol Request Evidence
 
 **Files:**
-- Modify: `crates/novex-mcp/src/lib.rs`
+- Modify: `crates/novex-mcp/src/json_rpc.rs`
+- Modify: `crates/novex-mcp/src/stdio.rs`
 
 **Interfaces:**
 - Produces: `McpJsonRpcRequest::initialize(id)`
