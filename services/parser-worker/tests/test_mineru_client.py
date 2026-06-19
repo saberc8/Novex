@@ -169,6 +169,25 @@ class MineruClientTest(unittest.TestCase):
         self.assertEqual(upload_request.method, "PUT")
         self.assertEqual(upload_request.body, b"%PDF-1.7")
 
+    def test_docker_service_hostname_source_uses_v4_batch_file_upload(self):
+        transport = RoutingTransport()
+        client = MineruClient(
+            token="token-123",
+            transport=transport,
+            source_reader=lambda url: b"%PDF-1.7",
+        )
+
+        task = client.create_extract_task(
+            "http://backend:4398/file/knowledge/1.pdf",
+            file_name="demo.pdf",
+            data_id="job-1",
+        )
+
+        self.assertEqual(task.task_id, "batch:batch-1")
+        self.assertEqual(transport.requests[0].path, "/api/v4/file-urls/batch")
+        self.assertEqual(transport.requests[1].method, "PUT")
+        self.assertEqual(transport.requests[1].body, b"%PDF-1.7")
+
     def test_batch_task_id_polls_batch_extract_results(self):
         transport = RoutingTransport()
         client = MineruClient(token="token-123", transport=transport)

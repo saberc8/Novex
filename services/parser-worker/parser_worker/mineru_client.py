@@ -294,6 +294,8 @@ def should_upload_source_url(source_url: str) -> bool:
     host = (parsed.hostname or "").strip().lower()
     if host == "localhost":
         return True
+    if is_local_hostname(host):
+        return True
     if not host:
         return False
     try:
@@ -301,6 +303,12 @@ def should_upload_source_url(source_url: str) -> bool:
     except ValueError:
         return False
     return address.is_loopback or address.is_private or address.is_link_local
+
+
+def is_local_hostname(host: str) -> bool:
+    if not host:
+        return False
+    return "." not in host or host.endswith((".local", ".localhost"))
 
 
 def file_name_from_url(source_url: str) -> str:

@@ -4,6 +4,35 @@ Novex 是一套面向企业交付的 AI Agent 基座。它不是单点 AI 应用
 
 当前仓库已经具备 Rust + Next.js 的 RBAC 控制平面、AI Foundation Rust crates、前台应用模板、parser worker、POC Docker 运行环境和交付模板。完整架构长文见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)，本 README 只保留项目首页需要的入口信息。
 
+## 产品截图
+
+<table>
+  <tr>
+    <td width="50%">
+      <img src="images/poc-codexlike.png" alt="Codex-like Agent 工作台" width="100%" />
+      <br />
+      <sub>Codex-like Agent 工作台：联网搜索、模型输出和运行事件。</sub>
+    </td>
+    <td width="50%">
+      <img src="images/poc-notebooklm.png" alt="NotebookLM-like 知识工作区" width="100%" />
+      <br />
+      <sub>NotebookLM-like 知识工作区：资料、对话和内容生成。</sub>
+    </td>
+  </tr>
+  <tr>
+    <td width="50%">
+      <img src="images/rbac-admin.png" alt="AI 基座模型管理" width="100%" />
+      <br />
+      <sub>AI 基座模型管理：模型路由、密钥占位和健康检查。</sub>
+    </td>
+    <td width="50%">
+      <img src="images/skills-admin.png" alt="AI Skills 导入与管理" width="100%" />
+      <br />
+      <sub>AI Skills 导入与管理：GitHub Skill 解析、预览和安装。</sub>
+    </td>
+  </tr>
+</table>
+
 ## 能力范围
 
 - 控制平面：租户、用户、角色、菜单、部门、文件、配置、调度、审计、在线用户和系统日志。

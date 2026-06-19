@@ -80,7 +80,7 @@ services:
     image: ${PYTHON_IMAGE:-python:3.12-slim}
     profiles: ["parser"]
     working_dir: /workspace
-    command: sh -lc "python3 -m pip install --no-cache-dir -r services/parser-worker/requirements.txt && PYTHONPATH=services/parser-worker python3 -m parser_worker.worker"
+    command: sh -lc "apt-get update && apt-get install -y --no-install-recommends curl ca-certificates && rm -rf /var/lib/apt/lists/* && python3 -m pip install --no-cache-dir -r services/parser-worker/requirements.txt && PYTHONPATH=services/parser-worker python3 -m parser_worker.worker"
     environment:
       PARSER_WORKER_ID: ${PARSER_WORKER_ID:-parser-worker-1}
       PARSER_BACKEND_BASE_URL: http://backend:4398

@@ -1,6 +1,7 @@
 import inspect
 import unittest
 from io import BytesIO
+from pathlib import Path
 from zipfile import ZipFile
 
 from parser_worker.mineru_client import MineruTask
@@ -160,6 +161,14 @@ class ParserWorkerRunnerTest(unittest.TestCase):
 
         self.assertIn("default_ssl_context()", source)
         self.assertIn("curl", source)
+
+    def test_parser_worker_compose_installs_curl_for_zip_fetch_fallback(self):
+        compose = (
+            Path(__file__).resolve().parents[3] / "infra" / "docker-compose.yml"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("apt-get install", compose)
+        self.assertIn("curl", compose)
 
     def test_complete_done_mineru_task_downloads_zip_and_posts_parsed_document(self):
         poster = FakePoster()
