@@ -385,10 +385,11 @@ crates/novex-plugin/
   lib.rs           crate facade 和 CRATE_ID
 
 crates/novex-trigger/
-  webhook/         外部 webhook endpoint、签名校验、幂等
-  schedule/        定时触发，复用 scheduler 能力
-  event/           GitHub event、plugin event、connector sync event
-  router/          将事件路由到 run graph、agent run、job 或通知
+  types.rs         TriggerSourceKind、TriggerTargetKind
+  delivery.rs      delivery target validation、retry policy、route snapshot planning
+  webhook.rs       webhook signature verification、idempotency validation
+  module.rs        FoundationModule constructor
+  lib.rs           crate facade 和 CRATE_ID
 
 crates/novex-memory/
   policy/          写入策略、TTL、脱敏、删除
