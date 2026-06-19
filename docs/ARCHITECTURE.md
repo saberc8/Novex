@@ -329,12 +329,14 @@ crates/novex-ai-core/
   observability/   trace event、cost、latency
 
 crates/novex-model/
-  registry/        provider、model、deployment、capability、credential
-  adapter/         OpenAI-compatible、DashScope/Qwen、DeepSeek、local runtime adapter
-  routing/         按租户、场景、成本、延迟、能力选择模型
-  capability/      context window、tool calling、json mode、vision、embedding dim、rerank score
-  health/          模型连通性、能力探测、延迟探测、降级状态
-  accounting/      token、字符数、向量条数、rerank 请求数、成本估算
+  taxonomy.rs      model kind、provider type、route purpose、runtime target
+  route.rs         runtime route/config/summary、env-backed route construction
+  provider.rs      provider-neutral stream/media/rerank/embedding DTO
+  usage.rs         token usage normalization、text token estimation
+  cost.rs          usage cost input、cost estimation
+  policy.rs        route fallback policy evaluation
+  util.rs          JSON field parsing、URL/key helpers、registry token normalization
+  lib.rs           crate facade 和 FoundationModule constructor
 
 crates/novex-rag/
   knowledge/       dataset、document、chunk、citation

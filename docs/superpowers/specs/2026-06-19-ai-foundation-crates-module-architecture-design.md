@@ -15,7 +15,7 @@ The goal is structural normalization, not new product behavior. The refactor sho
   - `novex-mcp/src/lib.rs`: MCP core types, JSON-RPC, Streamable HTTP planning/parsing, OAuth planning/session logic, stdio launch planning, registration validation, and tests.
   - `novex-eval/src/lib.rs`: eval DTOs, trace extraction, metric scoring, regression reporting, trace summary helpers, and tests.
   - `novex-tools/src/lib.rs` at the start of the effort: registry types, execution policy, concurrency/batch planning, executor binding/dispatch planning, tool definitions, input adapters, media parsing, and tests. The target shape moves those responsibilities into `types`, `policy`, `concurrency`, `executor`, `router`, `definitions`, `adapters`, and `media` modules behind a facade.
-  - `novex-model/src/lib.rs`: model taxonomy, runtime routes/config, provider DTOs, usage/cost accounting, route policy, env loading, URL/key helpers, and tests.
+  - `novex-model/src/lib.rs` at the start of the effort: model taxonomy, runtime routes/config, provider DTOs, usage/cost accounting, route policy, env loading, URL/key helpers, and tests. The target shape moves those responsibilities into `taxonomy`, `route`, `provider`, `usage`, `cost`, `policy`, and `util` modules behind a facade.
 - `docs/ARCHITECTURE.md` already defines the intended crate responsibilities and submodule names. The implementation should converge on that document instead of inventing a competing layout.
 - Some backend tests inspect crate source files with `include_str!` or file reads. Those tests must be updated when behavior moves out of `lib.rs`.
 
@@ -112,9 +112,8 @@ Target modules:
 - `usage`: usage counts, usage normalization, token estimation.
 - `cost`: cost input and cost estimation helpers.
 - `policy`: route policy input/status and policy evaluation.
-- `env`: runtime config loading from environment.
 - `util`: URL joining, key masking, JSON field helpers where not domain-specific.
-- `module`: `FoundationModule` constructor if needed.
+- `lib.rs`: facade and `FoundationModule` constructor.
 
 Provider transport DTOs remain here only when they are provider-neutral shared contracts. HTTP dispatch stays in `novex-provider-client` or backend transport adapters.
 

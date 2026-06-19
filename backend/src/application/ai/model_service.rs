@@ -6288,10 +6288,7 @@ mod tests {
             .split("#[cfg(test)]")
             .next()
             .unwrap();
-        let model_source = include_str!("../../../../crates/novex-model/src/lib.rs")
-            .split("#[cfg(test)]")
-            .next()
-            .unwrap();
+        let model_provider_source = include_str!("../../../../crates/novex-model/src/provider.rs");
         let provider_client_chat_parse_source =
             include_str!("../../../../crates/novex-provider-client/src/chat_parse.rs")
                 .split("#[cfg(test)]")
@@ -6308,10 +6305,10 @@ mod tests {
                 .next()
                 .unwrap();
 
-        assert!(model_source.contains("pub struct ModelProviderStreamChunk"));
-        assert!(model_source.contains("pub struct ModelEmbeddingVector"));
-        assert!(model_source.contains("pub struct ModelRerankScore"));
-        assert!(model_source.contains("pub struct ModelMediaImageGenerationResp"));
+        assert!(model_provider_source.contains("pub struct ModelProviderStreamChunk"));
+        assert!(model_provider_source.contains("pub struct ModelEmbeddingVector"));
+        assert!(model_provider_source.contains("pub struct ModelRerankScore"));
+        assert!(model_provider_source.contains("pub struct ModelMediaImageGenerationResp"));
         assert!(service_source.contains("pub use novex_model::{"));
         assert!(!service_source.contains("pub struct ModelProviderStreamChunk"));
         assert!(!service_source.contains("pub struct ModelEmbeddingVector"));
