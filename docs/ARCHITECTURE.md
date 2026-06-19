@@ -378,10 +378,11 @@ crates/novex-mcp/
   auth/            租户级授权、secret、连接状态
 
 crates/novex-plugin/
-  manifest/        plugin.json、版本、依赖、能力声明
-  install/         安装、启用、禁用、升级、回滚
-  permissions/     插件权限、工具权限、OAuth scope、网络访问声明
-  capabilities/    tools、connectors、triggers、oauth clients、ui config、eval cases
+  types.rs         PluginRuntime、capability、manifest、network policy、validation error
+  validation.rs    manifest validation、required permission extraction
+  builtin.rs       built-in plugin manifest catalog
+  module.rs        FoundationModule constructor
+  lib.rs           crate facade 和 CRATE_ID
 
 crates/novex-trigger/
   webhook/         外部 webhook endpoint、签名校验、幂等

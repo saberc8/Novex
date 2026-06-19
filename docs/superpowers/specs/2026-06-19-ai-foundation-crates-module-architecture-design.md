@@ -126,6 +126,7 @@ After the largest crates are normalized, apply the same rules to medium crates:
 - `novex-ai-core`: split foundation metadata into `module.rs`, tenant/resource contracts into `context.rs`, integration metering into `integration_usage.rs`, run graph vocabulary into `run_graph.rs`, and task limits into `budget.rs`; keep `lib.rs` as the facade.
 - `novex-connectors`: split connector vocabulary into `kind.rs`, credential binding and resolution into `credential.rs`, Feishu payload DTOs into `feishu.rs`, GitHub request/parser DTOs into `github.rs`, and foundation metadata into `module.rs`; keep `lib.rs` as the facade.
 - `novex-agent`: split intent routing into `intent.rs`, tool selection into `tool_selection.rs`, ReAct planning into `plan.rs`, shared matching helpers into `text.rs`, and foundation metadata into `module.rs`; keep `lib.rs` as the facade.
+- `novex-plugin`: split manifest DTO/error vocabulary into `types.rs`, manifest validation into `validation.rs`, built-in plugin catalog construction into `builtin.rs`, and foundation metadata into `module.rs`; keep `lib.rs` as the facade.
 - `novex-trigger`, `novex-trace`, `novex-skill`, `novex-memory`, and `novex-agent-protocol` can stay compact until they exceed the facade rule or start mixing unrelated domains.
 
 ## Test Layout
@@ -173,6 +174,7 @@ The default compatibility rule is root-level re-export preservation:
 - Existing code using `novex_ai_core::RunStatus` or `novex_ai_core::TenantContext` should keep compiling.
 - Existing code using `novex_connectors::GitHubCodeSearchRequest` or `novex_connectors::select_connector_credential` should keep compiling.
 - Existing code using `novex_agent::route_intent` or `novex_agent::plan_react_run` should keep compiling.
+- Existing code using `novex_plugin::validate_plugin_manifest` or `novex_plugin::builtin_plugin_manifest` should keep compiling.
 
 New module paths may also be public when useful, but they are secondary to preserving the crate-root facade.
 
