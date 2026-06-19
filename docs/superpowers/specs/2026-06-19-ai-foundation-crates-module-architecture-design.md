@@ -121,7 +121,7 @@ Provider transport DTOs remain here only when they are provider-neutral shared c
 
 After the largest crates are normalized, apply the same rules to medium crates:
 
-- `novex-agent-runtime`: split protocol/runtime state, turn parsing, budget/compaction, supervisor helpers.
+- `novex-agent-runtime`: split runtime budget/compaction state into `state.rs` and model-turn parsing/streaming parsing into `parser.rs`.
 - `novex-approval-review`: split review vocabulary, prompt/parse helpers, decision mapping.
 - `novex-ai-core`: split tenant/resource/run graph/policy/module metadata if the file remains hard to scan.
 - `novex-connectors`: split registry, GitHub, Feishu/web/database DTOs as connector coverage grows.
