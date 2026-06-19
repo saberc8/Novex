@@ -136,9 +136,9 @@
 ### Task 10: Local POC Wiring
 
 **Files:**
-- Modify: `infra/.env.poc.example`
-- Modify: `infra/README.md`
-- Test: `infra/README.md` or backend config tests where applicable
+- Modify: `.env.example`
+- Modify: `README.md`
+- Test: `README.md` or backend config tests where applicable
 
 **Steps:**
 1. Write/extend text assertions in an existing Rust test or add lightweight shell-verifiable docs checks for RabbitMQ, Redis, parser-worker env names.

@@ -10,7 +10,7 @@ The shared Docker stack lives at:
 
 - `/path/to/docker-common/docker-compose.yml`
 
-It already provides PostgreSQL, Redis, Etcd, MinIO, Milvus, Attu, and Neo4j through the `docker-common` Compose project and the `docker-common_default` network. Novex keeps project-local runtime defaults in `infra/.env.poc.example`, `infra/README.md`, `scripts/run-poc.sh`, and backend local POC contract tests.
+It already provides PostgreSQL, Redis, Etcd, MinIO, Milvus, Attu, and Neo4j through the `docker-common` Compose project and the `docker-common_default` network. Novex keeps project-local runtime defaults in `.env.example`, `README.md`, `scripts/run-poc.sh`, and backend local POC contract tests.
 
 ## Architecture
 
@@ -33,7 +33,7 @@ Local host execution uses the common host ports:
 2. `docker-rabbitmq` starts with management UI and healthcheck.
 3. Novex `run-poc.sh` checks that required common containers are available instead of launching infrastructure containers itself.
 4. Novex backend and parser-worker connect to shared services through the external common network.
-5. Host-run Novex commands read `infra/.env.poc` or `backend/.env` and use the common host ports.
+5. Host-run Novex commands read `.env` or `.env` and use the common host ports.
 
 ## Error Handling
 

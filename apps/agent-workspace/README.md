@@ -10,3 +10,15 @@ Scope:
 M3 status: Next.js workspace scaffolded. It provides a customer-facing run surface for
 creating Agent runs, inspecting workflow events, approving paused runs, cancelling
 active runs, reviewing tool permissions, and seeing final output.
+
+Commands:
+
+```bash
+pnpm install
+cp .env.example .env.local
+pnpm dev
+pnpm typecheck
+pnpm lint
+pnpm test
+pnpm build
+```

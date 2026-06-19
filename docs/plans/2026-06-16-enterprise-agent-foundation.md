@@ -1299,7 +1299,7 @@ git commit -m "feat: connect codex poc composer to agent runtime"
 **Files:**
 - Create: `scripts/smoke-agent-model-loop.sh`
 - Modify: `scripts/run-poc.sh`
-- Modify: `infra/.env.poc.example`
+- Modify: `.env.example`
 
 **Step 1: Create smoke script**
 
@@ -1326,7 +1326,7 @@ curl -fsS \
 
 **Step 2: Document env**
 
-Add to `infra/.env.poc.example`:
+Add to `.env.example`:
 
 ```bash
 # Codex-style Agent POC uses runtime.llm.code_agent through the existing LLM route.
@@ -1346,7 +1346,7 @@ Expected: PASS.
 **Step 4: Commit**
 
 ```bash
-git add scripts/smoke-agent-model-loop.sh infra/.env.poc.example
+git add scripts/smoke-agent-model-loop.sh .env.example
 git commit -m "chore: add model-loop agent smoke script"
 ```
 

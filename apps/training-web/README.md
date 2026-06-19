@@ -20,7 +20,8 @@ Commands:
 
 ```bash
 pnpm install
-NEXT_PUBLIC_API_BASE_URL=http://localhost:4398 pnpm dev
+cp .env.example .env.local
+pnpm dev
 pnpm typecheck
 pnpm lint
 pnpm test

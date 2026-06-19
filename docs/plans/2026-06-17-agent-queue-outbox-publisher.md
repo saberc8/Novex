@@ -70,8 +70,8 @@ Status: Completed.
 - Modify: `backend/src/application/ai/agent_service.rs`
 - Modify: `backend/src/shared/config.rs`
 - Modify: `backend/src/main.rs`
-- Modify: `backend/.env.example`
-- Modify: `infra/.env.poc.example`
+- Modify: `.env.example`
+- Modify: `.env.example`
 
 **Step 1: Write failing tests**
 
@@ -104,8 +104,8 @@ Status: Completed.
 - Modify: `backend/src/application/ai/agent_service.rs`
 - Modify: `backend/src/shared/config.rs`
 - Modify: `backend/src/main.rs`
-- Modify: `backend/.env.example`
-- Modify: `infra/.env.poc.example`
+- Modify: `.env.example`
+- Modify: `.env.example`
 
 **Step 1: Add migration and repository records**
 

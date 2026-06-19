@@ -224,7 +224,7 @@ git commit -m "feat: seed ai foundation menus"
 - Create: `templates/knowledge-base-chat/README.md`
 - Create: `templates/agent-workspace/README.md`
 - Create: `templates/training-app/README.md`
-- Create: `infra/README.md`
+- Create: `README.md`
 
 **Step 1: Add boundary docs**
 

@@ -6,7 +6,7 @@ use backend::application::ai::knowledge_service::{
 use sqlx::{postgres::PgPoolOptions, Row};
 
 #[tokio::test]
-#[ignore = "requires infra/.env.poc, Postgres, Milvus, embedding, rerank, and LLM providers"]
+#[ignore = "requires .env, Postgres, Milvus, embedding, rerank, and LLM providers"]
 async fn live_rag_uses_embedding_milvus_rerank_and_llm() {
     if env::var("NOVEX_LIVE_RAG_TEST").ok().as_deref() != Some("1") {
         eprintln!("NOVEX_LIVE_RAG_TEST=1 not set; skipping live RAG smoke");

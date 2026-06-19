@@ -178,24 +178,33 @@ mod tests {
     #[test]
     fn local_poc_contract_uses_common_infra_and_local_processes() {
         let readme = include_str!("../../../../../README.md");
-        let infra = include_str!("../../../../../infra/README.md");
-        let env = include_str!("../../../../../infra/.env.poc.example");
+        let env = include_str!("../../../../../.env.example");
+        let backend_env = include_str!("../../../../../backend/.env.example");
+        let parser_env = include_str!("../../../../../services/parser-worker/.env.example");
+        let admin_env = include_str!("../../../../../admin/.env.example");
+        let training_env = include_str!("../../../../../apps/training-web/.env.example");
+        let chat_env = include_str!("../../../../../apps/chat-web/.env.example");
+        let agent_env = include_str!("../../../../../apps/agent-workspace/.env.example");
+        let codex_env = include_str!("../../../../../apps/codex-app-poc/.env.example");
 
-        for doc in [readme, infra] {
-            for contract in [
-                "docker-common",
-                "cargo run -p backend",
-                "cargo run -p backend --bin eval_worker",
-                "uv run --no-project --with-requirements services/parser-worker/requirements.txt",
-                "services/parser-worker/.venv/bin/python -m parser_worker.worker",
-                "pnpm dev",
-                "NEXT_PUBLIC_API_BASE_URL",
-            ] {
-                assert!(
-                    doc.contains(contract),
-                    "{contract} missing from local POC docs"
-                );
-            }
+        for contract in [
+            "docker-common",
+            "cargo run -p backend",
+            "cargo run -p backend --bin eval_worker",
+            "uv run --no-project --with-requirements services/parser-worker/requirements.txt",
+            "services/parser-worker/.venv/bin/python -m parser_worker.worker",
+            "pnpm dev",
+            "NEXT_PUBLIC_API_BASE_URL",
+            "根目录 `.env`",
+            "根目录 `.env.example`",
+            "backend/.env.example",
+            "services/parser-worker/.env.example",
+            "apps/codex-app-poc/.env.example",
+        ] {
+            assert!(
+                readme.contains(contract),
+                "{contract} missing from local POC docs"
+            );
         }
 
         for contract in [
@@ -213,6 +222,43 @@ mod tests {
                 "{contract} missing from POC env schema"
             );
         }
+
+        for contract in [
+            "DATABASE_URL=postgres://postgres:postgres@127.0.0.1:15432/novex",
+            "AUTH_JWT_SECRET=local-dev-only-change-this-secret-32chars-min",
+            "LLM_API_KEY=",
+        ] {
+            assert!(
+                backend_env.contains(contract),
+                "{contract} missing from backend env schema"
+            );
+        }
+
+        for contract in [
+            "PARSER_BACKEND_BASE_URL=http://127.0.0.1:4398",
+            "RABBITMQ_PARSER_EXECUTE_QUEUE=novex.parser.execute",
+            "MINERU_TOKEN=",
+        ] {
+            assert!(
+                parser_env.contains(contract),
+                "{contract} missing from parser-worker env schema"
+            );
+        }
+
+        for frontend_env in [admin_env, training_env, chat_env, agent_env, codex_env] {
+            assert!(
+                frontend_env.contains("NEXT_PUBLIC_API_BASE_URL=http://localhost:4398"),
+                "frontend env schema should declare the backend API URL"
+            );
+        }
+        assert!(
+            admin_env.contains("NEXT_PUBLIC_CLIENT_ID=default"),
+            "admin env schema should declare the client id"
+        );
+        assert!(
+            codex_env.contains("NEXT_PUBLIC_AGENT_MODEL_ROUTE_ID=runtime.llm"),
+            "codex app env schema should declare the default model route"
+        );
     }
 
     #[test]
@@ -220,12 +266,17 @@ mod tests {
         let script = include_str!("../../../../../scripts/run-poc.sh");
 
         assert!(
-            script.contains("infra/.env.poc"),
-            "run script should use infra/.env.poc as the single POC env entry"
+            script.contains("ENV_FILE=\"${ROOT_DIR}/.env\""),
+            "run script should use root .env as the POC aggregate env entry"
         );
         assert!(
-            !script.contains("backend/.env"),
-            "run script should not load backend/.env for the POC stack"
+            !script.contains(&["backend", ".env"].join("/")),
+            "run script should not load a backend-local env file for the local POC flow"
+        );
+        let retired_env_name = [".env", "poc"].join(".");
+        assert!(
+            !script.contains(&retired_env_name),
+            "run script should not use the retired POC env filename"
         );
 
         for needle in [
@@ -274,10 +325,7 @@ mod tests {
             "docker image inspect",
             "docker pull",
             "Run './scripts/run-poc.sh pull'",
-            concat!(
-                "docker compose --env-file infra/.env.poc -f infra/docker",
-                "-compose.yml"
-            ),
+            "docker compose --env-file",
         ] {
             assert!(
                 !script.contains(removed),

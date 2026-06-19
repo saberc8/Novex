@@ -86,6 +86,15 @@ cat parse-request.json | PYTHONPATH=services/parser-worker uv run --no-project -
 
 For uploaded text-like assets (`/file/...` Markdown, TXT, CSV, JSON, code, logs), the runner resolves relative backend file URLs, fetches the source text, converts the source to an inline parser request, then posts completed chunks. For PDF, Office, and image paths, the first runner step returns `callbackStatus=deferred` after MinerU submission. A follow-up call to `complete_mineru_parse_job` handles a done MinerU task by downloading the ZIP result, selecting `auto_full.md` / `full.md` / `result.md` when present, chunking the markdown, and callbacking the backend. Pending tasks remain deferred.
 
+## Local Env
+
+Parser-worker-owned local configuration lives in `services/parser-worker/.env.example`. Copy it to `services/parser-worker/.env` for worker-only development, or use the root `.env` when running the full POC through `scripts/run-poc.sh`.
+
+```bash
+cp services/parser-worker/.env.example services/parser-worker/.env
+(set -a; . services/parser-worker/.env; set +a; PYTHONPATH=services/parser-worker uv run --no-project --with-requirements services/parser-worker/requirements.txt python -m parser_worker.health)
+```
+
 ## Queue Worker Mode
 
 Production uploads use RabbitMQ plus Redis instead of stdin execution. The Rust backend creates `ai_document`, `ai_parser_job`, and `ai_parser_outbox` in one database transaction. Its parser queue publisher publishes the outbox payload to the `novex.parser` direct exchange. The Python worker consumes `novex.parser.execute`, uses Redis leases to avoid concurrent execution of the same parser job, calls the existing runner callbacks, and republishes deferred or failed work to RabbitMQ retry/dead routes.

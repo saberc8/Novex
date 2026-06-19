@@ -166,8 +166,8 @@ Expected: PASS.
 **Files:**
 - Modify: `backend/src/main.rs`
 - Modify: `backend/src/shared/config.rs`
-- Modify: `infra/.env.poc.example`
-- Modify: `infra/README.md`
+- Modify: `.env.example`
+- Modify: `README.md`
 
 **Step 1: Write config tests**
 

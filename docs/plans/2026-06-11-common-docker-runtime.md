@@ -30,24 +30,24 @@
 
 **Files:**
 - Legacy: former Novex project Compose entrypoint
-- Modify: `Novex/infra/.env.poc.example`
-- Modify: `Novex/infra/.env.poc`
+- Modify: `Novex/.env.example`
+- Modify: `Novex/.env`
 
 **Steps:**
 1. Remove project-local PostgreSQL, Etcd, MinIO, Milvus, RabbitMQ, and Redis services from Novex compose.
 2. Attach Novex runtime services to external network `docker-common_default`.
 3. Change container runtime env to use common service DNS names.
 4. Change host runtime env examples to use common host ports.
-5. Keep local secrets only in ignored `.env.poc`.
+5. Keep local secrets only in ignored `.env`.
 6. Run Novex compose config validation.
 
 ### Task 3: Update Novex Run Script And Docs
 
 **Files:**
 - Modify: `Novex/scripts/run-poc.sh`
-- Modify: `Novex/infra/README.md`
-- Modify: `Novex/backend/.env.example`
-- Modify: `Novex/backend/.env`
+- Modify: `Novex/README.md`
+- Modify: `Novex/.env.example`
+- Modify: `Novex/.env`
 
 **Steps:**
 1. Replace project infrastructure services in `run-poc.sh` with a common-service prerequisite check.

@@ -4,6 +4,15 @@
 
 The seed migrations create `admin/admin123` for local development. Change this password outside local development before exposing the service.
 
+## Local Env
+
+Backend-owned local configuration lives in `backend/.env.example`. Copy it to `backend/.env` for backend-only development, or use the root `.env` when running the full POC through `scripts/run-poc.sh`.
+
+```bash
+cp backend/.env.example backend/.env
+(cd backend && set -a && . .env && set +a && cargo run)
+```
+
 ## Migration Smoke Checklist
 
 Run migrations against a local PostgreSQL database:

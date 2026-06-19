@@ -2,7 +2,7 @@
 
 Novex 是一套面向企业交付的 AI Agent 基座。它不是单点 AI 应用，而是把账号、租户、权限、知识库、模型路由、Agent 运行时、工具、MCP、连接器、记忆、评测、模板和交付流程沉淀成可复用平台能力，再按客户、行业和场景组合成具体应用。
 
-当前仓库是一个 Rust first 的 monorepo：`backend` 负责控制平面、HTTP API 和业务编排，`crates/*` 承载可复用 AI Foundation 能力，`admin` 和 `apps/*` 提供管理后台与客户前台模板，`services/*` 作为 Python/模型 sidecar，`infra` 与 `templates` 支撑本地 POC 和客户交付。完整架构长文见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)，本 README 保持项目首页、模块地图和开发规范入口。
+当前仓库是一个 Rust first 的 monorepo：`backend` 负责控制平面、HTTP API 和业务编排，`crates/*` 承载可复用 AI Foundation 能力，`admin` 和 `apps/*` 提供管理后台与客户前台模板，`services/*` 作为 Python/模型 sidecar，`scripts`、`.env.example` 与 `templates` 支撑本地 POC 和客户交付。完整架构长文见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)，本 README 保持项目首页、模块地图和开发规范入口。
 
 ## 产品截图
 
@@ -65,20 +65,20 @@ cd /path/to/Novex
 ./scripts/run-poc.sh
 ```
 
-`scripts/run-poc.sh` 会读取 `infra/.env.poc`；如果该文件不存在，会从 `infra/.env.poc.example` 复制生成。脚本会检查共享容器、创建缺失的 `novex` 数据库、校验 AI 相关环境变量，并打印下面这些本地启动命令。它不再启动 `novex-poc` Docker Compose 项目。
+`scripts/run-poc.sh` 会读取根目录 `.env` 作为 POC 汇总配置；如果该文件不存在，会从根目录 `.env.example` 复制生成。脚本会检查共享容器、创建缺失的 `novex` 数据库、校验 AI 相关环境变量，并打印下面这些本地启动命令。它不再启动 `novex-poc` Docker Compose 项目。
 
 Novex 项目进程分别在独立终端启动：
 
 ```bash
-(set -a; . infra/.env.poc; set +a; cargo run -p backend)
-(set -a; . infra/.env.poc; set +a; EVAL_WORKER_ENABLED=true DB_AUTO_MIGRATE=false cargo run -p backend --bin eval_worker)
+(set -a; . .env; set +a; cargo run -p backend)
+(set -a; . .env; set +a; EVAL_WORKER_ENABLED=true DB_AUTO_MIGRATE=false cargo run -p backend --bin eval_worker)
 
 # parser-worker 推荐 uv；没有 uv 时使用下面的 .venv 兜底命令。
-(set -a; . infra/.env.poc; set +a; PARSER_BACKEND_BASE_URL=http://127.0.0.1:4398 PARSER_BACKEND_TOKEN="${PARSER_CALLBACK_TOKEN}" PYTHONPATH=services/parser-worker uv run --no-project --with-requirements services/parser-worker/requirements.txt python -m parser_worker.worker)
+(set -a; . .env; set +a; PARSER_BACKEND_BASE_URL=http://127.0.0.1:4398 PARSER_BACKEND_TOKEN="${PARSER_CALLBACK_TOKEN}" PYTHONPATH=services/parser-worker uv run --no-project --with-requirements services/parser-worker/requirements.txt python -m parser_worker.worker)
 
 python3 -m venv services/parser-worker/.venv
 services/parser-worker/.venv/bin/python -m pip install -r services/parser-worker/requirements.txt
-(set -a; . infra/.env.poc; set +a; PARSER_BACKEND_BASE_URL=http://127.0.0.1:4398 PARSER_BACKEND_TOKEN="${PARSER_CALLBACK_TOKEN}" PYTHONPATH=services/parser-worker services/parser-worker/.venv/bin/python -m parser_worker.worker)
+(set -a; . .env; set +a; PARSER_BACKEND_BASE_URL=http://127.0.0.1:4398 PARSER_BACKEND_TOKEN="${PARSER_CALLBACK_TOKEN}" PYTHONPATH=services/parser-worker services/parser-worker/.venv/bin/python -m parser_worker.worker)
 
 (cd admin && pnpm install && NEXT_PUBLIC_API_BASE_URL=http://localhost:4398 pnpm dev)
 (cd apps/training-web && pnpm install && NEXT_PUBLIC_API_BASE_URL=http://localhost:4398 pnpm dev)
@@ -87,7 +87,7 @@ services/parser-worker/.venv/bin/python -m pip install -r services/parser-worker
 (cd apps/codex-app-poc && pnpm install && NEXT_PUBLIC_API_BASE_URL=http://localhost:4398 pnpm dev)
 ```
 
-不要用 Docker Compose 启动 Novex 项目服务；旧的 `novex-poc` Docker Compose project 可以删除。默认 POC 只依赖外部 `docker-common` 基础设施。
+不要用 Docker Compose 启动 Novex 项目服务；旧的 `novex-poc` Docker Compose project 可以删除。默认 POC 只依赖外部 `docker-common` 基础设施，仓库内也不再保留独立 `infra/` 目录。
 
 常用命令：
 
@@ -121,11 +121,18 @@ curl http://localhost:4398/health
 curl http://localhost:4398/ready
 ```
 
-更多基础设施说明见 [infra/README.md](infra/README.md)。
-
 ## 环境配置
 
-本地 POC 的唯一环境入口是 `infra/.env.poc`，提交到仓库的是 schema/defaults 文件 `infra/.env.poc.example`。不要把真实密钥写入 example 文件。
+环境文件按运行边界管理：根目录 `.env` / `.env.example` 是完整 POC 的汇总入口；各可独立运行项目保留自己的 `.env.example`，只声明该项目实际读取的变量。不要把真实密钥写入任何 example 文件。
+
+| 文件 | 作用 |
+| --- | --- |
+| `.env.example` | POC 汇总模板，供 `scripts/run-poc.sh` 生成根目录 `.env`，覆盖共享基础设施、后端、worker、模型和前端端口。 |
+| `backend/.env.example` | 后端和 Rust worker 独立开发模板，覆盖 DB、Redis、RabbitMQ、Milvus、JWT、队列、模型路由和连接器。 |
+| `services/parser-worker/.env.example` | parser-worker 独立开发模板，覆盖 backend callback、RabbitMQ、Redis、MinerU 和 worker lease。 |
+| `admin/.env.example` | Admin 前端模板。 |
+| `apps/training-web/.env.example`、`apps/chat-web/.env.example`、`apps/agent-workspace/.env.example` | 客户前台模板，只配置 API 地址。 |
+| `apps/codex-app-poc/.env.example` | Codex-like POC 前端模板，额外包含 dev auto-login 和 agent model route 配置。 |
 
 主要配置组：
 
@@ -150,7 +157,7 @@ cargo run -p backend --bin eval_worker
 cargo test --workspace
 ```
 
-单独运行后端时，使用 `backend/.env.example` 作为本地 `.env` 模板，并确保 PostgreSQL、Redis、RabbitMQ、Milvus 等依赖地址与实际运行方式一致。
+完整 POC 推荐从仓库根目录启动并共享根目录 `.env`。单独开发某个项目时，用该项目自己的 `.env.example` 生成本地 env：后端和 parser-worker 可以复制成各自目录下的 `.env`，Next.js 前端复制成对应目录下的 `.env.local`。
 
 POC 本地开发时，后端和 eval-worker 直接使用 Cargo，parser-worker 使用 uv 或 `.venv`，前端使用 pnpm。完整启动命令见上方“快速启动”。
 
@@ -177,7 +184,7 @@ pnpm build
 
 ```text
 Novex/
-  backend/                 Rust Axum API，控制平面、业务编排、HTTP/WebSocket 接口和 worker bins
+  backend/                 Rust Axum API，控制平面、业务编排、HTTP/WebSocket 接口、worker bins 和后端 .env.example
   crates/                  AI Foundation Rust crates
     novex-ai-core/         tenant context、budget、integration usage、Foundation module、Run Graph
     novex-agent-protocol/  Agent turn item、tool observation、turn outcome 协议
@@ -196,7 +203,7 @@ Novex/
     novex-memory/          memory type、scope 和上下文构建
     novex-eval/            eval case、score、report、trace extraction
     novex-trace/           trace event、bundle、replay summary
-  admin/                   Next.js 管理后台
+  admin/                   Next.js 管理后台和前端 .env.example
   apps/
     training-web/          员工培训模板
     chat-web/              默认 LLM Chat / 知识库问答前台
@@ -204,12 +211,12 @@ Novex/
     codex-app-poc/         Codex-like POC 应用
     customer-service-agent/客服 Agent 模板应用
   services/
-    parser-worker/         Python sidecar，文档解析、MinerU、OCR、格式转换
+    parser-worker/         Python sidecar，文档解析、MinerU、OCR、格式转换和 worker .env.example
     model-runtime/         可选模型运行时 adapter
   templates/               客户交付模板、默认菜单、技能、评测集和 smoke 脚本
-  infra/                   Docker Compose、POC env、基础设施说明
   docs/                    架构、计划和交付文档
   scripts/                 POC 启动和 smoke 脚本
+  .env.example             本地 POC 汇总环境 schema/defaults；真实值写入未提交的 .env
 ```
 
 后端内部采用分层目录：
@@ -322,7 +329,6 @@ novex-plugin
 ## 文档索引
 
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)：完整 AI Agent Foundation 架构说明。
-- [infra/README.md](infra/README.md)：共享 Docker 基础设施、默认端口和 POC 运行说明。
 - [backend/README.md](backend/README.md)：后端本地账号、迁移 smoke、Milvus、GitHub、飞书、媒体工具和 API 响应契约。
 - [docs/delivery/novex-customer-delivery.md](docs/delivery/novex-customer-delivery.md)：客户交付边界和交付包说明。
 - [docs/plans](docs/plans)：按日期沉淀的设计和实施计划。
@@ -331,6 +337,6 @@ novex-plugin
 ## 维护约定
 
 - 根 README 保持入口级别，不承载完整架构长文；深入设计写入 `docs/`。
-- 新增运行依赖时，同步更新 `infra/.env.poc.example`、`infra/README.md` 和本 README 的环境配置摘要。
-- 新增前台应用时，同步更新 `apps/` 目录说明、默认端口和 POC 启动脚本。
+- 新增运行依赖时，同步更新对应项目的 `.env.example`；如果完整 POC 也需要该变量，再同步更新根目录 `.env.example`、`scripts/run-poc.sh` 和本 README。
+- 新增前台应用时，同步更新 `apps/` 目录说明、默认端口、该 app 的 `.env.example` 和 POC 启动脚本。
 - 新增客户模板时，同步更新 `templates/` 下的 README、`template.json` 和 smoke 脚本。

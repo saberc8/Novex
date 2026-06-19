@@ -5,8 +5,7 @@ Standalone web POC for a Codex-like developer agent workbench. The composer can 
 ## Runtime Configuration
 
 ```bash
-NEXT_PUBLIC_API_BASE_URL=http://localhost:4398
-NEXT_PUBLIC_AGENT_MODEL_ROUTE_ID=runtime.llm
+cp .env.example .env.local
 ```
 
 `NEXT_PUBLIC_AGENT_MODEL_ROUTE_ID` is optional. When set, the POC sends it as `modelRouteId` so the backend resolves that configured `CodeAgent` route. When blank, the backend uses the default tenant or environment model route.
@@ -29,6 +28,7 @@ The command creates a real `runtimeMode=model_loop` Agent run, polls `/ai/agents
 
 ```bash
 pnpm install
+cp .env.example .env.local
 pnpm dev
 pnpm smoke:agent-live
 pnpm test

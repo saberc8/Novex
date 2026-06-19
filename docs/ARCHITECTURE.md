@@ -95,8 +95,9 @@ Novex/
     training-web/          Next.js + TypeScript，员工培训模板
     agent-workspace/       Next.js + TypeScript，Agent 工作台模板
   templates/               客户交付模板、默认角色、默认 skills、默认 eval set
-  infra/                   docker-compose、部署脚本、环境样例
   docs/                    架构、实施计划、交付手册
+  scripts/                 POC 启动、smoke、migration、seed、export/import 工具
+  .env.example             本地 POC 汇总环境 schema/defaults；项目独立 env 由各目录 .env.example 维护
 ```
 
 这个结构的原则是：仓库先不拆，模块先拆；部署先简单，服务边界先清楚。等某个模块需要独立团队、独立扩容、独立 SDK 或独立私有化交付时，再从 monorepo 中拆成独立仓库。
@@ -1647,7 +1648,7 @@ POC：
 
 ## 21. 第一阶段行动清单
 
-1. 建立 monorepo 模块边界：Rust `crates/`、Python `services/parser-worker/`、可选 `services/model-runtime/`、Next.js `apps/`、`templates/`、`infra/`。
+1. 建立 monorepo 模块边界：Rust `crates/`、Python `services/parser-worker/`、可选 `services/model-runtime/`、Next.js `apps/`、`templates/`、`scripts/`、根目录 POC 汇总 `.env.example` 和各项目独立 `.env.example`。
 2. 配置 Rust workspace，把 `backend` 接入 workspace，但保持现有 RBAC 功能可运行。
 3. 在现有 RBAC 模板中加入控制面租户、`tenant_id`、资源 ACL 和 AI 权限码规划。
 4. 设计资源权限表、成员组、权限继承、配额、用量计量和限流策略。

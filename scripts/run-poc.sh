@@ -2,8 +2,8 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-POC_ENV_FILE="${ROOT_DIR}/infra/.env.poc"
-POC_ENV_EXAMPLE="${ROOT_DIR}/infra/.env.poc.example"
+ENV_FILE="${ROOT_DIR}/.env"
+ENV_EXAMPLE="${ROOT_DIR}/.env.example"
 COMMAND="${1:-check}"
 
 COMMON_REQUIRED_CONTAINERS=(
@@ -20,7 +20,7 @@ main() {
   cd "${ROOT_DIR}"
   if [[ "${COMMAND}" != "help" && "${COMMAND}" != "-h" && "${COMMAND}" != "--help" ]]; then
     ensure_poc_env_file
-    load_poc_env
+    load_env
   fi
 
   case "${COMMAND}" in
@@ -61,25 +61,25 @@ main() {
 }
 
 ensure_poc_env_file() {
-  if [[ -f "${POC_ENV_FILE}" ]]; then
+  if [[ -f "${ENV_FILE}" ]]; then
     return
   fi
 
-  if [[ ! -f "${POC_ENV_EXAMPLE}" ]]; then
-    echo "Missing env template: infra/.env.poc.example" >&2
+  if [[ ! -f "${ENV_EXAMPLE}" ]]; then
+    echo "Missing env template: .env.example" >&2
     exit 1
   fi
 
-  cp "${POC_ENV_EXAMPLE}" "${POC_ENV_FILE}"
-  echo "Created env: infra/.env.poc from infra/.env.poc.example"
+  cp "${ENV_EXAMPLE}" "${ENV_FILE}"
+  echo "Created env: .env from .env.example"
 }
 
-load_poc_env() {
+load_env() {
   set -a
   # shellcheck disable=SC1090
-  . "${POC_ENV_FILE}"
+  . "${ENV_FILE}"
   set +a
-  echo "Loaded env: infra/.env.poc"
+  echo "Loaded env: .env"
 }
 
 require_docker() {
@@ -249,18 +249,18 @@ Shared infrastructure still runs in docker-common. Novex project processes run l
 
 Run each command in a separate terminal from the repo root:
 
-  (set -a; . infra/.env.poc; set +a; cargo run -p backend)
+  (set -a; . .env; set +a; cargo run -p backend)
       # Backend: http://localhost:${backend_port}
 
-  (set -a; . infra/.env.poc; set +a; EVAL_WORKER_ENABLED=true DB_AUTO_MIGRATE=false cargo run -p backend --bin eval_worker)
+  (set -a; . .env; set +a; EVAL_WORKER_ENABLED=true DB_AUTO_MIGRATE=false cargo run -p backend --bin eval_worker)
       # Eval worker
 
-  (set -a; . infra/.env.poc; set +a; PARSER_BACKEND_BASE_URL=http://127.0.0.1:${backend_port} PARSER_BACKEND_TOKEN="\${PARSER_CALLBACK_TOKEN}" PYTHONPATH=services/parser-worker uv run --no-project --with-requirements services/parser-worker/requirements.txt python -m parser_worker.worker)
+  (set -a; . .env; set +a; PARSER_BACKEND_BASE_URL=http://127.0.0.1:${backend_port} PARSER_BACKEND_TOKEN="\${PARSER_CALLBACK_TOKEN}" PYTHONPATH=services/parser-worker uv run --no-project --with-requirements services/parser-worker/requirements.txt python -m parser_worker.worker)
       # Parser worker with uv
 
   python3 -m venv services/parser-worker/.venv
   services/parser-worker/.venv/bin/python -m pip install -r services/parser-worker/requirements.txt
-  (set -a; . infra/.env.poc; set +a; PARSER_BACKEND_BASE_URL=http://127.0.0.1:${backend_port} PARSER_BACKEND_TOKEN="\${PARSER_CALLBACK_TOKEN}" PYTHONPATH=services/parser-worker services/parser-worker/.venv/bin/python -m parser_worker.worker)
+  (set -a; . .env; set +a; PARSER_BACKEND_BASE_URL=http://127.0.0.1:${backend_port} PARSER_BACKEND_TOKEN="\${PARSER_CALLBACK_TOKEN}" PYTHONPATH=services/parser-worker services/parser-worker/.venv/bin/python -m parser_worker.worker)
       # Parser worker fallback with .venv
 
   (cd admin && pnpm install && NEXT_PUBLIC_API_BASE_URL=http://localhost:${backend_port} pnpm dev)
@@ -329,8 +329,8 @@ Commands:
   down       Explain how to stop local processes and clean old novex-poc containers
   help       Show this help
 
-Single local env entry:
-  infra/.env.poc
+POC aggregate env entry:
+  .env
 
 Default local URLs:
   Backend          http://localhost:4398

@@ -52,7 +52,6 @@ backend/data/file/knowledge/
 .worktrees/
 .pnpm-store/
 .env
-.env.poc
 .env.local
 .env.development.local
 .env.test.local

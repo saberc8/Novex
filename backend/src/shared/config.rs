@@ -451,10 +451,9 @@ mod tests {
     }
 
     #[test]
-    fn poc_env_allows_codex_app_origin() {
-        let env_path =
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../infra/.env.poc.example");
-        let env = std::fs::read_to_string(env_path).expect("read POC env schema");
+    fn backend_env_allows_codex_app_origin() {
+        let env_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(".env.example");
+        let env = std::fs::read_to_string(env_path).expect("read backend env schema");
 
         assert!(env.contains("CORS_ALLOWED_ORIGINS="));
         assert!(env.contains("http://localhost:4413"));
@@ -462,10 +461,9 @@ mod tests {
     }
 
     #[test]
-    fn poc_env_disables_login_captcha_for_dev_auto_login() {
-        let env_path =
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../infra/.env.poc.example");
-        let env = std::fs::read_to_string(env_path).expect("read POC env schema");
+    fn backend_env_disables_login_captcha_for_dev_auto_login() {
+        let env_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(".env.example");
+        let env = std::fs::read_to_string(env_path).expect("read backend env schema");
 
         assert!(env.contains("LOGIN_CAPTCHA_ENABLED=false"));
     }

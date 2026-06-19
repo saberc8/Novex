@@ -6,7 +6,7 @@
 
 **Architecture:** Add executable database-backed route resolution in `ModelRuntimeService`, with environment routes as fallback. Then route Chat and RAG model calls through the service instance bound to the request tenant, preserving existing local fallbacks where non-strict mode allows them.
 
-**Tech Stack:** Rust, SQLx, `novex-model`, backend application services, gated live tests using real LLM/embedding/rerank endpoints from `backend/.env`.
+**Tech Stack:** Rust, SQLx, `novex-model`, backend application services, gated live tests using real LLM/embedding/rerank endpoints from `.env`.
 
 ---
 
@@ -248,7 +248,7 @@ Create `live_model_routing.rs` to:
 
 - create a temporary DB;
 - run migrations;
-- update/seed chat route rows from `backend/.env`;
+- update/seed chat route rows from `.env`;
 - call `ModelRuntimeService::for_tenant(...).chat_completion_with_usage`;
 - assert the response route id is the DB route code.
 
@@ -256,7 +256,7 @@ Run:
 
 ```bash
 set -a
-. /path/to/Novex/backend/.env
+. /path/to/Novex/.env
 set +a
 NOVEX_LIVE_MODEL_ROUTING_TEST=1 cargo test -p backend --test live_model_routing -- --ignored --nocapture
 NOVEX_LIVE_RAG_TEST=1 cargo test -p backend --test live_rag_e2e -- --ignored --nocapture
@@ -313,7 +313,7 @@ Expected: PASS.
 
 ```bash
 set -a
-. /path/to/Novex/backend/.env
+. /path/to/Novex/.env
 set +a
 NOVEX_LIVE_MODEL_ROUTING_TEST=1 cargo test -p backend --test live_model_routing -- --ignored --nocapture
 NOVEX_LIVE_RAG_TEST=1 cargo test -p backend --test live_rag_e2e -- --ignored --nocapture

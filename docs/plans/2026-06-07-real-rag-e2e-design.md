@@ -52,7 +52,7 @@ The backend remains the orchestrator. `novex-model` owns provider calls for embe
 
 Backend commands and tests should load `.env` consistently. The implementation should call `dotenvy::dotenv()` during runtime config bootstrap, without logging secret values.
 
-Live tests should load the original `/path/to/Novex/backend/.env` through the shell environment. The secret file should not be copied into the worktree.
+Live tests should load the original `/path/to/Novex/.env` through the shell environment. The secret file should not be copied into the worktree.
 
 ### RAG Ask
 
@@ -83,7 +83,7 @@ Add a gated test or smoke command that runs only when explicitly enabled, for ex
 
 - `NOVEX_LIVE_RAG_TEST=1`
 - `NOVEX_REQUIRE_MILVUS=1`
-- model and MinerU env vars loaded from `backend/.env`
+- model and MinerU env vars loaded from `.env`
 
 The smoke should create a small isolated tenant/dataset/document fixture, index real chunks, ask a question, assert citations exist, assert the answer is not the deterministic extractive fallback, and assert trace metadata records live provider usage.
 
@@ -126,7 +126,7 @@ Those should be separate milestones after the RAG acceptance path is genuinely l
 - `cargo test --workspace --exclude backend` passes.
 - `cargo test -p backend application::ai` passes.
 - parser-worker unit tests pass.
-- A live RAG test, run with real env loaded from `backend/.env`, proves:
+- A live RAG test, run with real env loaded from `.env`, proves:
   - embedding provider was called;
   - Milvus upsert and recall were used;
   - rerank provider was called;
