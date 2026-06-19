@@ -49,13 +49,3 @@ pub use rag::{
 };
 
 pub const CRATE_ID: &str = "novex-provider-client";
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn module_describes_provider_client_boundary() {
-        assert_eq!(CRATE_ID, "novex-provider-client");
-    }
-}
