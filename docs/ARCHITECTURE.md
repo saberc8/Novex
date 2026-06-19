@@ -323,10 +323,12 @@ backend/src/application/identity/
   provider_service.rs  身份提供商配置、租户准入和安全策略
 
 crates/novex-ai-core/
-  model/           Run、RunGraph、RunStep、Trace、Policy、TenantContext、ResourceRef
-  runtime/         通用 run 状态机、事件日志、pause/resume/cancel
-  provider/        ModelRequest、ModelResponse、Usage、ProviderError 的通用类型
-  observability/   trace event、cost、latency
+  module.rs        FoundationModule、FoundationStatus、foundation module skeleton catalog
+  context.rs       TenantContext、ResourceRef
+  integration_usage.rs  external integration usage subject、window、limit enforcement
+  run_graph.rs     RunStatus、run transition、step/event/pause vocabulary
+  budget.rs        TaskBudget、POC/default budget limits、normalization
+  lib.rs           crate facade 和 CRATE_ID
 
 crates/novex-model/
   taxonomy.rs      model kind、provider type、route purpose、runtime target

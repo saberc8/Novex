@@ -1,0 +1,80 @@
+use serde::{Deserialize, Serialize};
+
+use crate::CRATE_ID;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FoundationStatus {
+    Skeleton,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FoundationModule {
+    pub id: &'static str,
+    pub name: &'static str,
+    pub layer: &'static str,
+    pub status: FoundationStatus,
+    pub description: &'static str,
+}
+
+impl FoundationModule {
+    pub const fn skeleton(
+        id: &'static str,
+        name: &'static str,
+        layer: &'static str,
+        description: &'static str,
+    ) -> Self {
+        Self {
+            id,
+            name,
+            layer,
+            status: FoundationStatus::Skeleton,
+            description,
+        }
+    }
+}
+
+pub fn crate_module() -> FoundationModule {
+    FoundationModule::skeleton(
+        CRATE_ID,
+        "AI Core",
+        "foundation",
+        "Shared tenant, resource, run graph, trace, and policy contracts.",
+    )
+}
+
+pub fn foundation_modules() -> Vec<FoundationModule> {
+    vec![
+        FoundationModule::skeleton(
+            "tenant-context",
+            "Tenant Context",
+            "novex-ai-core",
+            "Tenant and caller context passed through AI foundation modules.",
+        ),
+        FoundationModule::skeleton(
+            "resource-ref",
+            "Resource Reference",
+            "novex-ai-core",
+            "Stable references for tenant-scoped AI assets and run artifacts.",
+        ),
+        FoundationModule::skeleton(
+            "run-graph",
+            "Run Graph",
+            "novex-ai-core",
+            "Shared run, step, status, pause, cancel, replay, and event boundaries.",
+        ),
+        FoundationModule::skeleton(
+            "trace",
+            "Trace",
+            "novex-ai-core",
+            "Trace, cost, usage, latency, and replay metadata boundary.",
+        ),
+        FoundationModule::skeleton(
+            "policy",
+            "Policy",
+            "novex-ai-core",
+            "Permission, approval, network zone, and execution policy boundary.",
+        ),
+    ]
+}

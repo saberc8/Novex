@@ -123,7 +123,7 @@ After the largest crates are normalized, apply the same rules to medium crates:
 
 - `novex-agent-runtime`: split runtime budget/compaction state into `state.rs` and model-turn parsing/streaming parsing into `parser.rs`.
 - `novex-approval-review`: split Guardian review vocabulary into `types.rs`, policy decisions into `policy.rs`, prompt/parse helpers into `model_review.rs`, and denial breaker state into `breaker.rs`.
-- `novex-ai-core`: split tenant/resource/run graph/policy/module metadata if the file remains hard to scan.
+- `novex-ai-core`: split foundation metadata into `module.rs`, tenant/resource contracts into `context.rs`, integration metering into `integration_usage.rs`, run graph vocabulary into `run_graph.rs`, and task limits into `budget.rs`; keep `lib.rs` as the facade.
 - `novex-connectors`: split registry, GitHub, Feishu/web/database DTOs as connector coverage grows.
 - `novex-agent`, `novex-trigger`, `novex-trace`, `novex-skill`, `novex-memory`, and `novex-agent-protocol` can stay compact until they exceed the facade rule or start mixing unrelated domains.
 
@@ -169,6 +169,7 @@ The default compatibility rule is root-level re-export preservation:
 - Existing code using `novex_mcp::McpOAuthAuthorizationPlan` should keep compiling.
 - Existing code using `novex_tools::ToolDefinition` should keep compiling.
 - Existing code using `novex_model::ModelRuntimeConfig` should keep compiling.
+- Existing code using `novex_ai_core::RunStatus` or `novex_ai_core::TenantContext` should keep compiling.
 
 New module paths may also be public when useful, but they are secondary to preserving the crate-root facade.
 
