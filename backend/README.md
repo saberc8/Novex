@@ -15,6 +15,14 @@ cp backend/.env.example backend/.env
 
 ## Migration Smoke Checklist
 
+Migration SQL is authored under `backend/migration_sources` and synchronized into the
+flat `backend/migrations` directory that SQLx consumes.
+
+```bash
+scripts/sync-migration-sources.sh
+scripts/sync-migration-sources.sh --check
+```
+
 Run migrations against a local PostgreSQL database:
 
 ```bash
