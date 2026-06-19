@@ -130,7 +130,8 @@ After the largest crates are normalized, apply the same rules to medium crates:
 - `novex-trigger`: split source/target vocabulary into `types.rs`, delivery routing/retry planning into `delivery.rs`, webhook signature and idempotency helpers into `webhook.rs`, and foundation metadata into `module.rs`; keep `lib.rs` as the facade.
 - `novex-trace`: split trace event vocabulary/constructors into `event.rs`, bundle ordering and replay logic into `bundle.rs`, replay summary DTO into `summary.rs`, and foundation metadata into `module.rs`; keep `lib.rs` as the facade.
 - `novex-skill`: split package path normalization and manifest selection into `path.rs`, resource layout classification into `resource.rs`, and keep `lib.rs` as the facade.
-- `novex-memory` and `novex-agent-protocol` can stay compact until they exceed the facade rule or start mixing unrelated domains.
+- `novex-agent-protocol`: split turn item vocabulary/constructors into `item.rs`, turn outcome state into `outcome.rs`, and keep `lib.rs` as the facade.
+- `novex-memory`: split memory DTOs into `types.rs`, filtered context construction into `context.rs`, foundation metadata into `module.rs`, and keep `lib.rs` as the facade.
 
 ## Test Layout
 
@@ -181,6 +182,8 @@ The default compatibility rule is root-level re-export preservation:
 - Existing code using `novex_trigger::plan_trigger_delivery` or `novex_trigger::webhook_signature` should keep compiling.
 - Existing code using `novex_trace::TraceBundle` or `novex_trace::TraceEvent` should keep compiling.
 - Existing code using `novex_skill::normalize_skill_package_path` or `novex_skill::skill_resource_kind` should keep compiling.
+- Existing code using `novex_agent_protocol::AgentTurnItem` or `novex_agent_protocol::TurnOutcome` should keep compiling.
+- Existing code using `novex_memory::build_memory_context` or `novex_memory::MemoryContext` should keep compiling.
 
 New module paths may also be public when useful, but they are secondary to preserving the crate-root facade.
 

@@ -354,6 +354,11 @@ crates/novex-agent/
   module.rs        FoundationModule constructor
   lib.rs           crate facade 和 CRATE_ID
 
+crates/novex-agent-protocol/
+  item.rs          AgentTurnItemType、ToolObservationStatus、AgentTurnItem
+  outcome.rs       TurnOutcome
+  lib.rs           crate facade 和 CRATE_ID
+
 crates/novex-tools/
   types.rs         tool kind、risk、approval policy、definition、execution envelope
   policy.rs        tool risk / approval policy evaluation
@@ -397,9 +402,10 @@ crates/novex-skill/
   lib.rs           crate facade
 
 crates/novex-memory/
-  policy/          写入策略、TTL、脱敏、删除
-  store/           session/user/org/project memory
-  retrieval/       memory retrieval + RBAC filter
+  types.rs         MemoryScope、MemoryWritePolicy、MemorySnippet、access/context DTO
+  context.rs       tenant/scope filtered memory context builder
+  module.rs        FoundationModule constructor
+  lib.rs           crate facade 和 CRATE_ID
 
 crates/novex-eval/
   case.rs          eval target/metric、case input/expected/actual、candidate DTO
