@@ -389,9 +389,12 @@ crates/novex-memory/
   retrieval/       memory retrieval + RBAC filter
 
 crates/novex-eval/
-  dataset/         eval dataset、case、版本
-  runner/          RAG、intent、tool、ReAct 评测 runner
-  metrics/         recall、faithfulness、tool accuracy、cost、latency
+  case.rs          eval target/metric、case input/expected/actual、candidate DTO
+  trace_extract.rs trace bundle -> eval candidate/actual、trace summary helpers
+  score.rs         metric dispatch、RAG/intent/tool/customer-service/cost/latency scoring
+  report.rs        regression report aggregation
+  text.rs          case-insensitive match、score rounding helpers
+  lib.rs           crate facade 和 FoundationModule constructor
 
 crates/novex-trace/
   bundle/          TraceBundle、TraceEvent、ReplaySummary

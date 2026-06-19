@@ -13,7 +13,7 @@ The goal is structural normalization, not new product behavior. The refactor sho
 - At the start of this architecture effort, the largest single files were:
   - `novex-rag/src/lib.rs`: parsing, chunking, Milvus request shaping, keyword/BM25 retrieval, answer building, and tests.
   - `novex-mcp/src/lib.rs`: MCP core types, JSON-RPC, Streamable HTTP planning/parsing, OAuth planning/session logic, stdio launch planning, registration validation, and tests.
-  - `novex-eval/src/lib.rs`: eval DTOs, trace extraction, metric scoring, regression reporting, trace summary helpers, and tests.
+  - `novex-eval/src/lib.rs` at the start of the effort: eval DTOs, trace extraction, metric scoring, regression reporting, trace summary helpers, and tests. The target shape moves those responsibilities into `case`, `trace_extract`, `score`, `report`, and `text` modules behind a facade.
   - `novex-tools/src/lib.rs` at the start of the effort: registry types, execution policy, concurrency/batch planning, executor binding/dispatch planning, tool definitions, input adapters, media parsing, and tests. The target shape moves those responsibilities into `types`, `policy`, `concurrency`, `executor`, `router`, `definitions`, `adapters`, and `media` modules behind a facade.
   - `novex-model/src/lib.rs` at the start of the effort: model taxonomy, runtime routes/config, provider DTOs, usage/cost accounting, route policy, env loading, URL/key helpers, and tests. The target shape moves those responsibilities into `taxonomy`, `route`, `provider`, `usage`, `cost`, `policy`, and `util` modules behind a facade.
 - `docs/ARCHITECTURE.md` already defines the intended crate responsibilities and submodule names. The implementation should converge on that document instead of inventing a competing layout.
@@ -77,12 +77,12 @@ OAuth and stdio should not stay intertwined with HTTP response parsing once spli
 
 Target modules:
 
-- `case`: eval target/metric enums, case input/expected/actual/candidate DTOs, trace-to-actual conversion.
+- `case`: eval target/metric enums and case input/expected/actual/candidate DTOs.
 - `score`: metric dispatch and individual scoring functions.
 - `trace_extract`: trace bundle event extraction, compaction/guardian/supervisor/tool/inference summaries.
 - `report`: regression report aggregation.
-- `text`: normalization, case-insensitive matching, snippets, rounding helpers.
-- `module`: `FoundationModule` constructor if needed.
+- `text`: case-insensitive matching and score rounding helpers.
+- `lib.rs`: facade and `FoundationModule` constructor.
 
 Trace parsing helpers should be private to `trace_extract` unless they are part of a deliberate public contract.
 
