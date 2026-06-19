@@ -3685,6 +3685,37 @@ Use the referenced methodology before drafting.
     }
 
     #[test]
+    fn capability_registry_seeds_web_search_tool_for_model_loop() {
+        let backfill_seed =
+            include_str!("../../../migrations/202606190001_seed_web_search_tool.sql");
+
+        assert!(
+            backfill_seed.contains("'web.search'"),
+            "web.search missing from seed"
+        );
+        assert!(
+            backfill_seed.contains("'Web Search'"),
+            "web.search display name missing"
+        );
+        assert!(
+            backfill_seed.contains("'function'"),
+            "web.search tool kind missing"
+        );
+        assert!(
+            backfill_seed.contains("'ai:agent:run'"),
+            "web.search permission missing"
+        );
+        assert!(
+            backfill_seed.contains("builtin.web.search"),
+            "web.search executor metadata missing"
+        );
+        assert!(
+            backfill_seed.contains("ON CONFLICT (tenant_id, code) DO UPDATE"),
+            "web.search backfill must be safe for existing databases"
+        );
+    }
+
+    #[test]
     fn customer_service_tool_seed_contains_tool_contracts() {
         let seed_path = concat!(
             env!("CARGO_MANIFEST_DIR"),

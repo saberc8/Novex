@@ -5,7 +5,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use chrono::{NaiveDateTime, Utc};
+use chrono::{NaiveDate, NaiveDateTime, Utc};
 use novex_agent::{plan_react_run_with_memory, AgentIntent, AgentLoopKind};
 use novex_agent_protocol::{AgentTurnItem, ToolObservationStatus};
 use novex_agent_runtime::{
@@ -3948,8 +3948,15 @@ fn model_loop_tool_executor_binding_payload(binding: Option<&ToolExecutorBinding
 }
 
 fn build_model_loop_system_prompt(tool_codes: &[String]) -> String {
+    build_model_loop_system_prompt_for_date(tool_codes, Utc::now().date_naive())
+}
+
+fn build_model_loop_system_prompt_for_date(
+    tool_codes: &[String],
+    current_date: NaiveDate,
+) -> String {
     format!(
-        "You are Novex Agent Runtime. You may answer directly or request tool calls while staying within the run budget. Available tools: {}. After each tool observation, decide whether another tool call is necessary or produce the final answer. To call one tool, reply with compact JSON exactly like {{\"type\":\"tool_call\",\"callId\":\"call-1\",\"toolCode\":\"rag.search\",\"arguments\":{{\"query\":\"...\"}}}}. To call multiple independent tools in the same turn, reply with compact JSON exactly like {{\"type\":\"tool_calls\",\"calls\":[{{\"callId\":\"call-1\",\"toolCode\":\"rag.search\",\"arguments\":{{\"query\":\"...\"}}}},{{\"callId\":\"call-2\",\"toolCode\":\"github.repo.read\",\"arguments\":{{\"repository\":\"org/repo\",\"path\":\"README.md\"}}}}]}}. Otherwise reply with the final answer. Never request a tool outside the available tools or after the tool-call budget is exhausted.",
+        "You are Novex Agent Runtime. Current date: {current_date}. Treat relative dates like today, tomorrow, and yesterday against this runtime date unless the user specifies another timezone. You may answer directly or request tool calls while staying within the run budget. Available tools: {}. After each tool observation, decide whether another tool call is necessary or produce the final answer. To call one tool, reply with compact JSON exactly like {{\"type\":\"tool_call\",\"callId\":\"call-1\",\"toolCode\":\"rag.search\",\"arguments\":{{\"query\":\"...\"}}}}. To call multiple independent tools in the same turn, reply with compact JSON exactly like {{\"type\":\"tool_calls\",\"calls\":[{{\"callId\":\"call-1\",\"toolCode\":\"rag.search\",\"arguments\":{{\"query\":\"...\"}}}},{{\"callId\":\"call-2\",\"toolCode\":\"github.repo.read\",\"arguments\":{{\"repository\":\"org/repo\",\"path\":\"README.md\"}}}}]}}. Otherwise reply with the final answer. Never request a tool outside the available tools or after the tool-call budget is exhausted.",
         tool_codes.join(", ")
     )
 }
@@ -5702,6 +5709,17 @@ mod tests {
         assert!(prompt.contains("Selected MCP tool codes: mcp.docs.search"));
         assert!(prompt.contains("Web search is enabled; web.search may be used"));
         assert!(!prompt.contains("What changed in the handbook?"));
+    }
+
+    #[test]
+    fn model_loop_system_prompt_includes_runtime_current_date() {
+        let prompt = build_model_loop_system_prompt_for_date(
+            &["web.search".to_owned()],
+            NaiveDate::from_ymd_opt(2026, 6, 19).unwrap(),
+        );
+
+        assert!(prompt.contains("Current date: 2026-06-19"));
+        assert!(prompt.contains("Treat relative dates like today"));
     }
 
     #[test]

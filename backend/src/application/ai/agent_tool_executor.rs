@@ -16,6 +16,7 @@ use novex_tools::{
     ToolExecutorDispatchPlan, ToolKind,
 };
 use serde_json::{json, Value};
+use url::Url;
 
 use super::model_service::ModelRuntimeService;
 use crate::infrastructure::persistence::ai_capability_repository::{
@@ -25,6 +26,7 @@ use crate::infrastructure::persistence::ai_capability_repository::{
 const FEISHU_WEBHOOK_TIMEOUT: Duration = Duration::from_secs(10);
 const GITHUB_CONNECTOR_TIMEOUT: Duration = Duration::from_secs(15);
 const MCP_STREAMABLE_HTTP_TIMEOUT: Duration = Duration::from_secs(20);
+const WEB_SEARCH_TIMEOUT: Duration = Duration::from_secs(10);
 
 type GitHubConnectorAuth = ResolvedConnectorCredential;
 
@@ -33,6 +35,105 @@ pub(super) const MEDIA_IMAGE_TOOL_CODE: &str = "media.image.generate";
 pub(super) const GITHUB_REPO_SEARCH_TOOL_CODE: &str = "github.repo.search";
 pub(super) const GITHUB_REPO_READ_TOOL_CODE: &str = "github.repo.read";
 pub(super) const WEB_SEARCH_TOOL_CODE: &str = "web.search";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WebSearchProvider {
+    GoogleNewsRss,
+    BingNewsRss,
+    Tavily,
+}
+
+impl WebSearchProvider {
+    fn from_code(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "google" | "google_news" | "google_news_rss" | "news_rss" | "rss" => {
+                Some(Self::GoogleNewsRss)
+            }
+            "bing" | "bing_news" | "bing_news_rss" => Some(Self::BingNewsRss),
+            "tavily" => Some(Self::Tavily),
+            _ => None,
+        }
+    }
+
+    fn code(self) -> &'static str {
+        match self {
+            Self::GoogleNewsRss => "google_news_rss",
+            Self::BingNewsRss => "bing_news_rss",
+            Self::Tavily => "tavily",
+        }
+    }
+
+    fn default_endpoint(self) -> &'static str {
+        match self {
+            Self::GoogleNewsRss => "https://news.google.com/rss/search",
+            Self::BingNewsRss => "https://www.bing.com/news/search",
+            Self::Tavily => "https://api.tavily.com/search",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WebSearchConfig {
+    provider: WebSearchProvider,
+    endpoint_url: String,
+    api_key: Option<String>,
+}
+
+impl WebSearchConfig {
+    fn from_env_map<F>(mut env_get: F) -> Option<Self>
+    where
+        F: FnMut(&str) -> Option<String>,
+    {
+        let provider_code = env_get("NOVEX_WEB_SEARCH_PROVIDER")
+            .or_else(|| env_get("WEB_SEARCH_PROVIDER"))
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| "google_news_rss".to_owned());
+        if matches!(
+            provider_code.to_ascii_lowercase().as_str(),
+            "disabled" | "disable" | "none" | "off" | "dry_run" | "dry-run"
+        ) {
+            return None;
+        }
+        let provider = WebSearchProvider::from_code(&provider_code)?;
+        let endpoint_url = env_get("NOVEX_WEB_SEARCH_ENDPOINT")
+            .or_else(|| env_get("WEB_SEARCH_ENDPOINT"))
+            .map(|value| value.trim().trim_end_matches('/').to_owned())
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| provider.default_endpoint().to_owned());
+        let api_key = env_get("NOVEX_WEB_SEARCH_API_KEY")
+            .or_else(|| env_get("WEB_SEARCH_API_KEY"))
+            .or_else(|| env_get("NOVEX_TAVILY_API_KEY"))
+            .or_else(|| env_get("TAVILY_API_KEY"))
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty());
+
+        if matches!(provider, WebSearchProvider::Tavily) && api_key.is_none() {
+            return None;
+        }
+
+        Some(Self {
+            provider,
+            endpoint_url,
+            api_key,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WebSearchRequestPlan {
+    provider: WebSearchProvider,
+    endpoint_url: String,
+    query: String,
+    limit: i64,
+    api_key: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WebSearchHttpResponse {
+    status: u16,
+    body: String,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct FeishuWebhookConfig {
@@ -189,6 +290,24 @@ pub(super) async fn execute_agent_tool(
 }
 
 async fn execute_web_search_tool(input: &Value) -> AgentToolExecution {
+    execute_web_search_tool_with_env_and_dispatch(
+        input,
+        |key| env::var(key).ok(),
+        |plan| async { dispatch_web_search_request(plan).await },
+    )
+    .await
+}
+
+async fn execute_web_search_tool_with_env_and_dispatch<EnvGet, Dispatch, DispatchFuture>(
+    input: &Value,
+    env_get: EnvGet,
+    dispatch: Dispatch,
+) -> AgentToolExecution
+where
+    EnvGet: FnMut(&str) -> Option<String>,
+    Dispatch: FnOnce(WebSearchRequestPlan) -> DispatchFuture,
+    DispatchFuture: Future<Output = Result<WebSearchHttpResponse, String>>,
+{
     let query = input
         .get("query")
         .and_then(Value::as_str)
@@ -201,19 +320,423 @@ async fn execute_web_search_tool(input: &Value) -> AgentToolExecution {
         .unwrap_or(5)
         .clamp(1, 10);
 
+    if query.is_empty() {
+        return AgentToolExecution::failed(
+            json!({
+                "dryRun": false,
+                "status": "failed",
+                "toolCode": WEB_SEARCH_TOOL_CODE,
+                "query": query,
+                "limit": limit,
+                "error": "web.search query is required"
+            }),
+            "web.search query is required".to_owned(),
+            "Agent failed to execute web search.".to_owned(),
+        );
+    }
+
+    let Some(config) = WebSearchConfig::from_env_map(env_get) else {
+        return AgentToolExecution::succeeded(
+            json!({
+                "dryRun": true,
+                "status": "dry_run",
+                "toolCode": WEB_SEARCH_TOOL_CODE,
+                "query": query,
+                "limit": limit,
+                "results": [],
+                "message": "web.search is wired, but no web search provider is configured for this POC environment"
+            }),
+            true,
+            "Web search dry-run executed.".to_owned(),
+        );
+    };
+
+    let plan = match web_search_request_plan(config, query, limit) {
+        Ok(plan) => plan,
+        Err(error) => {
+            return AgentToolExecution::failed(
+                json!({
+                    "dryRun": false,
+                    "status": "failed",
+                    "toolCode": WEB_SEARCH_TOOL_CODE,
+                    "query": query,
+                    "limit": limit,
+                    "error": error
+                }),
+                error,
+                "Agent failed to prepare web search.".to_owned(),
+            );
+        }
+    };
+    let provider = plan.provider.code();
+    let endpoint_url = plan.endpoint_url.clone();
+
+    let response = match dispatch(plan.clone()).await {
+        Ok(response) => response,
+        Err(error) => {
+            return AgentToolExecution::failed(
+                json!({
+                    "dryRun": false,
+                    "status": "failed",
+                    "toolCode": WEB_SEARCH_TOOL_CODE,
+                    "provider": provider,
+                    "query": query,
+                    "limit": limit,
+                    "endpointUrl": endpoint_url,
+                    "error": error
+                }),
+                error,
+                "Agent failed to execute web search.".to_owned(),
+            );
+        }
+    };
+
+    if !(200..300).contains(&response.status) {
+        let error = format!("web.search provider returned HTTP {}", response.status);
+        return AgentToolExecution::failed(
+            json!({
+                "dryRun": false,
+                "status": "failed",
+                "toolCode": WEB_SEARCH_TOOL_CODE,
+                "provider": provider,
+                "query": query,
+                "limit": limit,
+                "endpointUrl": endpoint_url,
+                "error": error,
+                "responsePreview": preview_text(&response.body, 512)
+            }),
+            error,
+            "Agent failed to execute web search.".to_owned(),
+        );
+    }
+
+    let results = match parse_web_search_response(&plan, &response.body) {
+        Ok(results) => results,
+        Err(error) => {
+            return AgentToolExecution::failed(
+                json!({
+                    "dryRun": false,
+                    "status": "failed",
+                    "toolCode": WEB_SEARCH_TOOL_CODE,
+                    "provider": provider,
+                    "query": query,
+                    "limit": limit,
+                    "endpointUrl": endpoint_url,
+                    "error": error,
+                    "responsePreview": preview_text(&response.body, 512)
+                }),
+                error,
+                "Agent failed to parse web search results.".to_owned(),
+            );
+        }
+    };
+
+    let result_count = results.len();
     AgentToolExecution::succeeded(
         json!({
-            "dryRun": true,
-            "status": "dry_run",
+            "dryRun": false,
+            "status": "succeeded",
             "toolCode": WEB_SEARCH_TOOL_CODE,
+            "provider": provider,
             "query": query,
             "limit": limit,
-            "results": [],
-            "message": "web.search is wired, but no web search provider is configured for this POC environment"
+            "endpointUrl": endpoint_url,
+            "results": results,
+            "message": "web.search returned live results"
         }),
-        true,
-        "Web search dry-run executed.".to_owned(),
+        false,
+        format!("Web search returned {result_count} result(s)."),
     )
+}
+
+fn web_search_request_plan(
+    config: WebSearchConfig,
+    query: &str,
+    limit: i64,
+) -> Result<WebSearchRequestPlan, String> {
+    let mut url = Url::parse(&config.endpoint_url)
+        .map_err(|err| format!("web.search endpoint URL is invalid: {err}"))?;
+    match config.provider {
+        WebSearchProvider::GoogleNewsRss => {
+            url.query_pairs_mut()
+                .append_pair("q", query)
+                .append_pair("hl", "zh-CN")
+                .append_pair("gl", "CN")
+                .append_pair("ceid", "CN:zh-Hans");
+        }
+        WebSearchProvider::BingNewsRss => {
+            url.query_pairs_mut()
+                .append_pair("q", query)
+                .append_pair("format", "rss");
+        }
+        WebSearchProvider::Tavily => {}
+    }
+
+    Ok(WebSearchRequestPlan {
+        provider: config.provider,
+        endpoint_url: url.to_string(),
+        query: query.to_owned(),
+        limit,
+        api_key: config.api_key,
+    })
+}
+
+async fn dispatch_web_search_request(
+    plan: WebSearchRequestPlan,
+) -> Result<WebSearchHttpResponse, String> {
+    let client = reqwest::Client::builder()
+        .timeout(WEB_SEARCH_TIMEOUT)
+        .user_agent("novex-web-search-poc")
+        .build()
+        .map_err(|err| format!("web.search client init failed: {err}"))?;
+
+    let response = match plan.provider {
+        WebSearchProvider::Tavily => {
+            let api_key = plan
+                .api_key
+                .as_deref()
+                .filter(|value| !value.trim().is_empty())
+                .ok_or_else(|| "Tavily API key is required for web.search".to_owned())?;
+            client
+                .post(&plan.endpoint_url)
+                .json(&json!({
+                    "api_key": api_key,
+                    "query": plan.query,
+                    "max_results": plan.limit,
+                    "search_depth": "basic"
+                }))
+                .send()
+                .await
+        }
+        WebSearchProvider::GoogleNewsRss | WebSearchProvider::BingNewsRss => {
+            client.get(&plan.endpoint_url).send().await
+        }
+    }
+    .map_err(|err| format!("web.search dispatch failed: {err}"))?;
+
+    let status = response.status().as_u16();
+    let body = response
+        .text()
+        .await
+        .map_err(|err| format!("web.search response read failed: {err}"))?;
+
+    Ok(WebSearchHttpResponse { status, body })
+}
+
+fn parse_web_search_response(
+    plan: &WebSearchRequestPlan,
+    body: &str,
+) -> Result<Vec<Value>, String> {
+    match plan.provider {
+        WebSearchProvider::GoogleNewsRss | WebSearchProvider::BingNewsRss => {
+            Ok(parse_news_rss_results(body, plan.limit as usize))
+        }
+        WebSearchProvider::Tavily => parse_tavily_search_results(body, plan.limit as usize),
+    }
+}
+
+fn parse_tavily_search_results(body: &str, limit: usize) -> Result<Vec<Value>, String> {
+    let payload: Value = serde_json::from_str(body)
+        .map_err(|err| format!("Tavily search response JSON is invalid: {err}"))?;
+    let results = payload
+        .get("results")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .take(limit)
+                .map(|item| {
+                    json!({
+                        "title": item.get("title").and_then(Value::as_str).unwrap_or(""),
+                        "url": item.get("url").and_then(Value::as_str).unwrap_or(""),
+                        "snippet": item.get("content").and_then(Value::as_str).unwrap_or(""),
+                        "publishedAt": item.get("published_date").and_then(Value::as_str),
+                        "score": item.get("score"),
+                        "source": "tavily"
+                    })
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    Ok(results)
+}
+
+fn parse_news_rss_results(body: &str, limit: usize) -> Vec<Value> {
+    let mut blocks = extract_xml_blocks(body, "item");
+    if blocks.is_empty() {
+        blocks = extract_xml_blocks(body, "entry");
+    }
+
+    blocks
+        .into_iter()
+        .take(limit)
+        .filter_map(|block| {
+            let title = extract_xml_text(&block, "title");
+            let link = extract_xml_text(&block, "link")
+                .or_else(|| extract_xml_attribute(&block, "link", "href"))
+                .or_else(|| extract_xml_text(&block, "id"));
+            let title = title.unwrap_or_default();
+            let link = link.unwrap_or_default();
+            if title.trim().is_empty() && link.trim().is_empty() {
+                return None;
+            }
+            let description = extract_xml_text(&block, "description")
+                .or_else(|| extract_xml_text(&block, "summary"))
+                .or_else(|| extract_xml_text(&block, "content"))
+                .unwrap_or_default();
+            let published_at = extract_xml_text(&block, "pubDate")
+                .or_else(|| extract_xml_text(&block, "published"))
+                .or_else(|| extract_xml_text(&block, "updated"))
+                .unwrap_or_default();
+            let source = extract_xml_text(&block, "source").unwrap_or_default();
+
+            Some(json!({
+                "title": normalize_xml_text(&title),
+                "url": normalize_xml_text(&link),
+                "snippet": strip_html_tags(&normalize_xml_text(&description)),
+                "publishedAt": normalize_xml_text(&published_at),
+                "source": normalize_xml_text(&source)
+            }))
+        })
+        .collect()
+}
+
+fn extract_xml_blocks(body: &str, local_name: &str) -> Vec<String> {
+    let lower = body.to_ascii_lowercase();
+    let open_prefix = format!("<{}", local_name.to_ascii_lowercase());
+    let close = format!("</{}>", local_name.to_ascii_lowercase());
+    let mut cursor = 0;
+    let mut blocks = Vec::new();
+
+    while let Some(relative_start) = lower[cursor..].find(&open_prefix) {
+        let start = cursor + relative_start;
+        let Some(relative_close) = lower[start..].find(&close) else {
+            break;
+        };
+        let end = start + relative_close + close.len();
+        blocks.push(body[start..end].to_owned());
+        cursor = end;
+    }
+
+    blocks
+}
+
+fn extract_xml_text(block: &str, local_name: &str) -> Option<String> {
+    let lower = block.to_ascii_lowercase();
+    let tag = local_name.to_ascii_lowercase();
+    let mut cursor = 0;
+
+    while let Some(relative_open) = lower[cursor..].find('<') {
+        let open = cursor + relative_open;
+        if lower[open + 1..].starts_with('/') {
+            cursor = open + 1;
+            continue;
+        }
+        let name_start = open + 1;
+        let Some(name_end) = lower[name_start..]
+            .find(|ch: char| ch == '>' || ch == '/' || ch.is_whitespace())
+            .map(|relative| name_start + relative)
+        else {
+            return None;
+        };
+        let raw_name = &lower[name_start..name_end];
+        if raw_name.rsplit(':').next() != Some(tag.as_str()) {
+            cursor = name_end;
+            continue;
+        }
+        let content_start = lower[name_end..]
+            .find('>')
+            .map(|relative| name_end + relative + 1)?;
+        let close = format!("</{}>", raw_name);
+        let content_end = lower[content_start..]
+            .find(&close)
+            .map(|relative| content_start + relative)?;
+        return Some(block[content_start..content_end].to_owned());
+    }
+
+    None
+}
+
+fn extract_xml_attribute(block: &str, local_name: &str, attribute: &str) -> Option<String> {
+    let lower = block.to_ascii_lowercase();
+    let tag = local_name.to_ascii_lowercase();
+    let mut cursor = 0;
+
+    while let Some(relative_open) = lower[cursor..].find('<') {
+        let open = cursor + relative_open;
+        if lower[open + 1..].starts_with('/') {
+            cursor = open + 1;
+            continue;
+        }
+        let name_start = open + 1;
+        let Some(name_end) = lower[name_start..]
+            .find(|ch: char| ch == '>' || ch == '/' || ch.is_whitespace())
+            .map(|relative| name_start + relative)
+        else {
+            return None;
+        };
+        let raw_name = &lower[name_start..name_end];
+        if raw_name.rsplit(':').next() != Some(tag.as_str()) {
+            cursor = name_end;
+            continue;
+        }
+        let tag_end = lower[name_end..]
+            .find('>')
+            .map(|relative| name_end + relative)?;
+        return extract_attribute_value(&block[name_start..tag_end], attribute);
+    }
+
+    None
+}
+
+fn extract_attribute_value(tag_text: &str, attribute: &str) -> Option<String> {
+    let lower = tag_text.to_ascii_lowercase();
+    let needle = format!("{}=", attribute.to_ascii_lowercase());
+    let start = lower.find(&needle)? + needle.len();
+    let quote = tag_text[start..].chars().next()?;
+    if quote != '"' && quote != '\'' {
+        return None;
+    }
+    let value_start = start + quote.len_utf8();
+    let value_end = tag_text[value_start..].find(quote)? + value_start;
+    Some(tag_text[value_start..value_end].to_owned())
+}
+
+fn normalize_xml_text(value: &str) -> String {
+    let trimmed = value.trim();
+    let cdata = trimmed
+        .strip_prefix("<![CDATA[")
+        .and_then(|value| value.strip_suffix("]]>"))
+        .unwrap_or(trimmed);
+    decode_xml_entities(cdata.trim())
+}
+
+fn decode_xml_entities(value: &str) -> String {
+    value
+        .replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&apos;", "'")
+        .replace("&#39;", "'")
+}
+
+fn strip_html_tags(value: &str) -> String {
+    let mut output = String::new();
+    let mut in_tag = false;
+    for ch in value.chars() {
+        match ch {
+            '<' => in_tag = true,
+            '>' => in_tag = false,
+            _ if !in_tag => output.push(ch),
+            _ => {}
+        }
+    }
+    output.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn preview_text(value: &str, limit: usize) -> String {
+    value.chars().take(limit).collect()
 }
 
 async fn execute_mcp_tool(
@@ -1326,9 +1849,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn web_search_tool_returns_dry_run_when_provider_missing() {
-        let output =
-            execute_web_search_tool(&json!({"query": "latest Novex release", "limit": 3})).await;
+    async fn web_search_tool_returns_dry_run_when_provider_disabled() {
+        let output = execute_web_search_tool_with_env_and_dispatch(
+            &json!({"query": "latest Novex release", "limit": 3}),
+            |key| (key == "NOVEX_WEB_SEARCH_PROVIDER").then(|| "disabled".to_owned()),
+            |_plan| async { Err("dispatch should not run when web.search is disabled".to_owned()) },
+        )
+        .await;
 
         assert!(output.succeeded_status());
         assert!(output.dry_run);
@@ -1336,6 +1863,88 @@ mod tests {
         assert_eq!(output.response_payload["status"], "dry_run");
         assert_eq!(output.response_payload["query"], "latest Novex release");
         assert_eq!(output.response_payload["limit"], 3);
+    }
+
+    #[tokio::test]
+    async fn web_search_tool_dispatches_default_news_rss_provider() {
+        let output = execute_web_search_tool_with_env_and_dispatch(
+            &json!({"query": "today hot news", "limit": 2}),
+            |_| None,
+            |plan| async move {
+                assert_eq!(plan.provider, WebSearchProvider::GoogleNewsRss);
+                assert!(plan.endpoint_url.contains("news.google.com/rss/search"));
+                assert!(plan.endpoint_url.contains("q=today+hot+news"));
+                assert_eq!(plan.limit, 2);
+
+                Ok(WebSearchHttpResponse {
+                    status: 200,
+                    body: r#"<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0"><channel>
+<item><title>First story</title><link>https://example.com/first</link><description><![CDATA[<b>Fresh</b> summary]]></description><pubDate>Fri, 19 Jun 2026 08:00:00 GMT</pubDate><source>Example News</source></item>
+<item><title>Second story</title><link>https://example.com/second</link><description>Second summary</description></item>
+</channel></rss>"#
+                        .to_owned(),
+                })
+            },
+        )
+        .await;
+
+        assert!(output.succeeded_status());
+        assert!(!output.dry_run);
+        assert_eq!(output.response_payload["dryRun"], false);
+        assert_eq!(output.response_payload["status"], "succeeded");
+        assert_eq!(output.response_payload["provider"], "google_news_rss");
+        assert_eq!(
+            output.response_payload["results"][0]["title"],
+            "First story"
+        );
+        assert_eq!(
+            output.response_payload["results"][0]["snippet"],
+            "Fresh summary"
+        );
+        assert_eq!(
+            output.response_payload["results"][0]["publishedAt"],
+            "Fri, 19 Jun 2026 08:00:00 GMT"
+        );
+    }
+
+    #[tokio::test]
+    async fn web_search_tool_dispatches_tavily_provider_when_configured() {
+        let output = execute_web_search_tool_with_env_and_dispatch(
+            &json!({"query": "agent infrastructure", "limit": 1}),
+            |key| match key {
+                "NOVEX_WEB_SEARCH_PROVIDER" => Some("tavily".to_owned()),
+                "NOVEX_WEB_SEARCH_ENDPOINT" => Some("https://search.example.test".to_owned()),
+                "NOVEX_WEB_SEARCH_API_KEY" => Some("secret-key".to_owned()),
+                _ => None,
+            },
+            |plan| async move {
+                assert_eq!(plan.provider, WebSearchProvider::Tavily);
+                assert_eq!(plan.endpoint_url, "https://search.example.test/");
+                assert_eq!(plan.api_key.as_deref(), Some("secret-key"));
+
+                Ok(WebSearchHttpResponse {
+                    status: 200,
+                    body: json!({
+                        "results": [{
+                            "title": "Agent infra update",
+                            "url": "https://example.com/agent",
+                            "content": "Loop and eval systems shipped.",
+                            "published_date": "2026-06-19"
+                        }]
+                    })
+                    .to_string(),
+                })
+            },
+        )
+        .await;
+
+        assert!(output.succeeded_status());
+        assert_eq!(output.response_payload["provider"], "tavily");
+        assert_eq!(
+            output.response_payload["results"][0]["snippet"],
+            "Loop and eval systems shipped."
+        );
     }
 
     #[test]
