@@ -364,10 +364,12 @@ crates/novex-tools/
   lib.rs           crate facade 和 FoundationModule constructor
 
 crates/novex-connectors/
-  registry/        connector schema、provider、auth type、resource type
-  credential/      OAuth token、API key、GitHub App、tenant/user/app scope
-  datasource/      GitHub repo、飞书文档、网页、数据库等数据源同步
-  tool_adapter/    将连接器能力暴露为 Agent tool 或 RAG datasource
+  kind.rs          ConnectorKind connector vocabulary
+  credential.rs    CredentialScope、credential binding/source/resolution helpers
+  feishu.rs        Feishu webhook text message DTO
+  github.rs        GitHub code search/read request DTO、response parser
+  module.rs        FoundationModule constructor
+  lib.rs           crate facade 和 CRATE_ID
 
 crates/novex-mcp/
   gateway/         MCP server 注册、tool discovery、调用代理
