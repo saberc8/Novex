@@ -9,7 +9,8 @@ use crate::{
         ModelChatCommand, ModelChatConversationResp, ModelChatResp, ModelHealthCheckCommand,
         ModelHealthCheckResp, ModelOpsSummaryResp, ModelProviderCallLeaseCancelResp,
         ModelProviderCallLeaseQuery, ModelProviderCallLeaseResp, ModelProviderCallLeaseSweepResp,
-        ModelRegistrySummary, ModelRouteCircuitBreakerResp, ModelRuntimeService,
+        ModelRegistryRouteCommand, ModelRegistrySummary, ModelRouteCircuitBreakerResp,
+        ModelRuntimeService,
     },
     domain::auth::model::CurrentUser,
     interfaces::http::{middleware::permission::require_permission, AppState},
@@ -17,6 +18,7 @@ use crate::{
 };
 
 pub const MODEL_LIST_PERMISSION: &str = "ai:model:list";
+pub const MODEL_MANAGE_PERMISSION: &str = "ai:model:manage";
 pub const MODEL_HEALTH_PERMISSION: &str = "ai:model:healthCheck";
 pub const MODEL_CHAT_PERMISSION: &str = "ai:model:chat";
 pub const MODEL_CIRCUIT_BREAKER_LIST_PERMISSION: &str = "ai:model:circuitBreaker:list";
@@ -30,6 +32,14 @@ pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/ai/models/runtime-config", get(runtime_config))
         .route("/ai/models/registry", get(model_registry))
+        .route(
+            "/ai/models/registry/routes",
+            post(upsert_model_registry_route),
+        )
+        .route(
+            "/ai/models/registry/routes/:route_id",
+            delete(delete_model_registry_route),
+        )
         .route("/ai/models/ops-summary", get(model_ops_summary))
         .route("/ai/models/health-check", post(health_check))
         .route(
@@ -79,6 +89,36 @@ async fn model_registry(
 
     Ok(Json(ApiResponse::ok(
         ModelRuntimeService::registry_summary_for_tenant(&state.db, current_user.tenant_id).await?,
+    )))
+}
+
+async fn upsert_model_registry_route(
+    State(state): State<AppState>,
+    current_user: CurrentUser,
+    Json(command): Json<ModelRegistryRouteCommand>,
+) -> Result<Json<ApiResponse<ModelRegistrySummary>>, AppError> {
+    require_permission(&current_user, MODEL_MANAGE_PERMISSION)?;
+    let service = ModelRuntimeService::for_tenant(state.db, current_user.tenant_id);
+
+    Ok(Json(ApiResponse::ok(
+        service
+            .upsert_model_registry_route_bundle(current_user.id, command)
+            .await?,
+    )))
+}
+
+async fn delete_model_registry_route(
+    State(state): State<AppState>,
+    current_user: CurrentUser,
+    Path(route_id): Path<i64>,
+) -> Result<Json<ApiResponse<ModelRegistrySummary>>, AppError> {
+    require_permission(&current_user, MODEL_MANAGE_PERMISSION)?;
+    let service = ModelRuntimeService::for_tenant(state.db, current_user.tenant_id);
+
+    Ok(Json(ApiResponse::ok(
+        service
+            .delete_model_registry_route(route_id, current_user.id)
+            .await?,
     )))
 }
 
@@ -301,6 +341,14 @@ mod tests {
     }
 
     #[test]
+    fn model_registry_manage_permission_seed_contains_upsert_control() {
+        let seed =
+            include_str!("../../../../migrations/202606200002_seed_ai_model_manage_permission.sql");
+
+        assert!(seed.contains(MODEL_MANAGE_PERMISSION));
+    }
+
+    #[test]
     fn model_registry_migration_contains_required_tables_and_fields() {
         let migration =
             include_str!("../../../../migrations/202606050015_create_ai_model_registry.sql");
@@ -406,6 +454,54 @@ mod tests {
             axum::Json(ModelHealthCheckCommand {
                 target: Some("all".to_owned()),
             }),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(matches!(err, AppError::Forbidden));
+    }
+
+    #[tokio::test]
+    async fn model_registry_upsert_handler_rejects_missing_permission_before_database() {
+        let err = upsert_model_registry_route(
+            State(test_state()),
+            user_with_permissions(vec![]),
+            axum::Json(ModelRegistryRouteCommand {
+                provider_code: "deepseek".to_owned(),
+                provider_name: Some("DeepSeek".to_owned()),
+                provider_type: "deep-seek".to_owned(),
+                protocol: Some("openai-compatible".to_owned()),
+                deployment_code: "deepseek-public".to_owned(),
+                deployment_name: Some("DeepSeek Public API".to_owned()),
+                endpoint: "https://api.deepseek.com".to_owned(),
+                api_path: Some("/chat/completions".to_owned()),
+                network_zone: Some("public".to_owned()),
+                timeout_ms: Some(20_000),
+                max_concurrency: None,
+                profile_code: "deepseek-v4-flash".to_owned(),
+                profile_name: Some("DeepSeek V4 Flash".to_owned()),
+                model_name: "deepseek-v4-flash".to_owned(),
+                model_kind: "llm".to_owned(),
+                credential_code: Some("env-llm-api-key".to_owned()),
+                credential_ref: Some("env:LLM_API_KEY".to_owned()),
+                route_code: "runtime.llm.chat".to_owned(),
+                route_purpose: "chat".to_owned(),
+                priority: Some(100),
+                status: Some(1),
+            }),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(matches!(err, AppError::Forbidden));
+    }
+
+    #[tokio::test]
+    async fn model_registry_delete_handler_rejects_missing_permission_before_database() {
+        let err = delete_model_registry_route(
+            State(test_state()),
+            user_with_permissions(vec![]),
+            axum::extract::Path(42),
         )
         .await
         .unwrap_err();
@@ -579,6 +675,59 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/ai/models/registry")
+                    .header(header::ACCEPT, "application/json")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let body = serde_json::from_slice::<Value>(&body).unwrap();
+        assert_eq!(body["code"], "401");
+    }
+
+    #[tokio::test]
+    async fn model_registry_upsert_route_is_registered_and_requires_auth() {
+        let db = PgPoolOptions::new()
+            .connect_lazy("postgres://postgres:postgres@localhost:5432/avalon_admin")
+            .unwrap();
+        let jwt = JwtService::new("test-secret".to_owned(), 24);
+        let app = build_router(db, &["http://localhost:4399".to_owned()], jwt).unwrap();
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/ai/models/registry/routes")
+                    .header(header::ACCEPT, "application/json")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"routeCode":"runtime.llm.chat"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let body = serde_json::from_slice::<Value>(&body).unwrap();
+        assert_eq!(body["code"], "401");
+    }
+
+    #[tokio::test]
+    async fn model_registry_delete_route_is_registered_and_requires_auth() {
+        let db = PgPoolOptions::new()
+            .connect_lazy("postgres://postgres:postgres@localhost:5432/avalon_admin")
+            .unwrap();
+        let jwt = JwtService::new("test-secret".to_owned(), 24);
+        let app = build_router(db, &["http://localhost:4399".to_owned()], jwt).unwrap();
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/ai/models/registry/routes/42")
                     .header(header::ACCEPT, "application/json")
                     .body(Body::empty())
                     .unwrap(),

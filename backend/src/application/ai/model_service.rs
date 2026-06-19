@@ -78,6 +78,8 @@ const MODEL_CHAT_HISTORY_LIMIT: i64 = 30;
 const MODEL_CHAT_TITLE_CHARS: usize = 60;
 const MODEL_CHAT_PREVIEW_CHARS: usize = 160;
 const MAX_MODEL_FALLBACK_HOPS: usize = 3;
+const MODEL_REGISTRY_DEFAULT_TIMEOUT_MS: i32 = 20_000;
+const MODEL_REGISTRY_DEFAULT_PRIORITY: i32 = 100;
 
 static MODEL_ROUTE_CIRCUIT_BREAKERS: OnceLock<Mutex<HashMap<String, Instant>>> = OnceLock::new();
 
@@ -392,6 +394,7 @@ pub struct ModelDeploymentRegistryResp {
     pub code: String,
     pub name: String,
     pub endpoint: String,
+    pub api_path: Option<String>,
     pub network_zone: String,
     pub status: i16,
 }
@@ -421,6 +424,32 @@ pub struct ModelRouteRegistryResp {
     pub status: i16,
     pub policy_status: ModelRoutePolicyStatus,
     pub masked_credential: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelRegistryRouteCommand {
+    pub provider_code: String,
+    pub provider_name: Option<String>,
+    pub provider_type: String,
+    pub protocol: Option<String>,
+    pub deployment_code: String,
+    pub deployment_name: Option<String>,
+    pub endpoint: String,
+    pub api_path: Option<String>,
+    pub network_zone: Option<String>,
+    pub timeout_ms: Option<i32>,
+    pub max_concurrency: Option<i32>,
+    pub profile_code: String,
+    pub profile_name: Option<String>,
+    pub model_name: String,
+    pub model_kind: String,
+    pub credential_code: Option<String>,
+    pub credential_ref: Option<String>,
+    pub route_code: String,
+    pub route_purpose: String,
+    pub priority: Option<i32>,
+    pub status: Option<i16>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -598,6 +627,7 @@ pub struct ModelDeploymentRegistryRow {
     pub code: String,
     pub name: String,
     pub endpoint: String,
+    pub api_path: Option<String>,
     pub network_zone: String,
     pub status: i16,
 }
@@ -1887,7 +1917,7 @@ ORDER BY id
         .await?;
         let deployments = sqlx::query_as::<_, ModelDeploymentRegistryRow>(
             r#"
-SELECT id, provider_id, code, name, endpoint, network_zone, status
+SELECT id, provider_id, code, name, endpoint, api_path, network_zone, status
 FROM ai_model_deployment
 WHERE tenant_id = $1
 ORDER BY id
@@ -1936,6 +1966,253 @@ ORDER BY r.priority, r.id
             profiles,
             routes,
         ))
+    }
+
+    pub async fn upsert_model_registry_route_bundle(
+        &self,
+        user_id: i64,
+        command: ModelRegistryRouteCommand,
+    ) -> Result<ModelRegistrySummary, AppError> {
+        let command = normalize_model_registry_route_command(command)?;
+        let now = Utc::now().naive_utc();
+        let provider_type = ModelProviderType::parse(&command.provider_type)
+            .ok_or_else(|| AppError::bad_request("模型供应商类型不合法"))?;
+        let model_kind = ModelKind::parse(&command.model_kind)
+            .ok_or_else(|| AppError::bad_request("模型类型不合法"))?;
+        let mut tx = self.db.begin().await?;
+
+        let provider_id = sqlx::query_scalar::<_, i64>(
+            r#"
+INSERT INTO ai_model_provider
+    (id, tenant_id, code, name, provider_type, protocol, status, metadata, create_user, create_time, update_user, update_time)
+VALUES
+    ($1, $2, $3, $4, $5, $6, 1, $7, $8, $9, $8, $9)
+ON CONFLICT (tenant_id, code) DO UPDATE
+SET name = EXCLUDED.name,
+    provider_type = EXCLUDED.provider_type,
+    protocol = EXCLUDED.protocol,
+    status = 1,
+    metadata = ai_model_provider.metadata || EXCLUDED.metadata,
+    update_user = EXCLUDED.update_user,
+    update_time = EXCLUDED.update_time
+RETURNING id;
+"#,
+        )
+        .bind(next_id())
+        .bind(self.tenant_id)
+        .bind(&command.provider_code)
+        .bind(command.provider_name.as_deref().unwrap_or(&command.provider_code))
+        .bind(&command.provider_type)
+        .bind(command.protocol.as_deref().unwrap_or("openai-compatible"))
+        .bind(json!({"source":"admin","managed":true}))
+        .bind(user_id)
+        .bind(now)
+        .fetch_one(&mut *tx)
+        .await?;
+
+        let deployment_id = sqlx::query_scalar::<_, i64>(
+            r#"
+INSERT INTO ai_model_deployment
+    (id, tenant_id, provider_id, code, name, endpoint, api_path, network_zone, timeout_ms, max_concurrency, status, metadata, create_user, create_time, update_user, update_time)
+VALUES
+    ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 1, $11, $12, $13, $12, $13)
+ON CONFLICT (tenant_id, code) DO UPDATE
+SET provider_id = EXCLUDED.provider_id,
+    name = EXCLUDED.name,
+    endpoint = EXCLUDED.endpoint,
+    api_path = EXCLUDED.api_path,
+    network_zone = EXCLUDED.network_zone,
+    timeout_ms = EXCLUDED.timeout_ms,
+    max_concurrency = EXCLUDED.max_concurrency,
+    status = 1,
+    metadata = ai_model_deployment.metadata || EXCLUDED.metadata,
+    update_user = EXCLUDED.update_user,
+    update_time = EXCLUDED.update_time
+RETURNING id;
+"#,
+        )
+        .bind(next_id())
+        .bind(self.tenant_id)
+        .bind(provider_id)
+        .bind(&command.deployment_code)
+        .bind(command.deployment_name.as_deref().unwrap_or(&command.deployment_code))
+        .bind(&command.endpoint)
+        .bind(command.api_path.as_deref())
+        .bind(command.network_zone.as_deref().unwrap_or("public"))
+        .bind(command.timeout_ms.unwrap_or(MODEL_REGISTRY_DEFAULT_TIMEOUT_MS))
+        .bind(command.max_concurrency)
+        .bind(json!({"source":"admin","managed":true}))
+        .bind(user_id)
+        .bind(now)
+        .fetch_one(&mut *tx)
+        .await?;
+
+        let profile_id = sqlx::query_scalar::<_, i64>(
+            r#"
+INSERT INTO ai_model_profile
+    (id, tenant_id, deployment_id, code, name, model_name, model_kind, capabilities, limits, embedding_spec, rerank_spec, cost_spec, fallback_policy, status, create_user, create_time, update_user, update_time)
+VALUES
+    ($1, $2, $3, $4, $5, $6, $7, $8, '{}'::jsonb, '{}'::jsonb, '{}'::jsonb, '{}'::jsonb, '{}'::jsonb, 1, $9, $10, $9, $10)
+ON CONFLICT (tenant_id, code) DO UPDATE
+SET deployment_id = EXCLUDED.deployment_id,
+    name = EXCLUDED.name,
+    model_name = EXCLUDED.model_name,
+    model_kind = EXCLUDED.model_kind,
+    capabilities = EXCLUDED.capabilities,
+    status = 1,
+    update_user = EXCLUDED.update_user,
+    update_time = EXCLUDED.update_time
+RETURNING id;
+"#,
+        )
+        .bind(next_id())
+        .bind(self.tenant_id)
+        .bind(deployment_id)
+        .bind(&command.profile_code)
+        .bind(command.profile_name.as_deref().unwrap_or(&command.profile_code))
+        .bind(&command.model_name)
+        .bind(&command.model_kind)
+        .bind(model_registry_capabilities(model_kind))
+        .bind(user_id)
+        .bind(now)
+        .fetch_one(&mut *tx)
+        .await?;
+
+        let credential_id = if let Some(credential_ref) = command.credential_ref.as_deref() {
+            sqlx::query_scalar::<_, i64>(
+                r#"
+INSERT INTO ai_model_credential
+    (id, tenant_id, provider_id, deployment_id, code, scope_type, scope_id, credential_ref, masked_value, status, metadata, create_user, create_time, update_user, update_time)
+VALUES
+    ($1, $2, $3, $4, $5, 'platform', '1', $6, $6, 1, $7, $8, $9, $8, $9)
+ON CONFLICT (tenant_id, code) DO UPDATE
+SET provider_id = EXCLUDED.provider_id,
+    deployment_id = EXCLUDED.deployment_id,
+    credential_ref = EXCLUDED.credential_ref,
+    masked_value = EXCLUDED.masked_value,
+    status = 1,
+    metadata = ai_model_credential.metadata || EXCLUDED.metadata,
+    update_user = EXCLUDED.update_user,
+    update_time = EXCLUDED.update_time
+RETURNING id;
+"#,
+            )
+            .bind(next_id())
+            .bind(self.tenant_id)
+            .bind(provider_id)
+            .bind(deployment_id)
+            .bind(
+                command
+                    .credential_code
+                    .as_deref()
+                    .unwrap_or("env-model-api-key"),
+            )
+            .bind(credential_ref)
+            .bind(json!({"source":"admin","secretSource":"environment"}))
+            .bind(user_id)
+            .bind(now)
+            .fetch_one(&mut *tx)
+            .await?
+        } else {
+            sqlx::query_scalar::<_, Option<i64>>(
+                r#"
+SELECT credential_id
+FROM ai_model_route
+WHERE tenant_id = $1
+  AND code = $2
+LIMIT 1;
+"#,
+            )
+            .bind(self.tenant_id)
+            .bind(&command.route_code)
+            .fetch_optional(&mut *tx)
+            .await?
+            .flatten()
+            .ok_or_else(|| AppError::bad_request("模型凭据 env 引用不能为空"))?
+        };
+
+        sqlx::query_scalar::<_, i64>(
+            r#"
+INSERT INTO ai_model_route
+    (id, tenant_id, code, route_purpose, model_profile_id, credential_id, priority, status, policy, create_user, create_time, update_user, update_time)
+VALUES
+    ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $10, $11)
+ON CONFLICT (tenant_id, code) DO UPDATE
+SET route_purpose = EXCLUDED.route_purpose,
+    model_profile_id = EXCLUDED.model_profile_id,
+    credential_id = EXCLUDED.credential_id,
+    priority = EXCLUDED.priority,
+    status = EXCLUDED.status,
+    policy = ai_model_route.policy || EXCLUDED.policy,
+    update_user = EXCLUDED.update_user,
+    update_time = EXCLUDED.update_time
+RETURNING id;
+"#,
+        )
+        .bind(next_id())
+        .bind(self.tenant_id)
+        .bind(&command.route_code)
+        .bind(&command.route_purpose)
+        .bind(profile_id)
+        .bind(credential_id)
+        .bind(command.priority.unwrap_or(MODEL_REGISTRY_DEFAULT_PRIORITY))
+        .bind(command.status.unwrap_or(1))
+        .bind(json!({"source":"admin","providerType":provider_type.as_str()}))
+        .bind(user_id)
+        .bind(now)
+        .fetch_one(&mut *tx)
+        .await?;
+
+        tx.commit().await?;
+
+        Self::registry_summary_for_tenant(&self.db, self.tenant_id).await
+    }
+
+    pub async fn delete_model_registry_route(
+        &self,
+        route_id: i64,
+        user_id: i64,
+    ) -> Result<ModelRegistrySummary, AppError> {
+        if route_id <= 0 {
+            return Err(AppError::bad_request("模型路由 ID 不合法"));
+        }
+        let mut tx = self.db.begin().await?;
+
+        sqlx::query(
+            r#"
+UPDATE ai_model_route
+SET fallback_route_id = NULL,
+    update_user = $3,
+    update_time = $4
+WHERE tenant_id = $1
+  AND fallback_route_id = $2;
+"#,
+        )
+        .bind(self.tenant_id)
+        .bind(route_id)
+        .bind(user_id)
+        .bind(Utc::now().naive_utc())
+        .execute(&mut *tx)
+        .await?;
+
+        let deleted = sqlx::query_scalar::<_, i64>(
+            r#"
+DELETE FROM ai_model_route
+WHERE tenant_id = $1
+  AND id = $2
+RETURNING id;
+"#,
+        )
+        .bind(self.tenant_id)
+        .bind(route_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        if deleted.is_none() {
+            return Err(AppError::NotFound);
+        }
+
+        tx.commit().await?;
+        Self::registry_summary_for_tenant(&self.db, self.tenant_id).await
     }
 
     pub fn registry_summary_from_rows(
@@ -1992,6 +2269,7 @@ ORDER BY r.priority, r.id
                     code: row.code,
                     name: row.name,
                     endpoint: row.endpoint,
+                    api_path: row.api_path,
                     network_zone: row.network_zone,
                     status: row.status,
                 })
@@ -5172,6 +5450,239 @@ fn default_purpose_for_target(target: ModelRuntimeTarget) -> ModelRoutePurpose {
     }
 }
 
+fn normalize_model_registry_route_command(
+    mut command: ModelRegistryRouteCommand,
+) -> Result<ModelRegistryRouteCommand, AppError> {
+    command.provider_code = normalize_registry_code("模型供应商编码", &command.provider_code, 64)?;
+    let provider_type = ModelProviderType::parse(&command.provider_type)
+        .ok_or_else(|| AppError::bad_request("模型供应商类型不合法"))?;
+    command.provider_type = provider_type.as_str().to_owned();
+    command.provider_name = Some(
+        normalize_optional_registry_text("模型供应商名称", command.provider_name.as_deref(), 100)?
+            .unwrap_or_else(|| command.provider_code.clone()),
+    );
+    command.protocol = Some(
+        normalize_optional_registry_code("模型协议", command.protocol.as_deref(), 64)?
+            .unwrap_or_else(|| default_model_registry_protocol(provider_type).to_owned()),
+    );
+
+    command.deployment_code =
+        normalize_registry_code("模型部署编码", &command.deployment_code, 64)?;
+    command.deployment_name = Some(
+        normalize_optional_registry_text("模型部署名称", command.deployment_name.as_deref(), 100)?
+            .unwrap_or_else(|| command.deployment_code.clone()),
+    );
+    command.endpoint = normalize_model_registry_endpoint(&command.endpoint)?;
+    command.api_path = normalize_optional_model_registry_api_path(command.api_path.as_deref())?;
+    command.network_zone = Some(
+        normalize_optional_registry_code("网络区域", command.network_zone.as_deref(), 64)?
+            .unwrap_or_else(|| "public".to_owned()),
+    );
+    command.timeout_ms = Some(normalize_positive_i32_option(
+        "模型超时时间",
+        command.timeout_ms,
+        MODEL_REGISTRY_DEFAULT_TIMEOUT_MS,
+    )?);
+    if command.max_concurrency.is_some_and(|value| value <= 0) {
+        return Err(AppError::bad_request("模型最大并发必须大于 0"));
+    }
+
+    command.profile_code =
+        normalize_registry_code("模型 Profile 编码", &command.profile_code, 128)?;
+    command.profile_name = Some(
+        normalize_optional_registry_text(
+            "模型 Profile 名称",
+            command.profile_name.as_deref(),
+            128,
+        )?
+        .unwrap_or_else(|| command.profile_code.clone()),
+    );
+    command.model_name = normalize_registry_text("模型名称", &command.model_name, 255)?;
+    let model_kind = ModelKind::parse(&command.model_kind)
+        .ok_or_else(|| AppError::bad_request("模型类型不合法"))?;
+    command.model_kind = model_kind.as_str().to_owned();
+
+    command.credential_ref =
+        normalize_optional_model_registry_credential_ref(command.credential_ref.as_deref())?;
+    command.credential_code =
+        normalize_optional_registry_code("模型凭据编码", command.credential_code.as_deref(), 128)?
+            .or_else(|| {
+                command
+                    .credential_ref
+                    .as_deref()
+                    .map(credential_code_from_env_ref)
+            });
+
+    command.route_code = normalize_registry_code("模型路由编码", &command.route_code, 128)?;
+    let route_purpose = ModelRoutePurpose::parse(&command.route_purpose)
+        .ok_or_else(|| AppError::bad_request("模型路由用途不合法"))?;
+    command.route_purpose = route_purpose.as_str().to_owned();
+    command.priority = Some(normalize_positive_i32_option(
+        "模型路由优先级",
+        command.priority,
+        MODEL_REGISTRY_DEFAULT_PRIORITY,
+    )?);
+    command.status = Some(normalize_model_registry_status(command.status)?);
+
+    Ok(command)
+}
+
+fn normalize_registry_text(label: &str, value: &str, max_chars: usize) -> Result<String, AppError> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Err(AppError::bad_request(format!("{label}不能为空")));
+    }
+    ensure_max_chars(label, value, max_chars)?;
+    Ok(value.to_owned())
+}
+
+fn normalize_optional_registry_text(
+    label: &str,
+    value: Option<&str>,
+    max_chars: usize,
+) -> Result<Option<String>, AppError> {
+    let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+    ensure_max_chars(label, value, max_chars)?;
+    Ok(Some(value.to_owned()))
+}
+
+fn normalize_registry_code(label: &str, value: &str, max_chars: usize) -> Result<String, AppError> {
+    let value = normalize_registry_text(label, value, max_chars)?.to_ascii_lowercase();
+    if value
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.'))
+    {
+        Ok(value)
+    } else {
+        Err(AppError::bad_request(format!(
+            "{label}只能包含字母、数字、点、下划线和中划线"
+        )))
+    }
+}
+
+fn normalize_optional_registry_code(
+    label: &str,
+    value: Option<&str>,
+    max_chars: usize,
+) -> Result<Option<String>, AppError> {
+    let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+    normalize_registry_code(label, value, max_chars).map(Some)
+}
+
+fn normalize_model_registry_endpoint(value: &str) -> Result<String, AppError> {
+    let endpoint = normalize_registry_text("模型部署 Endpoint", value, 2000)?
+        .trim_end_matches('/')
+        .to_owned();
+    let url = url::Url::parse(&endpoint)
+        .map_err(|_| AppError::bad_request("模型部署 Endpoint 必须是合法 URL"))?;
+    if !matches!(url.scheme(), "http" | "https") {
+        return Err(AppError::bad_request("模型部署 Endpoint 只支持 http/https"));
+    }
+    Ok(endpoint)
+}
+
+fn normalize_optional_model_registry_api_path(
+    value: Option<&str>,
+) -> Result<Option<String>, AppError> {
+    let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+    ensure_max_chars("模型部署 API Path", value, 255)?;
+    let value = value.trim_matches('/');
+    if value.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(format!("/{value}")))
+    }
+}
+
+fn normalize_model_registry_credential_ref(value: &str) -> Result<String, AppError> {
+    let value = normalize_registry_text("模型凭据 env 引用", value, 128)?;
+    let Some((prefix, key)) = value.split_once(':') else {
+        return Err(AppError::bad_request("模型凭据必须使用 env: 前缀"));
+    };
+    if !prefix.eq_ignore_ascii_case("env") {
+        return Err(AppError::bad_request("模型凭据必须使用 env: 前缀"));
+    }
+    let key = key.trim();
+    if key.is_empty() {
+        return Err(AppError::bad_request("模型凭据 env key 不能为空"));
+    }
+    if !key
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+    {
+        return Err(AppError::bad_request(
+            "模型凭据 env key 只能包含字母、数字和下划线",
+        ));
+    }
+    Ok(format!("env:{key}"))
+}
+
+fn normalize_optional_model_registry_credential_ref(
+    value: Option<&str>,
+) -> Result<Option<String>, AppError> {
+    let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+    normalize_model_registry_credential_ref(value).map(Some)
+}
+
+fn credential_code_from_env_ref(credential_ref: &str) -> String {
+    let env_key = credential_ref
+        .split_once(':')
+        .map(|(_, key)| key)
+        .unwrap_or("model_api_key")
+        .trim()
+        .to_ascii_lowercase()
+        .replace('_', "-");
+    format!("env-{env_key}")
+}
+
+fn normalize_positive_i32_option(
+    label: &str,
+    value: Option<i32>,
+    default_value: i32,
+) -> Result<i32, AppError> {
+    let value = value.unwrap_or(default_value);
+    if value <= 0 {
+        return Err(AppError::bad_request(format!("{label}必须大于 0")));
+    }
+    Ok(value)
+}
+
+fn normalize_model_registry_status(value: Option<i16>) -> Result<i16, AppError> {
+    let status = value.unwrap_or(1);
+    if matches!(status, 1 | 2) {
+        Ok(status)
+    } else {
+        Err(AppError::bad_request("模型状态不合法"))
+    }
+}
+
+fn default_model_registry_protocol(provider_type: ModelProviderType) -> &'static str {
+    match provider_type {
+        ModelProviderType::RightCodeDraw => "http",
+        _ => "openai-compatible",
+    }
+}
+
+fn model_registry_capabilities(kind: ModelKind) -> Value {
+    match kind {
+        ModelKind::Llm => json!({"chat":true}),
+        ModelKind::Embedding => json!({"textEmbedding":true}),
+        ModelKind::Rerank => json!({"rerank":true}),
+        ModelKind::MediaGeneration => json!({"imageGeneration":true}),
+        ModelKind::Vlm => json!({"vision":true}),
+        ModelKind::Asr => json!({"speechToText":true}),
+        ModelKind::Tts => json!({"textToSpeech":true}),
+    }
+}
+
 fn env_fallback_route_for_purpose(
     purpose: ModelRoutePurpose,
     config: &ModelRuntimeConfig,
@@ -7824,6 +8335,7 @@ mod tests {
                 code: "deepseek-public".to_owned(),
                 name: "DeepSeek Public API".to_owned(),
                 endpoint: "https://api.deepseek.com".to_owned(),
+                api_path: None,
                 network_zone: "public".to_owned(),
                 status: 1,
             }],
@@ -7879,6 +8391,7 @@ mod tests {
                     code: "llm-private".to_owned(),
                     name: "Private LLM".to_owned(),
                     endpoint: "https://llm.internal".to_owned(),
+                    api_path: None,
                     network_zone: "private".to_owned(),
                     status: 1,
                 },
@@ -7888,6 +8401,7 @@ mod tests {
                     code: "llm-public".to_owned(),
                     name: "Public LLM".to_owned(),
                     endpoint: "https://api.example.com".to_owned(),
+                    api_path: None,
                     network_zone: "public".to_owned(),
                     status: 1,
                 },
@@ -7983,6 +8497,75 @@ mod tests {
         let debug = format!("{summary:?}");
         assert!(!debug.contains("LLM_API_KEY"));
         assert!(!debug.contains("env:"));
+    }
+
+    #[test]
+    fn model_registry_route_command_normalizes_db_backed_runtime_fields() {
+        let command = normalize_model_registry_route_command(ModelRegistryRouteCommand {
+            provider_code: " DeepSeek ".to_owned(),
+            provider_name: Some(" DeepSeek ".to_owned()),
+            provider_type: "deep-seek".to_owned(),
+            protocol: None,
+            deployment_code: " deepseek-public ".to_owned(),
+            deployment_name: None,
+            endpoint: " https://api.deepseek.com/ ".to_owned(),
+            api_path: Some(" /chat/completions ".to_owned()),
+            network_zone: None,
+            timeout_ms: None,
+            max_concurrency: None,
+            profile_code: " deepseek-v4-flash ".to_owned(),
+            profile_name: None,
+            model_name: " deepseek-v4-flash ".to_owned(),
+            model_kind: "LLM".to_owned(),
+            credential_code: None,
+            credential_ref: Some(" env:LLM_API_KEY ".to_owned()),
+            route_code: " runtime.llm.chat ".to_owned(),
+            route_purpose: "chat".to_owned(),
+            priority: None,
+            status: None,
+        })
+        .unwrap();
+
+        assert_eq!(command.provider_code, "deepseek");
+        assert_eq!(command.provider_type, "deep-seek");
+        assert_eq!(command.deployment_name.as_deref(), Some("deepseek-public"));
+        assert_eq!(command.endpoint, "https://api.deepseek.com");
+        assert_eq!(command.api_path.as_deref(), Some("/chat/completions"));
+        assert_eq!(command.model_kind, "llm");
+        assert_eq!(command.credential_code.as_deref(), Some("env-llm-api-key"));
+        assert_eq!(command.credential_ref.as_deref(), Some("env:LLM_API_KEY"));
+        assert_eq!(command.priority, Some(100));
+        assert_eq!(command.status, Some(1));
+    }
+
+    #[test]
+    fn model_registry_route_command_rejects_plain_credential_values() {
+        let err = normalize_model_registry_route_command(ModelRegistryRouteCommand {
+            provider_code: "deepseek".to_owned(),
+            provider_name: None,
+            provider_type: "deep-seek".to_owned(),
+            protocol: None,
+            deployment_code: "deepseek-public".to_owned(),
+            deployment_name: None,
+            endpoint: "https://api.deepseek.com".to_owned(),
+            api_path: Some("/chat/completions".to_owned()),
+            network_zone: None,
+            timeout_ms: None,
+            max_concurrency: None,
+            profile_code: "deepseek-v4-flash".to_owned(),
+            profile_name: None,
+            model_name: "deepseek-v4-flash".to_owned(),
+            model_kind: "llm".to_owned(),
+            credential_code: None,
+            credential_ref: Some("sk-plain-secret".to_owned()),
+            route_code: "runtime.llm.chat".to_owned(),
+            route_purpose: "chat".to_owned(),
+            priority: None,
+            status: None,
+        })
+        .unwrap_err();
+
+        assert!(err.to_string().contains("env:"));
     }
 
     #[test]

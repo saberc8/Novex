@@ -1,5 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { getModelRuntimeConfig, runModelHealthCheck } from "@/api/ai/model";
+import {
+  deleteModelRegistryRoute,
+  getModelRegistry,
+  getModelRuntimeConfig,
+  runModelHealthCheck,
+  upsertModelRegistryRoute
+} from "@/api/ai/model";
 
 function okResponse(data: unknown = true) {
   return Promise.resolve(
@@ -31,8 +37,28 @@ describe("model runtime api wrappers", () => {
     fetchMock.mockClear();
   });
 
-  it("uses runtime config and health-check endpoints", async () => {
+  it("uses runtime config, registry, upsert, and health-check endpoints", async () => {
     await getModelRuntimeConfig();
+    await getModelRegistry();
+    await upsertModelRegistryRoute({
+      providerCode: "deepseek",
+      providerName: "DeepSeek",
+      providerType: "deep-seek",
+      deploymentCode: "deepseek-public",
+      deploymentName: "DeepSeek Public API",
+      endpoint: "https://api.deepseek.com",
+      apiPath: "/chat/completions",
+      profileCode: "deepseek-v4-flash",
+      profileName: "DeepSeek V4 Flash",
+      modelName: "deepseek-v4-flash",
+      modelKind: "llm",
+      credentialCode: "env-llm-api-key",
+      credentialRef: "env:LLM_API_KEY",
+      routeCode: "runtime.llm.chat",
+      routePurpose: "chat",
+      priority: 100
+    });
+    await deleteModelRegistryRoute(42);
     await runModelHealthCheck({ target: "all" });
 
     expect(fetchMock.mock.calls[0]?.[0]).toBe(
@@ -40,9 +66,24 @@ describe("model runtime api wrappers", () => {
     );
     expect(fetchMock.mock.calls[0]?.[1]).toMatchObject({ method: "GET" });
     expect(fetchMock.mock.calls[1]?.[0]).toBe(
+      "http://localhost:4398/ai/models/registry"
+    );
+    expect(fetchMock.mock.calls[1]?.[1]).toMatchObject({ method: "GET" });
+    expect(fetchMock.mock.calls[2]?.[0]).toBe(
+      "http://localhost:4398/ai/models/registry/routes"
+    );
+    expect(fetchMock.mock.calls[2]?.[1]).toMatchObject({
+      method: "POST",
+      body: expect.stringContaining('"credentialRef":"env:LLM_API_KEY"')
+    });
+    expect(fetchMock.mock.calls[3]?.[0]).toBe(
+      "http://localhost:4398/ai/models/registry/routes/42"
+    );
+    expect(fetchMock.mock.calls[3]?.[1]).toMatchObject({ method: "DELETE" });
+    expect(fetchMock.mock.calls[4]?.[0]).toBe(
       "http://localhost:4398/ai/models/health-check"
     );
-    expect(fetchMock.mock.calls[1]?.[1]).toMatchObject({
+    expect(fetchMock.mock.calls[4]?.[1]).toMatchObject({
       method: "POST",
       body: JSON.stringify({ target: "all" })
     });
