@@ -347,10 +347,12 @@ crates/novex-rag/
   context/         context builder、citation builder
 
 crates/novex-agent/
-  intent/          意图识别和路由
-  react/           ReAct loop、step、observation
-  planner/         planner 和 task budget
-  runtime/         基于 novex-ai-core run graph 的 agent run 编排
+  intent.rs        AgentIntent、intent routing
+  tool_selection.rs  SelectedTool、seeded POC tool selection、tool policy mapping
+  plan.rs          AgentLoopKind、AgentRunPlan、budget/memory-aware ReAct planning
+  text.rs          shared text matching helper
+  module.rs        FoundationModule constructor
+  lib.rs           crate facade 和 CRATE_ID
 
 crates/novex-tools/
   types.rs         tool kind、risk、approval policy、definition、execution envelope
