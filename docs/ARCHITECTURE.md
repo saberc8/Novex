@@ -405,9 +405,11 @@ crates/novex-eval/
   lib.rs           crate facade 和 FoundationModule constructor
 
 crates/novex-trace/
-  bundle/          TraceBundle、TraceEvent、ReplaySummary
-  rollout/         event bundle、summary payload、run replay boundary
-  adapters/        Run Graph events -> trace events -> eval candidates
+  event.rs         TraceEventKind、TraceEvent constructors
+  bundle.rs        TraceBundle ordering、tool-call count、replay summary derivation
+  summary.rs       TraceReplaySummary DTO
+  module.rs        FoundationModule constructor
+  lib.rs           crate facade 和 CRATE_ID
 
 services/parser-worker/    Python
   MinerU                   PDF、扫描件、复杂版面解析

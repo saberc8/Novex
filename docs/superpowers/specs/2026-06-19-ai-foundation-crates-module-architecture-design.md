@@ -128,7 +128,8 @@ After the largest crates are normalized, apply the same rules to medium crates:
 - `novex-agent`: split intent routing into `intent.rs`, tool selection into `tool_selection.rs`, ReAct planning into `plan.rs`, shared matching helpers into `text.rs`, and foundation metadata into `module.rs`; keep `lib.rs` as the facade.
 - `novex-plugin`: split manifest DTO/error vocabulary into `types.rs`, manifest validation into `validation.rs`, built-in plugin catalog construction into `builtin.rs`, and foundation metadata into `module.rs`; keep `lib.rs` as the facade.
 - `novex-trigger`: split source/target vocabulary into `types.rs`, delivery routing/retry planning into `delivery.rs`, webhook signature and idempotency helpers into `webhook.rs`, and foundation metadata into `module.rs`; keep `lib.rs` as the facade.
-- `novex-trace`, `novex-skill`, `novex-memory`, and `novex-agent-protocol` can stay compact until they exceed the facade rule or start mixing unrelated domains.
+- `novex-trace`: split trace event vocabulary/constructors into `event.rs`, bundle ordering and replay logic into `bundle.rs`, replay summary DTO into `summary.rs`, and foundation metadata into `module.rs`; keep `lib.rs` as the facade.
+- `novex-skill`, `novex-memory`, and `novex-agent-protocol` can stay compact until they exceed the facade rule or start mixing unrelated domains.
 
 ## Test Layout
 
@@ -177,6 +178,7 @@ The default compatibility rule is root-level re-export preservation:
 - Existing code using `novex_agent::route_intent` or `novex_agent::plan_react_run` should keep compiling.
 - Existing code using `novex_plugin::validate_plugin_manifest` or `novex_plugin::builtin_plugin_manifest` should keep compiling.
 - Existing code using `novex_trigger::plan_trigger_delivery` or `novex_trigger::webhook_signature` should keep compiling.
+- Existing code using `novex_trace::TraceBundle` or `novex_trace::TraceEvent` should keep compiling.
 
 New module paths may also be public when useful, but they are secondary to preserving the crate-root facade.
 
