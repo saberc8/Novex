@@ -8,24 +8,28 @@ Novex 是一套面向企业交付的 AI Agent 基座。它不是单点 AI 应用
 
 <table>
   <tr>
-    <td width="50%">
+    <td width="100%">
       <img src="images/poc-codexlike.png" alt="Codex-like Agent 工作台" width="100%" />
       <br />
       <sub>Codex-like Agent 工作台：联网搜索、模型输出和运行事件。</sub>
     </td>
-    <td width="50%">
+  </tr>
+  <tr>
+    <td width="100%">
       <img src="images/poc-notebooklm.png" alt="NotebookLM-like 知识工作区" width="100%" />
       <br />
       <sub>NotebookLM-like 知识工作区：资料、对话和内容生成。</sub>
     </td>
   </tr>
   <tr>
-    <td width="50%">
+    <td width="100%">
       <img src="images/rbac-admin.png" alt="AI 基座模型管理" width="100%" />
       <br />
       <sub>AI 基座模型管理：模型路由、密钥占位和健康检查。</sub>
     </td>
-    <td width="50%">
+  </tr>
+  <tr>
+    <td width="100%">
       <img src="images/skills-admin.png" alt="AI Skills 导入与管理" width="100%" />
       <br />
       <sub>AI Skills 导入与管理：GitHub Skill 解析、预览和安装。</sub>
