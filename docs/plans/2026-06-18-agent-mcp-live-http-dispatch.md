@@ -41,7 +41,7 @@ This is an adapter-port slice from Codex-style tool execution: backend decides w
 ## Implementation Steps
 
 1. Add RED backend tests in `backend/src/application/ai/agent_tool_executor.rs` using a fake dispatcher and live-enabled MCP metadata.
-2. Run `cargo test -p backend-rust mcp_tool_execution_live_http_dispatch --offline` and confirm the tests fail because the helper/live dispatch behavior does not exist.
+2. Run `cargo test -p backend mcp_tool_execution_live_http_dispatch --offline` and confirm the tests fail because the helper/live dispatch behavior does not exist.
 3. Add backend imports for `McpStreamableHttpResponse`, `parse_mcp_tool_call_response`, and `std::future::Future`.
 4. Extract `mcp_streamable_http_request_plan` so dry-run evidence and live dispatch share one request-plan builder.
 5. Add `mcp_live_execution_enabled`, `mcp_auth_requires_secret`, and sanitized auth payload helpers.
@@ -55,8 +55,8 @@ This is an adapter-port slice from Codex-style tool execution: backend decides w
 
 - `cargo fmt --all -- --check`
 - `git diff --check`
-- `cargo test -p backend-rust mcp_tool_execution_live_http_dispatch --offline`
-- `cargo test -p backend-rust mcp_tool_execution --offline`
-- `cargo test -p backend-rust mcp --offline`
+- `cargo test -p backend mcp_tool_execution_live_http_dispatch --offline`
+- `cargo test -p backend mcp_tool_execution --offline`
+- `cargo test -p backend mcp --offline`
 - `cargo test -p novex-mcp mcp_streamable_http --offline`
 - `cargo test --workspace --offline`

@@ -33,7 +33,7 @@ Add a backend unit test named `streamed_tool_call_early_stop_completion_contract
 
 - [ ] **Step 2: Run the focused test red**
 
-Run: `cargo test -p backend-rust streamed_tool_call_early_stop --offline`
+Run: `cargo test -p backend streamed_tool_call_early_stop --offline`
 
 Expected: FAIL because the completion reason enum and optional response contract do not exist.
 
@@ -43,7 +43,7 @@ Add the completion reason enum and update `ModelLoopProviderCompletion<T>` to ca
 
 - [ ] **Step 4: Verify green**
 
-Run: `cargo test -p backend-rust streamed_tool_call_early_stop --offline`
+Run: `cargo test -p backend streamed_tool_call_early_stop --offline`
 
 Expected: PASS for the contract test.
 
@@ -64,7 +64,7 @@ Add a backend Tokio test named `streamed_tool_call_early_stop_returns_before_pro
 
 - [ ] **Step 2: Run the focused test red**
 
-Run: `cargo test -p backend-rust streamed_tool_call_early_stop --offline`
+Run: `cargo test -p backend streamed_tool_call_early_stop --offline`
 
 Expected: FAIL because stream detection is retained but not yet a helper-level early-stop signal.
 
@@ -74,7 +74,7 @@ Introduce `fn model_loop_streamed_tool_call_completion<T>(stream_state: &ModelLo
 
 - [ ] **Step 4: Verify green**
 
-Run: `cargo test -p backend-rust streamed_tool_call_early_stop --offline`
+Run: `cargo test -p backend streamed_tool_call_early_stop --offline`
 
 Expected: PASS.
 
@@ -96,7 +96,7 @@ Add tests proving `model_loop_parse_turn_output(None, Some(&streamed))` returns 
 
 - [ ] **Step 2: Run focused tests red**
 
-Run: `cargo test -p backend-rust streamed_tool_call_early_stop --offline`
+Run: `cargo test -p backend streamed_tool_call_early_stop --offline`
 
 Expected: FAIL because `model_loop_parse_turn_output` still requires `&ModelChatResp` and the loop still unwraps a response.
 
@@ -106,15 +106,15 @@ Change the retry loop to store `Option<ModelChatResp>` from `completion.response
 
 - [ ] **Step 4: Update matrix and verify**
 
-Update the Runtime loop and Runtime loop POC rows to say streamed tool-call detection now early-stops local provider await and immediately enters the existing approval/execution path. Add `cargo test -p backend-rust streamed_tool_call_early_stop --offline` to the focused command list.
+Update the Runtime loop and Runtime loop POC rows to say streamed tool-call detection now early-stops local provider await and immediately enters the existing approval/execution path. Add `cargo test -p backend streamed_tool_call_early_stop --offline` to the focused command list.
 
 Run:
 
 ```bash
 cargo fmt -- --check
-cargo test -p backend-rust streamed_tool_call_early_stop --offline
-cargo test -p backend-rust streamed_tool_call_decision --offline
-cargo test -p backend-rust provider_stream_tool_call --offline
+cargo test -p backend streamed_tool_call_early_stop --offline
+cargo test -p backend streamed_tool_call_decision --offline
+cargo test -p backend provider_stream_tool_call --offline
 cargo test --workspace --offline
 git diff --check
 ```

@@ -31,7 +31,7 @@ Add tests proving:
 Run:
 
 ```bash
-cargo test -p backend-rust agent_queue_broker_consumer --offline
+cargo test -p backend agent_queue_broker_consumer --offline
 ```
 
 Expected: FAIL until the repository claim function exists.
@@ -59,7 +59,7 @@ Add tests proving:
 Run:
 
 ```bash
-cargo test -p backend-rust agent_queue_broker_consumer --offline
+cargo test -p backend agent_queue_broker_consumer --offline
 ```
 
 Expected: FAIL until the runtime consumer exists.
@@ -99,9 +99,9 @@ Start the broker consumer when Agent queue is enabled, while leaving polling fal
 
 ```bash
 cargo fmt -- --check
-cargo test -p backend-rust agent_queue_broker_consumer --offline
-cargo test -p backend-rust agent_queue_runtime --offline
-cargo test -p backend-rust ai_agent_repository --offline
+cargo test -p backend agent_queue_broker_consumer --offline
+cargo test -p backend agent_queue_runtime --offline
+cargo test -p backend ai_agent_repository --offline
 ```
 
 ### Task 4: Docs, Full Verification, Merge

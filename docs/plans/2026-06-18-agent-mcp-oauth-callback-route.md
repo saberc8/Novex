@@ -44,10 +44,10 @@ Close the MCP OAuth authorization-code loop by wiring callback state consumption
 
 - `cargo fmt --all -- --check`
 - `git diff --check`
-- `cargo test -p backend-rust mcp_oauth_token_dispatch --offline`
-- `cargo test -p backend-rust mcp_oauth_callback_route --offline`
-- `cargo test -p backend-rust mcp_oauth_persistence --offline`
-- `cargo test -p backend-rust mcp --offline`
+- `cargo test -p backend mcp_oauth_token_dispatch --offline`
+- `cargo test -p backend mcp_oauth_callback_route --offline`
+- `cargo test -p backend mcp_oauth_persistence --offline`
+- `cargo test -p backend mcp --offline`
 - `cargo test --workspace --offline`
 
 ## Follow-up

@@ -1,6 +1,6 @@
 use std::env;
 
-use backend_rust::application::ai::knowledge_service::{
+use backend::application::ai::knowledge_service::{
     DatasetCommand, DocumentUploadCommand, KnowledgeService, RagAskCommand,
 };
 use sqlx::{postgres::PgPoolOptions, Row};

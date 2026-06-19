@@ -58,7 +58,7 @@ fn mcp_gateway_migration_defines_discovered_tool_table() {
 Run:
 
 ```bash
-cargo test -p backend-rust mcp_gateway_migration_defines_discovered_tool_table --offline
+cargo test -p backend mcp_gateway_migration_defines_discovered_tool_table --offline
 ```
 
 Expected: FAIL because the migration is not implemented.
@@ -92,8 +92,8 @@ Add methods:
 Run:
 
 ```bash
-cargo test -p backend-rust mcp_gateway_migration_defines_discovered_tool_table --offline
-cargo test -p backend-rust capability --offline
+cargo test -p backend mcp_gateway_migration_defines_discovered_tool_table --offline
+cargo test -p backend capability --offline
 ```
 
 Expected: PASS.
@@ -211,7 +211,7 @@ The first test should build a command with:
 Run:
 
 ```bash
-cargo test -p backend-rust mcp_server_command_normalizes_registration_policy --offline
+cargo test -p backend mcp_server_command_normalizes_registration_policy --offline
 ```
 
 Expected: FAIL.
@@ -239,8 +239,8 @@ For the first POC, discovery may accept an explicit `tools` array in the request
 Run:
 
 ```bash
-cargo test -p backend-rust mcp_ --offline
-cargo test -p backend-rust capability --offline
+cargo test -p backend mcp_ --offline
+cargo test -p backend capability --offline
 ```
 
 Expected: PASS.
@@ -280,7 +280,7 @@ fn agent_runtime_routes_mcp_tools_through_audited_observation_path() {
 Run:
 
 ```bash
-cargo test -p backend-rust agent_runtime_routes_mcp_tools_through_audited_observation_path --offline
+cargo test -p backend agent_runtime_routes_mcp_tools_through_audited_observation_path --offline
 ```
 
 Expected: FAIL.
@@ -300,8 +300,8 @@ Add `execute_mcp_tool` that:
 Run:
 
 ```bash
-cargo test -p backend-rust agent_runtime_routes_mcp_tools_through_audited_observation_path --offline
-cargo test -p backend-rust --offline
+cargo test -p backend agent_runtime_routes_mcp_tools_through_audited_observation_path --offline
+cargo test -p backend --offline
 ```
 
 Expected: PASS.

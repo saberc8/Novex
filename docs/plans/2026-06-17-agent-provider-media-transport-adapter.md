@@ -71,7 +71,7 @@ fn model_provider_media_transport_adapter_source_contract() {
 
 - [ ] **Step 2: Verify red**
 
-Run: `cargo test -p backend-rust model_provider_media_transport_adapter --offline`
+Run: `cargo test -p backend model_provider_media_transport_adapter --offline`
 
 Expected: FAIL because media transport symbols do not exist yet.
 
@@ -161,8 +161,8 @@ send_model_provider_media_image_request(ModelProviderMediaImageRequest {
 Run:
 
 ```bash
-cargo test -p backend-rust model_provider_media_transport_adapter --offline
-cargo test -p backend-rust media_ --offline
+cargo test -p backend model_provider_media_transport_adapter --offline
+cargo test -p backend media_ --offline
 ```
 
 Expected: all commands pass.
@@ -196,14 +196,14 @@ Run:
 ```bash
 cargo fmt -- --check
 git diff --check
-cargo test -p backend-rust model_provider_media_transport_adapter --offline
-cargo test -p backend-rust media_ --offline
-cargo test -p backend-rust model_provider_rag_transport_adapter --offline
-cargo test -p backend-rust runtime_embedding --offline
-cargo test -p backend-rust rerank_ --offline
-cargo test -p backend-rust model_provider_native_cancel_transport_adapter --offline
-cargo test -p backend-rust model_provider_response_transport_adapter --offline
-cargo test -p backend-rust model_provider_http_transport_adapter --offline
+cargo test -p backend model_provider_media_transport_adapter --offline
+cargo test -p backend media_ --offline
+cargo test -p backend model_provider_rag_transport_adapter --offline
+cargo test -p backend runtime_embedding --offline
+cargo test -p backend rerank_ --offline
+cargo test -p backend model_provider_native_cancel_transport_adapter --offline
+cargo test -p backend model_provider_response_transport_adapter --offline
+cargo test -p backend model_provider_http_transport_adapter --offline
 cargo test --workspace --offline
 ```
 

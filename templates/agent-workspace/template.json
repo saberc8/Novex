@@ -34,7 +34,7 @@
       "code": "agent_runtime_api",
       "name": "Agent Runtime API Smoke",
       "workdir": "backend",
-      "command": "cargo test -p backend-rust agent --offline"
+      "command": "cargo test -p backend agent --offline"
     },
     {
       "code": "agent_workspace_frontend",

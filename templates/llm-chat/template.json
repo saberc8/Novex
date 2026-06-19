@@ -40,7 +40,7 @@
       "code": "llm_chat_api",
       "name": "LLM Chat API Smoke",
       "workdir": "backend",
-      "command": "cargo test -p backend-rust model_service --offline"
+      "command": "cargo test -p backend model_service --offline"
     }
   ],
   "sort": 1,

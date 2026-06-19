@@ -67,6 +67,6 @@ Backend tests:
 
 Acceptance:
 
-- `cargo test -p backend-rust tool_io_timeout --offline`
-- `cargo test -p backend-rust model_loop --offline`
+- `cargo test -p backend tool_io_timeout --offline`
+- `cargo test -p backend model_loop --offline`
 - `cargo test --workspace --offline`

@@ -151,7 +151,7 @@ fn agent_service_model_loop_records_tool_concurrency_policy() {
 Run:
 
 ```bash
-cargo test -p backend-rust agent_service_model_loop_records_tool_concurrency_policy --offline
+cargo test -p backend agent_service_model_loop_records_tool_concurrency_policy --offline
 ```
 
 Expected: FAIL because backend does not record policy.
@@ -175,8 +175,8 @@ Change Parallel tools row to `slice-1 implemented` with wording that policy/lock
 Run:
 
 ```bash
-cargo test -p backend-rust model_loop --offline
-cargo test -p backend-rust agent_service --offline
+cargo test -p backend model_loop --offline
+cargo test -p backend agent_service --offline
 cargo fmt -- --check
 ```
 
@@ -194,8 +194,8 @@ Run:
 ```bash
 cargo fmt -- --check
 cargo test -p novex-tools --offline
-cargo test -p backend-rust model_loop --offline
-cargo test -p backend-rust agent_service --offline
+cargo test -p backend model_loop --offline
+cargo test -p backend agent_service --offline
 cargo test --workspace --offline
 git status --short
 ```

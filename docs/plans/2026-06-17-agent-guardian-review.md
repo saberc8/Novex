@@ -4,7 +4,7 @@
 
 **Goal:** Add the Codex Guardian approval-review foundation to Novex: reusable review crate, denial circuit breaker, backend approval-pause evidence, trace payload preservation, and eval tags.
 
-**Architecture:** `novex-approval-review` owns Guardian review vocabulary and state-machine behavior. `backend-rust` adapts existing tool risk/policy records into Guardian review payloads when approval pauses are emitted. `novex-eval` extracts Guardian review tags from trace bundles.
+**Architecture:** `novex-approval-review` owns Guardian review vocabulary and state-machine behavior. `backend` adapts existing tool risk/policy records into Guardian review payloads when approval pauses are emitted. `novex-eval` extracts Guardian review tags from trace bundles.
 
 **Tech Stack:** Rust, serde, serde_json, existing backend AgentService, Cargo offline tests.
 
@@ -90,7 +90,7 @@ Add tests for:
 Run:
 
 ```bash
-cargo test -p backend-rust guardian_review --offline
+cargo test -p backend guardian_review --offline
 ```
 
 Expected: FAIL until backend maps Guardian review decisions and preserves approval payloads in traces.
@@ -108,8 +108,8 @@ Expected: FAIL until backend maps Guardian review decisions and preserves approv
 Run:
 
 ```bash
-cargo test -p backend-rust guardian_review --offline
-cargo test -p backend-rust agent_tool_policy_requires_manual_approval_for_high_risk_even_when_auto_approved --offline
+cargo test -p backend guardian_review --offline
+cargo test -p backend agent_tool_policy_requires_manual_approval_for_high_risk_even_when_auto_approved --offline
 ```
 
 Expected: PASS.

@@ -26,7 +26,7 @@ Add tests for:
 
 **Step 2: Run red tests**
 
-Run: `cargo test -p backend-rust model_loop_history_messages --offline`
+Run: `cargo test -p backend model_loop_history_messages --offline`
 
 Expected: FAIL because `build_model_loop_messages_from_history` does not exist yet.
 
@@ -49,9 +49,9 @@ Add:
 **Step 2: Run green tests**
 
 Run:
-- `cargo test -p backend-rust model_loop_history_messages --offline`
-- `cargo test -p backend-rust agent_service_model_loop_installs_response_item_history_for_sampling --offline`
-- `cargo test -p backend-rust observation_prompt_includes_tool_result_and_final_answer_instruction --offline`
+- `cargo test -p backend model_loop_history_messages --offline`
+- `cargo test -p backend agent_service_model_loop_installs_response_item_history_for_sampling --offline`
+- `cargo test -p backend observation_prompt_includes_tool_result_and_final_answer_instruction --offline`
 
 Expected: PASS.
 
@@ -102,9 +102,9 @@ Expected: PASS.
 Commit feature work, merge `feat/enterprise-agent-foundation` into `main`, rerun full verification on `main`, run `cargo clean` in both worktrees, and sync feature to main.
 
 **Verification evidence so far:**
-- Red: `cargo test -p backend-rust model_loop_history_messages --offline` failed on missing `build_model_loop_messages_from_history`.
-- Green: `cargo test -p backend-rust model_loop_history_messages --offline`
-- Green: `cargo test -p backend-rust agent_service_model_loop_installs_response_item_history_for_sampling --offline`
-- Green: `cargo test -p backend-rust observation_prompt_includes_tool_result_and_final_answer_instruction --offline`
+- Red: `cargo test -p backend model_loop_history_messages --offline` failed on missing `build_model_loop_messages_from_history`.
+- Green: `cargo test -p backend model_loop_history_messages --offline`
+- Green: `cargo test -p backend agent_service_model_loop_installs_response_item_history_for_sampling --offline`
+- Green: `cargo test -p backend observation_prompt_includes_tool_result_and_final_answer_instruction --offline`
 - Green: `cargo fmt -- --check`
 - Green: `cargo test --workspace --offline`

@@ -36,7 +36,7 @@ Add backend tests proving:
 Run:
 
 ```bash
-cargo test -p backend-rust agent_queue_resume_requeue --offline
+cargo test -p backend agent_queue_resume_requeue --offline
 ```
 
 Expected: FAIL until the status, repository methods, worker branch, and service branch exist.
@@ -67,8 +67,8 @@ Add `requeue_agent_run_for_resume(tenant_id, run_id, payload, user_id, now)` tha
 **Step 4: Verify**
 
 ```bash
-cargo test -p backend-rust agent_queue_resume_requeue --offline
-cargo test -p backend-rust agent_run_queue --offline
+cargo test -p backend agent_queue_resume_requeue --offline
+cargo test -p backend agent_run_queue --offline
 ```
 
 ### Task 3: Worker Waiting-Approval Handling
@@ -91,8 +91,8 @@ Ok(run) if run.status == "waiting_approval" => {
 **Step 2: Verify**
 
 ```bash
-cargo test -p backend-rust agent_queue_resume_requeue --offline
-cargo test -p backend-rust agent_queue_runtime --offline
+cargo test -p backend agent_queue_resume_requeue --offline
+cargo test -p backend agent_queue_runtime --offline
 ```
 
 ### Task 4: Resume API Requeue And Queued Resume Execution
@@ -126,10 +126,10 @@ At the top of `execute_queued_run`, detect resume payloads, transition `resuming
 **Step 5: Verify**
 
 ```bash
-cargo test -p backend-rust agent_queue_resume_requeue --offline
-cargo test -p backend-rust guardian_review --offline
-cargo test -p backend-rust guardian_auto_approval --offline
-cargo test -p backend-rust agent_queue_runtime --offline
+cargo test -p backend agent_queue_resume_requeue --offline
+cargo test -p backend guardian_review --offline
+cargo test -p backend guardian_auto_approval --offline
+cargo test -p backend agent_queue_runtime --offline
 ```
 
 ### Task 5: Docs, Full Verification, Merge

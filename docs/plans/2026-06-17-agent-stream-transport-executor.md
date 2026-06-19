@@ -35,7 +35,7 @@ Add backend test `model_stream_transport_task_uses_stream_specific_executor`. It
 
 - [ ] **Step 2: Run focused test red**
 
-Run: `cargo test -p backend-rust model_stream_transport_executor --offline`
+Run: `cargo test -p backend model_stream_transport_executor --offline`
 
 Expected: FAIL because the stream facade still spawns `chat_completion_for_purpose`.
 
@@ -76,7 +76,7 @@ let transport = ModelChatStreamTransportTask::spawn(async move {
 
 - [ ] **Step 4: Verify green**
 
-Run: `cargo test -p backend-rust model_stream_transport_executor --offline`
+Run: `cargo test -p backend model_stream_transport_executor --offline`
 
 Expected: PASS.
 
@@ -99,7 +99,7 @@ If existing stream transport tests mention only the task wrapper, keep them and 
 
 - [ ] **Step 2: Update migration matrix**
 
-Update the Runtime loop row to mention the private stream transport executor, update Runtime loop POC evidence to say `ModelChatStreamTransportTask` runs the stream-specific executor, add `cargo test -p backend-rust model_stream_transport_executor --offline` to the verification command, and add this plan to Follow-up Implementation Plans.
+Update the Runtime loop row to mention the private stream transport executor, update Runtime loop POC evidence to say `ModelChatStreamTransportTask` runs the stream-specific executor, add `cargo test -p backend model_stream_transport_executor --offline` to the verification command, and add this plan to Follow-up Implementation Plans.
 
 - [ ] **Step 3: Verify**
 
@@ -108,13 +108,13 @@ Run:
 ```bash
 cargo fmt -- --check
 git diff --check
-cargo test -p backend-rust model_stream_transport_executor --offline
-cargo test -p backend-rust model_stream_transport_task --offline
-cargo test -p backend-rust model_stream_call_lifecycle --offline
-cargo test -p backend-rust model_stream_native_runtime_api --offline
-cargo test -p backend-rust model_stream_completion_builder --offline
-cargo test -p backend-rust streamed_tool_call_early_stop --offline
-cargo test -p backend-rust provider_abort --offline
+cargo test -p backend model_stream_transport_executor --offline
+cargo test -p backend model_stream_transport_task --offline
+cargo test -p backend model_stream_call_lifecycle --offline
+cargo test -p backend model_stream_native_runtime_api --offline
+cargo test -p backend model_stream_completion_builder --offline
+cargo test -p backend streamed_tool_call_early_stop --offline
+cargo test -p backend provider_abort --offline
 cargo test --workspace --offline
 ```
 

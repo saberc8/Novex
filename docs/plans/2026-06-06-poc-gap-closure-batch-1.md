@@ -45,5 +45,5 @@
 **Steps:**
 1. Run `cargo fmt --check`.
 2. Run focused backend tests for knowledge repository/service/routes.
-3. Run `cargo test -p backend-rust application::ai::knowledge_service interfaces::http::ai::knowledge infrastructure::persistence::ai_knowledge_repository`.
-4. If focused tests pass, run broader `cargo test -p backend-rust`.
+3. Run `cargo test -p backend application::ai::knowledge_service interfaces::http::ai::knowledge infrastructure::persistence::ai_knowledge_repository`.
+4. If focused tests pass, run broader `cargo test -p backend`.

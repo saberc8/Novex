@@ -43,7 +43,7 @@ Then inspect the body from `execute_chat_completion_stream_transport` through `e
 
 - [ ] **Step 2: Verify red**
 
-Run: `cargo test -p backend-rust model_provider_stream_dispatch_mode --offline`
+Run: `cargo test -p backend model_provider_stream_dispatch_mode --offline`
 
 Expected: FAIL because dispatch mode does not exist yet.
 
@@ -63,7 +63,7 @@ Pass `ModelProviderDispatchMode::Unary` from existing unary entry points and `Mo
 
 - [ ] **Step 4: Verify green**
 
-Run: `cargo test -p backend-rust model_provider_stream_dispatch_mode --offline`
+Run: `cargo test -p backend model_provider_stream_dispatch_mode --offline`
 
 Expected: PASS.
 
@@ -84,7 +84,7 @@ Add backend test `model_provider_stream_dispatch_route_path_separates_unary_and_
 
 - [ ] **Step 2: Verify red**
 
-Run: `cargo test -p backend-rust model_provider_stream_dispatch_route_path --offline`
+Run: `cargo test -p backend model_provider_stream_dispatch_route_path --offline`
 
 Expected: FAIL until route execution receives and checks the mode.
 
@@ -108,7 +108,7 @@ Keep the existing unary text parsing path for all other cases.
 
 - [ ] **Step 4: Verify green**
 
-Run: `cargo test -p backend-rust model_provider_stream_dispatch_route_path --offline`
+Run: `cargo test -p backend model_provider_stream_dispatch_route_path --offline`
 
 Expected: PASS.
 
@@ -136,13 +136,13 @@ Run:
 ```bash
 cargo fmt -- --check
 git diff --check
-cargo test -p backend-rust model_provider_stream_dispatch_mode --offline
-cargo test -p backend-rust model_provider_stream_dispatch_route_path --offline
-cargo test -p backend-rust model_stream_transport_executor --offline
-cargo test -p backend-rust model_stream_transport_task --offline
-cargo test -p backend-rust model_stream_completion_builder --offline
-cargo test -p backend-rust streamed_tool_call_early_stop --offline
-cargo test -p backend-rust provider_abort --offline
+cargo test -p backend model_provider_stream_dispatch_mode --offline
+cargo test -p backend model_provider_stream_dispatch_route_path --offline
+cargo test -p backend model_stream_transport_executor --offline
+cargo test -p backend model_stream_transport_task --offline
+cargo test -p backend model_stream_completion_builder --offline
+cargo test -p backend streamed_tool_call_early_stop --offline
+cargo test -p backend provider_abort --offline
 cargo test --workspace --offline
 ```
 

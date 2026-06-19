@@ -82,7 +82,7 @@ Seed:
 ```bash
 rg "CREATE TABLE IF NOT EXISTS ai_eval_dataset|CREATE TABLE IF NOT EXISTS ai_eval_case|CREATE TABLE IF NOT EXISTS ai_eval_result" backend/migrations/202606050010_create_ai_eval_runtime.sql
 rg "ai:eval:run|ai:eval:case:list|ai:eval:report" backend/migrations/202606050011_seed_ai_eval_permissions.sql
-cargo test -p backend-rust --offline
+cargo test -p backend --offline
 ```
 
 **Step 3: Commit**
@@ -115,7 +115,7 @@ Add tests for:
 Run:
 
 ```bash
-cargo test -p backend-rust eval_runtime --offline
+cargo test -p backend eval_runtime --offline
 ```
 
 Expected: fail because eval modules and routes do not exist.
@@ -143,8 +143,8 @@ Runtime behavior:
 **Step 3: Verify and commit**
 
 ```bash
-cargo test -p backend-rust eval_runtime --offline
-cargo test -p backend-rust --offline
+cargo test -p backend eval_runtime --offline
+cargo test -p backend --offline
 git add backend/src/infrastructure/persistence/ai_eval_repository.rs backend/src/application/ai/eval_service.rs backend/src/interfaces/http/ai/eval.rs backend/src/infrastructure/persistence/mod.rs backend/src/application/ai/mod.rs backend/src/interfaces/http/ai/mod.rs
 git commit -m "feat: add eval runtime api"
 ```

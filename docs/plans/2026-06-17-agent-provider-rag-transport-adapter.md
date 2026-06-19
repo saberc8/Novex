@@ -88,7 +88,7 @@ fn model_provider_rag_transport_adapter_source_contract() {
 
 - [ ] **Step 2: Verify red**
 
-Run: `cargo test -p backend-rust model_provider_rag_transport_adapter --offline`
+Run: `cargo test -p backend model_provider_rag_transport_adapter --offline`
 
 Expected: FAIL because RAG transport symbols do not exist yet.
 
@@ -234,9 +234,9 @@ Import the RAG adapter symbols in `model_service.rs`, then replace the bodies of
 Run:
 
 ```bash
-cargo test -p backend-rust model_provider_rag_transport_adapter --offline
-cargo test -p backend-rust runtime_embedding --offline
-cargo test -p backend-rust rerank_ --offline
+cargo test -p backend model_provider_rag_transport_adapter --offline
+cargo test -p backend runtime_embedding --offline
+cargo test -p backend rerank_ --offline
 ```
 
 Expected: all commands pass.
@@ -270,13 +270,13 @@ Run:
 ```bash
 cargo fmt -- --check
 git diff --check
-cargo test -p backend-rust model_provider_rag_transport_adapter --offline
-cargo test -p backend-rust runtime_embedding --offline
-cargo test -p backend-rust rerank_ --offline
-cargo test -p backend-rust model_provider_native_cancel_transport_adapter --offline
-cargo test -p backend-rust model_provider_response_transport_adapter --offline
-cargo test -p backend-rust model_provider_http_transport_adapter --offline
-cargo test -p backend-rust provider_call_lease_cancel --offline
+cargo test -p backend model_provider_rag_transport_adapter --offline
+cargo test -p backend runtime_embedding --offline
+cargo test -p backend rerank_ --offline
+cargo test -p backend model_provider_native_cancel_transport_adapter --offline
+cargo test -p backend model_provider_response_transport_adapter --offline
+cargo test -p backend model_provider_http_transport_adapter --offline
+cargo test -p backend provider_call_lease_cancel --offline
 cargo test --workspace --offline
 ```
 

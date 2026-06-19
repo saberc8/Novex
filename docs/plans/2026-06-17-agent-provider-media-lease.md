@@ -39,7 +39,7 @@ Add tests for:
 
 - [x] **Step 2: Run red tests**
 
-Run: `cargo test -p backend-rust provider_call_lease --offline`
+Run: `cargo test -p backend provider_call_lease --offline`
 
 Expected: FAIL because `generate_media_image_for_source` does not exist yet and Agent media tool still performs the direct HTTP call.
 
@@ -71,7 +71,7 @@ Add `generate_media_image_for_source` using `execute_provider_call_with_lease` w
 
 - [x] **Step 3: Run green provider lease tests**
 
-Run: `cargo test -p backend-rust provider_call_lease --offline`
+Run: `cargo test -p backend provider_call_lease --offline`
 
 Expected: PASS.
 
@@ -99,7 +99,7 @@ Build the existing success payload from the returned provider response.
 
 - [x] **Step 2: Run focused media tests**
 
-Run: `cargo test -p backend-rust media_ --offline`
+Run: `cargo test -p backend media_ --offline`
 
 Expected: PASS.
 
@@ -130,9 +130,9 @@ Expected: PASS.
 Commit feature work, merge `feat/enterprise-agent-foundation` into `main`, rerun full verification on `main`, run `cargo clean` in both worktrees, and sync feature to `main`.
 
 **Verification evidence so far:**
-- Red: `cargo test -p backend-rust provider_call_lease --offline` failed on missing `generate_media_image`.
-- Green: `cargo test -p backend-rust provider_call_lease --offline`
-- Green: `cargo test -p backend-rust media_ --offline`
+- Red: `cargo test -p backend provider_call_lease --offline` failed on missing `generate_media_image`.
+- Green: `cargo test -p backend provider_call_lease --offline`
+- Green: `cargo test -p backend media_ --offline`
 - Green: `cargo fmt -- --check`
 - Green: `cargo test --workspace --offline` passed with 741 backend unit tests, workspace crate tests/doc-tests, and one ignored live RAG e2e infra test.
 - Green: `git diff --check`

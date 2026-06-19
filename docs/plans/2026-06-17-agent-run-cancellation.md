@@ -49,7 +49,7 @@ fn agent_service_model_loop_records_external_cancel_reason() {
 Run:
 
 ```bash
-cargo test -p backend-rust external_cancel --offline
+cargo test -p backend external_cancel --offline
 ```
 
 Expected: FAIL because `external_cancel` checkpoint helpers are not implemented.
@@ -102,7 +102,7 @@ async fn finish_model_loop_cancelled(
 Run:
 
 ```bash
-cargo test -p backend-rust external_cancel --offline
+cargo test -p backend external_cancel --offline
 ```
 
 Expected: PASS.
@@ -142,7 +142,7 @@ fn agent_service_model_loop_checks_cancel_around_tool_batches() {
 Run:
 
 ```bash
-cargo test -p backend-rust external_cancel --offline
+cargo test -p backend external_cancel --offline
 ```
 
 Expected: FAIL until the checkpoint calls are present.
@@ -164,8 +164,8 @@ If any checkpoint returns `Cancelled`, return `self.get_run(run_id).await`.
 Run:
 
 ```bash
-cargo test -p backend-rust external_cancel --offline
-cargo test -p backend-rust model_loop --offline
+cargo test -p backend external_cancel --offline
+cargo test -p backend model_loop --offline
 ```
 
 Expected: PASS.
@@ -192,9 +192,9 @@ Run:
 
 ```bash
 cargo fmt -- --check
-cargo test -p backend-rust external_cancel --offline
-cargo test -p backend-rust model_loop --offline
-cargo test -p backend-rust agent_service --offline
+cargo test -p backend external_cancel --offline
+cargo test -p backend model_loop --offline
+cargo test -p backend agent_service --offline
 cargo test --workspace --offline
 ```
 

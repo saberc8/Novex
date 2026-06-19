@@ -89,7 +89,7 @@ Use TDD for implementation:
 - Rust handler tests for permission checks and route registration.
 - Repository-level smoke through SQLx against the existing local Postgres path when available.
 - Frontend tests for dataset creation/upload calls, parse polling, session creation, message sending, and rendering citations from chat-flow responses.
-- Final verification with `cargo test -p backend-rust --offline`, workspace tests where practical, and package-level `pnpm` tests/typecheck for `apps/chat-web`.
+- Final verification with `cargo test -p backend --offline`, workspace tests where practical, and package-level `pnpm` tests/typecheck for `apps/chat-web`.
 
 ## Milestone Boundary
 

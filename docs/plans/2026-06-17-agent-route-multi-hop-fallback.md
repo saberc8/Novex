@@ -6,7 +6,7 @@
 
 **Architecture:** Keep `ai_model_route.fallback_route_id` and `fallback_plan_for_purpose_with_route_id` as the policy source. Add small pure helpers for fallback bounds/cycle decisions, then refactor `execute_normalized_chat_completion_with_fallback` so it iterates through eligible route chains and preserves ordered `providerAttempts`.
 
-**Tech Stack:** Rust, `backend-rust`, `novex-model`, `serde_json`, `HashSet`, existing `ModelProviderAttempt` trace/eval contract.
+**Tech Stack:** Rust, `backend`, `novex-model`, `serde_json`, `HashSet`, existing `ModelProviderAttempt` trace/eval contract.
 
 ---
 
@@ -80,7 +80,7 @@ fn multi_hop_fallback_blocks_cycles_and_hop_overflow() {
 Run:
 
 ```bash
-cargo test -p backend-rust multi_hop_fallback --offline
+cargo test -p backend multi_hop_fallback --offline
 ```
 
 Expected: FAIL because `MAX_MODEL_FALLBACK_HOPS` and `model_fallback_chain_can_visit` do not exist.
@@ -108,7 +108,7 @@ Import `HashSet`.
 Run:
 
 ```bash
-cargo test -p backend-rust multi_hop_fallback --offline
+cargo test -p backend multi_hop_fallback --offline
 ```
 
 Expected: PASS.
@@ -151,7 +151,7 @@ fn multi_hop_fallback_source_contract_iterates_route_chain() {
 Run:
 
 ```bash
-cargo test -p backend-rust multi_hop_fallback_source --offline
+cargo test -p backend multi_hop_fallback_source --offline
 ```
 
 Expected: FAIL because the runtime still only executes one fallback helper.
@@ -175,9 +175,9 @@ Keep the existing `execute_fallback_model_chat_completion` only if it is still u
 Run:
 
 ```bash
-cargo test -p backend-rust multi_hop_fallback_source --offline
-cargo test -p backend-rust provider_lifecycle --offline
-cargo test -p backend-rust route_circuit_breaker --offline
+cargo test -p backend multi_hop_fallback_source --offline
+cargo test -p backend provider_lifecycle --offline
+cargo test -p backend route_circuit_breaker --offline
 ```
 
 Expected: PASS.
@@ -203,7 +203,7 @@ Change rollout trace status from `slice-8 implemented` to `slice-9 implemented`.
 Add the new focused command to the Rollout/trace/eval acceptance row:
 
 ```bash
-cargo test -p backend-rust multi_hop_fallback --offline
+cargo test -p backend multi_hop_fallback --offline
 ```
 
 Add this implementation plan under follow-ups.
@@ -228,10 +228,10 @@ Run:
 
 ```bash
 cargo fmt -- --check
-cargo test -p backend-rust multi_hop_fallback --offline
-cargo test -p backend-rust provider_lifecycle --offline
-cargo test -p backend-rust route_circuit_breaker --offline
-cargo test -p backend-rust route_circuit_breaker_trace --offline
+cargo test -p backend multi_hop_fallback --offline
+cargo test -p backend provider_lifecycle --offline
+cargo test -p backend route_circuit_breaker --offline
+cargo test -p backend route_circuit_breaker_trace --offline
 cargo test -p novex-eval provider_fallback --offline
 cargo test -p novex-eval circuit_breaker --offline
 ```
@@ -254,12 +254,12 @@ Run:
 
 ```bash
 git status --short --branch
-cd /Users/yusenlin/Avalon/freedom/github/zm-agent/Novex
+cd /path/to/Novex
 git status --short --branch
 git merge --no-ff feat/enterprise-agent-foundation -m "merge: enterprise agent foundation multi-hop fallback"
 cargo fmt -- --check
 cargo test --workspace --offline
-cd /Users/yusenlin/Avalon/freedom/github/zm-agent/Novex/.worktrees/enterprise-agent-foundation
+cd /path/to/Novex/.worktrees/enterprise-agent-foundation
 git merge --ff-only main
 ```
 

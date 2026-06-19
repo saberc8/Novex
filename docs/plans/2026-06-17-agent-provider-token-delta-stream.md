@@ -6,7 +6,7 @@
 
 **Architecture:** Extend `ModelChatCommand` with a local-only stream sink, enable chat-completions SSE for CodeAgent calls, parse provider delta chunks into the final response, and have AgentService drain the sink into `model_delta` run events. The final inference event carries streaming metadata for trace/eval consumers.
 
-**Tech Stack:** Rust, `backend-rust`, `tokio::sync::mpsc`, `serde_json`, existing `ai_run_event` persistence, existing SSE/WebSocket run-event transports.
+**Tech Stack:** Rust, `backend`, `tokio::sync::mpsc`, `serde_json`, existing `ai_run_event` persistence, existing SSE/WebSocket run-event transports.
 
 ## Global Constraints
 
@@ -37,7 +37,7 @@ Add tests proving CodeAgent requests set `"stream": true` and provider SSE delta
 Run:
 
 ```bash
-cargo test -p backend-rust provider_token_delta --offline
+cargo test -p backend provider_token_delta --offline
 ```
 
 Expected: FAIL because stream chunk types and parser do not exist.
@@ -51,7 +51,7 @@ Add the stream chunk type, add `provider_delta_chunks` to `ModelChatResp`, parse
 Run:
 
 ```bash
-cargo test -p backend-rust provider_token_delta --offline
+cargo test -p backend provider_token_delta --offline
 ```
 
 Expected: PASS.
@@ -76,7 +76,7 @@ Add tests proving AgentService source includes a CodeAgent stream channel and th
 Run:
 
 ```bash
-cargo test -p backend-rust model_delta --offline
+cargo test -p backend model_delta --offline
 ```
 
 Expected: FAIL because the event sink and inference metadata do not exist.
@@ -90,7 +90,7 @@ Attach an `mpsc::UnboundedSender<ModelProviderStreamChunk>` to CodeAgent command
 Run:
 
 ```bash
-cargo test -p backend-rust model_delta --offline
+cargo test -p backend model_delta --offline
 ```
 
 Expected: PASS.
@@ -114,8 +114,8 @@ Run:
 
 ```bash
 cargo fmt -- --check
-cargo test -p backend-rust provider_token_delta --offline
-cargo test -p backend-rust model_delta --offline
+cargo test -p backend provider_token_delta --offline
+cargo test -p backend model_delta --offline
 cargo test --workspace --offline
 git diff --check
 ```

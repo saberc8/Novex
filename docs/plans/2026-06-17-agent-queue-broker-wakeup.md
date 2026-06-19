@@ -31,7 +31,7 @@ Add tests proving:
 Run:
 
 ```bash
-cargo test -p backend-rust agent_queue_broker_wakeup --offline
+cargo test -p backend agent_queue_broker_wakeup --offline
 ```
 
 Expected: FAIL until Agent RabbitMQ types exist.
@@ -56,7 +56,7 @@ Add tests proving:
 Run:
 
 ```bash
-cargo test -p backend-rust agent_queue_broker_wakeup --offline
+cargo test -p backend agent_queue_broker_wakeup --offline
 ```
 
 Expected: FAIL until config, mapper, message builder, and trait exist.
@@ -108,9 +108,9 @@ Add:
 
 ```bash
 cargo fmt -- --check
-cargo test -p backend-rust agent_queue_broker_wakeup --offline
-cargo test -p backend-rust agent_queue_runtime --offline
-cargo test -p backend-rust rabbitmq --offline
+cargo test -p backend agent_queue_broker_wakeup --offline
+cargo test -p backend agent_queue_runtime --offline
+cargo test -p backend rabbitmq --offline
 ```
 
 ### Task 4: Docs, Full Verification, Merge

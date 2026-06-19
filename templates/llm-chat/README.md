@@ -23,4 +23,4 @@ Script: `templates/llm-chat/smoke.sh`
 | Code | Workdir | Command |
 | --- | --- | --- |
 | `llm_chat_frontend` | `apps/chat-web` | `pnpm test` |
-| `llm_chat_api` | `backend` | `cargo test -p backend-rust model_service --offline` |
+| `llm_chat_api` | `backend` | `cargo test -p backend model_service --offline` |

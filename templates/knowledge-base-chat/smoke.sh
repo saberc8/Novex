@@ -12,4 +12,4 @@ run_check() {
 }
 
 run_check "apps/chat-web" "pnpm test"
-run_check "backend" "cargo test -p backend-rust knowledge --offline"
+run_check "backend" "cargo test -p backend knowledge --offline"

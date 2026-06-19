@@ -4,7 +4,7 @@
 
 **Goal:** Add a model-backed Codex Guardian review path to Novex approval handling with a dedicated model route purpose, strict prompt/parser contract, fail-closed timeout/failure semantics, backend approval evidence, and eval tags.
 
-**Architecture:** `novex-model` exposes `guardian_review` as a first-class LLM route purpose. `novex-approval-review` owns the Guardian prompt, assessment parser, and model-to-decision mapping. `backend-rust` calls the configured Guardian route when auto-approval is enabled for a tool that would otherwise pause, and `novex-eval` tags the enriched review payload.
+**Architecture:** `novex-model` exposes `guardian_review` as a first-class LLM route purpose. `novex-approval-review` owns the Guardian prompt, assessment parser, and model-to-decision mapping. `backend` calls the configured Guardian route when auto-approval is enabled for a tool that would otherwise pause, and `novex-eval` tags the enriched review payload.
 
 **Tech Stack:** Rust, serde, serde_json, tokio timeout, existing ModelRuntimeService, Cargo offline tests.
 
@@ -31,7 +31,7 @@ Run:
 
 ```bash
 cargo test -p novex-model guardian_review --offline
-cargo test -p backend-rust guardian_review_model_route --offline
+cargo test -p backend guardian_review_model_route --offline
 ```
 
 Expected: FAIL until the enum and route mappings exist.
@@ -46,7 +46,7 @@ Run:
 
 ```bash
 cargo test -p novex-model guardian_review --offline
-cargo test -p backend-rust guardian_review_model_route --offline
+cargo test -p backend guardian_review_model_route --offline
 ```
 
 Expected: PASS.
@@ -124,7 +124,7 @@ Add tests proving:
 Run:
 
 ```bash
-cargo test -p backend-rust guardian_model_review --offline
+cargo test -p backend guardian_model_review --offline
 ```
 
 Expected: FAIL until backend adapter functions exist.
@@ -144,8 +144,8 @@ Expected: FAIL until backend adapter functions exist.
 Run:
 
 ```bash
-cargo test -p backend-rust guardian_model_review --offline
-cargo test -p backend-rust guardian_review --offline
+cargo test -p backend guardian_model_review --offline
+cargo test -p backend guardian_review --offline
 ```
 
 Expected: PASS.

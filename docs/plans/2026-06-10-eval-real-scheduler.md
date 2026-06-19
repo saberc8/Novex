@@ -21,7 +21,7 @@ Add tests in `backend/src/application/ai/eval_service.rs` that include the migra
 
 **Step 2: Run failing test**
 
-Run: `cargo test -p backend-rust application::ai::eval_service::tests::eval_task_queue_migration_defines_required_tables`
+Run: `cargo test -p backend application::ai::eval_service::tests::eval_task_queue_migration_defines_required_tables`
 
 Expected: FAIL because the migration file does not exist.
 
@@ -31,7 +31,7 @@ Create the migration with `ai_eval_task` and `ai_eval_outbox` tables, status ind
 
 **Step 4: Run passing test**
 
-Run: `cargo test -p backend-rust application::ai::eval_service::tests::eval_task_queue_migration_defines_required_tables`
+Run: `cargo test -p backend application::ai::eval_service::tests::eval_task_queue_migration_defines_required_tables`
 
 Expected: PASS.
 
@@ -56,7 +56,7 @@ Add source-level tests that assert repository exposes task/outbox methods:
 
 **Step 2: Run failing test**
 
-Run: `cargo test -p backend-rust infrastructure::persistence::ai_eval_repository::tests::eval_repository_exposes_task_queue_methods`
+Run: `cargo test -p backend infrastructure::persistence::ai_eval_repository::tests::eval_repository_exposes_task_queue_methods`
 
 Expected: FAIL because methods are missing.
 
@@ -66,7 +66,7 @@ Add record structs for task save/read, outbox read/save, and terminal task summa
 
 **Step 4: Run passing test**
 
-Run: `cargo test -p backend-rust infrastructure::persistence::ai_eval_repository::tests::eval_repository_exposes_task_queue_methods`
+Run: `cargo test -p backend infrastructure::persistence::ai_eval_repository::tests::eval_repository_exposes_task_queue_methods`
 
 Expected: PASS.
 
@@ -86,7 +86,7 @@ Add tests for pure helpers:
 
 **Step 2: Run failing test**
 
-Run: `cargo test -p backend-rust application::ai::eval_service::tests::eval_run_creation_builds_task_outbox_payload`
+Run: `cargo test -p backend application::ai::eval_service::tests::eval_run_creation_builds_task_outbox_payload`
 
 Expected: FAIL because helper does not exist.
 
@@ -96,7 +96,7 @@ Change `run_eval` to create a queued run, task rows, and outbox rows. Move old s
 
 **Step 4: Run passing test**
 
-Run: `cargo test -p backend-rust application::ai::eval_service::tests::eval_run_creation_builds_task_outbox_payload`
+Run: `cargo test -p backend application::ai::eval_service::tests::eval_run_creation_builds_task_outbox_payload`
 
 Expected: PASS.
 
@@ -114,7 +114,7 @@ Add tests for config defaults, message conversion from outbox, and publish outco
 
 **Step 2: Run failing test**
 
-Run: `cargo test -p backend-rust application::ai::eval_queue_runtime::tests`
+Run: `cargo test -p backend application::ai::eval_queue_runtime::tests`
 
 Expected: FAIL because module is missing.
 
@@ -124,7 +124,7 @@ Add `EvalTaskMessage`, `EvalRabbitMqConfig`, publisher trait, `publish_pending_e
 
 **Step 4: Run passing test**
 
-Run: `cargo test -p backend-rust application::ai::eval_queue_runtime::tests`
+Run: `cargo test -p backend application::ai::eval_queue_runtime::tests`
 
 Expected: PASS.
 
@@ -147,7 +147,7 @@ Add tests that verify:
 
 **Step 2: Run failing test**
 
-Run: `cargo test -p backend-rust application::ai::eval_worker_runtime::tests`
+Run: `cargo test -p backend application::ai::eval_worker_runtime::tests`
 
 Expected: FAIL because module is missing.
 
@@ -157,16 +157,15 @@ Implement task consumption, task leasing, execution dispatch, retry/dead handlin
 
 **Step 4: Run passing test**
 
-Run: `cargo test -p backend-rust application::ai::eval_worker_runtime::tests`
+Run: `cargo test -p backend application::ai::eval_worker_runtime::tests`
 
 Expected: PASS.
 
-### Task 6: Wire Startup And Compose
+### Task 6: Wire Startup And Local POC Env
 
 **Files:**
 - Modify: `backend/src/main.rs`
 - Modify: `backend/src/shared/config.rs`
-- Modify: `infra/docker-compose.yml`
 - Modify: `infra/.env.poc.example`
 - Modify: `infra/README.md`
 
@@ -176,7 +175,7 @@ Add tests asserting eval queue env defaults and RabbitMQ topology names.
 
 **Step 2: Run failing test**
 
-Run: `cargo test -p backend-rust shared::config::tests::eval_queue_config_defaults_are_safe`
+Run: `cargo test -p backend shared::config::tests::eval_queue_config_defaults_are_safe`
 
 Expected: FAIL because fields are missing.
 
@@ -186,7 +185,7 @@ Start the eval outbox publisher in backend when enabled. Add `eval-worker` servi
 
 **Step 4: Run passing test**
 
-Run: `cargo test -p backend-rust shared::config::tests::eval_queue_config_defaults_are_safe`
+Run: `cargo test -p backend shared::config::tests::eval_queue_config_defaults_are_safe`
 
 Expected: PASS.
 
@@ -203,13 +202,13 @@ Expected: PASS.
 
 **Step 2: Backend targeted tests**
 
-Run: `cargo test -p backend-rust application::ai::eval_service::tests application::ai::eval_queue_runtime::tests application::ai::eval_worker_runtime::tests`
+Run: `cargo test -p backend application::ai::eval_service::tests application::ai::eval_queue_runtime::tests application::ai::eval_worker_runtime::tests`
 
 Expected: PASS.
 
 **Step 3: Backend compile tests**
 
-Run: `cargo test -p backend-rust`
+Run: `cargo test -p backend`
 
 Expected: PASS or report pre-existing environment-gated failures.
 

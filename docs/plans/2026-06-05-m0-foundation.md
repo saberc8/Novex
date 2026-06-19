@@ -148,7 +148,7 @@ Add tests that:
 
 **Step 2: Run test to verify it fails**
 
-Run: `cargo test -p backend-rust ai::foundation`
+Run: `cargo test -p backend ai::foundation`
 
 Expected: FAIL because the route and modules do not exist.
 
@@ -168,7 +168,7 @@ require_permission(&current_user, "ai:foundation:read")?;
 
 **Step 4: Run backend tests**
 
-Run: `cargo test -p backend-rust`
+Run: `cargo test -p backend`
 
 Expected: PASS.
 
@@ -200,7 +200,7 @@ Ensure every `INSERT` uses stable IDs and `ON CONFLICT DO NOTHING`.
 
 **Step 3: Run migration/test command**
 
-Run: `cargo test -p backend-rust`
+Run: `cargo test -p backend`
 
 Expected: PASS. SQLx compile checks should accept the migration file.
 

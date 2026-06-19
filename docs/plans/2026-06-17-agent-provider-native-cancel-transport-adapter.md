@@ -69,7 +69,7 @@ fn model_provider_native_cancel_transport_adapter_source_contract() {
 
 - [ ] **Step 2: Verify red**
 
-Run: `cargo test -p backend-rust model_provider_native_cancel_transport_adapter --offline`
+Run: `cargo test -p backend model_provider_native_cancel_transport_adapter --offline`
 
 Expected: FAIL because native cancel transport symbols do not exist yet.
 
@@ -166,9 +166,9 @@ Ok(model_provider_native_cancel_resp_from_plan(
 Run:
 
 ```bash
-cargo test -p backend-rust model_provider_native_cancel_transport_adapter --offline
-cargo test -p backend-rust provider_call_lease_cancel --offline
-cargo test -p backend-rust provider_stream_native_cancel --offline
+cargo test -p backend model_provider_native_cancel_transport_adapter --offline
+cargo test -p backend provider_call_lease_cancel --offline
+cargo test -p backend provider_stream_native_cancel --offline
 ```
 
 Expected: all commands pass.
@@ -202,13 +202,13 @@ Run:
 ```bash
 cargo fmt -- --check
 git diff --check
-cargo test -p backend-rust model_provider_native_cancel_transport_adapter --offline
-cargo test -p backend-rust model_provider_response_transport_adapter --offline
-cargo test -p backend-rust model_provider_http_transport_adapter --offline
-cargo test -p backend-rust provider_call_lease_cancel --offline
-cargo test -p backend-rust provider_stream_native_cancel --offline
-cargo test -p backend-rust streamed_tool_call_early_stop --offline
-cargo test -p backend-rust provider_abort --offline
+cargo test -p backend model_provider_native_cancel_transport_adapter --offline
+cargo test -p backend model_provider_response_transport_adapter --offline
+cargo test -p backend model_provider_http_transport_adapter --offline
+cargo test -p backend provider_call_lease_cancel --offline
+cargo test -p backend provider_stream_native_cancel --offline
+cargo test -p backend streamed_tool_call_early_stop --offline
+cargo test -p backend provider_abort --offline
 cargo test --workspace --offline
 ```
 

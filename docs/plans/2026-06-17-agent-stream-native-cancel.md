@@ -35,7 +35,7 @@ Add tests named `provider_stream_event_carries_provider_call_lease_id` and `prov
 
 - [ ] **Step 2: Run focused tests red**
 
-Run: `cargo test -p backend-rust provider_stream_lease_id --offline`
+Run: `cargo test -p backend provider_stream_lease_id --offline`
 
 Expected: FAIL because stream events do not carry provider-call lease ids.
 
@@ -45,7 +45,7 @@ Add the local-only field to `ModelChatCommand`, set it to `Some(lease_id)` insid
 
 - [ ] **Step 4: Verify green**
 
-Run: `cargo test -p backend-rust provider_stream_lease_id --offline`
+Run: `cargo test -p backend provider_stream_lease_id --offline`
 
 Expected: PASS.
 
@@ -72,8 +72,8 @@ Add source-contract tests that assert streamed tool-call completion retains `pro
 Run:
 
 ```bash
-cargo test -p backend-rust provider_stream_native_cancel --offline
-cargo test -p backend-rust provider_call_lease_cancel --offline
+cargo test -p backend provider_stream_native_cancel --offline
+cargo test -p backend provider_call_lease_cancel --offline
 ```
 
 Expected: FAIL because the early-stop path does not dispatch provider-native cancellation and the lease cancel helper cannot use in-memory stream metadata.
@@ -94,10 +94,10 @@ Run:
 
 ```bash
 cargo fmt -- --check
-cargo test -p backend-rust provider_stream_lease_id --offline
-cargo test -p backend-rust provider_stream_native_cancel --offline
-cargo test -p backend-rust provider_call_lease_cancel --offline
-cargo test -p backend-rust streamed_tool_call_early_stop --offline
+cargo test -p backend provider_stream_lease_id --offline
+cargo test -p backend provider_stream_native_cancel --offline
+cargo test -p backend provider_call_lease_cancel --offline
+cargo test -p backend streamed_tool_call_early_stop --offline
 cargo test -p novex-eval provider_native_cancel --offline
 cargo test --workspace --offline
 git diff --check

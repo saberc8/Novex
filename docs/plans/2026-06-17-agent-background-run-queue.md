@@ -33,7 +33,7 @@ Add backend tests proving:
 Run:
 
 ```bash
-cargo test -p backend-rust agent_run_queue --offline
+cargo test -p backend agent_run_queue --offline
 ```
 
 Expected: FAIL until migration and repository methods exist.
@@ -54,7 +54,7 @@ Add:
 **Step 3: Verify and commit**
 
 ```bash
-cargo test -p backend-rust agent_run_queue --offline
+cargo test -p backend agent_run_queue --offline
 git add backend/migrations/202606170006_create_ai_agent_run_queue.sql backend/src/infrastructure/persistence/ai_agent_repository.rs
 git commit -m "feat: add agent run queue repository"
 ```
@@ -81,7 +81,7 @@ Add backend tests proving:
 Run:
 
 ```bash
-cargo test -p backend-rust agent_run_queue --offline
+cargo test -p backend agent_run_queue --offline
 ```
 
 Expected: FAIL until command and service wiring exist.
@@ -102,8 +102,8 @@ Default `create_run` behavior remains inline.
 **Step 3: Verify and commit**
 
 ```bash
-cargo test -p backend-rust agent_run_queue --offline
-cargo test -p backend-rust agent_runtime_low_risk_tool_can_finish_without_approval --offline
+cargo test -p backend agent_run_queue --offline
+cargo test -p backend agent_runtime_low_risk_tool_can_finish_without_approval --offline
 git add backend/src/application/ai/agent_service.rs apps/agent-workspace/src/types/agent.ts apps/codex-app-poc/src/types/agent.ts
 git commit -m "feat: create queued agent runs"
 ```
@@ -132,8 +132,8 @@ Add tests proving:
 Run:
 
 ```bash
-cargo test -p backend-rust agent_queue_runtime --offline
-cargo test -p backend-rust agent_run_queue --offline
+cargo test -p backend agent_queue_runtime --offline
+cargo test -p backend agent_run_queue --offline
 ```
 
 Expected: FAIL until runtime exists.
@@ -154,8 +154,8 @@ Refactor existing inline execution enough that the worker executes an existing r
 **Step 3: Verify and commit**
 
 ```bash
-cargo test -p backend-rust agent_queue_runtime --offline
-cargo test -p backend-rust agent_run_queue --offline
+cargo test -p backend agent_queue_runtime --offline
+cargo test -p backend agent_run_queue --offline
 git add backend/src/application/ai/agent_queue_runtime.rs backend/src/application/ai/mod.rs backend/src/application/ai/agent_service.rs backend/src/shared/config.rs backend/src/main.rs
 git commit -m "feat: execute queued agent runs"
 ```

@@ -6,7 +6,7 @@
 
 **Architecture:** Add a process-local route circuit breaker registry to the model runtime. `chat_completion_for_purpose` checks the breaker before sampling the primary route, opens it after fallback-eligible failures, records skipped primary provider attempts, and keeps trace/eval extraction based on nested `providerAttempts`.
 
-**Tech Stack:** Rust, `backend-rust`, `novex-eval`, `serde_json`, `std::sync::OnceLock`, `Mutex<HashMap<_, _>>`.
+**Tech Stack:** Rust, `backend`, `novex-eval`, `serde_json`, `std::sync::OnceLock`, `Mutex<HashMap<_, _>>`.
 
 ---
 
@@ -89,7 +89,7 @@ fn route_circuit_breaker_cooldown_requires_enabled_fallback_and_positive_policy(
 Run:
 
 ```bash
-cargo test -p backend-rust route_circuit_breaker --offline
+cargo test -p backend route_circuit_breaker --offline
 ```
 
 Expected: FAIL because circuit breaker helpers do not exist.
@@ -111,7 +111,7 @@ Add:
 Run:
 
 ```bash
-cargo test -p backend-rust route_circuit_breaker --offline
+cargo test -p backend route_circuit_breaker --offline
 ```
 
 Expected: PASS.
@@ -153,7 +153,7 @@ fn route_circuit_breaker_source_contract_bypasses_primary_and_opens_after_failur
 Run:
 
 ```bash
-cargo test -p backend-rust route_circuit_breaker_source --offline
+cargo test -p backend route_circuit_breaker_source --offline
 ```
 
 Expected: FAIL because runtime wrapper has not been wired.
@@ -173,8 +173,8 @@ Extract a small fallback execution helper only if needed to keep duplication bou
 Run:
 
 ```bash
-cargo test -p backend-rust route_circuit_breaker_source --offline
-cargo test -p backend-rust provider_lifecycle --offline
+cargo test -p backend route_circuit_breaker_source --offline
+cargo test -p backend provider_lifecycle --offline
 ```
 
 Expected: PASS.
@@ -254,7 +254,7 @@ fn trace_eval_candidate_tags_circuit_breaker_attempts() {
 Run:
 
 ```bash
-cargo test -p backend-rust route_circuit_breaker_trace --offline
+cargo test -p backend route_circuit_breaker_trace --offline
 cargo test -p novex-eval circuit_breaker --offline
 ```
 
@@ -269,7 +269,7 @@ Update `TraceInferenceSummary` with `circuit_open_count`. During `providerAttemp
 Run:
 
 ```bash
-cargo test -p backend-rust route_circuit_breaker_trace --offline
+cargo test -p backend route_circuit_breaker_trace --offline
 cargo test -p novex-eval circuit_breaker --offline
 ```
 
@@ -308,9 +308,9 @@ Run:
 
 ```bash
 cargo fmt -- --check
-cargo test -p backend-rust route_circuit_breaker --offline
-cargo test -p backend-rust provider_lifecycle --offline
-cargo test -p backend-rust provider_lifecycle_trace --offline
+cargo test -p backend route_circuit_breaker --offline
+cargo test -p backend provider_lifecycle --offline
+cargo test -p backend provider_lifecycle_trace --offline
 cargo test -p novex-eval circuit_breaker --offline
 cargo test --workspace --offline
 ```
@@ -322,11 +322,11 @@ Expected: PASS. `live_rag_e2e` remains ignored unless external infra is configur
 Run:
 
 ```bash
-cd /Users/yusenlin/Avalon/freedom/github/zm-agent/Novex
+cd /path/to/Novex
 git merge --no-ff feat/enterprise-agent-foundation -m "merge: enterprise agent foundation route circuit breaker"
 cargo fmt -- --check
 cargo test --workspace --offline
-cd /Users/yusenlin/Avalon/freedom/github/zm-agent/Novex/.worktrees/enterprise-agent-foundation
+cd /path/to/Novex/.worktrees/enterprise-agent-foundation
 git merge --ff-only main
 git status --short --branch
 ```

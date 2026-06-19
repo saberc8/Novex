@@ -13,7 +13,7 @@
 ## Global Constraints
 
 - Do not move `ModelRuntimeRoute`, `ModelChatCommand`, provider-call leases, fallback, tenant context, persistence, trace/eval, stream event emission, or cost accounting into `novex-provider-client`.
-- `novex-provider-client` may depend on `novex-model` route/provider vocabulary, but must not depend on `backend-rust`.
+- `novex-provider-client` may depend on `novex-model` route/provider vocabulary, but must not depend on `backend`.
 - Preserve existing payload shapes for chat-completions, Responses CodeAgent streaming, Responses compaction v2, and unary `/responses/compact`.
 - Preserve endpoint selection rules: route endpoint for chat-completions and configured `/responses`, route base URL plus `responses` for compaction v2, and route base URL plus `responses/compact` for unary compaction.
 - Preserve provider metadata rules: only OpenAI-compatible, Azure OpenAI, and local-runtime routes receive metadata.
@@ -70,7 +70,7 @@ fn provider_client_chat_request_plan_lives_in_provider_client_crate() {
 
 - [ ] **Step 2: Verify RED**
 
-Run: `cargo test -p backend-rust provider_client_chat_request_plan_lives_in_provider_client_crate --offline`
+Run: `cargo test -p backend provider_client_chat_request_plan_lives_in_provider_client_crate --offline`
 
 Expected: FAIL because provider-client does not yet own chat request planning or payload construction.
 
@@ -311,12 +311,12 @@ Update tests that call `model_chat_request_payload(...)` to call `model_chat_pro
 Run:
 
 ```bash
-cargo test -p backend-rust provider_client_chat_request_plan_lives_in_provider_client_crate --offline
-cargo test -p backend-rust model_chat_payload --offline
-cargo test -p backend-rust provider_responses_transport --offline
-cargo test -p backend-rust provider_compact_transport --offline
-cargo test -p backend-rust provider_compact_unary --offline
-cargo test -p backend-rust model_provider_stream_dispatch_route_path --offline
+cargo test -p backend provider_client_chat_request_plan_lives_in_provider_client_crate --offline
+cargo test -p backend model_chat_payload --offline
+cargo test -p backend provider_responses_transport --offline
+cargo test -p backend provider_compact_transport --offline
+cargo test -p backend provider_compact_unary --offline
+cargo test -p backend model_provider_stream_dispatch_route_path --offline
 ```
 
 Expected: all commands pass.
@@ -345,12 +345,12 @@ Run:
 cargo fmt -- --check
 git diff --check
 cargo test -p novex-provider-client chat_plan --offline
-cargo test -p backend-rust provider_client_chat_request_plan_lives_in_provider_client_crate --offline
-cargo test -p backend-rust model_chat_payload --offline
-cargo test -p backend-rust provider_responses_transport --offline
-cargo test -p backend-rust provider_compact_transport --offline
-cargo test -p backend-rust provider_compact_unary --offline
-cargo test -p backend-rust model_provider_stream_dispatch_route_path --offline
+cargo test -p backend provider_client_chat_request_plan_lives_in_provider_client_crate --offline
+cargo test -p backend model_chat_payload --offline
+cargo test -p backend provider_responses_transport --offline
+cargo test -p backend provider_compact_transport --offline
+cargo test -p backend provider_compact_unary --offline
+cargo test -p backend model_provider_stream_dispatch_route_path --offline
 cargo test --workspace --offline
 ```
 
@@ -366,11 +366,11 @@ git commit -m "feat: extract provider client chat request planning"
 - [ ] **Step 4: Merge into main and verify main**
 
 ```bash
-git -C /Users/yusenlin/Avalon/freedom/github/zm-agent/Novex merge --ff-only feat/enterprise-agent-foundation
-git -C /Users/yusenlin/Avalon/freedom/github/zm-agent/Novex status --short --branch
+git -C /path/to/Novex merge --ff-only feat/enterprise-agent-foundation
+git -C /path/to/Novex status --short --branch
 ```
 
-Then run in `/Users/yusenlin/Avalon/freedom/github/zm-agent/Novex`:
+Then run in `/path/to/Novex`:
 
 ```bash
 cargo fmt -- --check
@@ -381,7 +381,7 @@ cargo test --workspace --offline
 - [ ] **Step 5: Sync feature worktree and clean both workspaces**
 
 ```bash
-git -C /Users/yusenlin/Avalon/freedom/github/zm-agent/Novex/.worktrees/enterprise-agent-foundation merge --ff-only main
+git -C /path/to/Novex/.worktrees/enterprise-agent-foundation merge --ff-only main
 cargo clean
 ```
 

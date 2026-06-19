@@ -114,7 +114,7 @@ Import `TraceEventKind` if needed.
 Run:
 
 ```bash
-cargo test -p backend-rust runtime_spans --offline
+cargo test -p backend runtime_spans --offline
 ```
 
 Expected: FAIL until mappings exist.
@@ -133,8 +133,8 @@ In `trace_event_from_run_event`:
 Run:
 
 ```bash
-cargo test -p backend-rust runtime_spans --offline
-cargo test -p backend-rust agent_run_events_convert_to_trace_bundle --offline
+cargo test -p backend runtime_spans --offline
+cargo test -p backend agent_run_events_convert_to_trace_bundle --offline
 ```
 
 Expected: PASS.
@@ -219,10 +219,10 @@ Run:
 ```bash
 cargo fmt -- --check
 cargo test -p novex-trace runtime_span --offline
-cargo test -p backend-rust runtime_spans --offline
+cargo test -p backend runtime_spans --offline
 cargo test -p novex-eval runtime_spans --offline
-cargo test -p backend-rust agent_run_events_convert_to_trace_bundle --offline
-cargo test -p backend-rust eval_runtime --offline
+cargo test -p backend agent_run_events_convert_to_trace_bundle --offline
+cargo test -p backend eval_runtime --offline
 cargo test --workspace --offline
 ```
 

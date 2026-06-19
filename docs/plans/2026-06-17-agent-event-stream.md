@@ -24,7 +24,7 @@ Add tests:
 Run:
 
 ```bash
-cargo test -p backend-rust agent_event_stream --offline
+cargo test -p backend agent_event_stream --offline
 ```
 
 Expected: FAIL until the stream contract exists.
@@ -50,8 +50,8 @@ Implement:
 Run:
 
 ```bash
-cargo test -p backend-rust agent_event_stream --offline
-cargo test -p backend-rust agent_event_list --offline
+cargo test -p backend agent_event_stream --offline
+cargo test -p backend agent_event_list --offline
 ```
 
 Expected: PASS.

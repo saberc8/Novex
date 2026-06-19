@@ -169,7 +169,7 @@ fn agent_service_model_loop_uses_model_assisted_context_compaction() {
 Run:
 
 ```bash
-cargo test -p backend-rust model_loop_compaction --offline
+cargo test -p backend model_loop_compaction --offline
 ```
 
 Expected: FAIL because model compaction helper functions and source wiring do not exist.
@@ -294,8 +294,8 @@ The `ContextCompaction` payload must include:
 Run:
 
 ```bash
-cargo test -p backend-rust model_loop_compaction --offline
-cargo test -p backend-rust model_loop --offline
+cargo test -p backend model_loop_compaction --offline
+cargo test -p backend model_loop --offline
 ```
 
 Expected: PASS.
@@ -396,7 +396,7 @@ Change Runtime loop row from `slice-6 implemented` to `slice-17 implemented`, no
 Update Runtime loop POC verification command to include:
 
 ```bash
-cargo test -p novex-agent-runtime --offline && cargo test -p backend-rust model_loop_compaction --offline && cargo test -p backend-rust model_loop --offline
+cargo test -p novex-agent-runtime --offline && cargo test -p backend model_loop_compaction --offline && cargo test -p backend model_loop --offline
 ```
 
 Update Rollout/trace/eval acceptance command to include:
@@ -418,9 +418,9 @@ Run:
 ```bash
 cargo fmt -- --check
 cargo test -p novex-agent-runtime runtime_compaction --offline
-cargo test -p backend-rust model_loop_compaction --offline
-cargo test -p backend-rust model_loop --offline
-cargo test -p backend-rust runtime_spans --offline
+cargo test -p backend model_loop_compaction --offline
+cargo test -p backend model_loop --offline
+cargo test -p backend runtime_spans --offline
 cargo test -p novex-eval compaction --offline
 cargo test --workspace --offline
 ```
@@ -439,11 +439,11 @@ git commit -m "docs: record model assisted compaction progress"
 After feature verification:
 
 ```bash
-cd /Users/yusenlin/Avalon/freedom/github/zm-agent/Novex
+cd /path/to/Novex
 git merge --no-ff feat/enterprise-agent-foundation -m "merge: enterprise agent foundation model compaction"
 cargo fmt -- --check
 cargo test --workspace --offline
-cd /Users/yusenlin/Avalon/freedom/github/zm-agent/Novex/.worktrees/enterprise-agent-foundation
+cd /path/to/Novex/.worktrees/enterprise-agent-foundation
 git merge --ff-only main
 ```
 

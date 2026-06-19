@@ -57,7 +57,7 @@ fn provider_background_response_capture_payload_marks_responses_background() {
 Run:
 
 ```bash
-cargo test -p backend-rust provider_background_response_capture_payload --offline
+cargo test -p backend provider_background_response_capture_payload --offline
 ```
 
 Expected: FAIL because `background` and `store` are not present.
@@ -71,7 +71,7 @@ Add `background=true` and `store=true` to `model_chat_responses_compaction_paylo
 Run:
 
 ```bash
-cargo test -p backend-rust provider_background_response_capture_payload --offline
+cargo test -p backend provider_background_response_capture_payload --offline
 ```
 
 Expected: PASS.
@@ -137,7 +137,7 @@ fn provider_background_response_capture_parses_sse_response_metadata() {
 Run:
 
 ```bash
-cargo test -p backend-rust provider_background_response_capture_parses --offline
+cargo test -p backend provider_background_response_capture_parses --offline
 ```
 
 Expected: FAIL because the output type does not expose provider response metadata.
@@ -151,7 +151,7 @@ Add optional metadata fields to `ModelChatCompactionProviderOutput`, extract roo
 Run:
 
 ```bash
-cargo test -p backend-rust provider_background_response_capture_parses --offline
+cargo test -p backend provider_background_response_capture_parses --offline
 ```
 
 Expected: PASS.
@@ -212,7 +212,7 @@ fn provider_background_response_capture_persists_provider_id_for_cancel() {
 Run:
 
 ```bash
-cargo test -p backend-rust provider_background_response_capture_persists --offline
+cargo test -p backend provider_background_response_capture_persists --offline
 ```
 
 Expected: FAIL because `ModelChatResp` has no provider response metadata fields and lease completion does not persist them.
@@ -226,20 +226,20 @@ Add optional provider response metadata to `ModelChatResp`, set it from compacti
 Run:
 
 ```bash
-cargo test -p backend-rust provider_background_response_capture --offline
-cargo test -p backend-rust provider_call_lease_cancel --offline
+cargo test -p backend provider_background_response_capture --offline
+cargo test -p backend provider_call_lease_cancel --offline
 ```
 
 Expected: PASS.
 
 **Evidence:**
-- Red: `cargo test -p backend-rust provider_background_response_capture_payload --offline` failed because `background` was `Null`.
-- Green: `cargo test -p backend-rust provider_background_response_capture_payload --offline` passed after adding `background=true` and `store=true`.
-- Red: `cargo test -p backend-rust provider_background_response_capture_parses --offline` failed because `ModelChatCompactionProviderOutput` lacked provider metadata fields.
-- Green: `cargo test -p backend-rust provider_background_response_capture_parses --offline` passed after JSON/SSE metadata extraction.
-- Red: `cargo test -p backend-rust provider_background_response_capture_persists --offline` failed because `ModelChatResp` lacked provider metadata fields.
-- Green: `cargo test -p backend-rust provider_background_response_capture_persists --offline` passed after lease propagation.
-- Regression: `cargo test -p backend-rust provider_background_response_capture --offline`, `cargo test -p backend-rust provider_compact_transport --offline`, and `cargo test -p backend-rust provider_call_lease_cancel --offline` passed.
+- Red: `cargo test -p backend provider_background_response_capture_payload --offline` failed because `background` was `Null`.
+- Green: `cargo test -p backend provider_background_response_capture_payload --offline` passed after adding `background=true` and `store=true`.
+- Red: `cargo test -p backend provider_background_response_capture_parses --offline` failed because `ModelChatCompactionProviderOutput` lacked provider metadata fields.
+- Green: `cargo test -p backend provider_background_response_capture_parses --offline` passed after JSON/SSE metadata extraction.
+- Red: `cargo test -p backend provider_background_response_capture_persists --offline` failed because `ModelChatResp` lacked provider metadata fields.
+- Green: `cargo test -p backend provider_background_response_capture_persists --offline` passed after lease propagation.
+- Regression: `cargo test -p backend provider_background_response_capture --offline`, `cargo test -p backend provider_compact_transport --offline`, and `cargo test -p backend provider_call_lease_cancel --offline` passed.
 
 ### Task 4: Matrix, Verification, Merge
 
@@ -257,10 +257,10 @@ Run:
 
 ```bash
 cargo fmt -- --check
-cargo test -p backend-rust provider_background_response_capture --offline
-cargo test -p backend-rust provider_compact_transport --offline
-cargo test -p backend-rust provider_call_lease_cancel --offline
-cargo test -p backend-rust provider_call_lease --offline
+cargo test -p backend provider_background_response_capture --offline
+cargo test -p backend provider_compact_transport --offline
+cargo test -p backend provider_call_lease_cancel --offline
+cargo test -p backend provider_call_lease --offline
 cargo test --workspace --offline
 git diff --check
 ```
@@ -269,10 +269,10 @@ Expected: all pass with exit code 0.
 
 **Evidence:**
 - Format: `cargo fmt -- --check` passed after rustfmt.
-- New slice: `cargo test -p backend-rust provider_background_response_capture --offline` passed.
-- Regression: `cargo test -p backend-rust provider_compact_transport --offline` passed.
-- Regression: `cargo test -p backend-rust provider_call_lease_cancel --offline` passed.
-- Regression: `cargo test -p backend-rust provider_call_lease --offline` passed.
+- New slice: `cargo test -p backend provider_background_response_capture --offline` passed.
+- Regression: `cargo test -p backend provider_compact_transport --offline` passed.
+- Regression: `cargo test -p backend provider_call_lease_cancel --offline` passed.
+- Regression: `cargo test -p backend provider_call_lease --offline` passed.
 - Workspace: `cargo test --workspace --offline` passed with backend `760` tests.
 - Diff hygiene: `git diff --check` passed.
 
@@ -281,13 +281,13 @@ Expected: all pass with exit code 0.
 ```bash
 git add backend/src/application/ai/model_service.rs docs/plans/2026-06-16-codex-migration-matrix.md docs/plans/2026-06-17-agent-provider-background-response-capture-design.md docs/plans/2026-06-17-agent-provider-background-response-capture.md
 git commit -m "feat: capture provider background response metadata"
-cd /Users/yusenlin/Avalon/freedom/github/zm-agent/Novex
+cd /path/to/Novex
 git merge --no-ff feat/enterprise-agent-foundation -m "merge: enterprise agent foundation provider background response capture"
 cargo fmt -- --check
 cargo test --workspace --offline
 git diff --check
 cargo clean
-cd /Users/yusenlin/Avalon/freedom/github/zm-agent/Novex/.worktrees/enterprise-agent-foundation
+cd /path/to/Novex/.worktrees/enterprise-agent-foundation
 cargo clean
 git merge --ff-only main
 ```

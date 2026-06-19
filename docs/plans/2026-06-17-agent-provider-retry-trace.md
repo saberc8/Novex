@@ -57,7 +57,7 @@ fn model_runtime_retry_policy_reads_route_policy_source_contract() {
 Run:
 
 ```bash
-cargo test -p backend-rust model_route_retry_policy --offline
+cargo test -p backend model_route_retry_policy --offline
 ```
 
 Expected: FAIL because the retry policy type/helper/query does not exist.
@@ -88,7 +88,7 @@ Add `retry_policy_for_purpose` on `ModelRuntimeService` that reads the highest-p
 Run:
 
 ```bash
-cargo test -p backend-rust model_route_retry_policy --offline
+cargo test -p backend model_route_retry_policy --offline
 ```
 
 Expected: PASS.
@@ -222,7 +222,7 @@ fn agent_service_model_loop_retries_retryable_provider_errors() {
 Run:
 
 ```bash
-cargo test -p backend-rust provider_retry --offline
+cargo test -p backend provider_retry --offline
 ```
 
 Expected: FAIL because attempt payload and retry loop do not exist.
@@ -245,9 +245,9 @@ Wrap the model call in `for attempt in 1..=model_retry_policy.max_attempts()`. O
 Run:
 
 ```bash
-cargo test -p backend-rust provider_retry --offline
-cargo test -p backend-rust provider_error --offline
-cargo test -p backend-rust model_loop --offline
+cargo test -p backend provider_retry --offline
+cargo test -p backend provider_error --offline
+cargo test -p backend model_loop --offline
 ```
 
 Expected: PASS.
@@ -274,10 +274,10 @@ Run:
 
 ```bash
 cargo fmt -- --check
-cargo test -p backend-rust model_route_retry_policy --offline
-cargo test -p backend-rust provider_retry --offline
-cargo test -p backend-rust provider_error --offline
-cargo test -p backend-rust model_loop --offline
+cargo test -p backend model_route_retry_policy --offline
+cargo test -p backend provider_retry --offline
+cargo test -p backend provider_error --offline
+cargo test -p backend model_loop --offline
 cargo test -p novex-eval provider_retry_spans --offline
 ```
 

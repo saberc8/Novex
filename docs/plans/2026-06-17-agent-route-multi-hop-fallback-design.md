@@ -61,9 +61,9 @@ This slice adds tests that prove a multi-hop success response preserves:
 
 ## Acceptance
 
-- `cargo test -p backend-rust multi_hop_fallback --offline`
-- `cargo test -p backend-rust provider_lifecycle --offline`
-- `cargo test -p backend-rust route_circuit_breaker --offline`
+- `cargo test -p backend multi_hop_fallback --offline`
+- `cargo test -p backend provider_lifecycle --offline`
+- `cargo test -p backend route_circuit_breaker --offline`
 - `cargo test -p novex-eval provider_fallback --offline`
 - `cargo fmt -- --check`
 - `cargo test --workspace --offline`

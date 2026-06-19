@@ -84,7 +84,7 @@ Run:
 
 ```bash
 cargo test -p novex-tools --offline
-cargo test -p backend-rust customer_service_tool --offline
+cargo test -p backend customer_service_tool --offline
 ```
 
 Expected: PASS.
@@ -116,7 +116,7 @@ Add tests:
 Run:
 
 ```bash
-cargo test -p backend-rust customer_service_prompt_requires_citations_or_insufficient_evidence --offline
+cargo test -p backend customer_service_prompt_requires_citations_or_insufficient_evidence --offline
 ```
 
 Expected: FAIL.
@@ -151,8 +151,8 @@ Prompt requirements:
 Run:
 
 ```bash
-cargo test -p backend-rust customer_service_flow --offline
-cargo test -p backend-rust agent_service --offline
+cargo test -p backend customer_service_flow --offline
+cargo test -p backend agent_service --offline
 ```
 
 Expected: PASS.
@@ -185,7 +185,7 @@ Add:
 Run:
 
 ```bash
-cargo test -p backend-rust customer_service_agent_route_is_registered_and_requires_auth --offline
+cargo test -p backend customer_service_agent_route_is_registered_and_requires_auth --offline
 ```
 
 Expected: FAIL.
@@ -214,7 +214,7 @@ Seed a template:
 Run:
 
 ```bash
-cargo test -p backend-rust customer_service_ --offline
+cargo test -p backend customer_service_ --offline
 ```
 
 Expected: PASS.
@@ -246,7 +246,7 @@ Add:
 Run:
 
 ```bash
-cargo test -p backend-rust customer_service_eval_seed_contains_resolution_and_handoff_cases --offline
+cargo test -p backend customer_service_eval_seed_contains_resolution_and_handoff_cases --offline
 ```
 
 Expected: FAIL.
@@ -275,7 +275,7 @@ Run:
 
 ```bash
 cargo test -p novex-eval --offline
-cargo test -p backend-rust customer_service_eval --offline
+cargo test -p backend customer_service_eval --offline
 ```
 
 Expected: PASS.

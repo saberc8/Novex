@@ -170,7 +170,7 @@ async fn mcp_stdio_process_timeout_returns_safe_error_evidence() {
 
 - [ ] **Step 2: Run RED**
 
-Run: `cargo test -p backend-rust mcp_stdio_process --offline`
+Run: `cargo test -p backend mcp_stdio_process --offline`
 
 Expected: FAIL because the backend module and supervisor API do not exist.
 
@@ -180,7 +180,7 @@ Spawn `Command` with piped stdin/stdout/stderr, resolve `McpStdioEnvValue` entri
 
 - [ ] **Step 4: Run GREEN**
 
-Run: `cargo test -p backend-rust mcp_stdio_process --offline`
+Run: `cargo test -p backend mcp_stdio_process --offline`
 
 Expected: PASS.
 
@@ -255,7 +255,7 @@ async fn mcp_tool_execution_live_stdio_dispatch_uses_stdio_plan() {
 
 - [ ] **Step 2: Run RED**
 
-Run: `cargo test -p backend-rust mcp_tool_execution_live_stdio_dispatch --offline`
+Run: `cargo test -p backend mcp_tool_execution_live_stdio_dispatch --offline`
 
 Expected: FAIL because stdio dispatch routing and injected stdio dispatcher do not exist.
 
@@ -265,7 +265,7 @@ Generalize the current HTTP-only helper to accept both HTTP and stdio dispatch c
 
 - [ ] **Step 4: Run GREEN**
 
-Run: `cargo test -p backend-rust mcp_tool_execution --offline`
+Run: `cargo test -p backend mcp_tool_execution --offline`
 
 Expected: PASS.
 
@@ -290,9 +290,9 @@ Run:
 cargo fmt --all -- --check
 git diff --check
 cargo test -p novex-mcp mcp_stdio --offline
-cargo test -p backend-rust mcp_stdio_process --offline
-cargo test -p backend-rust mcp_tool_execution --offline
-cargo test -p backend-rust mcp --offline
+cargo test -p backend mcp_stdio_process --offline
+cargo test -p backend mcp_tool_execution --offline
+cargo test -p backend mcp --offline
 ```
 
 - [ ] **Step 3: Commit, merge, and clean**

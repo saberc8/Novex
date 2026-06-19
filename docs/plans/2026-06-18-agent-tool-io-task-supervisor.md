@@ -48,10 +48,10 @@ Extend `backend/src/application/ai/agent_tool_io_runtime.rs` with a private `Age
 
 - `cargo fmt --all -- --check`
 - `git diff --check`
-- `cargo test -p backend-rust agent_tool_io_runtime --offline`
-- `cargo test -p backend-rust parallel_tool_io_batch --offline`
-- `cargo test -p backend-rust tool_io_timeout --offline`
-- `cargo test -p backend-rust runtime_registry --offline`
-- `cargo test -p backend-rust parallel_tool --offline`
-- `cargo test -p backend-rust model_loop --offline`
+- `cargo test -p backend agent_tool_io_runtime --offline`
+- `cargo test -p backend parallel_tool_io_batch --offline`
+- `cargo test -p backend tool_io_timeout --offline`
+- `cargo test -p backend runtime_registry --offline`
+- `cargo test -p backend parallel_tool --offline`
+- `cargo test -p backend model_loop --offline`
 - `cargo test --workspace --offline`

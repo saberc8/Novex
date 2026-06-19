@@ -1,8 +1,8 @@
 [package]
-name = "backend-rust"
+name = "backend"
 version = "0.1.0"
 edition = "2021"
-default-run = "backend-rust"
+default-run = "backend"
 
 [dependencies]
 anyhow = "1"

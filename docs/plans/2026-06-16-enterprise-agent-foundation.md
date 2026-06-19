@@ -879,7 +879,7 @@ fn agent_runtime_event_payload_preserves_turn_item_shape() {
 Run:
 
 ```bash
-cargo test -p backend-rust agent_runtime_event_payload_preserves_turn_item_shape --offline
+cargo test -p backend agent_runtime_event_payload_preserves_turn_item_shape --offline
 ```
 
 Expected: FAIL because helper does not exist.
@@ -902,7 +902,7 @@ fn agent_turn_item_event_payload(item: &novex_agent_protocol::AgentTurnItem) -> 
 Run:
 
 ```bash
-cargo test -p backend-rust agent_runtime_event_payload_preserves_turn_item_shape --offline
+cargo test -p backend agent_runtime_event_payload_preserves_turn_item_shape --offline
 cargo test --workspace --offline
 ```
 
@@ -958,7 +958,7 @@ fn model_loop_prompt_mentions_available_tool_schema() {
 Run:
 
 ```bash
-cargo test -p backend-rust model_loop_prompt_mentions_available_tool_schema --offline
+cargo test -p backend model_loop_prompt_mentions_available_tool_schema --offline
 ```
 
 Expected: FAIL.
@@ -993,8 +993,8 @@ Add a temporary `create_model_loop_run` that creates the run, calls `runtime.llm
 Run:
 
 ```bash
-cargo test -p backend-rust agent_run_command_accepts_model_runtime_mode --offline
-cargo test -p backend-rust model_loop_prompt_mentions_available_tool_schema --offline
+cargo test -p backend agent_run_command_accepts_model_runtime_mode --offline
+cargo test -p backend model_loop_prompt_mentions_available_tool_schema --offline
 cargo test --workspace --offline
 ```
 
@@ -1033,7 +1033,7 @@ fn observation_prompt_includes_tool_result_and_final_answer_instruction() {
 Run:
 
 ```bash
-cargo test -p backend-rust observation_prompt_includes_tool_result_and_final_answer_instruction --offline
+cargo test -p backend observation_prompt_includes_tool_result_and_final_answer_instruction --offline
 ```
 
 Expected: FAIL.
@@ -1076,8 +1076,8 @@ Keep `max_tool_calls` to 1 in this task. Multi-tool loops come later.
 Run:
 
 ```bash
-cargo test -p backend-rust observation_prompt_includes_tool_result_and_final_answer_instruction --offline
-cargo test -p backend-rust --offline
+cargo test -p backend observation_prompt_includes_tool_result_and_final_answer_instruction --offline
+cargo test -p backend --offline
 ```
 
 Expected: PASS.

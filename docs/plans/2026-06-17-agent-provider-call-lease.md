@@ -40,7 +40,7 @@ It must read the new migration and assert it contains:
 
 **Step 2: Run test to verify it fails**
 
-Run: `cargo test -p backend-rust provider_call_lease_migration --offline`
+Run: `cargo test -p backend provider_call_lease_migration --offline`
 
 Expected: FAIL because the migration file does not exist or lacks fields.
 
@@ -50,7 +50,7 @@ Create `backend/migrations/202606170008_create_ai_model_provider_call_lease.sql`
 
 **Step 4: Run test to verify it passes**
 
-Run: `cargo test -p backend-rust provider_call_lease_migration --offline`
+Run: `cargo test -p backend provider_call_lease_migration --offline`
 
 Expected: PASS.
 
@@ -72,7 +72,7 @@ Add tests:
 
 **Step 2: Run tests to verify they fail**
 
-Run: `cargo test -p backend-rust provider_call_lease --offline`
+Run: `cargo test -p backend provider_call_lease --offline`
 
 Expected: FAIL because types and helpers do not exist.
 
@@ -88,7 +88,7 @@ Add:
 
 **Step 4: Run tests to verify they pass**
 
-Run: `cargo test -p backend-rust provider_call_lease --offline`
+Run: `cargo test -p backend provider_call_lease --offline`
 
 Expected: PASS.
 
@@ -114,7 +114,7 @@ They must prove:
 
 **Step 2: Run tests to verify they fail**
 
-Run: `cargo test -p backend-rust provider_call_lease_source_contract --offline`
+Run: `cargo test -p backend provider_call_lease_source_contract --offline`
 
 Expected: FAIL because wrapper and persistence helpers do not exist.
 
@@ -131,10 +131,10 @@ Update tenant-bound chat methods to use it.
 **Step 4: Run focused tests**
 
 Run:
-- `cargo test -p backend-rust provider_call_lease --offline`
-- `cargo test -p backend-rust model_chat_payload --offline`
-- `cargo test -p backend-rust provider_compact_transport --offline`
-- `cargo test -p backend-rust provider_lifecycle --offline`
+- `cargo test -p backend provider_call_lease --offline`
+- `cargo test -p backend model_chat_payload --offline`
+- `cargo test -p backend provider_compact_transport --offline`
+- `cargo test -p backend provider_lifecycle --offline`
 
 Expected: PASS.
 
@@ -156,8 +156,8 @@ Add or extend tests:
 **Step 2: Run tests to verify they fail**
 
 Run:
-- `cargo test -p backend-rust agent_provider_call_lease_context_contract_links_run_and_source --offline`
-- `cargo test -p backend-rust model_inference_event_payload_links_provider_call_lease --offline`
+- `cargo test -p backend agent_provider_call_lease_context_contract_links_run_and_source --offline`
+- `cargo test -p backend model_inference_event_payload_links_provider_call_lease --offline`
 
 Expected: FAIL before context wiring.
 
@@ -168,10 +168,10 @@ Update model-loop sampling, context compaction, and Guardian review model calls 
 **Step 4: Run focused tests**
 
 Run:
-- `cargo test -p backend-rust provider_call_lease --offline`
-- `cargo test -p backend-rust model_loop --offline`
-- `cargo test -p backend-rust remote_compaction --offline`
-- `cargo test -p backend-rust guardian_model_review --offline`
+- `cargo test -p backend provider_call_lease --offline`
+- `cargo test -p backend model_loop --offline`
+- `cargo test -p backend remote_compaction --offline`
+- `cargo test -p backend guardian_model_review --offline`
 
 Expected: PASS.
 
@@ -200,6 +200,6 @@ Expected: PASS.
 Commit feature work, merge `feat/enterprise-agent-foundation` into `main`, rerun full verification on `main`, run `cargo clean` in both worktrees, and sync feature to main.
 
 **Verification evidence:**
-- `cargo test -p backend-rust provider_call_lease --offline`
+- `cargo test -p backend provider_call_lease --offline`
 - `cargo fmt -- --check`
 - `cargo test --workspace --offline`

@@ -233,7 +233,7 @@ Extend the existing template manifest test to assert the training template inclu
 
 **Step 2: Run test to verify failure**
 
-Run: `cargo test -p backend-rust delivery_template_manifest --offline`
+Run: `cargo test -p backend delivery_template_manifest --offline`
 
 Expected: FAIL until template metadata is updated.
 
@@ -243,7 +243,7 @@ Add C-side page list and smoke commands while keeping existing template fields i
 
 **Step 4: Run tests**
 
-Run: `cargo test -p backend-rust delivery_template_manifest --offline`
+Run: `cargo test -p backend delivery_template_manifest --offline`
 
 Expected: PASS.
 

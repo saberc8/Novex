@@ -181,7 +181,7 @@ fn agent_service_model_loop_uses_compacted_messages_for_next_sample() {
 Run:
 
 ```bash
-cargo test -p backend-rust agent_service_model_loop_records_context_compaction_event --offline
+cargo test -p backend agent_service_model_loop_records_context_compaction_event --offline
 ```
 
 Expected: FAIL because the backend does not trigger or persist compaction.
@@ -232,7 +232,7 @@ It returns system prompt, original user input, and one compacted context user me
 Change the runtime loop row to state that deterministic context compaction slice is implemented and remote/model compaction remains next. Change the verification command to the real cargo filter:
 
 ```bash
-cargo test -p backend-rust model_loop --offline
+cargo test -p backend model_loop --offline
 ```
 
 **Step 6: Verify backend package**
@@ -240,8 +240,8 @@ cargo test -p backend-rust model_loop --offline
 Run:
 
 ```bash
-cargo test -p backend-rust model_loop --offline
-cargo test -p backend-rust agent_service --offline
+cargo test -p backend model_loop --offline
+cargo test -p backend agent_service --offline
 cargo fmt -- --check
 ```
 
@@ -266,8 +266,8 @@ Run:
 ```bash
 cargo fmt -- --check
 cargo test -p novex-agent-runtime --offline
-cargo test -p backend-rust model_loop --offline
-cargo test -p backend-rust agent_service --offline
+cargo test -p backend model_loop --offline
+cargo test -p backend agent_service --offline
 cargo test --workspace --offline
 git status --short
 ```

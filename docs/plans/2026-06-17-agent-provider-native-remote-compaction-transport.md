@@ -31,7 +31,7 @@ Add tests for:
 Run:
 
 ```bash
-cargo test -p backend-rust model_chat_payload --offline
+cargo test -p backend model_chat_payload --offline
 ```
 
 Expected: FAIL because `ModelChatCommand` has no request metadata contract.
@@ -59,7 +59,7 @@ Update `model_chat_request_payload(...)` to add a `metadata` object only when:
 Run:
 
 ```bash
-cargo test -p backend-rust model_chat_payload --offline
+cargo test -p backend model_chat_payload --offline
 ```
 
 Expected: PASS.
@@ -84,7 +84,7 @@ Add tests proving:
 Run:
 
 ```bash
-cargo test -p backend-rust remote_compaction --offline
+cargo test -p backend remote_compaction --offline
 ```
 
 Expected: FAIL until AgentService builds and records the model request metadata.
@@ -98,8 +98,8 @@ Import the new model metadata types, map `AgentRemoteCompactionRequest` into `Mo
 Run:
 
 ```bash
-cargo test -p backend-rust remote_compaction --offline
-cargo test -p backend-rust model_loop_compaction --offline
+cargo test -p backend remote_compaction --offline
+cargo test -p backend model_loop_compaction --offline
 ```
 
 Expected: PASS.

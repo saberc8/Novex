@@ -67,7 +67,7 @@ async fn runtime_cancel_signal_marks_snapshot_cancelling() {
 Run:
 
 ```bash
-cargo test -p backend-rust runtime_supervisor --offline
+cargo test -p backend runtime_supervisor --offline
 ```
 
 Expected: FAIL because supervisor snapshot types and APIs do not exist.
@@ -91,8 +91,8 @@ Keep `cancel_run(...) -> bool` as a compatibility wrapper over `cancel_run_signa
 Run:
 
 ```bash
-cargo test -p backend-rust runtime_supervisor --offline
-cargo test -p backend-rust runtime_registry --offline
+cargo test -p backend runtime_supervisor --offline
+cargo test -p backend runtime_registry --offline
 ```
 
 Expected: PASS.
@@ -146,7 +146,7 @@ fn agent_service_cancel_run_uses_supervisor_cancel_signal_payload() {
 Run:
 
 ```bash
-cargo test -p backend-rust runtime_supervisor --offline
+cargo test -p backend runtime_supervisor --offline
 ```
 
 Expected: FAIL until payload helper and service wiring exist.
@@ -163,8 +163,8 @@ Expected: FAIL until payload helper and service wiring exist.
 Run:
 
 ```bash
-cargo test -p backend-rust runtime_supervisor --offline
-cargo test -p backend-rust external_cancel --offline
+cargo test -p backend runtime_supervisor --offline
+cargo test -p backend external_cancel --offline
 ```
 
 Expected: PASS.
@@ -271,9 +271,9 @@ Run:
 
 ```bash
 cargo fmt -- --check
-cargo test -p backend-rust runtime_supervisor --offline
-cargo test -p backend-rust runtime_registry --offline
-cargo test -p backend-rust external_cancel --offline
+cargo test -p backend runtime_supervisor --offline
+cargo test -p backend runtime_registry --offline
+cargo test -p backend external_cancel --offline
 cargo test -p novex-eval runtime_supervisor --offline
 cargo test --workspace --offline
 ```

@@ -37,7 +37,7 @@ async fn agent_runtime_registry_signals_registered_run_cancellation() {
 Run:
 
 ```bash
-cargo test -p backend-rust runtime_registry --offline
+cargo test -p backend runtime_registry --offline
 ```
 
 Expected: FAIL because `AgentRuntimeRegistry` does not exist.
@@ -70,7 +70,7 @@ Methods:
 Run:
 
 ```bash
-cargo test -p backend-rust runtime_registry --offline
+cargo test -p backend runtime_registry --offline
 ```
 
 Expected: PASS.
@@ -114,7 +114,7 @@ fn app_state_owns_agent_runtime_registry() {
 Run:
 
 ```bash
-cargo test -p backend-rust runtime_registry --offline
+cargo test -p backend runtime_registry --offline
 ```
 
 Expected: FAIL until `AppState` and handlers are wired.
@@ -133,8 +133,8 @@ Expected: FAIL until `AppState` and handlers are wired.
 Run:
 
 ```bash
-cargo test -p backend-rust runtime_registry --offline
-cargo test -p backend-rust agent_handlers --offline
+cargo test -p backend runtime_registry --offline
+cargo test -p backend agent_handlers --offline
 ```
 
 Expected: PASS.
@@ -184,7 +184,7 @@ fn agent_service_tool_io_awaits_runtime_cancel_token() {
 Run:
 
 ```bash
-cargo test -p backend-rust runtime_registry --offline
+cargo test -p backend runtime_registry --offline
 ```
 
 Expected: FAIL until model/tool futures are wrapped.
@@ -207,11 +207,11 @@ Expected: FAIL until model/tool futures are wrapped.
 Run:
 
 ```bash
-cargo test -p backend-rust runtime_registry --offline
-cargo test -p backend-rust external_cancel --offline
-cargo test -p backend-rust tool_io_timeout --offline
-cargo test -p backend-rust parallel_tool --offline
-cargo test -p backend-rust model_loop --offline
+cargo test -p backend runtime_registry --offline
+cargo test -p backend external_cancel --offline
+cargo test -p backend tool_io_timeout --offline
+cargo test -p backend parallel_tool --offline
+cargo test -p backend model_loop --offline
 ```
 
 Expected: PASS.
@@ -242,12 +242,12 @@ Run:
 
 ```bash
 cargo fmt -- --check
-cargo test -p backend-rust runtime_registry --offline
-cargo test -p backend-rust external_cancel --offline
-cargo test -p backend-rust tool_io_timeout --offline
-cargo test -p backend-rust parallel_tool --offline
-cargo test -p backend-rust model_loop --offline
-cargo test -p backend-rust agent_service --offline
+cargo test -p backend runtime_registry --offline
+cargo test -p backend external_cancel --offline
+cargo test -p backend tool_io_timeout --offline
+cargo test -p backend parallel_tool --offline
+cargo test -p backend model_loop --offline
+cargo test -p backend agent_service --offline
 cargo test --workspace --offline
 ```
 

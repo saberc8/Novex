@@ -14,7 +14,7 @@
 - Do not change media image provider payload shape; keep using `MediaImageGenerationRequest::to_provider_payload()`.
 - Do not change provider auth behavior; keep both bearer auth and `x-api-key` header.
 - Do not change Chinese media error messages, timeout use, asset parsing behavior, provider-call leases, source metadata, trace/eval metadata, media job persistence, or dry-run behavior.
-- `novex-provider-client` must not depend on `backend-rust`, backend `AppError`, SQL, tenant context, provider-call leases, run-event persistence, media job persistence, or trace/eval crates.
+- `novex-provider-client` must not depend on `backend`, backend `AppError`, SQL, tenant context, provider-call leases, run-event persistence, media job persistence, or trace/eval crates.
 - Backend remains responsible for converting `ModelProviderClientError` into `AppError`.
 - Use a RED source-contract test before moving production code.
 - Verify with focused media/provider-client tests, formatting, diff checks, and the offline workspace test suite.
@@ -71,7 +71,7 @@ assert!(!backend_media_source.contains("图片生成请求失败: HTTP"));
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `cargo test -p backend-rust provider_client_media_dispatch_lives_in_provider_client_crate --offline`
+Run: `cargo test -p backend provider_client_media_dispatch_lives_in_provider_client_crate --offline`
 
 Expected: FAIL because backend `media.rs` still owns the request DTO, payload conversion, provider POST dispatch, dual auth headers, JSON body reading, HTTP status mapping, provider asset parser call, and media error strings.
 
@@ -210,13 +210,13 @@ Run:
 ```bash
 cargo fmt -- --check
 git diff --check
-cargo test -p backend-rust provider_client_media_dispatch_lives_in_provider_client_crate --offline
-cargo test -p backend-rust model_provider_media_transport_adapter --offline
-cargo test -p backend-rust model_provider_transport_splits_provider_client_modules --offline
-cargo test -p backend-rust media_ --offline
-cargo test -p backend-rust provider_client_http_primitives_live_in_provider_client_crate --offline
-cargo test -p backend-rust provider_client_native_cancel_dispatch_lives_in_provider_client_crate --offline
-cargo test -p backend-rust provider_client_rag_dispatch_lives_in_provider_client_crate --offline
+cargo test -p backend provider_client_media_dispatch_lives_in_provider_client_crate --offline
+cargo test -p backend model_provider_media_transport_adapter --offline
+cargo test -p backend model_provider_transport_splits_provider_client_modules --offline
+cargo test -p backend media_ --offline
+cargo test -p backend provider_client_http_primitives_live_in_provider_client_crate --offline
+cargo test -p backend provider_client_native_cancel_dispatch_lives_in_provider_client_crate --offline
+cargo test -p backend provider_client_rag_dispatch_lives_in_provider_client_crate --offline
 cargo test -p novex-provider-client --offline
 cargo test --workspace --offline
 ```

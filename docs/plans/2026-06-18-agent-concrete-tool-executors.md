@@ -42,10 +42,10 @@ Move concrete backend Agent tool execution implementations out of `agent_service
 
 - `cargo fmt --all -- --check`
 - `git diff --check`
-- `cargo test -p backend-rust agent_concrete_tool_executors --offline`
-- `cargo test -p backend-rust mcp_tool_execution --offline`
-- `cargo test -p backend-rust github_connector_auth --offline`
-- `cargo test -p backend-rust media_image_tool_uses_tenant_bound_model_route --offline`
-- `cargo test -p backend-rust agent_tool_executor_selection --offline`
-- `cargo test -p backend-rust model_loop --offline`
+- `cargo test -p backend agent_concrete_tool_executors --offline`
+- `cargo test -p backend mcp_tool_execution --offline`
+- `cargo test -p backend github_connector_auth --offline`
+- `cargo test -p backend media_image_tool_uses_tenant_bound_model_route --offline`
+- `cargo test -p backend agent_tool_executor_selection --offline`
+- `cargo test -p backend model_loop --offline`
 - `cargo test --workspace --offline`

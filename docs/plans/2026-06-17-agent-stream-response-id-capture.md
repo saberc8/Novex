@@ -33,7 +33,7 @@ Add a backend unit test named `provider_stream_event_carries_responses_created_m
 
 - [ ] **Step 2: Run the focused test red**
 
-Run: `cargo test -p backend-rust provider_stream_response_id --offline`
+Run: `cargo test -p backend provider_stream_response_id --offline`
 
 Expected: FAIL because provider stream events do not carry provider response id/status and the emitter only returns a next chunk index.
 
@@ -43,7 +43,7 @@ Add optional metadata fields to `ModelProviderStreamEvent`. Replace the `next_ch
 
 - [ ] **Step 4: Verify green**
 
-Run: `cargo test -p backend-rust provider_stream_response_id --offline`
+Run: `cargo test -p backend provider_stream_response_id --offline`
 
 Expected: PASS.
 
@@ -65,7 +65,7 @@ Add tests named `provider_stream_response_id_is_added_to_model_delta_payload` an
 
 - [ ] **Step 2: Run focused tests red**
 
-Run: `cargo test -p backend-rust provider_stream_response_id --offline`
+Run: `cargo test -p backend provider_stream_response_id --offline`
 
 Expected: FAIL because Agent payloads and completions do not retain stream response metadata yet.
 
@@ -81,9 +81,9 @@ Run:
 
 ```bash
 cargo fmt -- --check
-cargo test -p backend-rust provider_stream_response_id --offline
-cargo test -p backend-rust streamed_tool_call_early_stop --offline
-cargo test -p backend-rust provider_token_delta --offline
+cargo test -p backend provider_stream_response_id --offline
+cargo test -p backend streamed_tool_call_early_stop --offline
+cargo test -p backend provider_token_delta --offline
 cargo test --workspace --offline
 git diff --check
 ```

@@ -22,5 +22,5 @@ Script: `templates/customer-service-agent/smoke.sh`
 
 | Code | Workdir | Command |
 | --- | --- | --- |
-| `customer_service_agent_api` | `backend` | `cargo test -p backend-rust customer_service_ --offline` |
+| `customer_service_agent_api` | `backend` | `cargo test -p backend customer_service_ --offline` |
 | `customer_service_agent_frontend` | `apps/customer-service-agent` | `pnpm test` |

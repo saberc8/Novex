@@ -182,7 +182,7 @@ fn agent_service_model_loop_records_remote_compaction_request() {
 Run:
 
 ```bash
-cargo test -p backend-rust remote_compaction --offline
+cargo test -p backend remote_compaction --offline
 ```
 
 Expected: FAIL until the remote prompt builder and event payload wiring exist.
@@ -201,8 +201,8 @@ Expected: FAIL until the remote prompt builder and event payload wiring exist.
 Run:
 
 ```bash
-cargo test -p backend-rust remote_compaction --offline
-cargo test -p backend-rust model_loop_compaction --offline
+cargo test -p backend remote_compaction --offline
+cargo test -p backend model_loop_compaction --offline
 ```
 
 Expected: PASS.
@@ -313,8 +313,8 @@ Run:
 ```bash
 cargo fmt -- --check
 cargo test -p novex-agent-runtime remote_compaction --offline
-cargo test -p backend-rust remote_compaction --offline
-cargo test -p backend-rust model_loop_compaction --offline
+cargo test -p backend remote_compaction --offline
+cargo test -p backend model_loop_compaction --offline
 cargo test -p novex-eval remote_compaction --offline
 cargo test --workspace --offline
 ```

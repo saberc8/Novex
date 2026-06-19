@@ -83,7 +83,7 @@ async fn serial_tool_io_batch_runs_calls_in_sequence() {
 Run:
 
 ```bash
-cargo test -p backend-rust parallel_tool_io_batch --offline
+cargo test -p backend parallel_tool_io_batch --offline
 ```
 
 Expected: FAIL because prepared/executed types and helper do not exist.
@@ -105,7 +105,7 @@ Use `futures_util::future::join_all` for `ToolBatchExecutionMode::Parallel`. Pre
 Run:
 
 ```bash
-cargo test -p backend-rust parallel_tool_io_batch --offline
+cargo test -p backend parallel_tool_io_batch --offline
 cargo fmt -- --check
 ```
 
@@ -154,7 +154,7 @@ fn agent_service_model_loop_evaluates_batch_approval_before_execution() {
 Run:
 
 ```bash
-cargo test -p backend-rust agent_service_parallel_tool_execution_separates_io_from_persistence --offline
+cargo test -p backend agent_service_parallel_tool_execution_separates_io_from_persistence --offline
 ```
 
 Expected: FAIL because split helpers do not exist yet.
@@ -180,8 +180,8 @@ Keep `execute_and_record_tool_call` as a wrapper.
 Run:
 
 ```bash
-cargo test -p backend-rust agent_service_parallel_tool_execution_separates_io_from_persistence --offline
-cargo test -p backend-rust agent_service --offline
+cargo test -p backend agent_service_parallel_tool_execution_separates_io_from_persistence --offline
+cargo test -p backend agent_service --offline
 cargo fmt -- --check
 ```
 
@@ -218,7 +218,7 @@ fn agent_service_model_loop_executes_parallel_batches_via_io_executor() {
 Run:
 
 ```bash
-cargo test -p backend-rust agent_service_model_loop_executes_parallel_batches_via_io_executor --offline
+cargo test -p backend agent_service_model_loop_executes_parallel_batches_via_io_executor --offline
 ```
 
 Expected: FAIL because model loop still executes inside the per-call loop.
@@ -243,8 +243,8 @@ Change Parallel tools row to note true parallel tool I/O is in place while cance
 Run:
 
 ```bash
-cargo test -p backend-rust model_loop --offline
-cargo test -p backend-rust agent_service --offline
+cargo test -p backend model_loop --offline
+cargo test -p backend agent_service --offline
 cargo fmt -- --check
 ```
 
@@ -261,9 +261,9 @@ Run:
 
 ```bash
 cargo fmt -- --check
-cargo test -p backend-rust parallel_tool --offline
-cargo test -p backend-rust model_loop --offline
-cargo test -p backend-rust agent_service --offline
+cargo test -p backend parallel_tool --offline
+cargo test -p backend model_loop --offline
+cargo test -p backend agent_service --offline
 cargo test --workspace --offline
 git status --short
 ```

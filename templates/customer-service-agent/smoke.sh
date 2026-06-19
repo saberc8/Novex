@@ -11,5 +11,5 @@ run_check() {
   (cd "${ROOT_DIR}/${workdir}" && bash -lc "${command}")
 }
 
-run_check "backend" "cargo test -p backend-rust customer_service_ --offline"
+run_check "backend" "cargo test -p backend customer_service_ --offline"
 run_check "apps/customer-service-agent" "pnpm test"

@@ -46,7 +46,7 @@ Add tests for:
 
 - [x] **Step 2: Run red tests**
 
-Run: `cargo test -p backend-rust agent_turn_item --offline`
+Run: `cargo test -p backend agent_turn_item --offline`
 
 Result: FAIL as expected because `AgentTurnItemRecord`,
 `agent_turn_item_save_record_from_event_payload`, and `agent_turn_item_from_record` did not exist yet.
@@ -87,7 +87,7 @@ Ignore non-turn-item events.
 
 - [x] **Step 3: Run green focused tests**
 
-Run: `cargo test -p backend-rust agent_turn_item --offline`
+Run: `cargo test -p backend agent_turn_item --offline`
 
 Result: PASS.
 
@@ -116,9 +116,9 @@ Load ordered turn items through `load_model_loop_turn_item_history(run_id)` and 
 - [x] **Step 3: Run focused runtime tests**
 
 Run:
-- `cargo test -p backend-rust agent_runtime_event_payload_preserves_turn_item_shape --offline`
-- `cargo test -p backend-rust agent_trace_snapshot_contains_replay_summary --offline`
-- `cargo test -p backend-rust agent_run_events_convert_to_trace_bundle --offline`
+- `cargo test -p backend agent_runtime_event_payload_preserves_turn_item_shape --offline`
+- `cargo test -p backend agent_trace_snapshot_contains_replay_summary --offline`
+- `cargo test -p backend agent_run_events_convert_to_trace_bundle --offline`
 
 Result: PASS.
 
@@ -149,12 +149,12 @@ Expected: PASS.
 Commit feature work, merge `feat/enterprise-agent-foundation` into `main`, rerun full verification on `main`, run `cargo clean` in both worktrees, and sync feature to `main`.
 
 **Verification evidence so far:**
-- Red: `cargo test -p backend-rust agent_turn_item --offline` failed before implementation on missing `AgentTurnItemRecord` and replay helper functions.
-- Green: `cargo test -p backend-rust agent_turn_item --offline`
-- Green: `cargo test -p backend-rust agent_service_response_item_ledger --offline`
-- Green: `cargo test -p backend-rust agent_runtime_event_payload_preserves_turn_item_shape --offline`
-- Green: `cargo test -p backend-rust agent_trace_snapshot_contains_replay_summary --offline`
-- Green: `cargo test -p backend-rust agent_run_events_convert_to_trace_bundle --offline`
+- Red: `cargo test -p backend agent_turn_item --offline` failed before implementation on missing `AgentTurnItemRecord` and replay helper functions.
+- Green: `cargo test -p backend agent_turn_item --offline`
+- Green: `cargo test -p backend agent_service_response_item_ledger --offline`
+- Green: `cargo test -p backend agent_runtime_event_payload_preserves_turn_item_shape --offline`
+- Green: `cargo test -p backend agent_trace_snapshot_contains_replay_summary --offline`
+- Green: `cargo test -p backend agent_run_events_convert_to_trace_bundle --offline`
 - Green: `cargo fmt -- --check`
 - Green: `cargo test --workspace --offline`
 - Green: `git diff --check`

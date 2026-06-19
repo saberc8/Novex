@@ -11,7 +11,7 @@
 ## Global Constraints
 
 - Do not change embedding/rerank provider request payloads, error messages, or backend public facade names.
-- `crates/novex-provider-client` must not depend on `backend-rust` or backend `AppError`.
+- `crates/novex-provider-client` must not depend on `backend` or backend `AppError`.
 - Keep parser behavior identical: support `results`/`data`, `index`/`document_index`/`documentIndex`, `relevance_score`/`relevanceScore`/`score`, numeric strings, finite filtering, and empty vector rejection.
 - Use a RED source-contract test before creating the crate.
 - Verify with focused backend tests, provider-client crate tests, formatting, diff checks, and the offline workspace test suite.
@@ -58,7 +58,7 @@ assert!(!rag_source.contains("fn json_f32("));
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `cargo test -p backend-rust provider_client_rag_parsers_live_in_provider_client_crate --offline`
+Run: `cargo test -p backend provider_client_rag_parsers_live_in_provider_client_crate --offline`
 
 Expected: FAIL because the workspace crate does not exist and backend RAG transport still owns parser helpers.
 
@@ -103,10 +103,10 @@ Run:
 ```bash
 cargo fmt -- --check
 git diff --check
-cargo test -p backend-rust provider_client_rag_parsers_live_in_provider_client_crate --offline
-cargo test -p backend-rust model_provider_rag_transport_adapter --offline
-cargo test -p backend-rust runtime_embedding --offline
-cargo test -p backend-rust rerank_ --offline
+cargo test -p backend provider_client_rag_parsers_live_in_provider_client_crate --offline
+cargo test -p backend model_provider_rag_transport_adapter --offline
+cargo test -p backend runtime_embedding --offline
+cargo test -p backend rerank_ --offline
 cargo test -p novex-provider-client --offline
 ```
 

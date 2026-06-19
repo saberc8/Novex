@@ -1,6 +1,6 @@
 use std::net::SocketAddr;
 
-use backend_rust::{
+use backend::{
     application::ai::agent_queue_runtime::{
         agent_queue_from_config, agent_rabbitmq_from_config, spawn_agent_queue_broker_consumer,
         spawn_agent_queue_outbox_publisher, spawn_agent_queue_worker,
@@ -91,9 +91,8 @@ async fn main() -> anyhow::Result<()> {
 }
 
 fn init_tracing() {
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-        EnvFilter::new("backend_rust=debug,tower_http=info,axum::rejection=trace")
-    });
+    let filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new("backend=debug,tower_http=info,axum::rejection=trace"));
 
     tracing_subscriber::registry()
         .with(filter)

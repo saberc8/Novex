@@ -59,7 +59,7 @@ fn model_circuit_breaker_permission_seed_contains_controls() {
 Run:
 
 ```bash
-cargo test -p backend-rust model_circuit_breaker_permission_seed --offline
+cargo test -p backend model_circuit_breaker_permission_seed --offline
 ```
 
 Expected: FAIL because the seed migration does not exist.
@@ -88,7 +88,7 @@ ON CONFLICT DO NOTHING;
 Run:
 
 ```bash
-cargo test -p backend-rust model_circuit_breaker_permission_seed --offline
+cargo test -p backend model_circuit_breaker_permission_seed --offline
 ```
 
 Expected: PASS.
@@ -144,7 +144,7 @@ fn route_breaker_controls_source_contract_clears_tenant_breaker_and_local_cache(
 Run:
 
 ```bash
-cargo test -p backend-rust route_breaker_controls --offline
+cargo test -p backend route_breaker_controls --offline
 ```
 
 Expected: FAIL because service methods do not exist.
@@ -165,7 +165,7 @@ Use `format_datetime` for timestamp output and compute `is_open`/`remaining_ms` 
 Run:
 
 ```bash
-cargo test -p backend-rust route_breaker_controls --offline
+cargo test -p backend route_breaker_controls --offline
 ```
 
 Expected: PASS.
@@ -225,7 +225,7 @@ fn model_circuit_breaker_routes_are_registered() {
 Run:
 
 ```bash
-cargo test -p backend-rust model_circuit_breaker_ --offline
+cargo test -p backend model_circuit_breaker_ --offline
 ```
 
 Expected: FAIL because handlers/routes are missing.
@@ -244,7 +244,7 @@ Both bind `ModelRuntimeService::for_tenant(state.db, current_user.tenant_id)`.
 Run:
 
 ```bash
-cargo test -p backend-rust model_circuit_breaker_ --offline
+cargo test -p backend model_circuit_breaker_ --offline
 ```
 
 Expected: PASS.
@@ -291,7 +291,7 @@ fn route_breaker_controls_source_contract_checks_persistent_before_local_cache()
 Run:
 
 ```bash
-cargo test -p backend-rust checks_persistent_before_local_cache --offline
+cargo test -p backend checks_persistent_before_local_cache --offline
 ```
 
 Expected: FAIL if runtime still checks local first.
@@ -305,9 +305,9 @@ Check persistent breaker first, then local cache. This makes manual DB clear aut
 Run:
 
 ```bash
-cargo test -p backend-rust checks_persistent_before_local_cache --offline
-cargo test -p backend-rust route_circuit_breaker --offline
-cargo test -p backend-rust persistent_route_circuit_breaker --offline
+cargo test -p backend checks_persistent_before_local_cache --offline
+cargo test -p backend route_circuit_breaker --offline
+cargo test -p backend persistent_route_circuit_breaker --offline
 ```
 
 Expected: PASS.
@@ -333,7 +333,7 @@ Change rollout trace status from `slice-10 implemented` to `slice-11 implemented
 Add focused command:
 
 ```bash
-cargo test -p backend-rust route_breaker_controls --offline
+cargo test -p backend route_breaker_controls --offline
 ```
 
 **Step 2: Commit matrix**
@@ -351,10 +351,10 @@ Run:
 
 ```bash
 cargo fmt -- --check
-cargo test -p backend-rust model_circuit_breaker_ --offline
-cargo test -p backend-rust route_breaker_controls --offline
-cargo test -p backend-rust route_circuit_breaker --offline
-cargo test -p backend-rust persistent_route_circuit_breaker --offline
+cargo test -p backend model_circuit_breaker_ --offline
+cargo test -p backend route_breaker_controls --offline
+cargo test -p backend route_circuit_breaker --offline
+cargo test -p backend persistent_route_circuit_breaker --offline
 cargo test --workspace --offline
 ```
 

@@ -8,15 +8,15 @@ Novex should reuse the shared `docker-common` infrastructure stack by default, s
 
 The shared Docker stack lives at:
 
-- `/Users/yusenlin/Avalon/freedom/2026/aimanju/aether-loom/docker-compose.yml`
+- `/path/to/docker-common/docker-compose.yml`
 
-It already provides PostgreSQL, Redis, Etcd, MinIO, Milvus, Attu, and Neo4j through the `docker-common` Compose project and the `docker-common_default` network. Novex still has project-local infrastructure defaults in `infra/docker-compose.yml`, `infra/.env.poc.example`, `infra/README.md`, `scripts/run-poc.sh`, and backend compose contract tests.
+It already provides PostgreSQL, Redis, Etcd, MinIO, Milvus, Attu, and Neo4j through the `docker-common` Compose project and the `docker-common_default` network. Novex keeps project-local runtime defaults in `infra/.env.poc.example`, `infra/README.md`, `scripts/run-poc.sh`, and backend local POC contract tests.
 
 ## Architecture
 
 The shared stack becomes the owner of infrastructure containers. Add RabbitMQ to that stack with the same naming convention as existing services: `docker-rabbitmq`, configurable host ports, healthcheck, and a named persistent volume.
 
-Novex keeps only project runtime services in its Compose file: backend, parser-worker, and web apps. These containers join the external `docker-common_default` network and connect to common services by network DNS names such as `postgres`, `redis`, `milvus`, and `rabbitmq`.
+Novex project services run as local processes. They connect to common services through host ports while the common containers still use network DNS names such as `postgres`, `redis`, `milvus`, and `rabbitmq` inside the shared Docker network.
 
 Local host execution uses the common host ports:
 
@@ -46,5 +46,5 @@ Use static compose/config validation plus live Docker checks:
 - `docker compose -p docker-common -f <common-compose> config`
 - `docker compose -p docker-common -f <common-compose> up -d rabbitmq`
 - `docker ps` to confirm `docker-rabbitmq` is running and healthy
-- `docker compose --env-file infra/.env.poc -f infra/docker-compose.yml config`
-- targeted Novex backend tests that assert the compose contract
+- `./scripts/run-poc.sh commands`
+- targeted Novex backend tests that assert the local POC contract

@@ -42,7 +42,7 @@ Add tests proving a ticket round-trips and is rejected for a different run id.
 Run:
 
 ```bash
-cargo test -p backend-rust agent_event_ws_ticket --offline
+cargo test -p backend agent_event_ws_ticket --offline
 ```
 
 Expected: FAIL because the ticket methods do not exist.
@@ -58,7 +58,7 @@ Use the existing JWT secret, include `purpose`, `user_id`, `username`, `run_id`,
 Run:
 
 ```bash
-cargo test -p backend-rust agent_event_ws_ticket --offline
+cargo test -p backend agent_event_ws_ticket --offline
 ```
 
 Expected: PASS.
@@ -89,7 +89,7 @@ Add tests proving:
 Run:
 
 ```bash
-cargo test -p backend-rust agent_event_websocket_ticket --offline
+cargo test -p backend agent_event_websocket_ticket --offline
 ```
 
 Expected: FAIL because the route, response, and principal extractor do not exist.
@@ -105,8 +105,8 @@ Add the route and handler. The extractor reads `Authorization` first, then query
 Run:
 
 ```bash
-cargo test -p backend-rust agent_event_websocket_ticket --offline
-cargo test -p backend-rust agent_event_websocket --offline
+cargo test -p backend agent_event_websocket_ticket --offline
+cargo test -p backend agent_event_websocket --offline
 ```
 
 Expected: PASS.
@@ -219,8 +219,8 @@ Actual: PASS for `cargo fmt -- --check`, `cargo test --workspace --offline`, bot
 - Feature commit: `4af991a feat: add agent websocket browser tickets`.
 - Main merge: `88af86f merge: enterprise agent foundation websocket browser tickets`.
 - Red tests:
-  - `cargo test -p backend-rust agent_event_ws_ticket --offline` failed because ticket issue/parse methods were missing.
-  - `cargo test -p backend-rust agent_event_websocket_ticket --offline` failed because `create_event_ws_ticket` was missing.
+  - `cargo test -p backend agent_event_ws_ticket --offline` failed because ticket issue/parse methods were missing.
+  - `cargo test -p backend agent_event_websocket_ticket --offline` failed because `create_event_ws_ticket` was missing.
   - `pnpm test -- src/api/agent.test.ts` failed in both frontend apps because browser ticket helpers were missing.
 - Green verification:
   - `cargo fmt -- --check`

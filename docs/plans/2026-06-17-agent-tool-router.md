@@ -160,7 +160,7 @@ fn model_loop_tool_router_exposes_prompt_codes() {
 Run:
 
 ```bash
-cargo test -p backend-rust agent_service_model_loop_uses_novex_tool_router --offline
+cargo test -p backend agent_service_model_loop_uses_novex_tool_router --offline
 ```
 
 Expected: FAIL because backend still uses local tool-code list.
@@ -202,8 +202,8 @@ Change Tool router row to `slice-1 implemented` and note that registry-owned pro
 Run:
 
 ```bash
-cargo test -p backend-rust model_loop --offline
-cargo test -p backend-rust agent_service --offline
+cargo test -p backend model_loop --offline
+cargo test -p backend agent_service --offline
 cargo fmt -- --check
 ```
 
@@ -221,8 +221,8 @@ Run:
 ```bash
 cargo fmt -- --check
 cargo test -p novex-tools --offline
-cargo test -p backend-rust model_loop --offline
-cargo test -p backend-rust agent_service --offline
+cargo test -p backend model_loop --offline
+cargo test -p backend agent_service --offline
 cargo test --workspace --offline
 git status --short
 ```

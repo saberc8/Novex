@@ -92,7 +92,7 @@ fn provider_call_lease_cancel_completion_records_native_cancel_evidence() {
 Run:
 
 ```bash
-cargo test -p backend-rust provider_call_lease_native_cancel --offline
+cargo test -p backend provider_call_lease_native_cancel --offline
 ```
 
 Expected: FAIL because the cancel response structs and plan helpers do not exist.
@@ -106,7 +106,7 @@ Add response structs, native cancel plan structs, provider response id extractio
 Run:
 
 ```bash
-cargo test -p backend-rust provider_call_lease_native_cancel --offline
+cargo test -p backend provider_call_lease_native_cancel --offline
 ```
 
 Expected: PASS.
@@ -150,7 +150,7 @@ fn provider_call_lease_completion_only_updates_running_rows() {
 Run:
 
 ```bash
-cargo test -p backend-rust provider_call_lease_cancel --offline
+cargo test -p backend provider_call_lease_cancel --offline
 ```
 
 Expected: FAIL because the service method and running-row guard do not exist.
@@ -164,7 +164,7 @@ Fetch the lease row, resolve route by route purpose and code, build/send native 
 Run:
 
 ```bash
-cargo test -p backend-rust provider_call_lease_cancel --offline
+cargo test -p backend provider_call_lease_cancel --offline
 ```
 
 Expected: PASS.
@@ -222,7 +222,7 @@ fn provider_call_lease_cancel_route_is_registered() {
 Run:
 
 ```bash
-cargo test -p backend-rust provider_call_lease_cancel --offline
+cargo test -p backend provider_call_lease_cancel --offline
 ```
 
 Expected: FAIL because route, permission, and migration do not exist.
@@ -240,9 +240,9 @@ Move provider-native cancel controls into Runtime loop evidence while keeping We
 Run:
 
 ```bash
-cargo test -p backend-rust provider_call_lease_cancel --offline
-cargo test -p backend-rust provider_call_lease --offline
-cargo test -p backend-rust provider_abort --offline
+cargo test -p backend provider_call_lease_cancel --offline
+cargo test -p backend provider_call_lease --offline
+cargo test -p backend provider_abort --offline
 cargo fmt -- --check
 cargo test --workspace --offline
 git diff --check
@@ -251,11 +251,11 @@ git diff --check
 Expected: all pass with exit code 0.
 
 **Evidence:**
-- Red: `cargo test -p backend-rust provider_call_lease_native_cancel --offline` failed before structs/helpers existed.
-- Green: `cargo test -p backend-rust provider_call_lease_native_cancel --offline` passed after native cancel plan helpers.
-- Green: `cargo test -p backend-rust provider_call_lease_cancel --offline` passed after service and HTTP wiring.
-- Regression: `cargo test -p backend-rust provider_call_lease --offline` passed.
-- Regression: `cargo test -p backend-rust provider_abort --offline` passed.
+- Red: `cargo test -p backend provider_call_lease_native_cancel --offline` failed before structs/helpers existed.
+- Green: `cargo test -p backend provider_call_lease_native_cancel --offline` passed after native cancel plan helpers.
+- Green: `cargo test -p backend provider_call_lease_cancel --offline` passed after service and HTTP wiring.
+- Regression: `cargo test -p backend provider_call_lease --offline` passed.
+- Regression: `cargo test -p backend provider_abort --offline` passed.
 - Format: `cargo fmt -- --check` passed.
 - Workspace: `cargo test --workspace --offline` passed.
 
@@ -274,7 +274,7 @@ git commit -m "feat: add provider call lease cancellation control"
 - [x] **Step 2: Merge to main**
 
 ```bash
-cd /Users/yusenlin/Avalon/freedom/github/zm-agent/Novex
+cd /path/to/Novex
 git merge --no-ff feat/enterprise-agent-foundation -m "merge: enterprise agent foundation provider native cancel"
 ```
 
@@ -290,7 +290,7 @@ git diff --check
 
 ```bash
 cargo clean
-cd /Users/yusenlin/Avalon/freedom/github/zm-agent/Novex/.worktrees/enterprise-agent-foundation
+cd /path/to/Novex/.worktrees/enterprise-agent-foundation
 cargo clean
 git merge --ff-only main
 ```

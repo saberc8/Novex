@@ -176,7 +176,7 @@ async fn mcp_oauth_refresh_token_dispatch_resolves_refresh_secret_and_writes_new
 
 - [ ] **Step 2: Run RED test**
 
-Run: `cargo test -p backend-rust mcp_oauth_refresh_token_dispatch --offline`
+Run: `cargo test -p backend mcp_oauth_refresh_token_dispatch --offline`
 
 Expected: FAIL because refresh command and dispatch function do not exist.
 
@@ -186,7 +186,7 @@ Resolve `refresh_token_secret_ref` through the injected async resolver, build `M
 
 - [ ] **Step 4: Run focused tests**
 
-Run: `cargo test -p backend-rust mcp_oauth_token_dispatch --offline`
+Run: `cargo test -p backend mcp_oauth_token_dispatch --offline`
 
 Expected: PASS, including existing authorization-code tests.
 
@@ -241,7 +241,7 @@ Add a source-contract test requiring `find_mcp_oauth_session_for_scope`, `Secret
 
 - [ ] **Step 3: Run RED tests**
 
-Run: `cargo test -p backend-rust mcp_oauth_refresh --offline`
+Run: `cargo test -p backend mcp_oauth_refresh --offline`
 
 Expected: FAIL because refresh metadata parsing and service method do not exist.
 
@@ -251,7 +251,7 @@ Load the scoped session, require a refresh token secret ref, recover refresh con
 
 - [ ] **Step 5: Run focused tests**
 
-Run: `cargo test -p backend-rust mcp_oauth_callback --offline && cargo test -p backend-rust mcp_oauth_refresh --offline`
+Run: `cargo test -p backend mcp_oauth_callback --offline && cargo test -p backend mcp_oauth_refresh --offline`
 
 Expected: PASS.
 
@@ -270,7 +270,7 @@ Add a source route test requiring the new route, handler, auth extraction, and s
 
 - [ ] **Step 2: Run RED test**
 
-Run: `cargo test -p backend-rust mcp_oauth_refresh_route --offline`
+Run: `cargo test -p backend mcp_oauth_refresh_route --offline`
 
 Expected: FAIL until the route is registered.
 
@@ -290,11 +290,11 @@ Run:
 cargo fmt --all -- --check
 git diff --check
 cargo test -p novex-mcp mcp_oauth_session --offline
-cargo test -p backend-rust mcp_oauth_token_dispatch --offline
-cargo test -p backend-rust mcp_oauth_callback --offline
-cargo test -p backend-rust mcp_oauth_refresh --offline
-cargo test -p backend-rust mcp_oauth_refresh_route --offline
-cargo test -p backend-rust secret --offline
+cargo test -p backend mcp_oauth_token_dispatch --offline
+cargo test -p backend mcp_oauth_callback --offline
+cargo test -p backend mcp_oauth_refresh --offline
+cargo test -p backend mcp_oauth_refresh_route --offline
+cargo test -p backend secret --offline
 ```
 
 Expected: all commands pass.

@@ -41,5 +41,5 @@ Move the next piece of Codex-style tool infrastructure into `novex-tools`: a ser
 - `cargo fmt --all -- --check`
 - `git diff --check`
 - `cargo test -p novex-tools tool_executor_dispatch_plan --offline`
-- `cargo test -p backend-rust tool_executor_dispatch_plan --offline`
+- `cargo test -p backend tool_executor_dispatch_plan --offline`
 - `cargo test --workspace --offline`

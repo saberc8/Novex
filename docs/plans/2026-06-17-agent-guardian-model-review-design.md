@@ -62,7 +62,7 @@ This is closest to Codex, but too broad for this slice because Novex does not ye
 - `review_tool_approval_with_model_assessment`
 - `guardian_review_failure_decision`
 
-`backend-rust` adapts Agent runtime state into transcript entries, builds a reviewed action from the tool and proposed arguments, calls `chat_completion_for_purpose(ModelRoutePurpose::GuardianReview, ...)` with a 90-second timeout, and serializes the resulting decision into `guardianReview`.
+`backend` adapts Agent runtime state into transcript entries, builds a reviewed action from the tool and proposed arguments, calls `chat_completion_for_purpose(ModelRoutePurpose::GuardianReview, ...)` with a 90-second timeout, and serializes the resulting decision into `guardianReview`.
 
 ## Runtime Semantics
 

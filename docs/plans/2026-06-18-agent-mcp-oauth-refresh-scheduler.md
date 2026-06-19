@@ -46,7 +46,7 @@ fn mcp_oauth_persistence_repository_lists_due_refresh_sessions() {
 
 - [ ] **Step 2: Run RED test**
 
-Run: `cargo test -p backend-rust mcp_oauth_persistence_repository_lists_due_refresh_sessions --offline`
+Run: `cargo test -p backend mcp_oauth_persistence_repository_lists_due_refresh_sessions --offline`
 
 Expected: FAIL because the method and query contract do not exist.
 
@@ -56,7 +56,7 @@ Add `MCP_OAUTH_SESSION_DUE_REFRESH_SQL` using the same selected columns as `MCP_
 
 - [ ] **Step 4: Run GREEN test**
 
-Run: `cargo test -p backend-rust mcp_oauth_persistence --offline`
+Run: `cargo test -p backend mcp_oauth_persistence --offline`
 
 Expected: PASS.
 
@@ -91,7 +91,7 @@ fn mcp_oauth_refresh_scheduler_service_uses_due_query_and_existing_refresh_path(
 
 - [ ] **Step 2: Run RED test**
 
-Run: `cargo test -p backend-rust mcp_oauth_refresh_scheduler --offline`
+Run: `cargo test -p backend mcp_oauth_refresh_scheduler --offline`
 
 Expected: FAIL because the batch summary and service method do not exist.
 
@@ -101,7 +101,7 @@ Add a bounded limit normalizer, query due sessions through `AiCapabilityReposito
 
 - [ ] **Step 4: Run GREEN test**
 
-Run: `cargo test -p backend-rust mcp_oauth_refresh_scheduler --offline`
+Run: `cargo test -p backend mcp_oauth_refresh_scheduler --offline`
 
 Expected: PASS.
 
@@ -144,7 +144,7 @@ fn mcp_oauth_refresh_key_builtin_job_is_accepted() {
 
 - [ ] **Step 2: Run RED test**
 
-Run: `cargo test -p backend-rust mcp_oauth_refresh_key --offline`
+Run: `cargo test -p backend mcp_oauth_refresh_key --offline`
 
 Expected: FAIL because executor does not route the key and service test is missing.
 
@@ -154,7 +154,7 @@ Import `CapabilityService` in `scheduler/executor.rs`, add the match branch for 
 
 - [ ] **Step 4: Run GREEN test**
 
-Run: `cargo test -p backend-rust scheduler --offline`
+Run: `cargo test -p backend scheduler --offline`
 
 Expected: PASS.
 
@@ -173,7 +173,7 @@ Add a test that includes the migration text and requires the seeded key, job id,
 
 - [ ] **Step 2: Run RED test**
 
-Run: `cargo test -p backend-rust mcp_oauth_refresh_scheduler_seed --offline`
+Run: `cargo test -p backend mcp_oauth_refresh_scheduler_seed --offline`
 
 Expected: FAIL because the migration file does not exist.
 
@@ -190,10 +190,10 @@ Run:
 ```bash
 cargo fmt --all -- --check
 git diff --check
-cargo test -p backend-rust mcp_oauth_persistence --offline
-cargo test -p backend-rust mcp_oauth_refresh_scheduler --offline
-cargo test -p backend-rust scheduler --offline
-cargo test -p backend-rust secret --offline
+cargo test -p backend mcp_oauth_persistence --offline
+cargo test -p backend mcp_oauth_refresh_scheduler --offline
+cargo test -p backend scheduler --offline
+cargo test -p backend secret --offline
 ```
 
 Expected: all commands pass.

@@ -1,4 +1,4 @@
-use backend_rust::{
+use backend::{
     application::ai::{
         eval_queue_runtime::eval_rabbitmq_from_config, eval_worker_runtime::run_eval_worker_runtime,
     },
@@ -31,9 +31,8 @@ async fn main() -> anyhow::Result<()> {
 }
 
 fn init_tracing() {
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-        EnvFilter::new("backend_rust=debug,tower_http=info,axum::rejection=trace")
-    });
+    let filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new("backend=debug,tower_http=info,axum::rejection=trace"));
 
     tracing_subscriber::registry()
         .with(filter)

@@ -524,7 +524,7 @@ Run:
 ```bash
 cargo test -p novex-mcp
 cargo test -p novex-provider-client
-cargo test -p backend-rust application::ai::foundation_service::tests::summary_lists_required_foundation_crates
+cargo test -p backend application::ai::foundation_service::tests::summary_lists_required_foundation_crates
 ```
 
 Expected: all commands pass.

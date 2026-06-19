@@ -81,7 +81,7 @@ The runner can also be used as a process boundary:
 ```bash
 export PARSER_BACKEND_BASE_URL="http://127.0.0.1:4398"
 export PARSER_BACKEND_TOKEN="<backend JWT or service token>"
-cat parse-request.json | PYTHONPATH=services/parser-worker python3 -m parser_worker.runner
+cat parse-request.json | PYTHONPATH=services/parser-worker uv run --no-project --with-requirements services/parser-worker/requirements.txt python -m parser_worker.runner
 ```
 
 For uploaded text-like assets (`/file/...` Markdown, TXT, CSV, JSON, code, logs), the runner resolves relative backend file URLs, fetches the source text, converts the source to an inline parser request, then posts completed chunks. For PDF, Office, and image paths, the first runner step returns `callbackStatus=deferred` after MinerU submission. A follow-up call to `complete_mineru_parse_job` handles a done MinerU task by downloading the ZIP result, selecting `auto_full.md` / `full.md` / `result.md` when present, chunking the markdown, and callbacking the backend. Pending tasks remain deferred.
@@ -90,24 +90,37 @@ For uploaded text-like assets (`/file/...` Markdown, TXT, CSV, JSON, code, logs)
 
 Production uploads use RabbitMQ plus Redis instead of stdin execution. The Rust backend creates `ai_document`, `ai_parser_job`, and `ai_parser_outbox` in one database transaction. Its parser queue publisher publishes the outbox payload to the `novex.parser` direct exchange. The Python worker consumes `novex.parser.execute`, uses Redis leases to avoid concurrent execution of the same parser job, calls the existing runner callbacks, and republishes deferred or failed work to RabbitMQ retry/dead routes.
 
-Install the runtime queue dependencies:
+Use uv for the runtime queue dependencies:
 
 ```bash
-python3 -m pip install pika redis
+PYTHONPATH=services/parser-worker uv run --no-project --with-requirements services/parser-worker/requirements.txt python -m parser_worker.health
 ```
 
-Run the worker:
+If uv is unavailable, create a local `.venv` once:
 
 ```bash
-export PARSER_BACKEND_BASE_URL="http://backend:4398"
+python3 -m venv services/parser-worker/.venv
+services/parser-worker/.venv/bin/python -m pip install -r services/parser-worker/requirements.txt
+```
+
+Run the worker with uv:
+
+```bash
+export PARSER_BACKEND_BASE_URL="http://127.0.0.1:4398"
 export PARSER_BACKEND_TOKEN="<backend service token>"
-export RABBITMQ_URL="amqp://guest:guest@rabbitmq:5672/%2f"
-export REDIS_URL="redis://redis:6379/0"
+export RABBITMQ_URL="amqp://guest:guest@127.0.0.1:5673/%2f"
+export REDIS_URL="redis://127.0.0.1:16379/0"
 export RABBITMQ_PARSER_EXCHANGE="novex.parser"
 export RABBITMQ_PARSER_EXECUTE_QUEUE="novex.parser.execute"
 export RABBITMQ_PARSER_RETRY_QUEUE="novex.parser.retry"
 export RABBITMQ_PARSER_DEAD_QUEUE="novex.parser.dead"
-PYTHONPATH=services/parser-worker python3 -m parser_worker.worker
+PYTHONPATH=services/parser-worker uv run --no-project --with-requirements services/parser-worker/requirements.txt python -m parser_worker.worker
+```
+
+Or run the same worker through `.venv`:
+
+```bash
+PYTHONPATH=services/parser-worker services/parser-worker/.venv/bin/python -m parser_worker.worker
 ```
 
 Default queue topology:
@@ -129,7 +142,7 @@ MinerU credentials are runtime secrets and must not be committed. Start the work
 ```bash
 export MINERU_TOKEN="<token from OpenXLab/MinerU>"
 export PARSER_WORKER_MODE="type-routed"
-PYTHONPATH=services/parser-worker python3 -m parser_worker.health
+PYTHONPATH=services/parser-worker uv run --no-project --with-requirements services/parser-worker/requirements.txt python -m parser_worker.health
 ```
 
 The health command prints only masked credentials, for example:
@@ -151,5 +164,5 @@ Current implementation status:
 Verification:
 
 ```bash
-PYTHONPATH=services/parser-worker python3 -m unittest discover -s services/parser-worker/tests
+PYTHONPATH=services/parser-worker uv run --no-project --with-requirements services/parser-worker/requirements.txt python -m unittest discover -s services/parser-worker/tests
 ```

@@ -50,7 +50,7 @@ assert!(!transport_source.contains("use super::model_service::{"));
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `cargo test -p backend-rust model_provider_transport_types_live_in_shared_model_crate --offline`
+Run: `cargo test -p backend model_provider_transport_types_live_in_shared_model_crate --offline`
 
 Expected: FAIL because `novex-model` does not yet own those DTO structs and transport still imports them from `model_service`.
 
@@ -113,9 +113,9 @@ Run:
 ```bash
 cargo fmt -- --check
 git diff --check
-cargo test -p backend-rust model_provider_transport_types_live_in_shared_model_crate --offline
-cargo test -p backend-rust model_provider_media_transport_adapter --offline
-cargo test -p backend-rust model_provider_rag_transport_adapter --offline
+cargo test -p backend model_provider_transport_types_live_in_shared_model_crate --offline
+cargo test -p backend model_provider_media_transport_adapter --offline
+cargo test -p backend model_provider_rag_transport_adapter --offline
 cargo test -p novex-model --offline
 ```
 

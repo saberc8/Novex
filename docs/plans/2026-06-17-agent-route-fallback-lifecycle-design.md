@@ -94,8 +94,8 @@ Final verification for the slice:
 
 ```bash
 cargo fmt -- --check
-cargo test -p backend-rust model_route_fallback --offline
-cargo test -p backend-rust provider_lifecycle --offline
+cargo test -p backend model_route_fallback --offline
+cargo test -p backend provider_lifecycle --offline
 cargo test -p novex-eval provider_fallback --offline
 cargo test --workspace --offline
 ```

@@ -52,7 +52,7 @@ The backend remains the orchestrator. `novex-model` owns provider calls for embe
 
 Backend commands and tests should load `.env` consistently. The implementation should call `dotenvy::dotenv()` during runtime config bootstrap, without logging secret values.
 
-Live tests should load the original `/Users/yusenlin/Avalon/freedom/github/zm-agent/Novex/backend/.env` through the shell environment. The secret file should not be copied into the worktree.
+Live tests should load the original `/path/to/Novex/backend/.env` through the shell environment. The secret file should not be copied into the worktree.
 
 ### RAG Ask
 
@@ -123,8 +123,8 @@ Those should be separate milestones after the RAG acceptance path is genuinely l
 
 ## Acceptance Criteria
 
-- `cargo test --workspace --exclude backend-rust` passes.
-- `cargo test -p backend-rust application::ai` passes.
+- `cargo test --workspace --exclude backend` passes.
+- `cargo test -p backend application::ai` passes.
 - parser-worker unit tests pass.
 - A live RAG test, run with real env loaded from `backend/.env`, proves:
   - embedding provider was called;

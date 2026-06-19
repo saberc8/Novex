@@ -103,7 +103,7 @@ for a route using `ModelProviderType::DeepSeek`.
 Run:
 
 ```bash
-cargo test -p backend-rust model_chat_response_extracts_answer_usage_and_route_summary --offline
+cargo test -p backend model_chat_response_extracts_answer_usage_and_route_summary --offline
 ```
 
 Expected: FAIL because `ModelChatResp` does not expose provider.
@@ -123,7 +123,7 @@ Update existing test literals with provider values.
 Run:
 
 ```bash
-cargo test -p backend-rust model_chat_response_extracts_answer_usage_and_route_summary model_chat_usage_record --offline
+cargo test -p backend model_chat_response_extracts_answer_usage_and_route_summary model_chat_usage_record --offline
 ```
 
 Expected: PASS.
@@ -176,7 +176,7 @@ fn agent_run_events_convert_inference_spans_to_trace_bundle() {
 Run:
 
 ```bash
-cargo test -p backend-rust inference_spans --offline
+cargo test -p backend inference_spans --offline
 ```
 
 Expected: FAIL until the mapping exists.
@@ -204,8 +204,8 @@ After each completed model response in `create_model_loop_run`, append a `RunEve
 Run:
 
 ```bash
-cargo test -p backend-rust inference_spans --offline
-cargo test -p backend-rust model_loop --offline
+cargo test -p backend inference_spans --offline
+cargo test -p backend model_loop --offline
 ```
 
 Expected: PASS.
@@ -316,9 +316,9 @@ Run:
 ```bash
 cargo fmt -- --check
 cargo test -p novex-trace inference_span --offline
-cargo test -p backend-rust inference_spans --offline
+cargo test -p backend inference_spans --offline
 cargo test -p novex-eval inference_spans --offline
-cargo test -p backend-rust model_chat_response_extracts_answer_usage_and_route_summary model_chat_usage_record --offline
+cargo test -p backend model_chat_response_extracts_answer_usage_and_route_summary model_chat_usage_record --offline
 cargo test --workspace --offline
 ```
 

@@ -18,7 +18,7 @@
 
 **Steps:**
 1. Write a failing migration test that includes the new migration and asserts table names for tenant, ACL, quota, identity, OAuth, and secret contracts.
-2. Run `cargo test -p backend-rust foundation_control_plane --offline`; expect missing file or missing table names.
+2. Run `cargo test -p backend foundation_control_plane --offline`; expect missing file or missing table names.
 3. Add the additive migration with default platform tenant/admin membership and required indexes.
 4. Run the targeted test and commit.
 
@@ -30,7 +30,7 @@
 
 **Steps:**
 1. Write a failing migration test that asserts all model registry table names and critical columns: `credential_ref`, `network_zone`, `model_kind`, `route_purpose`, `cost_spec`.
-2. Run `cargo test -p backend-rust model_registry --offline`; expect missing file or missing content.
+2. Run `cargo test -p backend model_registry --offline`; expect missing file or missing content.
 3. Add provider/deployment/profile/credential/route/health/usage tables and safe default seed metadata.
 4. Run the targeted test and commit.
 
@@ -44,7 +44,7 @@
 1. Write failing service tests for a registry summary built from rows and for route registration requiring auth.
 2. Add `ModelRegistrySummary`, row structs, SQL queries, and `GET /ai/models/registry`.
 3. Ensure no raw secret values are returned.
-4. Run `cargo test -p backend-rust model --offline` and commit.
+4. Run `cargo test -p backend model --offline` and commit.
 
 ### Task 4: RAG Trace Runtime Route Resolution
 
@@ -56,7 +56,7 @@
    - env-backed config returns `runtime.embedding`, `runtime.reranker`, and `runtime.llm`;
    - missing env falls back to `local-keyword`, `none`, and `local-extractive`.
 2. Replace fixed constants in trace creation with a small resolver using `novex_model::ModelRuntimeConfig`.
-3. Run `cargo test -p backend-rust rag_ask --offline` and commit.
+3. Run `cargo test -p backend rag_ask --offline` and commit.
 
 ### Task 5: Verification
 

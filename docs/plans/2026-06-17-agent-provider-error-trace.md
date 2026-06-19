@@ -55,7 +55,7 @@ fn agent_run_events_convert_provider_error_spans_to_trace_bundle() {
 Run:
 
 ```bash
-cargo test -p backend-rust provider_error_spans --offline
+cargo test -p backend provider_error_spans --offline
 ```
 
 Expected: FAIL because trace conversion only treats `model_inference` as an inference event.
@@ -69,7 +69,7 @@ Update the thought guard so both `model_inference` and `model_inference_error` m
 Run:
 
 ```bash
-cargo test -p backend-rust provider_error_spans --offline
+cargo test -p backend provider_error_spans --offline
 ```
 
 Expected: PASS.
@@ -202,7 +202,7 @@ fn agent_service_model_loop_records_provider_error_spans() {
 Run:
 
 ```bash
-cargo test -p backend-rust provider_error --offline
+cargo test -p backend provider_error --offline
 ```
 
 Expected: FAIL because payload helper and error path do not exist.
@@ -227,9 +227,9 @@ and small helpers to classify HTTP status/retryability. In `create_model_loop_ru
 Run:
 
 ```bash
-cargo test -p backend-rust provider_error --offline
-cargo test -p backend-rust inference_spans --offline
-cargo test -p backend-rust model_loop --offline
+cargo test -p backend provider_error --offline
+cargo test -p backend inference_spans --offline
+cargo test -p backend model_loop --offline
 ```
 
 Expected: PASS.
@@ -256,9 +256,9 @@ Run:
 
 ```bash
 cargo fmt -- --check
-cargo test -p backend-rust provider_error --offline
-cargo test -p backend-rust inference_spans --offline
-cargo test -p backend-rust model_loop --offline
+cargo test -p backend provider_error --offline
+cargo test -p backend inference_spans --offline
+cargo test -p backend model_loop --offline
 cargo test -p novex-eval provider_error_spans --offline
 ```
 

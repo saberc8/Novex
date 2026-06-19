@@ -31,7 +31,7 @@ Add tests proving:
 Run:
 
 ```bash
-cargo test -p backend-rust agent_poc_configured_model_route --offline
+cargo test -p backend agent_poc_configured_model_route --offline
 ```
 
 Expected: FAIL until the DTO field and route propagation exist.
@@ -89,9 +89,9 @@ Set `route_id: command.model_route_id.clone()` for CodeAgent model calls in the 
 Run:
 
 ```bash
-cargo test -p backend-rust agent_poc_configured_model_route --offline
-cargo test -p backend-rust model_loop --offline
-cargo test -p backend-rust queued_model_loop --offline
+cargo test -p backend agent_poc_configured_model_route --offline
+cargo test -p backend model_loop --offline
+cargo test -p backend queued_model_loop --offline
 ```
 
 ### Task 4: POC Implementation

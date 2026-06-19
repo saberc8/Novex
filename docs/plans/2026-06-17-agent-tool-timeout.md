@@ -64,7 +64,7 @@ fn agent_service_model_loop_maps_cancelled_tool_observations() {
 Run:
 
 ```bash
-cargo test -p backend-rust tool_io_timeout_returns_cancelled_execution --offline
+cargo test -p backend tool_io_timeout_returns_cancelled_execution --offline
 ```
 
 Expected: FAIL because timeout and cancelled execution do not exist.
@@ -89,8 +89,8 @@ Wrap each `execute(prepared)` inside `tokio::time::timeout(prepared.timeout, ...
 Run:
 
 ```bash
-cargo test -p backend-rust tool_io_timeout --offline
-cargo test -p backend-rust parallel_tool --offline
+cargo test -p backend tool_io_timeout --offline
+cargo test -p backend parallel_tool --offline
 cargo fmt -- --check
 ```
 
@@ -127,7 +127,7 @@ fn agent_service_model_loop_records_tool_timeout_cancel_reason() {
 Run:
 
 ```bash
-cargo test -p backend-rust agent_service_model_loop_records_tool_timeout_cancel_reason --offline
+cargo test -p backend agent_service_model_loop_records_tool_timeout_cancel_reason --offline
 ```
 
 Expected: FAIL before cancel payload is implemented.
@@ -141,8 +141,8 @@ Update Parallel tools row to say timeout-driven cancelled tool execution exists,
 Run:
 
 ```bash
-cargo test -p backend-rust model_loop --offline
-cargo test -p backend-rust agent_service --offline
+cargo test -p backend model_loop --offline
+cargo test -p backend agent_service --offline
 cargo fmt -- --check
 ```
 
@@ -159,10 +159,10 @@ Run:
 
 ```bash
 cargo fmt -- --check
-cargo test -p backend-rust tool_io_timeout --offline
-cargo test -p backend-rust parallel_tool --offline
-cargo test -p backend-rust model_loop --offline
-cargo test -p backend-rust agent_service --offline
+cargo test -p backend tool_io_timeout --offline
+cargo test -p backend parallel_tool --offline
+cargo test -p backend model_loop --offline
+cargo test -p backend agent_service --offline
 cargo test --workspace --offline
 git status --short
 ```

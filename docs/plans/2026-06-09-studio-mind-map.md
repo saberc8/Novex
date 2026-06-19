@@ -21,7 +21,7 @@
 **Steps:**
 1. Write a failing Rust test that asserts the Studio migration defines `ai_studio_action`, `ai_studio_artifact`, `mind_map.generate`, `artifact_type`, `content_json`, and `ai:studio:artifact:create`.
 2. Write a failing handler test that `generate_artifact` rejects a user missing `ai:studio:artifact:create`.
-3. Run `cargo test -p backend-rust studio --offline` and confirm it fails because the Studio module is missing.
+3. Run `cargo test -p backend studio --offline` and confirm it fails because the Studio module is missing.
 
 ### Task 2: Backend Studio Repository and Service
 
@@ -34,7 +34,7 @@
 
 **Steps:**
 1. Write service tests for action command normalization and deterministic mind-map fallback.
-2. Run `cargo test -p backend-rust studio_service --offline` and confirm it fails.
+2. Run `cargo test -p backend studio_service --offline` and confirm it fails.
 3. Implement repository DTOs for action list, artifact list/get, and insert.
 4. Implement `StudioService` with `list_actions`, `list_dataset_artifacts`, `get_artifact`, and `generate_artifact`.
 5. Run targeted backend tests.
@@ -67,7 +67,7 @@
 ### Task 5: Verification
 
 **Commands:**
-- `cd backend && cargo test -p backend-rust studio --offline`
+- `cd backend && cargo test -p backend studio --offline`
 - `cd apps/chat-web && pnpm vitest run src/api/studio.test.ts app/page.test.tsx`
 - If targeted checks pass, run `cd apps/chat-web && pnpm typecheck`
 

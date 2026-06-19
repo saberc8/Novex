@@ -23,4 +23,4 @@ Script: `templates/knowledge-base-chat/smoke.sh`
 | Code | Workdir | Command |
 | --- | --- | --- |
 | `chat_web_frontend` | `apps/chat-web` | `pnpm test` |
-| `knowledge_base_api` | `backend` | `cargo test -p backend-rust knowledge --offline` |
+| `knowledge_base_api` | `backend` | `cargo test -p backend knowledge --offline` |

@@ -41,7 +41,7 @@ fn model_ops_alert_delivery_migration_defines_table_and_seed_job() {
 Run:
 
 ```bash
-cargo test -p backend-rust model_ops_alert_delivery_migration --offline
+cargo test -p backend model_ops_alert_delivery_migration --offline
 ```
 
 Expected: FAIL because the migration file does not exist.
@@ -95,7 +95,7 @@ ON CONFLICT DO NOTHING;
 Run:
 
 ```bash
-cargo test -p backend-rust model_ops_alert_delivery_migration --offline
+cargo test -p backend model_ops_alert_delivery_migration --offline
 ```
 
 Expected: PASS.
@@ -172,7 +172,7 @@ fn model_ops_alert_delivery_candidate(alert_key: &str, now: NaiveDateTime) -> Mo
 Run:
 
 ```bash
-cargo test -p backend-rust model_ops_alert_delivery_message --offline
+cargo test -p backend model_ops_alert_delivery_message --offline
 ```
 
 Expected: FAIL because candidate/result helpers do not exist.
@@ -196,8 +196,8 @@ Use `FeishuTextMessage::new(message).to_webhook_payload()`.
 Run:
 
 ```bash
-cargo test -p backend-rust model_ops_alert_delivery_message --offline
-cargo test -p backend-rust model_ops_alert_delivery_dry_run --offline
+cargo test -p backend model_ops_alert_delivery_message --offline
+cargo test -p backend model_ops_alert_delivery_dry_run --offline
 ```
 
 Expected: PASS.
@@ -240,7 +240,7 @@ fn model_ops_alert_delivery_source_contract_scans_audits_and_records_delivery() 
 Run:
 
 ```bash
-cargo test -p backend-rust model_ops_alert_delivery_source_contract --offline
+cargo test -p backend model_ops_alert_delivery_source_contract --offline
 ```
 
 Expected: FAIL because scanner/persistence are not wired.
@@ -265,7 +265,7 @@ The scanner selects active unresolved alerts with no `sent` or `dry_run` Feishu 
 Run:
 
 ```bash
-cargo test -p backend-rust model_ops_alert_delivery --offline
+cargo test -p backend model_ops_alert_delivery --offline
 ```
 
 Expected: PASS.
@@ -321,7 +321,7 @@ fn model_alert_delivery_key_builtin_job_is_accepted() {
 Run:
 
 ```bash
-cargo test -p backend-rust model_alert_delivery_key --offline
+cargo test -p backend model_alert_delivery_key --offline
 ```
 
 Expected: FAIL because executor has no dispatch arm.
@@ -348,9 +348,9 @@ Run:
 
 ```bash
 cargo fmt -- --check
-cargo test -p backend-rust model_ops_alert_delivery --offline
-cargo test -p backend-rust model_alert_delivery_key --offline
-cargo test -p backend-rust model_health_alert --offline
+cargo test -p backend model_ops_alert_delivery --offline
+cargo test -p backend model_alert_delivery_key --offline
+cargo test -p backend model_health_alert --offline
 cargo test --workspace --offline
 ```
 
@@ -368,10 +368,10 @@ git commit -m "docs: record model ops alert delivery progress"
 After feature verification:
 
 ```bash
-cd /Users/yusenlin/Avalon/freedom/github/zm-agent/Novex
+cd /path/to/Novex
 git merge --no-ff feat/enterprise-agent-foundation -m "merge: enterprise agent foundation model ops alert delivery"
 cargo fmt -- --check
 cargo test --workspace --offline
-cd /Users/yusenlin/Avalon/freedom/github/zm-agent/Novex/.worktrees/enterprise-agent-foundation
+cd /path/to/Novex/.worktrees/enterprise-agent-foundation
 git merge --ff-only main
 ```

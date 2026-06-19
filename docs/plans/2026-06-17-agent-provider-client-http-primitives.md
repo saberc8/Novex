@@ -12,7 +12,7 @@
 
 - Preserve existing `model_service.rs` imports and call sites through the `model_provider_transport` facade.
 - Do not change provider payload shapes, timeouts, bearer-auth behavior, HTTP status messages, or response parsing behavior.
-- `novex-provider-client` must not depend on `backend-rust`, backend `AppError`, SQL, tenant context, provider-call leases, or run-event persistence.
+- `novex-provider-client` must not depend on `backend`, backend `AppError`, SQL, tenant context, provider-call leases, or run-event persistence.
 - Backend remains responsible for converting provider-client errors into `AppError`.
 - Use a RED source-contract test before moving production code.
 - Verify with focused provider transport tests, provider-client crate tests, formatting, diff checks, and the offline workspace test suite.
@@ -63,7 +63,7 @@ assert!(media_source.contains("model_provider_http_client(request.timeout)"));
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `cargo test -p backend-rust provider_client_http_primitives_live_in_provider_client_crate --offline`
+Run: `cargo test -p backend provider_client_http_primitives_live_in_provider_client_crate --offline`
 
 Expected: FAIL because `novex-provider-client` does not yet own `ModelProviderHttpRequest`, `ModelProviderClientError`, `model_provider_http_client`, or generic HTTP dispatch.
 
@@ -160,12 +160,12 @@ Run:
 ```bash
 cargo fmt -- --check
 git diff --check
-cargo test -p backend-rust provider_client_http_primitives_live_in_provider_client_crate --offline
-cargo test -p backend-rust model_provider_http_transport_adapter --offline
-cargo test -p backend-rust model_provider_transport_splits_provider_client_modules --offline
-cargo test -p backend-rust model_provider_native_cancel_transport_adapter --offline
-cargo test -p backend-rust model_provider_rag_transport_adapter --offline
-cargo test -p backend-rust model_provider_media_transport_adapter --offline
+cargo test -p backend provider_client_http_primitives_live_in_provider_client_crate --offline
+cargo test -p backend model_provider_http_transport_adapter --offline
+cargo test -p backend model_provider_transport_splits_provider_client_modules --offline
+cargo test -p backend model_provider_native_cancel_transport_adapter --offline
+cargo test -p backend model_provider_rag_transport_adapter --offline
+cargo test -p backend model_provider_media_transport_adapter --offline
 cargo test -p novex-provider-client --offline
 ```
 

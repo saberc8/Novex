@@ -33,7 +33,7 @@ Add tests proving:
 Run:
 
 ```bash
-cargo test -p backend-rust agent_queue_outbox --offline
+cargo test -p backend agent_queue_outbox --offline
 ```
 
 Expected: FAIL until migration and repository APIs exist.
@@ -57,7 +57,7 @@ Add tests proving:
 Run:
 
 ```bash
-cargo test -p backend-rust agent_queue_outbox --offline
+cargo test -p backend agent_queue_outbox --offline
 ```
 
 Expected: FAIL until runtime publisher APIs exist.
@@ -71,7 +71,7 @@ Status: Completed.
 - Modify: `backend/src/shared/config.rs`
 - Modify: `backend/src/main.rs`
 - Modify: `backend/.env.example`
-- Modify: `infra/docker-compose.yml`
+- Modify: `infra/.env.poc.example`
 
 **Step 1: Write failing tests**
 
@@ -81,14 +81,14 @@ Add tests proving:
 - queued resume writes queue outbox,
 - `AppConfig` exposes `AGENT_QUEUE_PUBLISHER_ENABLED`,
 - main starts `spawn_agent_queue_outbox_publisher`,
-- local env/compose expose the publisher flag.
+- local env/docs expose the publisher flag.
 
 Run:
 
 ```bash
-cargo test -p backend-rust agent_queue_outbox --offline
-cargo test -p backend-rust shared::config --offline
-cargo test -p backend-rust foundation --offline
+cargo test -p backend agent_queue_outbox --offline
+cargo test -p backend shared::config --offline
+cargo test -p backend foundation --offline
 ```
 
 Expected: FAIL until service/config/main/env are wired.
@@ -105,7 +105,7 @@ Status: Completed.
 - Modify: `backend/src/shared/config.rs`
 - Modify: `backend/src/main.rs`
 - Modify: `backend/.env.example`
-- Modify: `infra/docker-compose.yml`
+- Modify: `infra/.env.poc.example`
 
 **Step 1: Add migration and repository records**
 
@@ -138,11 +138,11 @@ Use queue/outbox transactional APIs in queued creation and queued resume. Add `A
 
 ```bash
 cargo fmt -- --check
-cargo test -p backend-rust agent_queue_outbox --offline
-cargo test -p backend-rust agent_queue_runtime --offline
-cargo test -p backend-rust ai_agent_repository --offline
-cargo test -p backend-rust shared::config --offline
-cargo test -p backend-rust foundation --offline
+cargo test -p backend agent_queue_outbox --offline
+cargo test -p backend agent_queue_runtime --offline
+cargo test -p backend ai_agent_repository --offline
+cargo test -p backend shared::config --offline
+cargo test -p backend foundation --offline
 ```
 
 ### Task 5: Docs, Full Verification, Merge, Clean

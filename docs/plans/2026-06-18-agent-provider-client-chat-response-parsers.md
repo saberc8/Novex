@@ -13,7 +13,7 @@
 ## Global Constraints
 
 - Do not change provider request payloads, route selection, fallback behavior, provider-call lease persistence, cost accounting, Agent event payloads, or stream early-stop semantics.
-- `novex-provider-client` must not depend on `backend-rust`, backend `AppError`, SQL, tenant context, provider-call leases, run-event persistence, or trace/eval crates.
+- `novex-provider-client` must not depend on `backend`, backend `AppError`, SQL, tenant context, provider-call leases, run-event persistence, or trace/eval crates.
 - Backend remains responsible for converting `ModelProviderClientError` into `AppError`.
 - Streaming event emission stays in `model_service.rs` because events need route summary, provider, model, and provider-call lease metadata.
 - Verify with focused parser/stream/provider-client tests, formatting, diff checks, and the offline workspace test suite.
@@ -73,7 +73,7 @@ fn provider_client_chat_response_parsers_live_in_provider_client_crate() {
 
 - [ ] **Step 2: Verify RED**
 
-Run: `cargo test -p backend-rust provider_client_chat_response_parsers_live_in_provider_client_crate --offline`
+Run: `cargo test -p backend provider_client_chat_response_parsers_live_in_provider_client_crate --offline`
 
 Expected: FAIL because chat/compaction parsers and stream builder still live in backend-local transport.
 
@@ -130,9 +130,9 @@ builder
 Run:
 
 ```bash
-cargo test -p backend-rust model_provider_response_transport_adapter --offline
-cargo test -p backend-rust model_stream_completion_builder --offline
-cargo test -p backend-rust provider_token_delta --offline
+cargo test -p backend model_provider_response_transport_adapter --offline
+cargo test -p backend model_stream_completion_builder --offline
+cargo test -p backend provider_token_delta --offline
 cargo test -p novex-provider-client chat --offline
 ```
 
@@ -176,9 +176,9 @@ In `backend/src/application/ai/model_provider_transport.rs`, keep the existing b
 Run:
 
 ```bash
-cargo test -p backend-rust provider_compact_transport --offline
-cargo test -p backend-rust remote_compaction --offline
-cargo test -p backend-rust model_loop_compaction --offline
+cargo test -p backend provider_compact_transport --offline
+cargo test -p backend remote_compaction --offline
+cargo test -p backend model_loop_compaction --offline
 ```
 
 Expected: all commands pass.
@@ -207,10 +207,10 @@ Run:
 cargo fmt -- --check
 git diff --check
 cargo test -p novex-provider-client --offline
-cargo test -p backend-rust model_provider_response_transport_adapter --offline
-cargo test -p backend-rust provider_compact_transport --offline
-cargo test -p backend-rust model_stream_completion_builder --offline
-cargo test -p backend-rust provider_token_delta --offline
+cargo test -p backend model_provider_response_transport_adapter --offline
+cargo test -p backend provider_compact_transport --offline
+cargo test -p backend model_stream_completion_builder --offline
+cargo test -p backend provider_token_delta --offline
 cargo test --workspace --offline
 ```
 
@@ -224,11 +224,11 @@ git commit -m "feat: extract provider client chat response parsers"
 - [ ] **Step 4: Merge to main, verify, sync, and clean**
 
 ```bash
-git -C /Users/yusenlin/Avalon/freedom/github/zm-agent/Novex merge --ff-only feat/enterprise-agent-foundation
+git -C /path/to/Novex merge --ff-only feat/enterprise-agent-foundation
 cargo fmt -- --check
 git diff --check
 cargo test --workspace --offline
 cargo clean
-git -C /Users/yusenlin/Avalon/freedom/github/zm-agent/Novex/.worktrees/enterprise-agent-foundation merge --ff-only main
+git -C /path/to/Novex/.worktrees/enterprise-agent-foundation merge --ff-only main
 cargo clean
 ```

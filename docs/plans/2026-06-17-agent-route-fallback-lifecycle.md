@@ -6,7 +6,7 @@
 
 **Architecture:** The model runtime owns one-hop fallback planning and execution. `ModelChatResp` carries provider attempt metadata, the agent trace payload serializes it, and eval derives fallback tags from nested attempts.
 
-**Tech Stack:** Rust, `backend-rust`, `novex-eval`, `novex-model`, `serde_json`, `sqlx`.
+**Tech Stack:** Rust, `backend`, `novex-eval`, `novex-model`, `serde_json`, `sqlx`.
 
 ---
 
@@ -93,7 +93,7 @@ fn model_route_fallback_source_contract_reads_configured_fallback_route() {
 Run:
 
 ```bash
-cargo test -p backend-rust model_route_fallback --offline
+cargo test -p backend model_route_fallback --offline
 ```
 
 Expected: FAIL because fallback decision/helper methods do not exist.
@@ -115,7 +115,7 @@ The query should select primary route policy plus `fallback_route.code AS fallba
 Run:
 
 ```bash
-cargo test -p backend-rust model_route_fallback --offline
+cargo test -p backend model_route_fallback --offline
 ```
 
 Expected: PASS.
@@ -181,7 +181,7 @@ fn provider_lifecycle_source_contract_fallback_wraps_chat_completion() {
 Run:
 
 ```bash
-cargo test -p backend-rust provider_lifecycle --offline
+cargo test -p backend provider_lifecycle --offline
 ```
 
 Expected: FAIL because attempt metadata does not exist.
@@ -206,9 +206,9 @@ Update `execute_normalized_chat_completion_with_route` to attach a successful pr
 Run:
 
 ```bash
-cargo test -p backend-rust provider_lifecycle --offline
-cargo test -p backend-rust model_chat_response --offline
-cargo test -p backend-rust model_chat_usage_record --offline
+cargo test -p backend provider_lifecycle --offline
+cargo test -p backend model_chat_response --offline
+cargo test -p backend model_chat_usage_record --offline
 ```
 
 Expected: PASS.
@@ -292,7 +292,7 @@ fn trace_eval_candidate_tags_provider_fallback_attempts() {
 Run:
 
 ```bash
-cargo test -p backend-rust provider_lifecycle_trace --offline
+cargo test -p backend provider_lifecycle_trace --offline
 cargo test -p novex-eval provider_fallback --offline
 ```
 
@@ -319,7 +319,7 @@ Read nested `providerAttempts` from inference payloads.
 Run:
 
 ```bash
-cargo test -p backend-rust provider_lifecycle_trace --offline
+cargo test -p backend provider_lifecycle_trace --offline
 cargo test -p novex-eval provider_fallback --offline
 ```
 
@@ -358,9 +358,9 @@ Run:
 
 ```bash
 cargo fmt -- --check
-cargo test -p backend-rust model_route_fallback --offline
-cargo test -p backend-rust provider_lifecycle --offline
-cargo test -p backend-rust provider_lifecycle_trace --offline
+cargo test -p backend model_route_fallback --offline
+cargo test -p backend provider_lifecycle --offline
+cargo test -p backend provider_lifecycle_trace --offline
 cargo test -p novex-eval provider_fallback --offline
 cargo test --workspace --offline
 ```
@@ -372,11 +372,11 @@ Expected: PASS. `live_rag_e2e` remains ignored unless external infra is configur
 Run:
 
 ```bash
-cd /Users/yusenlin/Avalon/freedom/github/zm-agent/Novex
+cd /path/to/Novex
 git merge --no-ff feat/enterprise-agent-foundation -m "merge: enterprise agent foundation route fallback lifecycle"
 cargo fmt -- --check
 cargo test --workspace --offline
-cd /Users/yusenlin/Avalon/freedom/github/zm-agent/Novex/.worktrees/enterprise-agent-foundation
+cd /path/to/Novex/.worktrees/enterprise-agent-foundation
 git merge --ff-only main
 git status --short --branch
 ```

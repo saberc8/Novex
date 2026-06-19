@@ -98,7 +98,7 @@ All tables must include `tenant_id`, timestamps, status, and stable IDs. `ai_age
 ```bash
 rg "CREATE TABLE IF NOT EXISTS ai_run|CREATE TABLE IF NOT EXISTS ai_run_event|CREATE TABLE IF NOT EXISTS ai_run_pause" backend/migrations/202606050008_create_ai_agent_runtime.sql
 rg "ai:agent:run|ai:agent:event:list|ai:agent:resume|ai:agent:cancel" backend/migrations/202606050009_seed_ai_agent_permissions.sql
-cargo test -p backend-rust --offline
+cargo test -p backend --offline
 ```
 
 **Step 3: Commit**
@@ -133,7 +133,7 @@ Add tests for:
 Run:
 
 ```bash
-cargo test -p backend-rust agent_runtime --offline
+cargo test -p backend agent_runtime --offline
 ```
 
 Expected: fail because backend agent modules and routes do not exist.
@@ -163,8 +163,8 @@ Runtime behavior:
 **Step 3: Verify and commit**
 
 ```bash
-cargo test -p backend-rust agent_runtime --offline
-cargo test -p backend-rust --offline
+cargo test -p backend agent_runtime --offline
+cargo test -p backend --offline
 git add backend/src/infrastructure/persistence/ai_agent_repository.rs backend/src/application/ai/agent_service.rs backend/src/interfaces/http/ai/agent.rs backend/src/infrastructure/persistence/mod.rs backend/src/application/ai/mod.rs backend/src/interfaces/http/ai/mod.rs
 git commit -m "feat: add agent runtime api"
 ```

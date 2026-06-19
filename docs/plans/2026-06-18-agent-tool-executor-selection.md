@@ -43,6 +43,6 @@ Start concrete executor extraction by moving backend tool executor selection out
 
 - `cargo fmt --all -- --check`
 - `git diff --check`
-- `cargo test -p backend-rust agent_tool_executor_selection --offline`
-- `cargo test -p backend-rust tool_executor_dispatch_plan --offline`
+- `cargo test -p backend agent_tool_executor_selection --offline`
+- `cargo test -p backend tool_executor_dispatch_plan --offline`
 - `cargo test --workspace --offline`

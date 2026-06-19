@@ -846,7 +846,7 @@ Expected: PASS.
 Run:
 
 ```bash
-cargo test -p backend-rust foundation_service::tests::foundation_modules_include_ai_core
+cargo test -p backend foundation_service::tests::foundation_modules_include_ai_core
 ```
 
 Expected: PASS or report the exact test name if the backend test filter does not match any tests.

@@ -49,7 +49,7 @@ Add or update a backend source-contract test that expects `agent_service.rs` to 
 
 - [ ] **Step 4: Run RED**
 
-Run: `cargo test -p backend-rust agent_tool_execution_envelope_lives_in_novex_tools --offline`
+Run: `cargo test -p backend agent_tool_execution_envelope_lives_in_novex_tools --offline`
 
 Expected: fail because `agent_service.rs` still defines a local `AgentToolExecution`.
 
@@ -74,10 +74,10 @@ cargo fmt --all -- --check
 git diff --check
 cargo test -p novex-tools agent_tool_execution --offline
 cargo test -p novex-tools --offline
-cargo test -p backend-rust agent_tool_execution_envelope_lives_in_novex_tools --offline
-cargo test -p backend-rust agent_tool_executor_selection --offline
-cargo test -p backend-rust agent_tool_input_adapters_live_in_novex_tools --offline
-cargo test -p backend-rust model_loop --offline
+cargo test -p backend agent_tool_execution_envelope_lives_in_novex_tools --offline
+cargo test -p backend agent_tool_executor_selection --offline
+cargo test -p backend agent_tool_input_adapters_live_in_novex_tools --offline
+cargo test -p backend model_loop --offline
 cargo test --workspace --offline
 ```
 

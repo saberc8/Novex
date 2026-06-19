@@ -6,7 +6,7 @@
 
 **Architecture:** Add an additive SQL migration for `ai_model_route_circuit_breaker`. Extend `ModelRuntimeService` with DB-backed open/read helpers, keep the existing process-local breaker as a fast path, and wire both helpers into the existing fallback chain.
 
-**Tech Stack:** Rust, SQLx, PostgreSQL migrations, `backend-rust`, `chrono`, existing `ModelProviderAttempt`.
+**Tech Stack:** Rust, SQLx, PostgreSQL migrations, `backend`, `chrono`, existing `ModelProviderAttempt`.
 
 ---
 
@@ -73,7 +73,7 @@ fn model_route_circuit_breaker_migration_defines_runtime_state_table() {
 Run:
 
 ```bash
-cargo test -p backend-rust model_route_circuit_breaker_migration --offline
+cargo test -p backend model_route_circuit_breaker_migration --offline
 ```
 
 Expected: FAIL because the migration file does not exist.
@@ -110,7 +110,7 @@ CREATE INDEX IF NOT EXISTS idx_ai_model_route_circuit_breaker_opened_until
 Run:
 
 ```bash
-cargo test -p backend-rust model_route_circuit_breaker_migration --offline
+cargo test -p backend model_route_circuit_breaker_migration --offline
 ```
 
 Expected: PASS.
@@ -165,7 +165,7 @@ fn persistent_route_circuit_breaker_source_contract_reads_runtime_state() {
 Run:
 
 ```bash
-cargo test -p backend-rust persistent_route_circuit_breaker_source --offline
+cargo test -p backend persistent_route_circuit_breaker_source --offline
 ```
 
 Expected: FAIL because the helper methods do not exist.
@@ -193,7 +193,7 @@ Use `next_id()` for `id`, `self.tenant_id` for tenant isolation, and `DEFAULT_TE
 Run:
 
 ```bash
-cargo test -p backend-rust persistent_route_circuit_breaker_source --offline
+cargo test -p backend persistent_route_circuit_breaker_source --offline
 ```
 
 Expected: PASS.
@@ -235,7 +235,7 @@ fn persistent_route_circuit_breaker_source_contract_wires_runtime_chain() {
 Run:
 
 ```bash
-cargo test -p backend-rust persistent_route_circuit_breaker_source_contract_wires_runtime_chain --offline
+cargo test -p backend persistent_route_circuit_breaker_source_contract_wires_runtime_chain --offline
 ```
 
 Expected: FAIL because the route chain still uses only process-local helpers.
@@ -257,9 +257,9 @@ After fallback-eligible failure, call both:
 Run:
 
 ```bash
-cargo test -p backend-rust persistent_route_circuit_breaker_source --offline
-cargo test -p backend-rust route_circuit_breaker --offline
-cargo test -p backend-rust multi_hop_fallback --offline
+cargo test -p backend persistent_route_circuit_breaker_source --offline
+cargo test -p backend route_circuit_breaker --offline
+cargo test -p backend multi_hop_fallback --offline
 ```
 
 Expected: PASS.
@@ -285,7 +285,7 @@ Change rollout trace status from `slice-9 implemented` to `slice-10 implemented`
 Add focused command:
 
 ```bash
-cargo test -p backend-rust persistent_route_circuit_breaker --offline
+cargo test -p backend persistent_route_circuit_breaker --offline
 ```
 
 Add this implementation plan under follow-ups.
@@ -305,11 +305,11 @@ Run:
 
 ```bash
 cargo fmt -- --check
-cargo test -p backend-rust persistent_route_circuit_breaker --offline
-cargo test -p backend-rust route_circuit_breaker --offline
-cargo test -p backend-rust multi_hop_fallback --offline
-cargo test -p backend-rust provider_lifecycle --offline
-cargo test -p backend-rust route_circuit_breaker_trace --offline
+cargo test -p backend persistent_route_circuit_breaker --offline
+cargo test -p backend route_circuit_breaker --offline
+cargo test -p backend multi_hop_fallback --offline
+cargo test -p backend provider_lifecycle --offline
+cargo test -p backend route_circuit_breaker_trace --offline
 cargo test -p novex-eval circuit_breaker --offline
 cargo test --workspace --offline
 ```

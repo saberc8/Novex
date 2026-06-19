@@ -112,7 +112,7 @@ If Redis is unavailable, the worker should fail the message retryably. This keep
 Add a long-running worker entry point:
 
 ```bash
-PYTHONPATH=services/parser-worker python3 -m parser_worker.worker
+PYTHONPATH=services/parser-worker uv run --no-project --with-requirements services/parser-worker/requirements.txt python -m parser_worker.worker
 ```
 
 The worker:

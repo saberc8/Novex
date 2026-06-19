@@ -43,9 +43,9 @@ Add the backend-owned MCP OAuth callback/state contract that validates provider 
 
 - `cargo fmt --all -- --check`
 - `git diff --check`
-- `cargo test -p backend-rust mcp_oauth_callback --offline`
-- `cargo test -p backend-rust mcp_oauth_token_dispatch --offline`
-- `cargo test -p backend-rust mcp --offline`
+- `cargo test -p backend mcp_oauth_callback --offline`
+- `cargo test -p backend mcp_oauth_token_dispatch --offline`
+- `cargo test -p backend mcp --offline`
 - `cargo test -p novex-mcp mcp_oauth_session --offline`
 - `cargo test --workspace --offline`
 

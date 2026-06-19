@@ -13,7 +13,7 @@
 ## Global Constraints
 
 - Do not move `ModelRuntimeRoute`, `ModelChatCommand`, provider request planning, payload construction, fallback, provider-call leases, cost accounting, Agent events, trace/eval, or tenant context into `novex-provider-client`.
-- `novex-provider-client` must not depend on `backend-rust`, SQL, tenant context, run-event persistence, or trace/eval crates.
+- `novex-provider-client` must not depend on `backend`, SQL, tenant context, run-event persistence, or trace/eval crates.
 - Chat dispatch must preserve the existing user-facing failure message shape: `LLM 模型调用失败: HTTP {status}`.
 - Streaming chat dispatch must continue returning the raw `reqwest::Response` so backend can emit `ModelProviderStreamEvent` with route, provider, model, and lease metadata.
 - Unary chat dispatch must read response text inside `novex-provider-client` and return it to backend for transport-specific parsing.
@@ -72,7 +72,7 @@ fn provider_client_chat_dispatch_lives_in_provider_client_crate() {
 
 - [ ] **Step 2: Verify RED**
 
-Run: `cargo test -p backend-rust provider_client_chat_dispatch_lives_in_provider_client_crate --offline`
+Run: `cargo test -p backend provider_client_chat_dispatch_lives_in_provider_client_crate --offline`
 
 Expected: FAIL because provider-client does not yet expose chat-specific dispatch APIs and route execution still calls generic HTTP dispatch directly.
 
@@ -190,12 +190,12 @@ Change `model_provider_stream_dispatch_route_path_separates_unary_and_stream`, `
 Run:
 
 ```bash
-cargo test -p backend-rust provider_client_chat_dispatch_lives_in_provider_client_crate --offline
-cargo test -p backend-rust model_provider_http_transport_adapter --offline
-cargo test -p backend-rust model_provider_response_transport_adapter --offline
-cargo test -p backend-rust model_provider_stream_dispatch_route_path --offline
-cargo test -p backend-rust provider_token_delta --offline
-cargo test -p backend-rust provider_compact_transport --offline
+cargo test -p backend provider_client_chat_dispatch_lives_in_provider_client_crate --offline
+cargo test -p backend model_provider_http_transport_adapter --offline
+cargo test -p backend model_provider_response_transport_adapter --offline
+cargo test -p backend model_provider_stream_dispatch_route_path --offline
+cargo test -p backend provider_token_delta --offline
+cargo test -p backend provider_compact_transport --offline
 ```
 
 Expected: all commands pass.
@@ -224,12 +224,12 @@ Run:
 cargo fmt -- --check
 git diff --check
 cargo test -p novex-provider-client --offline
-cargo test -p backend-rust provider_client_chat_dispatch_lives_in_provider_client_crate --offline
-cargo test -p backend-rust model_provider_http_transport_adapter --offline
-cargo test -p backend-rust model_provider_response_transport_adapter --offline
-cargo test -p backend-rust model_provider_stream_dispatch_route_path --offline
-cargo test -p backend-rust provider_token_delta --offline
-cargo test -p backend-rust provider_compact_transport --offline
+cargo test -p backend provider_client_chat_dispatch_lives_in_provider_client_crate --offline
+cargo test -p backend model_provider_http_transport_adapter --offline
+cargo test -p backend model_provider_response_transport_adapter --offline
+cargo test -p backend model_provider_stream_dispatch_route_path --offline
+cargo test -p backend provider_token_delta --offline
+cargo test -p backend provider_compact_transport --offline
 cargo test --workspace --offline
 ```
 
@@ -243,11 +243,11 @@ git commit -m "feat: extract provider client chat dispatch"
 - [ ] **Step 4: Merge to main, verify, sync, and clean**
 
 ```bash
-git -C /Users/yusenlin/Avalon/freedom/github/zm-agent/Novex merge --ff-only feat/enterprise-agent-foundation
+git -C /path/to/Novex merge --ff-only feat/enterprise-agent-foundation
 cargo fmt -- --check
 git diff --check
 cargo test --workspace --offline
 cargo clean
-git -C /Users/yusenlin/Avalon/freedom/github/zm-agent/Novex/.worktrees/enterprise-agent-foundation merge --ff-only main
+git -C /path/to/Novex/.worktrees/enterprise-agent-foundation merge --ff-only main
 cargo clean
 ```

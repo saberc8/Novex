@@ -40,7 +40,7 @@
       "code": "knowledge_base_api",
       "name": "Knowledge Base API Smoke",
       "workdir": "backend",
-      "command": "cargo test -p backend-rust knowledge --offline"
+      "command": "cargo test -p backend knowledge --offline"
     }
   ],
   "sort": 2,

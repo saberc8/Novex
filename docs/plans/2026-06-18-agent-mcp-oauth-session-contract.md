@@ -43,7 +43,7 @@ This keeps the Codex-style MCP foundation moving while preserving Novex's tenant
 - `git diff --check`
 - `cargo test -p novex-mcp mcp_oauth_session --offline`
 - `cargo test -p novex-mcp --offline`
-- `cargo test -p backend-rust mcp --offline`
+- `cargo test -p backend mcp --offline`
 - `cargo test --workspace --offline`
 
 ## Follow-up

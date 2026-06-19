@@ -2,21 +2,10 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-COMPOSE_FILE="${ROOT_DIR}/infra/docker-compose.yml"
 POC_ENV_FILE="${ROOT_DIR}/infra/.env.poc"
 POC_ENV_EXAMPLE="${ROOT_DIR}/infra/.env.poc.example"
-COMMAND="${1:-up}"
+COMMAND="${1:-check}"
 
-COMPOSE=()
-POC_SERVICES=(
-  backend
-  eval-worker
-  parser-worker
-  admin
-  training-web
-  chat-web
-  agent-workspace
-)
 COMMON_REQUIRED_CONTAINERS=(
   docker-postgres
   docker-redis
@@ -32,39 +21,33 @@ main() {
   if [[ "${COMMAND}" != "help" && "${COMMAND}" != "-h" && "${COMMAND}" != "--help" ]]; then
     ensure_poc_env_file
     load_poc_env
-    build_compose_command
   fi
 
   case "${COMMAND}" in
-    up)
+    check|up)
       require_docker
       ensure_parser_callback_token
       check_live_ai_env
       require_common_docker_services
       ensure_common_postgres_database
-      require_local_images
-      print_urls
-      exec "${COMPOSE[@]}" up --pull never "${POC_SERVICES[@]}"
-      ;;
-    down)
-      require_docker
-      exec "${COMPOSE[@]}" down
-      ;;
-    logs)
-      require_docker
-      exec "${COMPOSE[@]}" logs -f "${POC_SERVICES[@]}"
-      ;;
-    status|ps)
-      require_docker
-      exec "${COMPOSE[@]}" ps
+      print_local_commands
       ;;
     env|check-env)
       ensure_parser_callback_token
       check_live_ai_env
       ;;
-    pull)
-      require_docker
-      pull_missing_images
+    commands)
+      ensure_parser_callback_token
+      print_local_commands
+      ;;
+    down)
+      print_no_managed_processes
+      ;;
+    status|ps)
+      print_local_status_hint
+      ;;
+    logs)
+      print_local_logs_hint
       ;;
     help|-h|--help)
       usage
@@ -99,19 +82,9 @@ load_poc_env() {
   echo "Loaded env: infra/.env.poc"
 }
 
-build_compose_command() {
-  COMPOSE=(
-    docker compose
-    --env-file "${POC_ENV_FILE}"
-    -f "${COMPOSE_FILE}"
-    --profile parser
-    --profile apps
-  )
-}
-
 require_docker() {
   if ! command -v docker >/dev/null 2>&1; then
-    echo "Docker is required but was not found in PATH." >&2
+    echo "Docker is required for the external docker-common infrastructure checks." >&2
     exit 1
   fi
   if ! docker compose version >/dev/null 2>&1; then
@@ -122,31 +95,6 @@ require_docker() {
     echo "Docker daemon is not running or not reachable." >&2
     exit 1
   fi
-}
-
-require_local_images() {
-  local missing=()
-  local image
-
-  while IFS= read -r image; do
-    missing+=("${image}")
-  done < <(missing_local_images)
-
-  if [[ "${#missing[@]}" -eq 0 ]]; then
-    return
-  fi
-
-  echo "Missing local Docker images; the POC script will not auto-pull during up:" >&2
-  printf '  %s\n' "${missing[@]}" >&2
-  print_local_image_alternatives "${missing[@]}" >&2
-  cat >&2 <<'EOF'
-
-Options:
-  1. Run './scripts/run-poc.sh pull' when Docker Hub access is available.
-  2. Edit infra/.env.poc to point RUST_IMAGE, NODE_IMAGE, or PYTHON_IMAGE at tags you already have locally.
-
-EOF
-  exit 1
 }
 
 require_common_docker_services() {
@@ -215,71 +163,12 @@ ensure_common_postgres_database() {
 }
 
 print_common_stack_hint() {
-  cat <<'EOF'
+  local common_stack_dir="${COMMON_STACK_DIR:-/path/to/docker-common}"
+  cat <<EOF
 Start or repair the shared stack first:
-  cd /Users/yusenlin/Avalon/freedom/2026/aimanju/aether-loom
+  cd ${common_stack_dir}
   docker compose up -d postgres redis rabbitmq etcd minio milvus attu neo4j
 EOF
-}
-
-pull_missing_images() {
-  local missing=()
-  local failed=()
-  local image
-
-  while IFS= read -r image; do
-    missing+=("${image}")
-  done < <(missing_local_images)
-
-  if [[ "${#missing[@]}" -eq 0 ]]; then
-    echo "All compose images already exist locally; nothing to pull."
-    return
-  fi
-
-  echo "Pulling missing Docker images only:"
-  printf '  %s\n' "${missing[@]}"
-  for image in "${missing[@]}"; do
-    if ! docker pull "${image}"; then
-      failed+=("${image}")
-    fi
-  done
-
-  if [[ "${#failed[@]}" -eq 0 ]]; then
-    return
-  fi
-
-  echo "Failed to pull these Docker images:" >&2
-  printf '  %s\n' "${failed[@]}" >&2
-  print_local_image_alternatives "${failed[@]}" >&2
-  exit 1
-}
-
-missing_local_images() {
-  local image
-
-  while IFS= read -r image; do
-    if [[ -z "${image}" ]]; then
-      continue
-    fi
-    if ! docker image inspect "${image}" >/dev/null 2>&1; then
-      echo "${image}"
-    fi
-  done < <("${COMPOSE[@]}" config --images | sort -u)
-}
-
-print_local_image_alternatives() {
-  local image
-  local repository
-  local alternatives
-
-  for image in "$@"; do
-    repository="${image%:*}"
-    alternatives="$(docker images --format '{{.Repository}}:{{.Tag}}' | grep -E "^${repository//\//\\/}:" | sort || true)"
-    if [[ -n "${alternatives}" ]]; then
-      echo "Local tags for ${repository}:"
-      printf '  %s\n' ${alternatives}
-    fi
-  done
 }
 
 ensure_parser_callback_token() {
@@ -351,22 +240,78 @@ mask_value() {
   fi
 }
 
-print_urls() {
+print_local_commands() {
+  local backend_port="${HTTP_PORT:-4398}"
   cat <<EOF
-Starting Novex POC stack
-------------------------
-Backend:          http://localhost:${BACKEND_PORT:-4398}
-Admin:            http://localhost:${ADMIN_PORT:-4399}
-Training Web:     http://localhost:${TRAINING_WEB_PORT:-4401}
-Chat Web:         http://localhost:${CHAT_WEB_PORT:-4402}
-Agent Workspace:  http://localhost:${AGENT_WORKSPACE_PORT:-4403}
-Codex App POC:    http://localhost:${CODEX_APP_POC_PORT:-4413} (standalone: apps/codex-app-poc)
-RabbitMQ UI:      ${RABBITMQ_MANAGEMENT_URL:-http://localhost:15673}
-MinIO Console:    ${MINIO_CONSOLE_URL:-http://localhost:19011}
-Attu:             ${ATTU_URL:-http://localhost:18000}
-Neo4j Browser:    ${NEO4J_BROWSER_URL:-http://localhost:17474}
+Novex POC local process startup
+-------------------------------
+Shared infrastructure still runs in docker-common. Novex project processes run locally.
 
-RabbitMQ default login: ${RABBITMQ_DEFAULT_USER:-guest} / ${RABBITMQ_DEFAULT_PASS:-guest}
+Run each command in a separate terminal from the repo root:
+
+  (set -a; . infra/.env.poc; set +a; cargo run -p backend)
+      # Backend: http://localhost:${backend_port}
+
+  (set -a; . infra/.env.poc; set +a; EVAL_WORKER_ENABLED=true DB_AUTO_MIGRATE=false cargo run -p backend --bin eval_worker)
+      # Eval worker
+
+  (set -a; . infra/.env.poc; set +a; PARSER_BACKEND_BASE_URL=http://127.0.0.1:${backend_port} PARSER_BACKEND_TOKEN="\${PARSER_CALLBACK_TOKEN}" PYTHONPATH=services/parser-worker uv run --no-project --with-requirements services/parser-worker/requirements.txt python -m parser_worker.worker)
+      # Parser worker with uv
+
+  python3 -m venv services/parser-worker/.venv
+  services/parser-worker/.venv/bin/python -m pip install -r services/parser-worker/requirements.txt
+  (set -a; . infra/.env.poc; set +a; PARSER_BACKEND_BASE_URL=http://127.0.0.1:${backend_port} PARSER_BACKEND_TOKEN="\${PARSER_CALLBACK_TOKEN}" PYTHONPATH=services/parser-worker services/parser-worker/.venv/bin/python -m parser_worker.worker)
+      # Parser worker fallback with .venv
+
+  (cd admin && pnpm install && NEXT_PUBLIC_API_BASE_URL=http://localhost:${backend_port} pnpm dev)
+      # Admin: http://localhost:${ADMIN_PORT:-4399}
+
+  (cd apps/training-web && pnpm install && NEXT_PUBLIC_API_BASE_URL=http://localhost:${backend_port} pnpm dev)
+      # Training Web: http://localhost:${TRAINING_WEB_PORT:-4401}
+
+  (cd apps/chat-web && pnpm install && NEXT_PUBLIC_API_BASE_URL=http://localhost:${backend_port} pnpm dev)
+      # Chat Web: http://localhost:${CHAT_WEB_PORT:-4402}
+
+  (cd apps/agent-workspace && pnpm install && NEXT_PUBLIC_API_BASE_URL=http://localhost:${backend_port} pnpm dev)
+      # Agent Workspace: http://localhost:${AGENT_WORKSPACE_PORT:-4403}
+
+  (cd apps/codex-app-poc && pnpm install && NEXT_PUBLIC_API_BASE_URL=http://localhost:${backend_port} pnpm dev)
+      # Codex App POC: http://localhost:${CODEX_APP_POC_PORT:-4413}
+
+Shared service URLs:
+  RabbitMQ UI:   ${RABBITMQ_MANAGEMENT_URL:-http://localhost:15673}
+  MinIO Console: ${MINIO_CONSOLE_URL:-http://localhost:19011}
+  Attu:          ${ATTU_URL:-http://localhost:18000}
+  Neo4j Browser: ${NEO4J_BROWSER_URL:-http://localhost:17474}
+EOF
+}
+
+print_no_managed_processes() {
+  cat <<'EOF'
+Novex project services run as local terminal processes now.
+Stop backend, eval-worker, parser-worker, and frontend apps with Ctrl-C in their terminals.
+
+If old novex-poc Docker containers still exist, remove them by Compose project label:
+  ids="$(docker ps -aq --filter label=com.docker.compose.project=novex-poc)"; [ -z "${ids}" ] || docker rm -f ${ids}
+  vols="$(docker volume ls -q --filter label=com.docker.compose.project=novex-poc)"; [ -z "${vols}" ] || docker volume rm ${vols}
+EOF
+}
+
+print_local_status_hint() {
+  local backend_port="${HTTP_PORT:-4398}"
+  local admin_port="${ADMIN_PORT:-4399}"
+  cat <<EOF
+Novex project services are local processes now.
+Check the terminals where you started cargo/uv/venv/pnpm, or inspect ports:
+  lsof -nP -iTCP:${backend_port} -sTCP:LISTEN
+  lsof -nP -iTCP:${admin_port} -sTCP:LISTEN
+EOF
+}
+
+print_local_logs_hint() {
+  cat <<'EOF'
+Novex project service logs are printed in the local terminals where each process runs.
+There is no managed novex-poc Docker log stream in the default local POC flow.
 EOF
 }
 
@@ -375,29 +320,25 @@ usage() {
 Usage: scripts/run-poc.sh [command]
 
 Commands:
-  up         Check docker-common, then start backend, parser-worker, and POC frontends
-  down       Stop and remove compose services
-  logs       Follow logs for the POC stack
-  status     Show compose service status
+  check      Check docker-common, ensure the database, then print local startup commands
+  up         Alias for check
   env        Check live AI environment variables only
-  pull       Pull compose images
+  commands   Print local startup commands only
+  status     Explain how to inspect local process status
+  logs       Explain where local process logs are shown
+  down       Explain how to stop local processes and clean old novex-poc containers
   help       Show this help
 
 Single local env entry:
   infra/.env.poc
 
-Agent model-loop smoke:
-  TOKEN="\$ADMIN_TOKEN" ./scripts/smoke-agent-model-loop.sh
-
-Default URLs:
+Default local URLs:
   Backend          http://localhost:4398
   Admin            http://localhost:4399
   Training Web     http://localhost:4401
   Chat Web         http://localhost:4402
   Agent Workspace  http://localhost:4403
-  RabbitMQ UI      http://localhost:15673
-  MinIO Console    http://localhost:19011
-  Attu             http://localhost:18000
+  Codex App POC    http://localhost:4413
 EOF
 }
 

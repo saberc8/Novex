@@ -26,7 +26,7 @@ Add tests for:
 
 **Step 2: Run red tests**
 
-Run: `cargo test -p backend-rust provider_call_lease_heartbeat --offline`
+Run: `cargo test -p backend provider_call_lease_heartbeat --offline`
 
 Expected: FAIL because heartbeat helper functions do not exist yet.
 
@@ -51,8 +51,8 @@ Start heartbeat after lease creation, stop it after provider await returns, and 
 **Step 2: Run green tests**
 
 Run:
-- `cargo test -p backend-rust provider_call_lease_heartbeat --offline`
-- `cargo test -p backend-rust provider_call_lease --offline`
+- `cargo test -p backend provider_call_lease_heartbeat --offline`
+- `cargo test -p backend provider_call_lease --offline`
 
 Expected: PASS.
 
@@ -82,8 +82,8 @@ Expected: PASS.
 Commit feature work, merge `feat/enterprise-agent-foundation` into `main`, rerun full verification on `main`, run `cargo clean` in both worktrees, and sync feature to main.
 
 **Verification evidence so far:**
-- Red: `cargo test -p backend-rust provider_call_lease_heartbeat --offline` failed on missing `model_provider_call_lease_expiry_from_heartbeat`.
-- Green: `cargo test -p backend-rust provider_call_lease_heartbeat --offline`
-- Green: `cargo test -p backend-rust provider_call_lease --offline`
+- Red: `cargo test -p backend provider_call_lease_heartbeat --offline` failed on missing `model_provider_call_lease_expiry_from_heartbeat`.
+- Green: `cargo test -p backend provider_call_lease_heartbeat --offline`
+- Green: `cargo test -p backend provider_call_lease --offline`
 - Green: `cargo fmt -- --check`
 - Green: `cargo test --workspace --offline`

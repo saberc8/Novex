@@ -12,7 +12,7 @@
 
 - Preserve existing `model_service.rs` imports and call sites through `model_provider_transport`.
 - Do not change embedding/rerank request payload shapes, timeouts, bearer-auth behavior, parser behavior, or Chinese error messages.
-- `novex-provider-client` must not depend on `backend-rust`, backend `AppError`, SQL, tenant context, provider-call leases, or run-event persistence.
+- `novex-provider-client` must not depend on `backend`, backend `AppError`, SQL, tenant context, provider-call leases, or run-event persistence.
 - Backend remains responsible for converting `ModelProviderClientError` into `AppError`.
 - Keep parser facade re-exports from `model_provider_transport.rs` stable for existing tests and service helpers.
 - Use a RED source-contract test before moving production code.
@@ -71,7 +71,7 @@ assert!(!backend_rag_source.contains("Rerank 模型响应为空"));
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `cargo test -p backend-rust provider_client_rag_dispatch_lives_in_provider_client_crate --offline`
+Run: `cargo test -p backend provider_client_rag_dispatch_lives_in_provider_client_crate --offline`
 
 Expected: FAIL because backend `rag.rs` still owns `ModelProviderEmbeddingRequest`, `ModelProviderRerankRequest`, provider POST dispatch, JSON response reading, HTTP status mapping, and empty response errors.
 
@@ -284,13 +284,13 @@ Run:
 ```bash
 cargo fmt -- --check
 git diff --check
-cargo test -p backend-rust provider_client_rag_dispatch_lives_in_provider_client_crate --offline
-cargo test -p backend-rust provider_client_rag_parsers_live_in_provider_client_crate --offline
-cargo test -p backend-rust provider_client_http_primitives_live_in_provider_client_crate --offline
-cargo test -p backend-rust model_provider_rag_transport_adapter --offline
-cargo test -p backend-rust model_provider_transport_splits_provider_client_modules --offline
-cargo test -p backend-rust runtime_embedding --offline
-cargo test -p backend-rust rerank_ --offline
+cargo test -p backend provider_client_rag_dispatch_lives_in_provider_client_crate --offline
+cargo test -p backend provider_client_rag_parsers_live_in_provider_client_crate --offline
+cargo test -p backend provider_client_http_primitives_live_in_provider_client_crate --offline
+cargo test -p backend model_provider_rag_transport_adapter --offline
+cargo test -p backend model_provider_transport_splits_provider_client_modules --offline
+cargo test -p backend runtime_embedding --offline
+cargo test -p backend rerank_ --offline
 cargo test -p novex-provider-client --offline
 ```
 

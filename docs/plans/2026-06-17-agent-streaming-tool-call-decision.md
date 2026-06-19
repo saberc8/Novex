@@ -33,7 +33,7 @@ Add a backend unit test that feeds two JSON chunks into `ModelLoopProviderStream
 
 - [ ] **Step 2: Run the focused test red**
 
-Run: `cargo test -p backend-rust streamed_tool_call_output --offline`
+Run: `cargo test -p backend streamed_tool_call_output --offline`
 
 Expected: FAIL because `detected_tool_call_output` does not exist.
 
@@ -43,7 +43,7 @@ Add `detected_tool_call_output: Option<ParsedModelTurnOutput>` to `ModelLoopProv
 
 - [ ] **Step 4: Verify green**
 
-Run: `cargo test -p backend-rust streamed_tool_call_output --offline`
+Run: `cargo test -p backend streamed_tool_call_output --offline`
 
 Expected: PASS.
 
@@ -69,7 +69,7 @@ Add a backend source-contract test proving `execute_model_loop_existing_run` rec
 
 - [ ] **Step 3: Run focused tests red**
 
-Run: `cargo test -p backend-rust streamed_tool_call_decision --offline`
+Run: `cargo test -p backend streamed_tool_call_decision --offline`
 
 Expected: FAIL because the helper/envelope/wiring do not exist.
 
@@ -87,9 +87,9 @@ Run:
 
 ```bash
 cargo fmt -- --check
-cargo test -p backend-rust streamed_tool_call_output --offline
-cargo test -p backend-rust streamed_tool_call_decision --offline
-cargo test -p backend-rust provider_stream_tool_call --offline
+cargo test -p backend streamed_tool_call_output --offline
+cargo test -p backend streamed_tool_call_decision --offline
+cargo test -p backend provider_stream_tool_call --offline
 cargo test --workspace --offline
 git diff --check
 ```

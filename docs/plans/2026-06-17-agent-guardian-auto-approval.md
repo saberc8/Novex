@@ -2,7 +2,7 @@
 
 **Goal:** Let Codex-style Guardian model approvals continue Novex agent execution without human pause while keeping timeout/session/parse/rejection outcomes fail-closed.
 
-**Architecture:** `backend-rust` treats `GuardianReviewDecision` as an explicit execution gate after deterministic tool policy requires approval. Approved model-reviewed decisions continue through normal tool execution with traceable `guardianReview` evidence. Non-executable decisions reuse the precomputed review payload for the existing approval pause. `novex-eval` reads Guardian evidence from both `ApprovalRequested` and `ActionSelected`.
+**Architecture:** `backend` treats `GuardianReviewDecision` as an explicit execution gate after deterministic tool policy requires approval. Approved model-reviewed decisions continue through normal tool execution with traceable `guardianReview` evidence. Non-executable decisions reuse the precomputed review payload for the existing approval pause. `novex-eval` reads Guardian evidence from both `ApprovalRequested` and `ActionSelected`.
 
 ## Task 1: Backend Auto-Approval Gate Tests
 
@@ -20,7 +20,7 @@ Add tests:
 Run:
 
 ```bash
-cargo test -p backend-rust guardian_auto_approval --offline
+cargo test -p backend guardian_auto_approval --offline
 ```
 
 Expected: FAIL until the gate and branch wiring exist.
@@ -47,9 +47,9 @@ Implement:
 Run:
 
 ```bash
-cargo test -p backend-rust guardian_auto_approval --offline
-cargo test -p backend-rust guardian_model_review --offline
-cargo test -p backend-rust guardian_review --offline
+cargo test -p backend guardian_auto_approval --offline
+cargo test -p backend guardian_model_review --offline
+cargo test -p backend guardian_review --offline
 ```
 
 Expected: PASS.

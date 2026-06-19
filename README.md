@@ -47,26 +47,56 @@ Novex 是一套面向企业交付的 AI Agent 基座。它不是单点 AI 应用
 
 ## 快速启动
 
-POC 默认复用外部 `docker-common` 基础设施。先启动共享基础服务，再启动 Novex 项目服务。
+POC 默认复用外部 `docker-common` 基础设施。当前启动方式是：只有 PostgreSQL、Redis、RabbitMQ、Milvus、MinIO、Attu、Neo4j 这些共享基础设施在 Docker 里；Novex 自己的 backend、eval-worker、parser-worker 和所有前端 app 都用本机进程启动。
+
+| 层级 | 启动方式 | 内容 |
+| --- | --- | --- |
+| 共享基础设施 | 外部 `docker-common` | PostgreSQL、Redis、RabbitMQ、Milvus、MinIO、Attu、Neo4j |
+| Novex 后端/worker | 本机 `cargo run` / `uv` 或 `.venv` | backend、eval-worker、parser-worker |
+| POC 前端 app | 本机 `pnpm dev` | Admin、Training Web、Chat Web、Agent Workspace、Codex App POC |
+
+推荐启动顺序：先启动共享基础设施，再让 `run-poc.sh` 做环境检查和打印本地启动命令。
 
 ```bash
-cd /Users/yusenlin/Avalon/freedom/2026/aimanju/aether-loom
+cd /path/to/docker-common
 docker compose up -d postgres redis rabbitmq etcd minio milvus attu neo4j
 
 cd /path/to/Novex
 ./scripts/run-poc.sh
 ```
 
-`scripts/run-poc.sh` 会读取 `infra/.env.poc`；如果该文件不存在，会从 `infra/.env.poc.example` 复制生成。脚本会检查共享容器、创建缺失的 `novex` 数据库、校验 AI 相关环境变量，并启动 backend、eval-worker、parser-worker、Admin、Training Web、Chat Web 和 Agent Workspace。
+`scripts/run-poc.sh` 会读取 `infra/.env.poc`；如果该文件不存在，会从 `infra/.env.poc.example` 复制生成。脚本会检查共享容器、创建缺失的 `novex` 数据库、校验 AI 相关环境变量，并打印下面这些本地启动命令。它不再启动 `novex-poc` Docker Compose 项目。
+
+Novex 项目进程分别在独立终端启动：
+
+```bash
+(set -a; . infra/.env.poc; set +a; cargo run -p backend)
+(set -a; . infra/.env.poc; set +a; EVAL_WORKER_ENABLED=true DB_AUTO_MIGRATE=false cargo run -p backend --bin eval_worker)
+
+# parser-worker 推荐 uv；没有 uv 时使用下面的 .venv 兜底命令。
+(set -a; . infra/.env.poc; set +a; PARSER_BACKEND_BASE_URL=http://127.0.0.1:4398 PARSER_BACKEND_TOKEN="${PARSER_CALLBACK_TOKEN}" PYTHONPATH=services/parser-worker uv run --no-project --with-requirements services/parser-worker/requirements.txt python -m parser_worker.worker)
+
+python3 -m venv services/parser-worker/.venv
+services/parser-worker/.venv/bin/python -m pip install -r services/parser-worker/requirements.txt
+(set -a; . infra/.env.poc; set +a; PARSER_BACKEND_BASE_URL=http://127.0.0.1:4398 PARSER_BACKEND_TOKEN="${PARSER_CALLBACK_TOKEN}" PYTHONPATH=services/parser-worker services/parser-worker/.venv/bin/python -m parser_worker.worker)
+
+(cd admin && pnpm install && NEXT_PUBLIC_API_BASE_URL=http://localhost:4398 pnpm dev)
+(cd apps/training-web && pnpm install && NEXT_PUBLIC_API_BASE_URL=http://localhost:4398 pnpm dev)
+(cd apps/chat-web && pnpm install && NEXT_PUBLIC_API_BASE_URL=http://localhost:4398 pnpm dev)
+(cd apps/agent-workspace && pnpm install && NEXT_PUBLIC_API_BASE_URL=http://localhost:4398 pnpm dev)
+(cd apps/codex-app-poc && pnpm install && NEXT_PUBLIC_API_BASE_URL=http://localhost:4398 pnpm dev)
+```
+
+不要用 Docker Compose 启动 Novex 项目服务；旧的 `novex-poc` Docker Compose project 可以删除。默认 POC 只依赖外部 `docker-common` 基础设施。
 
 常用命令：
 
 ```bash
 ./scripts/run-poc.sh env       # 检查 LLM / Embedding / Reranker / Parser 等配置
-./scripts/run-poc.sh status    # 查看服务状态
-./scripts/run-poc.sh logs      # 跟踪日志
-./scripts/run-poc.sh down      # 停止 POC 服务
-./scripts/run-poc.sh pull      # 在可访问镜像源时拉取缺失镜像
+./scripts/run-poc.sh commands  # 打印本地启动命令
+./scripts/run-poc.sh status    # 提示如何检查本地进程状态
+./scripts/run-poc.sh logs      # 提示日志所在终端
+./scripts/run-poc.sh down      # 提示如何停止本地进程，并清理旧 novex-poc 容器
 ```
 
 默认访问地址：
@@ -74,11 +104,11 @@ cd /path/to/Novex
 | 服务 | 地址 |
 | --- | --- |
 | Backend | `http://localhost:4398` |
-| Admin | `http://localhost:4399` |
-| Training Web | `http://localhost:4401` |
-| Chat Web | `http://localhost:4402` |
-| Agent Workspace | `http://localhost:4403` |
-| Codex App POC | `http://localhost:4413`，独立运行于 `apps/codex-app-poc` |
+| Admin | `http://localhost:4399`，本地 `pnpm dev` |
+| Training Web | `http://localhost:4401`，本地 `pnpm dev` |
+| Chat Web | `http://localhost:4402`，本地 `pnpm dev` |
+| Agent Workspace | `http://localhost:4403`，本地 `pnpm dev` |
+| Codex App POC | `http://localhost:4413`，本地 `pnpm dev` |
 | RabbitMQ UI | `http://localhost:15673` |
 | MinIO Console | `http://localhost:19011` |
 | Attu | `http://localhost:18000` |
@@ -99,7 +129,7 @@ curl http://localhost:4398/ready
 
 主要配置组：
 
-- 基础运行：`AUTH_JWT_SECRET`、`BACKEND_PORT`、`ADMIN_PORT`、`CHAT_WEB_PORT`、`TRAINING_WEB_PORT`、`AGENT_WORKSPACE_PORT`、`CODEX_APP_POC_PORT`
+- 基础运行：`AUTH_JWT_SECRET`、`HTTP_PORT`、`ADMIN_PORT`、`CHAT_WEB_PORT`、`TRAINING_WEB_PORT`、`AGENT_WORKSPACE_PORT`、`CODEX_APP_POC_PORT`
 - 共享基础设施：`COMMON_DOCKER_NETWORK`、`COMMON_POSTGRES_DATABASE`、`DATABASE_URL`、`REDIS_URL`、`RABBITMQ_URL`、`MILVUS_ENDPOINT`、`MINIO_ENDPOINT`
 - 模型能力：`LLM_API_KEY`、`LLM_BASE_URL`、`LLM_MODEL`
 - 向量与重排：`EMBEDDING_API_KEY`、`EMBEDDING_BASE_URL`、`EMBEDDING_MODEL`、`RERANKER_API_KEY`、`RERANKER_BASE_URL`、`RERANKER_MODEL`
@@ -115,21 +145,21 @@ curl http://localhost:4398/ready
 后端是 Cargo workspace：
 
 ```bash
-cargo run -p backend-rust
-cargo run -p backend-rust --bin eval_worker
+cargo run -p backend
+cargo run -p backend --bin eval_worker
 cargo test --workspace
 ```
 
 单独运行后端时，使用 `backend/.env.example` 作为本地 `.env` 模板，并确保 PostgreSQL、Redis、RabbitMQ、Milvus 等依赖地址与实际运行方式一致。
 
-前端应用分别维护 `package.json`，使用 pnpm：
+POC 本地开发时，后端和 eval-worker 直接使用 Cargo，parser-worker 使用 uv 或 `.venv`，前端使用 pnpm。完整启动命令见上方“快速启动”。
 
 ```bash
-cd admin && pnpm install && pnpm dev
-cd apps/training-web && pnpm install && pnpm dev
-cd apps/chat-web && pnpm install && pnpm dev
-cd apps/agent-workspace && pnpm install && pnpm dev
-cd apps/codex-app-poc && pnpm install && pnpm dev
+(cd admin && pnpm typecheck && pnpm test)
+(cd apps/training-web && pnpm typecheck && pnpm test)
+(cd apps/chat-web && pnpm typecheck && pnpm test)
+(cd apps/agent-workspace && pnpm typecheck && pnpm test)
+(cd apps/codex-app-poc && pnpm typecheck && pnpm test)
 ```
 
 常用前端检查：

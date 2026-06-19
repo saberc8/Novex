@@ -27,7 +27,7 @@ Add tests for:
 
 **Step 2: Run red tests**
 
-Run: `cargo test -p backend-rust provider_call_lease_controls --offline`
+Run: `cargo test -p backend provider_call_lease_controls --offline`
 
 Expected: FAIL.
 
@@ -37,7 +37,7 @@ Add constants, routes, handler functions, and migration seed.
 
 **Step 4: Run green tests**
 
-Run: `cargo test -p backend-rust provider_call_lease_controls --offline`
+Run: `cargo test -p backend provider_call_lease_controls --offline`
 
 Expected: PASS.
 
@@ -57,7 +57,7 @@ Add tests for:
 
 **Step 2: Run red tests**
 
-Run: `cargo test -p backend-rust provider_call_lease_controls --offline`
+Run: `cargo test -p backend provider_call_lease_controls --offline`
 
 Expected: FAIL.
 
@@ -71,7 +71,7 @@ Add:
 
 **Step 4: Run green tests**
 
-Run: `cargo test -p backend-rust provider_call_lease_controls --offline`
+Run: `cargo test -p backend provider_call_lease_controls --offline`
 
 Expected: PASS.
 
@@ -93,7 +93,7 @@ Add source-contract tests for:
 
 **Step 2: Run red tests**
 
-Run: `cargo test -p backend-rust provider_call_lease_controls --offline`
+Run: `cargo test -p backend provider_call_lease_controls --offline`
 
 Expected: FAIL.
 
@@ -103,7 +103,7 @@ Add `ModelRuntimeService::expire_stale_provider_call_leases(user_id)`.
 
 **Step 4: Run green tests**
 
-Run: `cargo test -p backend-rust provider_call_lease_controls --offline`
+Run: `cargo test -p backend provider_call_lease_controls --offline`
 
 Expected: PASS.
 
@@ -132,6 +132,6 @@ Expected: PASS.
 Commit feature work, merge `feat/enterprise-agent-foundation` into `main`, rerun full verification on `main`, run `cargo clean` in both worktrees, and sync feature to main.
 
 **Verification evidence:**
-- `cargo test -p backend-rust provider_call_lease_controls --offline`
+- `cargo test -p backend provider_call_lease_controls --offline`
 - `cargo fmt -- --check`
 - `cargo test --workspace --offline`

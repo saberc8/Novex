@@ -6,7 +6,7 @@
 
 **Architecture:** Add a PostgreSQL outbox row when parser jobs are created, publish outbox events to a dedicated RabbitMQ parser exchange, and run parser-worker as a long-lived consumer. Redis provides short-lived worker leases, idempotency, retry counters, and heartbeat cache while PostgreSQL remains the source of truth.
 
-**Tech Stack:** Rust backend-rust, SQLx/PostgreSQL migrations, lapin/RabbitMQ, redis-rs or Python redis client, Python parser-worker, Next.js training-web, Vitest, Rust unit tests, Python unittest.
+**Tech Stack:** Rust backend, SQLx/PostgreSQL migrations, lapin/RabbitMQ, redis-rs or Python redis client, Python parser-worker, Next.js training-web, Vitest, Rust unit tests, Python unittest.
 
 ---
 
@@ -19,7 +19,7 @@
 
 **Steps:**
 1. Write a failing Rust test that asserts the migration contains `ai_parser_outbox`, parser job indexes, unique parser job idempotency, status, attempt count, and payload JSONB.
-2. Run `cargo test -p backend-rust infrastructure::persistence::ai_knowledge_repository::tests::parser_outbox_migration_defines_durable_queue_contract`.
+2. Run `cargo test -p backend infrastructure::persistence::ai_knowledge_repository::tests::parser_outbox_migration_defines_durable_queue_contract`.
 3. Add the migration and repository string assertions.
 4. Re-run the test and confirm it passes.
 
@@ -133,10 +133,10 @@
 3. Add API wrapper, UI polling state, indexed/failed status display, and dataset refresh after indexed.
 4. Re-run targeted frontend tests.
 
-### Task 10: Docker Compose Wiring
+### Task 10: Local POC Wiring
 
 **Files:**
-- Modify: `infra/docker-compose.yml`
+- Modify: `infra/.env.poc.example`
 - Modify: `infra/README.md`
 - Test: `infra/README.md` or backend config tests where applicable
 
@@ -161,8 +161,8 @@
 ### Task 12: Full Verification
 
 **Commands:**
-- `cargo test -p backend-rust application::ai::knowledge_service::tests infrastructure::mq::rabbitmq::tests`
-- `cargo test -p backend-rust interfaces::http::ai::knowledge::tests`
+- `cargo test -p backend application::ai::knowledge_service::tests infrastructure::mq::rabbitmq::tests`
+- `cargo test -p backend interfaces::http::ai::knowledge::tests`
 - `PYTHONPATH=services/parser-worker python3 -m unittest discover -s services/parser-worker/tests`
 - `pnpm test src/api/knowledge.test.ts app/page.test.tsx` in `apps/training-web`
 - `cargo test --workspace` if time allows

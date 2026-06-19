@@ -34,7 +34,7 @@ Add a backend unit test named `model_stream_native_runtime_api_exposes_future_an
 
 - [ ] **Step 2: Run focused test red**
 
-Run: `cargo test -p backend-rust model_stream_native_runtime_api --offline`
+Run: `cargo test -p backend model_stream_native_runtime_api --offline`
 
 Expected: FAIL because the stream facade does not exist yet.
 
@@ -44,7 +44,7 @@ Add the boxed future type and stream call struct near `ModelProviderStreamEvent`
 
 - [ ] **Step 4: Verify green**
 
-Run: `cargo test -p backend-rust model_stream_native_runtime_api --offline`
+Run: `cargo test -p backend model_stream_native_runtime_api --offline`
 
 Expected: PASS.
 
@@ -65,7 +65,7 @@ Add a backend unit test named `agent_model_loop_uses_stream_native_runtime_api`.
 
 - [ ] **Step 2: Run focused test red**
 
-Run: `cargo test -p backend-rust model_stream_native_runtime_api --offline`
+Run: `cargo test -p backend model_stream_native_runtime_api --offline`
 
 Expected: FAIL because Agent still wires provider stream channels itself.
 
@@ -83,9 +83,9 @@ Run:
 
 ```bash
 cargo fmt -- --check
-cargo test -p backend-rust model_stream_native_runtime_api --offline
-cargo test -p backend-rust provider_stream_native_cancel --offline
-cargo test -p backend-rust streamed_tool_call_early_stop --offline
+cargo test -p backend model_stream_native_runtime_api --offline
+cargo test -p backend provider_stream_native_cancel --offline
+cargo test -p backend streamed_tool_call_early_stop --offline
 cargo test --workspace --offline
 git diff --check
 ```

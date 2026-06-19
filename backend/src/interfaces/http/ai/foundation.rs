@@ -176,73 +176,41 @@ mod tests {
     }
 
     #[test]
-    fn local_poc_compose_declares_foundation_runtime_services() {
-        let compose = include_str!("../../../../../infra/docker-compose.yml");
+    fn local_poc_contract_uses_common_infra_and_local_processes() {
+        let readme = include_str!("../../../../../README.md");
+        let infra = include_str!("../../../../../infra/README.md");
+        let env = include_str!("../../../../../infra/.env.poc.example");
 
-        for service in [
-            "backend:",
-            "parser-worker:",
-            "admin:",
-            "training-web:",
-            "chat-web:",
-            "agent-workspace:",
-        ] {
-            assert!(compose.contains(service), "{service} missing from compose");
+        for doc in [readme, infra] {
+            for contract in [
+                "docker-common",
+                "cargo run -p backend",
+                "cargo run -p backend --bin eval_worker",
+                "uv run --no-project --with-requirements services/parser-worker/requirements.txt",
+                "services/parser-worker/.venv/bin/python -m parser_worker.worker",
+                "pnpm dev",
+                "NEXT_PUBLIC_API_BASE_URL",
+            ] {
+                assert!(
+                    doc.contains(contract),
+                    "{contract} missing from local POC docs"
+                );
+            }
         }
 
         for contract in [
-            "${RUST_IMAGE:-rust:bookworm}",
-            "${PYTHON_IMAGE:-python:3.12-slim}",
-            "${NODE_IMAGE:-node:24-bookworm-slim}",
-            "COMMON_DOCKER_NETWORK",
-            "external: true",
-            "docker-common_default",
-            "postgres://${COMMON_POSTGRES_USER:-postgres}:${COMMON_POSTGRES_PASSWORD:-postgres}@postgres:5432/${COMMON_POSTGRES_DATABASE:-novex}",
-            "http://milvus:19530",
-            "amqp://${RABBITMQ_DEFAULT_USER:-guest}:${RABBITMQ_DEFAULT_PASS:-guest}@rabbitmq:5672/%2f",
-            "redis://redis:6379/0",
-            "${BACKEND_PORT:-4398}:${HTTP_PORT:-4398}",
-            "${ADMIN_PORT:-4399}:4399",
-            "${TRAINING_WEB_PORT:-4401}:4401",
-            "${CHAT_WEB_PORT:-4402}:4402",
-            "${AGENT_WORKSPACE_PORT:-4403}:4403",
-            "DB_AUTO_MIGRATE",
-            "AUTH_JWT_SECRET",
-            "MILVUS_ENDPOINT",
-            "PARSER_QUEUE_ENABLED",
-            "PARSER_QUEUE_PUBLISHER_ENABLED",
-            "AGENT_QUEUE_ENABLED",
-            "AGENT_QUEUE_PUBLISHER_ENABLED",
-            "PARSER_CALLBACK_TOKEN",
-            "RABBITMQ_URL",
-            "REDIS_URL",
-            "RABBITMQ_PARSER_EXCHANGE",
-            "RABBITMQ_PARSER_EXECUTE_QUEUE",
-            "RABBITMQ_AGENT_EXCHANGE",
-            "RABBITMQ_AGENT_EXECUTE_QUEUE",
-            "PARSER_WORKER_MODE",
-            "python3 -m parser_worker.worker",
-            "NEXT_PUBLIC_API_BASE_URL",
+            "DATABASE_URL=postgres://postgres:postgres@127.0.0.1:15432/novex",
+            "RABBITMQ_URL=amqp://guest:guest@127.0.0.1:5673/%2f",
+            "REDIS_URL=redis://127.0.0.1:16379/0",
+            "MILVUS_ENDPOINT=http://127.0.0.1:19540",
+            "MINIO_ENDPOINT=http://127.0.0.1:19010",
+            "LOGIN_CAPTCHA_ENABLED=false",
+            "PARSER_QUEUE_ENABLED=true",
+            "PARSER_QUEUE_PUBLISHER_ENABLED=true",
         ] {
             assert!(
-                compose.contains(contract),
-                "{contract} missing from compose"
-            );
-        }
-
-        for removed_contract in [
-            "${POSTGRES_IMAGE:-postgres:16-alpine}",
-            "${ETCD_IMAGE:-quay.io/coreos/etcd:v3.5.18}",
-            "${MINIO_IMAGE:-minio/minio:RELEASE.2025-01-20T14-49-07Z}",
-            "${MILVUS_IMAGE:-milvusdb/milvus:v2.5.4}",
-            "${RABBITMQ_IMAGE:-rabbitmq:4.0-management-alpine}",
-            "${REDIS_IMAGE:-redis:7-alpine}",
-            "${POSTGRES_PORT:-5432}:5432",
-            "${REDIS_PORT:-6379}:6379",
-        ] {
-            assert!(
-                !compose.contains(removed_contract),
-                "{removed_contract} should not be declared by Novex compose"
+                env.contains(contract),
+                "{contract} missing from POC env schema"
             );
         }
     }
@@ -261,15 +229,6 @@ mod tests {
         );
 
         for needle in [
-            "docker compose",
-            "--profile parser",
-            "--profile apps",
-            "--pull never",
-            "require_local_images",
-            "pull_missing_images",
-            "docker image inspect",
-            "docker pull",
-            "Run './scripts/run-poc.sh pull'",
             "require_common_docker_services",
             "ensure_common_postgres_database",
             "docker network inspect",
@@ -278,6 +237,11 @@ mod tests {
             "docker-common_default",
             "COMMON_POSTGRES_DATABASE",
             "PARSER_CALLBACK_TOKEN",
+            "cargo run -p backend",
+            "cargo run -p backend --bin eval_worker",
+            "uv run --no-project --with-requirements services/parser-worker/requirements.txt",
+            "services/parser-worker/.venv/bin/python -m parser_worker.worker",
+            "pnpm dev",
             "LLM_API_KEY",
             "LLM_BASE_URL",
             "LLM_MODEL",
@@ -301,5 +265,24 @@ mod tests {
             !script.contains("pull \"${POC_SERVICES[@]}\""),
             "pull command should not refresh already-local compose images"
         );
+        for removed in [
+            concat!("--profile ", "parser"),
+            concat!("--profile ", "apps"),
+            "--pull never",
+            "require_local_images",
+            "pull_missing_images",
+            "docker image inspect",
+            "docker pull",
+            "Run './scripts/run-poc.sh pull'",
+            concat!(
+                "docker compose --env-file infra/.env.poc -f infra/docker",
+                "-compose.yml"
+            ),
+        ] {
+            assert!(
+                !script.contains(removed),
+                "{removed} should not be part of the local process POC flow"
+            );
+        }
     }
 }

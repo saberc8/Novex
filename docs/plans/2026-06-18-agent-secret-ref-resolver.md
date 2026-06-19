@@ -41,8 +41,8 @@ Add a tenant-aware backend secretRef resolver so agent infrastructure can read `
 
 - `cargo fmt --all -- --check`
 - `git diff --check`
-- `cargo test -p backend-rust secret --offline`
-- `cargo test -p backend-rust mcp_oauth_callback --offline`
+- `cargo test -p backend secret --offline`
+- `cargo test -p backend mcp_oauth_callback --offline`
 - `cargo test --workspace --offline`
 
 ## Follow-up

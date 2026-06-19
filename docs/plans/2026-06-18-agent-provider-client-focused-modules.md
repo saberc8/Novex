@@ -12,7 +12,7 @@
 
 - Do not change public item names already consumed by backend: `ModelProviderClientError`, `ModelProviderHttpRequest`, `ModelProviderChatRequest`, `ModelProviderChatPlanInput`, `ModelProviderChatPlan`, `ModelProviderChatTransport`, `ModelChatProviderOutput`, `ModelChatCompactionProviderOutput`, `ModelChatStreamCompletionBuilder`, native cancel/media/RAG request DTOs, parser functions, dispatch functions, and response-id helpers.
 - Do not move backend route resolution, tenant context, provider-call leases, trace/eval, stream event emission, or app error mapping into `novex-provider-client`.
-- Keep provider-client modules independent of `backend-rust`, SQL, HTTP handlers, and Agent runtime state.
+- Keep provider-client modules independent of `backend`, SQL, HTTP handlers, and Agent runtime state.
 - Preserve all existing provider-client parser, dispatch, and planner behavior.
 - Keep `lib.rs` as a facade; implementation modules must own their local unit tests.
 - Verify with a RED source-contract test, provider-client full tests, focused backend provider-client boundary tests, formatting, diff checks, and the offline workspace suite.
@@ -89,7 +89,7 @@ fn provider_client_crate_uses_focused_modules() {
 
 - [x] **Step 2: Verify RED**
 
-Run: `cargo test -p backend-rust provider_client_crate_uses_focused_modules --offline`
+Run: `cargo test -p backend provider_client_crate_uses_focused_modules --offline`
 
 Expected: FAIL because provider-client is still implemented in a single `src/lib.rs`.
 
@@ -234,13 +234,13 @@ Run:
 ```bash
 cargo fmt -- --check
 git diff --check
-cargo test -p backend-rust provider_client_crate_uses_focused_modules --offline
-cargo test -p backend-rust provider_client_chat_request_plan_lives_in_provider_client_crate --offline
-cargo test -p backend-rust provider_client_chat_dispatch_lives_in_provider_client_crate --offline
-cargo test -p backend-rust provider_client_chat_response_parsers_live_in_provider_client_crate --offline
-cargo test -p backend-rust provider_client_rag_dispatch_lives_in_provider_client_crate --offline
-cargo test -p backend-rust provider_client_media_dispatch_lives_in_provider_client_crate --offline
-cargo test -p backend-rust provider_client_native_cancel_dispatch_lives_in_provider_client_crate --offline
+cargo test -p backend provider_client_crate_uses_focused_modules --offline
+cargo test -p backend provider_client_chat_request_plan_lives_in_provider_client_crate --offline
+cargo test -p backend provider_client_chat_dispatch_lives_in_provider_client_crate --offline
+cargo test -p backend provider_client_chat_response_parsers_live_in_provider_client_crate --offline
+cargo test -p backend provider_client_rag_dispatch_lives_in_provider_client_crate --offline
+cargo test -p backend provider_client_media_dispatch_lives_in_provider_client_crate --offline
+cargo test -p backend provider_client_native_cancel_dispatch_lives_in_provider_client_crate --offline
 cargo test -p novex-provider-client --offline
 cargo test --workspace --offline
 ```
@@ -257,10 +257,10 @@ git commit -m "refactor: split provider client focused modules"
 - [ ] **Step 4: Merge into main and verify main**
 
 ```bash
-git -C /Users/yusenlin/Avalon/freedom/github/zm-agent/Novex merge --ff-only feat/enterprise-agent-foundation
+git -C /path/to/Novex merge --ff-only feat/enterprise-agent-foundation
 ```
 
-Then run in `/Users/yusenlin/Avalon/freedom/github/zm-agent/Novex`:
+Then run in `/path/to/Novex`:
 
 ```bash
 cargo fmt -- --check
@@ -271,7 +271,7 @@ cargo test --workspace --offline
 - [ ] **Step 5: Sync feature worktree and clean both workspaces**
 
 ```bash
-git -C /Users/yusenlin/Avalon/freedom/github/zm-agent/Novex/.worktrees/enterprise-agent-foundation merge --ff-only main
+git -C /path/to/Novex/.worktrees/enterprise-agent-foundation merge --ff-only main
 cargo clean
 ```
 

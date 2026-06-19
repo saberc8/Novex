@@ -92,7 +92,7 @@ fn provider_compact_v2_keeps_responses_trigger_transport() {
 
 - [x] **Step 2: Run red tests**
 
-Run: `cargo test -p backend-rust provider_compact_unary --offline`
+Run: `cargo test -p backend provider_compact_unary --offline`
 
 Result: FAIL as expected because `ResponsesCompactUnary` did not exist.
 
@@ -157,7 +157,7 @@ fn model_chat_responses_compact_unary_payload(
 
 - [x] **Step 4: Run green focused tests**
 
-Run: `cargo test -p backend-rust provider_compact_unary --offline`
+Run: `cargo test -p backend provider_compact_unary --offline`
 
 Result: PASS.
 
@@ -203,7 +203,7 @@ fn provider_compact_unary_reuses_json_compaction_response_parser() {
 
 - [x] **Step 2: Run red tests**
 
-Run: `cargo test -p backend-rust provider_compact_unary --offline`
+Run: `cargo test -p backend provider_compact_unary --offline`
 
 Result: Covered by the first red compile failure for the new unary transport; parser wiring was then added before green.
 
@@ -229,10 +229,10 @@ This parser already accepts JSON body text and enforces exactly one compaction o
 Run:
 
 ```bash
-cargo test -p backend-rust provider_compact_unary --offline
-cargo test -p backend-rust provider_compact_transport --offline
-cargo test -p backend-rust remote_compaction --offline
-cargo test -p backend-rust model_loop_compaction --offline
+cargo test -p backend provider_compact_unary --offline
+cargo test -p backend provider_compact_transport --offline
+cargo test -p backend remote_compaction --offline
+cargo test -p backend model_loop_compaction --offline
 ```
 
 Expected: PASS.
@@ -267,11 +267,11 @@ Expected: PASS.
 Commit feature work, merge `feat/enterprise-agent-foundation` into `main`, rerun full verification on `main`, run `cargo clean` in both worktrees, and sync feature to `main`.
 
 **Verification evidence so far:**
-- Red: `cargo test -p backend-rust provider_compact_unary --offline` failed on missing `ModelChatProviderTransport::ResponsesCompactUnary`.
-- Green: `cargo test -p backend-rust provider_compact_unary --offline`
-- Green: `cargo test -p backend-rust provider_compact_transport --offline`
-- Green: `cargo test -p backend-rust remote_compaction --offline`
-- Green: `cargo test -p backend-rust model_loop_compaction --offline`
+- Red: `cargo test -p backend provider_compact_unary --offline` failed on missing `ModelChatProviderTransport::ResponsesCompactUnary`.
+- Green: `cargo test -p backend provider_compact_unary --offline`
+- Green: `cargo test -p backend provider_compact_transport --offline`
+- Green: `cargo test -p backend remote_compaction --offline`
+- Green: `cargo test -p backend model_loop_compaction --offline`
 - Green: `cargo fmt -- --check`
 - Green: `cargo test --workspace --offline`
 - Green: `git diff --check`

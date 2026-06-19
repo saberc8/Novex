@@ -39,7 +39,7 @@ fn model_health_automation_migration_defines_alert_table_and_seed_job() {
 Run:
 
 ```bash
-cargo test -p backend-rust model_health_automation_migration --offline
+cargo test -p backend model_health_automation_migration --offline
 ```
 
 Expected: FAIL because the migration file does not exist or does not contain the required schema/job seed.
@@ -100,7 +100,7 @@ ON CONFLICT DO NOTHING;
 Run:
 
 ```bash
-cargo test -p backend-rust model_health_automation_migration --offline
+cargo test -p backend model_health_automation_migration --offline
 ```
 
 Expected: PASS.
@@ -188,7 +188,7 @@ fn model_health_alert_key_uses_target_when_route_is_missing() {
 Run:
 
 ```bash
-cargo test -p backend-rust model_health_alert --offline
+cargo test -p backend model_health_alert --offline
 ```
 
 Expected: FAIL because the helper types and functions do not exist.
@@ -207,7 +207,7 @@ Keep these helpers pure and near existing model-health persistence helpers.
 Run:
 
 ```bash
-cargo test -p backend-rust model_health_alert --offline
+cargo test -p backend model_health_alert --offline
 ```
 
 Expected: PASS.
@@ -250,7 +250,7 @@ fn model_health_alert_persistence_source_contract_upserts_and_resolves_active_al
 Run:
 
 ```bash
-cargo test -p backend-rust model_health_alert_persistence --offline
+cargo test -p backend model_health_alert_persistence --offline
 ```
 
 Expected: FAIL because alert persistence is not wired.
@@ -273,8 +273,8 @@ Add DB helpers:
 Run:
 
 ```bash
-cargo test -p backend-rust model_health_alert --offline
-cargo test -p backend-rust model_health_persistence --offline
+cargo test -p backend model_health_alert --offline
+cargo test -p backend model_health_persistence --offline
 ```
 
 Expected: PASS.
@@ -296,8 +296,8 @@ git commit -m "feat: persist model health alerts"
 Change rollout trace status from `slice-13 implemented` to `slice-14 implemented`. Update notes to mention seeded model health scheduler job and active model ops alerts. Add focused commands:
 
 ```bash
-cargo test -p backend-rust model_health_automation --offline
-cargo test -p backend-rust model_health_alert --offline
+cargo test -p backend model_health_automation --offline
+cargo test -p backend model_health_alert --offline
 ```
 
 **Step 2: Run verification**
@@ -306,10 +306,10 @@ Run:
 
 ```bash
 cargo fmt -- --check
-cargo test -p backend-rust model_health_automation --offline
-cargo test -p backend-rust model_health_alert --offline
-cargo test -p backend-rust model_health_persistence --offline
-cargo test -p backend-rust model_health_check_key --offline
+cargo test -p backend model_health_automation --offline
+cargo test -p backend model_health_alert --offline
+cargo test -p backend model_health_persistence --offline
+cargo test -p backend model_health_check_key --offline
 cargo test --workspace --offline
 ```
 
@@ -327,10 +327,10 @@ git commit -m "docs: record model health automation progress"
 After feature verification:
 
 ```bash
-cd /Users/yusenlin/Avalon/freedom/github/zm-agent/Novex
+cd /path/to/Novex
 git merge --no-ff feat/enterprise-agent-foundation -m "merge: enterprise agent foundation model health automation"
 cargo fmt -- --check
 cargo test --workspace --offline
-cd /Users/yusenlin/Avalon/freedom/github/zm-agent/Novex/.worktrees/enterprise-agent-foundation
+cd /path/to/Novex/.worktrees/enterprise-agent-foundation
 git merge --ff-only main
 ```

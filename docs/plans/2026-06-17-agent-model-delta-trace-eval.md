@@ -6,7 +6,7 @@
 
 **Architecture:** Keep `TraceEventKind::Inference` as the model-provider evidence bucket. Extend the existing run-event-to-trace filter to include `model_delta`, then extend `novex-eval` inference summary aggregation with model-delta counts and text length.
 
-**Tech Stack:** Rust, `backend-rust`, `novex-trace`, `novex-eval`, existing `ai_run_event` payloads.
+**Tech Stack:** Rust, `backend`, `novex-trace`, `novex-eval`, existing `ai_run_event` payloads.
 
 ## Global Constraints
 
@@ -54,7 +54,7 @@ Assert the trace event kind is `Inference` and payload fields are preserved.
 Run:
 
 ```bash
-cargo test -p backend-rust model_delta_spans --offline
+cargo test -p backend model_delta_spans --offline
 ```
 
 Expected: FAIL because `model_delta` is not yet an inference trace item.
@@ -68,7 +68,7 @@ Extend `is_model_inference_trace_item` to include `model_delta`.
 Run:
 
 ```bash
-cargo test -p backend-rust model_delta_spans --offline
+cargo test -p backend model_delta_spans --offline
 ```
 
 Expected: PASS.
@@ -135,7 +135,7 @@ Run:
 
 ```bash
 cargo fmt -- --check
-cargo test -p backend-rust model_delta_spans --offline
+cargo test -p backend model_delta_spans --offline
 cargo test -p novex-eval model_delta --offline
 cargo test --workspace --offline
 cd apps/agent-workspace && pnpm test -- src/api/agent.test.ts && pnpm typecheck

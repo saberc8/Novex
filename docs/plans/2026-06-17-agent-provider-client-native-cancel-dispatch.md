@@ -12,7 +12,7 @@
 
 - Preserve existing `model_service.rs` imports and call sites through `model_provider_transport`.
 - Do not change native-cancel request method, bearer-auth behavior, timeout use, returned HTTP status, or error message text.
-- `novex-provider-client` must not depend on `backend-rust`, backend `AppError`, SQL, tenant context, provider-call leases, run-event persistence, or trace/eval crates.
+- `novex-provider-client` must not depend on `backend`, backend `AppError`, SQL, tenant context, provider-call leases, run-event persistence, or trace/eval crates.
 - Backend remains responsible for converting `ModelProviderClientError` into `AppError`.
 - Use a RED source-contract test before moving production code.
 - Verify with focused native-cancel/provider-client tests, formatting, diff checks, and the offline workspace test suite.
@@ -58,7 +58,7 @@ assert!(!backend_native_source.contains("Provider native cancel failed: HTTP"));
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `cargo test -p backend-rust provider_client_native_cancel_dispatch_lives_in_provider_client_crate --offline`
+Run: `cargo test -p backend provider_client_native_cancel_dispatch_lives_in_provider_client_crate --offline`
 
 Expected: FAIL because backend `native_cancel.rs` still owns the request DTO, provider POST dispatch, bearer auth, status mapping, and native-cancel failure message.
 
@@ -159,12 +159,12 @@ Run:
 ```bash
 cargo fmt -- --check
 git diff --check
-cargo test -p backend-rust provider_client_native_cancel_dispatch_lives_in_provider_client_crate --offline
-cargo test -p backend-rust provider_client_http_primitives_live_in_provider_client_crate --offline
-cargo test -p backend-rust model_provider_native_cancel_transport_adapter --offline
-cargo test -p backend-rust provider_call_lease_native_cancel --offline
-cargo test -p backend-rust provider_call_lease_cancel --offline
-cargo test -p backend-rust provider_stream_native_cancel --offline
+cargo test -p backend provider_client_native_cancel_dispatch_lives_in_provider_client_crate --offline
+cargo test -p backend provider_client_http_primitives_live_in_provider_client_crate --offline
+cargo test -p backend model_provider_native_cancel_transport_adapter --offline
+cargo test -p backend provider_call_lease_native_cancel --offline
+cargo test -p backend provider_call_lease_cancel --offline
+cargo test -p backend provider_stream_native_cancel --offline
 cargo test -p novex-provider-client --offline
 cargo test --workspace --offline
 ```

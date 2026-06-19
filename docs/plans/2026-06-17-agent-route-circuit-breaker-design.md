@@ -79,8 +79,8 @@ Final verification:
 
 ```bash
 cargo fmt -- --check
-cargo test -p backend-rust route_circuit_breaker --offline
-cargo test -p backend-rust provider_lifecycle_trace --offline
+cargo test -p backend route_circuit_breaker --offline
+cargo test -p backend provider_lifecycle_trace --offline
 cargo test -p novex-eval circuit_breaker --offline
 cargo test --workspace --offline
 ```

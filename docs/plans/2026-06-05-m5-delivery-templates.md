@@ -72,7 +72,7 @@ Add tests for:
 Run:
 
 ```bash
-cargo test -p backend-rust delivery_template --offline
+cargo test -p backend delivery_template --offline
 ```
 
 Expected: fail because the template service and routes do not exist.
@@ -96,8 +96,8 @@ Behavior:
 **Step 3: Verify and commit**
 
 ```bash
-cargo test -p backend-rust delivery_template --offline
-cargo test -p backend-rust --offline
+cargo test -p backend delivery_template --offline
+cargo test -p backend --offline
 cargo fmt -- --check
 git add backend/src/application/ai/template_service.rs backend/src/interfaces/http/ai/template.rs backend/src/application/ai/mod.rs backend/src/interfaces/http/ai/mod.rs backend/migrations/202606050012_seed_ai_template_permissions.sql
 git commit -m "feat: add delivery template api"

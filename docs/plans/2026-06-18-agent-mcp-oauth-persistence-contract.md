@@ -43,10 +43,10 @@ Add the backend persistence contract for MCP OAuth callback state and session ma
 
 - `cargo fmt --all -- --check`
 - `git diff --check`
-- `cargo test -p backend-rust mcp_oauth_persistence --offline`
-- `cargo test -p backend-rust mcp --offline`
-- `cargo test -p backend-rust mcp_oauth_callback --offline`
-- `cargo test -p backend-rust mcp_oauth_token_dispatch --offline`
+- `cargo test -p backend mcp_oauth_persistence --offline`
+- `cargo test -p backend mcp --offline`
+- `cargo test -p backend mcp_oauth_callback --offline`
+- `cargo test -p backend mcp_oauth_token_dispatch --offline`
 - `cargo test --workspace --offline`
 
 ## Follow-up

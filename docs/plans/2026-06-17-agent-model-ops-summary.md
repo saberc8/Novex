@@ -56,7 +56,7 @@ fn model_ops_summary_permission_seed_contains_control() {
 Run:
 
 ```bash
-cargo test -p backend-rust model_ops_summary_permission_seed --offline
+cargo test -p backend model_ops_summary_permission_seed --offline
 ```
 
 Expected: FAIL because the migration file does not exist.
@@ -83,7 +83,7 @@ ON CONFLICT DO NOTHING;
 Run:
 
 ```bash
-cargo test -p backend-rust model_ops_summary_permission_seed --offline
+cargo test -p backend model_ops_summary_permission_seed --offline
 ```
 
 Expected: PASS.
@@ -184,7 +184,7 @@ fn model_ops_summary_from_rows_counts_open_breakers_and_degraded_routes() {
 Run:
 
 ```bash
-cargo test -p backend-rust model_ops_summary --offline
+cargo test -p backend model_ops_summary --offline
 ```
 
 Expected: FAIL because service types/functions do not exist.
@@ -207,7 +207,7 @@ Use a single tenant-scoped SQL query joining route metadata, current breaker row
 Run:
 
 ```bash
-cargo test -p backend-rust model_ops_summary --offline
+cargo test -p backend model_ops_summary --offline
 ```
 
 Expected: PASS.
@@ -254,7 +254,7 @@ fn model_ops_summary_route_is_registered() {
 Run:
 
 ```bash
-cargo test -p backend-rust model_ops_summary --offline
+cargo test -p backend model_ops_summary --offline
 ```
 
 Expected: FAIL because the handler/route is missing.
@@ -286,7 +286,7 @@ async fn model_ops_summary(
 Run:
 
 ```bash
-cargo test -p backend-rust model_ops_summary --offline
+cargo test -p backend model_ops_summary --offline
 ```
 
 Expected: PASS.
@@ -312,7 +312,7 @@ Change rollout trace status from `slice-11 implemented` to `slice-12 implemented
 Add focused command:
 
 ```bash
-cargo test -p backend-rust model_ops_summary --offline
+cargo test -p backend model_ops_summary --offline
 ```
 
 **Step 2: Commit matrix**
@@ -330,9 +330,9 @@ Run:
 
 ```bash
 cargo fmt -- --check
-cargo test -p backend-rust model_ops_summary --offline
-cargo test -p backend-rust model_circuit_breaker_ --offline
-cargo test -p backend-rust route_breaker_controls --offline
+cargo test -p backend model_ops_summary --offline
+cargo test -p backend model_circuit_breaker_ --offline
+cargo test -p backend route_breaker_controls --offline
 cargo test --workspace --offline
 ```
 

@@ -50,7 +50,7 @@ assert!(source.contains("agent_run_event_ws_loop"));
 Run:
 
 ```bash
-cargo test -p backend-rust agent_event_websocket --offline
+cargo test -p backend agent_event_websocket --offline
 ```
 
 Expected: FAIL because the route, handler, and helper names do not exist.
@@ -66,12 +66,12 @@ Enable axum `ws`, import `WebSocketUpgrade`, add the route, check permission, co
 Run:
 
 ```bash
-cargo test -p backend-rust agent_event_websocket_route --offline
+cargo test -p backend agent_event_websocket_route --offline
 ```
 
 Expected: PASS.
 
-Actual: PASS via `cargo test -p backend-rust agent_event_websocket --offline`.
+Actual: PASS via `cargo test -p backend agent_event_websocket --offline`.
 
 ### Task 2: WebSocket Frame Contract
 
@@ -108,7 +108,7 @@ assert!(body["message"].is_string());
 Run:
 
 ```bash
-cargo test -p backend-rust agent_event_websocket_message --offline
+cargo test -p backend agent_event_websocket_message --offline
 ```
 
 Expected: FAIL because message helpers do not exist.
@@ -124,12 +124,12 @@ Serialize typed text JSON frames with `type`, top-level `sequenceNo`, and full e
 Run:
 
 ```bash
-cargo test -p backend-rust agent_event_websocket_message --offline
+cargo test -p backend agent_event_websocket_message --offline
 ```
 
 Expected: PASS.
 
-Actual: PASS via `cargo test -p backend-rust agent_event_websocket --offline`.
+Actual: PASS via `cargo test -p backend agent_event_websocket --offline`.
 
 ### Task 3: WebSocket Poll Loop
 
@@ -156,8 +156,8 @@ Use the same behavior as SSE:
 Run:
 
 ```bash
-cargo test -p backend-rust agent_event_websocket --offline
-cargo test -p backend-rust agent_event_stream --offline
+cargo test -p backend agent_event_websocket --offline
+cargo test -p backend agent_event_stream --offline
 ```
 
 Expected: PASS.
@@ -218,7 +218,7 @@ Actual: PASS for `cargo fmt -- --check`, `cargo test --workspace --offline`, and
 - Planning commit: `c224087 docs: plan agent event websocket transport`.
 - Feature commit: `a3c53a2 feat: add agent run event websocket transport`.
 - Main merge: `51d2a38 merge: enterprise agent foundation event websocket`.
-- Red test: `cargo test -p backend-rust agent_event_websocket --offline` failed before implementation because WebSocket frame helpers were missing.
-- Focused green tests: `cargo test -p backend-rust agent_event_websocket --offline` and `cargo test -p backend-rust agent_event_stream --offline`.
+- Red test: `cargo test -p backend agent_event_websocket --offline` failed before implementation because WebSocket frame helpers were missing.
+- Focused green tests: `cargo test -p backend agent_event_websocket --offline` and `cargo test -p backend agent_event_stream --offline`.
 - Full verification: `cargo fmt -- --check`, `cargo test --workspace --offline`, and `git diff --check`.
 - Cleanup: `cargo clean` ran in both main and feature worktrees.

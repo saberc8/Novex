@@ -55,7 +55,7 @@ Backend unit tests should prove:
 Run the focused backend test first:
 
 ```bash
-cargo test -p backend-rust provider_token_delta_responses --offline
+cargo test -p backend provider_token_delta_responses --offline
 ```
 
 Then run the standard slice verification:

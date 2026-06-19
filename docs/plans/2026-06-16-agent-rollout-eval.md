@@ -141,7 +141,7 @@ fn agent_run_events_convert_to_trace_bundle() {
 Run:
 
 ```bash
-cargo test -p backend-rust agent_run_events_convert_to_trace_bundle --offline
+cargo test -p backend agent_run_events_convert_to_trace_bundle --offline
 ```
 
 Expected: FAIL.
@@ -173,8 +173,8 @@ The route should read current tenant-scoped run events and return:
 Run:
 
 ```bash
-cargo test -p backend-rust agent_run_events_convert_to_trace_bundle --offline
-cargo test -p backend-rust agent_trace_route_is_registered_and_requires_auth --offline
+cargo test -p backend agent_run_events_convert_to_trace_bundle --offline
+cargo test -p backend agent_trace_route_is_registered_and_requires_auth --offline
 ```
 
 Expected: PASS.
@@ -214,7 +214,7 @@ fn agent_rollout_migration_defines_replay_bundle_table() {
 Run:
 
 ```bash
-cargo test -p backend-rust agent_rollout_migration_defines_replay_bundle_table --offline
+cargo test -p backend agent_rollout_migration_defines_replay_bundle_table --offline
 ```
 
 Expected: FAIL.
@@ -246,8 +246,8 @@ When an agent run succeeds, fails, cancels, or pauses for approval, build a trac
 Run:
 
 ```bash
-cargo test -p backend-rust agent_rollout_migration_defines_replay_bundle_table --offline
-cargo test -p backend-rust agent_runtime_records_poc_trace_contract_events --offline
+cargo test -p backend agent_rollout_migration_defines_replay_bundle_table --offline
+cargo test -p backend agent_runtime_records_poc_trace_contract_events --offline
 ```
 
 Expected: PASS.
@@ -319,7 +319,7 @@ Run:
 
 ```bash
 cargo test -p novex-eval --offline
-cargo test -p backend-rust eval_case_capture --offline
+cargo test -p backend eval_case_capture --offline
 ```
 
 Expected: PASS.
@@ -351,7 +351,7 @@ Add:
 Run:
 
 ```bash
-cargo test -p backend-rust eval_runtime_normalizes_trace_replay_run_mode --offline
+cargo test -p backend eval_runtime_normalizes_trace_replay_run_mode --offline
 ```
 
 Expected: FAIL.
@@ -374,8 +374,8 @@ For each eval case:
 Run:
 
 ```bash
-cargo test -p backend-rust eval_runtime_scores_agent_trace_tool_and_answer --offline
-cargo test -p backend-rust --offline
+cargo test -p backend eval_runtime_scores_agent_trace_tool_and_answer --offline
+cargo test -p backend --offline
 ```
 
 Expected: PASS.

@@ -36,7 +36,7 @@ Add backend tests `model_stream_transport_task_replaces_boxed_future` and `model
 
 - [ ] **Step 2: Run focused test red**
 
-Run: `cargo test -p backend-rust model_stream_transport_task --offline`
+Run: `cargo test -p backend model_stream_transport_task --offline`
 
 Expected: FAIL because `ModelChatStreamTransportTask` does not exist and `ModelChatStreamFuture` still exists.
 
@@ -83,7 +83,7 @@ Update `ModelChatStreamCall` to use `transport`. In `chat_completion_stream_for_
 
 - [ ] **Step 4: Verify green**
 
-Run: `cargo test -p backend-rust model_stream_transport_task --offline`
+Run: `cargo test -p backend model_stream_transport_task --offline`
 
 Expected: PASS.
 
@@ -107,7 +107,7 @@ Add backend test `agent_model_stream_transport_task_waits_without_boxed_future`.
 
 - [ ] **Step 2: Run focused test red**
 
-Run: `cargo test -p backend-rust model_stream_transport_task --offline`
+Run: `cargo test -p backend model_stream_transport_task --offline`
 
 Expected: FAIL because Agent still destructures `response` and pins the boxed future.
 
@@ -148,12 +148,12 @@ Run:
 ```bash
 cargo fmt -- --check
 git diff --check
-cargo test -p backend-rust model_stream_transport_task --offline
-cargo test -p backend-rust model_stream_call_lifecycle --offline
-cargo test -p backend-rust model_stream_native_runtime_api --offline
-cargo test -p backend-rust model_stream_completion_builder --offline
-cargo test -p backend-rust streamed_tool_call_early_stop --offline
-cargo test -p backend-rust provider_abort --offline
+cargo test -p backend model_stream_transport_task --offline
+cargo test -p backend model_stream_call_lifecycle --offline
+cargo test -p backend model_stream_native_runtime_api --offline
+cargo test -p backend model_stream_completion_builder --offline
+cargo test -p backend streamed_tool_call_early_stop --offline
+cargo test -p backend provider_abort --offline
 cargo test --workspace --offline
 ```
 

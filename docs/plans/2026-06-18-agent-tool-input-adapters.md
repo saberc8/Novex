@@ -48,7 +48,7 @@ Update the backend source-contract around tool execution so it expects imports/c
 
 - [ ] **Step 4: Run RED**
 
-Run: `cargo test -p backend-rust agent_tool_input_adapters_live_in_novex_tools --offline`
+Run: `cargo test -p backend agent_tool_input_adapters_live_in_novex_tools --offline`
 
 Expected: fail because `agent_service.rs` still defines and calls local adapter functions.
 
@@ -79,10 +79,10 @@ Run:
 cargo fmt --all -- --check
 git diff --check
 cargo test -p novex-tools agent_tool_input --offline
-cargo test -p backend-rust agent_tool_input_adapters_live_in_novex_tools --offline
-cargo test -p backend-rust github_search_request_from_tool_input --offline
-cargo test -p backend-rust media_image_request_from_tool_input --offline
-cargo test -p backend-rust feishu_message_text --offline
+cargo test -p backend agent_tool_input_adapters_live_in_novex_tools --offline
+cargo test -p backend github_search_request_from_tool_input --offline
+cargo test -p backend media_image_request_from_tool_input --offline
+cargo test -p backend feishu_message_text --offline
 cargo test --workspace --offline
 ```
 

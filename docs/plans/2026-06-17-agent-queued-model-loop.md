@@ -33,7 +33,7 @@ Add backend tests proving:
 Run:
 
 ```bash
-cargo test -p backend-rust queued_model_loop --offline
+cargo test -p backend queued_model_loop --offline
 ```
 
 Expected: FAIL until the helper exists and the rejection strings are removed.
@@ -71,8 +71,8 @@ Move the current model-loop body into the helper. The helper should:
 **Step 3: Verify**
 
 ```bash
-cargo test -p backend-rust model_loop --offline
-cargo test -p backend-rust queued_model_loop --offline
+cargo test -p backend model_loop --offline
+cargo test -p backend queued_model_loop --offline
 ```
 
 ### Task 3: Enable Queued Model Loop Dispatch

@@ -34,7 +34,7 @@
       "code": "customer_service_agent_api",
       "name": "Customer Service Agent API Smoke",
       "workdir": "backend",
-      "command": "cargo test -p backend-rust customer_service_ --offline"
+      "command": "cargo test -p backend customer_service_ --offline"
     },
     {
       "code": "customer_service_agent_frontend",

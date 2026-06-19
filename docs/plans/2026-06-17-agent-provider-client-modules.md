@@ -68,7 +68,7 @@ assert!(media_source.contains("model_provider_http_client(request.timeout)"));
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `cargo test -p backend-rust model_provider_transport_splits_provider_client_modules --offline`
+Run: `cargo test -p backend model_provider_transport_splits_provider_client_modules --offline`
 
 Expected: FAIL because the provider client submodule files do not exist yet and the root transport file still owns these functions.
 
@@ -113,12 +113,12 @@ Run:
 ```bash
 cargo fmt -- --check
 git diff --check
-cargo test -p backend-rust model_provider_transport_splits_provider_client_modules --offline
-cargo test -p backend-rust model_provider_http_transport_adapter --offline
-cargo test -p backend-rust model_provider_native_cancel_transport_adapter --offline
-cargo test -p backend-rust model_provider_rag_transport_adapter --offline
-cargo test -p backend-rust model_provider_media_transport_adapter --offline
-cargo test -p backend-rust model_provider_transport_types_live_in_shared_model_crate --offline
+cargo test -p backend model_provider_transport_splits_provider_client_modules --offline
+cargo test -p backend model_provider_http_transport_adapter --offline
+cargo test -p backend model_provider_native_cancel_transport_adapter --offline
+cargo test -p backend model_provider_rag_transport_adapter --offline
+cargo test -p backend model_provider_media_transport_adapter --offline
+cargo test -p backend model_provider_transport_types_live_in_shared_model_crate --offline
 ```
 
 - [ ] **Step 8: Run full workspace verification**

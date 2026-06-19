@@ -37,6 +37,6 @@ Make the backend model loop consume the `novex-tools` executor registry when pre
 
 - `cargo fmt --all -- --check`
 - `git diff --check`
-- `cargo test -p backend-rust tool_executor_registry --offline`
-- `cargo test -p backend-rust model_loop_tool_executor_binding_payload --offline`
+- `cargo test -p backend tool_executor_registry --offline`
+- `cargo test -p backend model_loop_tool_executor_binding_payload --offline`
 - `cargo test --workspace --offline`

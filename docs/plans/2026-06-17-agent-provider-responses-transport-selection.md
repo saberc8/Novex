@@ -72,7 +72,7 @@ fn provider_responses_transport_code_agent_request_uses_configured_responses_end
 Run:
 
 ```bash
-cargo test -p backend-rust provider_responses_transport_code_agent_request_uses_configured_responses_endpoint --offline
+cargo test -p backend provider_responses_transport_code_agent_request_uses_configured_responses_endpoint --offline
 ```
 
 Expected: FAIL because `ResponsesCodeAgent` and the payload branch do not exist.
@@ -111,7 +111,7 @@ Add helper behavior:
 Run:
 
 ```bash
-cargo test -p backend-rust provider_responses_transport_code_agent_request_uses_configured_responses_endpoint --offline
+cargo test -p backend provider_responses_transport_code_agent_request_uses_configured_responses_endpoint --offline
 ```
 
 Expected: PASS.
@@ -140,7 +140,7 @@ assert_eq!(request.endpoint, route.endpoint());
 Run:
 
 ```bash
-cargo test -p backend-rust provider_token_delta_code_agent_chat_request_enables_streaming --offline
+cargo test -p backend provider_token_delta_code_agent_chat_request_enables_streaming --offline
 ```
 
 Expected: PASS after Task 1 implementation.

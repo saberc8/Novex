@@ -65,7 +65,7 @@ fn model_chat_cost_cents_from_spec_ignores_missing_spec() {
 Run:
 
 ```bash
-cargo test -p backend-rust model_chat_cost_cents --offline
+cargo test -p backend model_chat_cost_cents --offline
 ```
 
 Expected: FAIL because the helper and `cost_cents` field do not exist.
@@ -89,7 +89,7 @@ Update existing `ModelChatResp` test literals with `cost_cents: None`.
 Run:
 
 ```bash
-cargo test -p backend-rust model_chat_cost_cents --offline
+cargo test -p backend model_chat_cost_cents --offline
 ```
 
 Expected: PASS.
@@ -121,7 +121,7 @@ Add or update a test asserting the source contains:
 Run:
 
 ```bash
-cargo test -p backend-rust model_chat_response_cost_runtime --offline
+cargo test -p backend model_chat_response_cost_runtime --offline
 ```
 
 Expected: FAIL until runtime service fills response cost.
@@ -145,8 +145,8 @@ Call it in `chat_completion_with_usage`, `chat_completion_for_source`, and `chat
 Run:
 
 ```bash
-cargo test -p backend-rust model_chat_response_cost_runtime --offline
-cargo test -p backend-rust model_chat_response_extracts_answer_usage_and_route_summary --offline
+cargo test -p backend model_chat_response_cost_runtime --offline
+cargo test -p backend model_chat_response_extracts_answer_usage_and_route_summary --offline
 ```
 
 Expected: PASS.
@@ -196,7 +196,7 @@ fn model_inference_event_payload_preserves_response_cost() {
 Run:
 
 ```bash
-cargo test -p backend-rust inference_cost --offline
+cargo test -p backend inference_cost --offline
 ```
 
 Expected: FAIL because agent payload currently writes null.
@@ -216,8 +216,8 @@ using a borrowed/serializable value that does not move from `response`.
 Run:
 
 ```bash
-cargo test -p backend-rust inference_cost --offline
-cargo test -p backend-rust inference_spans --offline
+cargo test -p backend inference_cost --offline
+cargo test -p backend inference_spans --offline
 ```
 
 Expected: PASS.
@@ -244,10 +244,10 @@ Run:
 
 ```bash
 cargo fmt -- --check
-cargo test -p backend-rust model_chat_cost_cents --offline
-cargo test -p backend-rust model_chat_response_cost_runtime --offline
-cargo test -p backend-rust inference_cost --offline
-cargo test -p backend-rust inference_spans --offline
+cargo test -p backend model_chat_cost_cents --offline
+cargo test -p backend model_chat_response_cost_runtime --offline
+cargo test -p backend inference_cost --offline
+cargo test -p backend inference_spans --offline
 cargo test -p novex-eval inference_spans --offline
 cargo test --workspace --offline
 ```

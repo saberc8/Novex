@@ -32,7 +32,7 @@ Add tests that prove:
 Run:
 
 ```bash
-cargo test -p backend-rust provider_compact_transport --offline
+cargo test -p backend provider_compact_transport --offline
 ```
 
 Expected: FAIL because no provider request plan or Responses compaction payload helpers exist.
@@ -55,7 +55,7 @@ Add internal helpers:
 Run:
 
 ```bash
-cargo test -p backend-rust provider_compact_transport --offline
+cargo test -p backend provider_compact_transport --offline
 ```
 
 Expected: PASS.
@@ -82,7 +82,7 @@ Add tests that prove:
 Run:
 
 ```bash
-cargo test -p backend-rust provider_compact_transport --offline
+cargo test -p backend provider_compact_transport --offline
 ```
 
 Expected: FAIL until parser helpers exist.
@@ -104,9 +104,9 @@ For Responses compaction transport, read the provider response body as text and 
 Run:
 
 ```bash
-cargo test -p backend-rust provider_compact_transport --offline
-cargo test -p backend-rust remote_compaction --offline
-cargo test -p backend-rust model_loop_compaction --offline
+cargo test -p backend provider_compact_transport --offline
+cargo test -p backend remote_compaction --offline
+cargo test -p backend model_loop_compaction --offline
 ```
 
 Expected: PASS.

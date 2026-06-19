@@ -35,7 +35,7 @@ Add backend tests proving:
 Run:
 
 ```bash
-cargo test -p backend-rust agent_queue_cancel_sync --offline
+cargo test -p backend agent_queue_cancel_sync --offline
 ```
 
 Expected: FAIL until the repository method and service wiring exist.
@@ -66,8 +66,8 @@ The method updates only `pending` and `retrying` rows, clears locks, sets `finis
 **Step 2: Verify**
 
 ```bash
-cargo test -p backend-rust agent_queue_cancel_sync --offline
-cargo test -p backend-rust agent_run_queue --offline
+cargo test -p backend agent_queue_cancel_sync --offline
+cargo test -p backend agent_run_queue --offline
 ```
 
 ### Task 3: Wire Cancel API To Queue Sync
@@ -92,9 +92,9 @@ Do not require affected rows to be non-zero.
 **Step 2: Verify**
 
 ```bash
-cargo test -p backend-rust agent_queue_cancel_sync --offline
-cargo test -p backend-rust external_cancel --offline
-cargo test -p backend-rust runtime_supervisor --offline
+cargo test -p backend agent_queue_cancel_sync --offline
+cargo test -p backend external_cancel --offline
+cargo test -p backend runtime_supervisor --offline
 ```
 
 ### Task 4: Update Docs, Verify, Merge

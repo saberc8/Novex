@@ -85,7 +85,7 @@ fn model_health_check_record_from_result_maps_status_and_metadata() {
 Run:
 
 ```bash
-cargo test -p backend-rust model_health_persistence --offline
+cargo test -p backend model_health_persistence --offline
 ```
 
 Expected: FAIL because helper types/functions do not exist.
@@ -106,7 +106,7 @@ Modify `health_check_for_tenant` to persist the finished result list before retu
 Run:
 
 ```bash
-cargo test -p backend-rust model_health_persistence --offline
+cargo test -p backend model_health_persistence --offline
 ```
 
 Expected: PASS.
@@ -150,7 +150,7 @@ fn model_health_persistence_source_contract_refreshes_active_tenants() {
 Run:
 
 ```bash
-cargo test -p backend-rust refresh_active_tenant_model_health --offline
+cargo test -p backend refresh_active_tenant_model_health --offline
 ```
 
 Expected: FAIL because method is missing.
@@ -170,7 +170,7 @@ It selects distinct tenant IDs from active `ai_model_route`, runs `health_check_
 Run:
 
 ```bash
-cargo test -p backend-rust refresh_active_tenant_model_health --offline
+cargo test -p backend refresh_active_tenant_model_health --offline
 ```
 
 Expected: PASS.
@@ -228,7 +228,7 @@ fn normalize_builtin_job_accepts_model_health_check_key() {
 Run:
 
 ```bash
-cargo test -p backend-rust model_health_check_key --offline
+cargo test -p backend model_health_check_key --offline
 ```
 
 Expected: FAIL because executor does not support the builtin.
@@ -256,8 +256,8 @@ Expose a `db()` accessor on `SchedulerRepository` if needed, or pass the cloned 
 Run:
 
 ```bash
-cargo test -p backend-rust model_health_check_key --offline
-cargo test -p backend-rust scheduler_builtin --offline
+cargo test -p backend model_health_check_key --offline
+cargo test -p backend scheduler_builtin --offline
 ```
 
 Expected: PASS.
@@ -283,7 +283,7 @@ Change rollout trace status from `slice-12 implemented` to `slice-13 implemented
 Add focused command:
 
 ```bash
-cargo test -p backend-rust model_health_persistence --offline
+cargo test -p backend model_health_persistence --offline
 ```
 
 **Step 2: Commit matrix**
@@ -301,9 +301,9 @@ Run:
 
 ```bash
 cargo fmt -- --check
-cargo test -p backend-rust model_health_persistence --offline
-cargo test -p backend-rust model_ops_summary --offline
-cargo test -p backend-rust model_health_check_key --offline
+cargo test -p backend model_health_persistence --offline
+cargo test -p backend model_ops_summary --offline
+cargo test -p backend model_health_check_key --offline
 cargo test --workspace --offline
 ```
 

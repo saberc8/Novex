@@ -56,7 +56,7 @@ fn model_provider_http_transport_adapter_source_contract() {
 
 - [ ] **Step 2: Verify red**
 
-Run: `cargo test -p backend-rust model_provider_http_transport_adapter --offline`
+Run: `cargo test -p backend model_provider_http_transport_adapter --offline`
 
 Expected: FAIL because the adapter module and call do not exist yet.
 
@@ -154,7 +154,7 @@ let response = send_model_provider_http_request(ModelProviderHttpRequest {
 
 - [ ] **Step 4: Verify green**
 
-Run: `cargo test -p backend-rust model_provider_http_transport_adapter --offline`
+Run: `cargo test -p backend model_provider_http_transport_adapter --offline`
 
 Expected: PASS.
 
@@ -182,13 +182,13 @@ Run:
 ```bash
 cargo fmt -- --check
 git diff --check
-cargo test -p backend-rust model_provider_http_transport_adapter --offline
-cargo test -p backend-rust model_provider_stream_dispatch_mode --offline
-cargo test -p backend-rust model_provider_stream_dispatch_route_path --offline
-cargo test -p backend-rust model_stream_transport_executor --offline
-cargo test -p backend-rust model_stream_completion_builder --offline
-cargo test -p backend-rust streamed_tool_call_early_stop --offline
-cargo test -p backend-rust provider_abort --offline
+cargo test -p backend model_provider_http_transport_adapter --offline
+cargo test -p backend model_provider_stream_dispatch_mode --offline
+cargo test -p backend model_provider_stream_dispatch_route_path --offline
+cargo test -p backend model_stream_transport_executor --offline
+cargo test -p backend model_stream_completion_builder --offline
+cargo test -p backend streamed_tool_call_early_stop --offline
+cargo test -p backend provider_abort --offline
 cargo test --workspace --offline
 ```
 

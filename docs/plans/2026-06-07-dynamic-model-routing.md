@@ -75,7 +75,7 @@ Add pure resolver tests for:
 Run:
 
 ```bash
-cargo test -p backend-rust application::ai::model_service::tests::dynamic_route -- --nocapture
+cargo test -p backend application::ai::model_service::tests::dynamic_route -- --nocapture
 ```
 
 Expected: FAIL because database route conversion and purpose resolver do not exist.
@@ -106,7 +106,7 @@ The resolver must query the current tenant and active rows, ordered by `priority
 **Step 4: Run tests**
 
 ```bash
-cargo test -p backend-rust application::ai::model_service::tests::dynamic_route -- --nocapture
+cargo test -p backend application::ai::model_service::tests::dynamic_route -- --nocapture
 ```
 
 Expected: PASS.
@@ -136,7 +136,7 @@ Add tests for:
 Run:
 
 ```bash
-cargo test -p backend-rust application::ai::model_service::tests::model_chat_ application::ai::model_service::tests::dynamic_route interfaces::http::ai::model -- --nocapture
+cargo test -p backend application::ai::model_service::tests::model_chat_ application::ai::model_service::tests::dynamic_route interfaces::http::ai::model -- --nocapture
 ```
 
 Expected: FAIL until chat and HTTP handlers use the tenant-bound service path.
@@ -162,8 +162,8 @@ Change HTTP handlers:
 **Step 4: Run tests**
 
 ```bash
-cargo test -p backend-rust application::ai::model_service -- --nocapture
-cargo test -p backend-rust interfaces::http::ai::model -- --nocapture
+cargo test -p backend application::ai::model_service -- --nocapture
+cargo test -p backend interfaces::http::ai::model -- --nocapture
 ```
 
 Expected: PASS.
@@ -192,7 +192,7 @@ Add tests for:
 Run:
 
 ```bash
-cargo test -p backend-rust application::ai::knowledge_service::tests::dynamic_route -- --nocapture
+cargo test -p backend application::ai::knowledge_service::tests::dynamic_route -- --nocapture
 ```
 
 Expected: FAIL until RAG helpers accept tenant-bound route resolution.
@@ -215,8 +215,8 @@ Change ask path helpers to receive tenant-bound model service or resolved routes
 **Step 4: Run tests**
 
 ```bash
-cargo test -p backend-rust application::ai::knowledge_service::tests::dynamic_route -- --nocapture
-cargo test -p backend-rust application::ai::knowledge_service -- --nocapture
+cargo test -p backend application::ai::knowledge_service::tests::dynamic_route -- --nocapture
+cargo test -p backend application::ai::knowledge_service -- --nocapture
 ```
 
 Expected: PASS.
@@ -256,10 +256,10 @@ Run:
 
 ```bash
 set -a
-. /Users/yusenlin/Avalon/freedom/github/zm-agent/Novex/backend/.env
+. /path/to/Novex/backend/.env
 set +a
-NOVEX_LIVE_MODEL_ROUTING_TEST=1 cargo test -p backend-rust --test live_model_routing -- --ignored --nocapture
-NOVEX_LIVE_RAG_TEST=1 cargo test -p backend-rust --test live_rag_e2e -- --ignored --nocapture
+NOVEX_LIVE_MODEL_ROUTING_TEST=1 cargo test -p backend --test live_model_routing -- --ignored --nocapture
+NOVEX_LIVE_RAG_TEST=1 cargo test -p backend --test live_rag_e2e -- --ignored --nocapture
 ```
 
 Expected: FAIL until dynamic DB route resolution is wired through.
@@ -301,9 +301,9 @@ Expected: PASS.
 **Step 2: Offline regression**
 
 ```bash
-cargo test --workspace --exclude backend-rust
-cargo test -p backend-rust application::ai
-cargo test -p backend-rust interfaces::http::ai
+cargo test --workspace --exclude backend
+cargo test -p backend application::ai
+cargo test -p backend interfaces::http::ai
 PYTHONPATH=services/parser-worker python3 -m unittest discover -s services/parser-worker/tests
 ```
 
@@ -313,10 +313,10 @@ Expected: PASS.
 
 ```bash
 set -a
-. /Users/yusenlin/Avalon/freedom/github/zm-agent/Novex/backend/.env
+. /path/to/Novex/backend/.env
 set +a
-NOVEX_LIVE_MODEL_ROUTING_TEST=1 cargo test -p backend-rust --test live_model_routing -- --ignored --nocapture
-NOVEX_LIVE_RAG_TEST=1 cargo test -p backend-rust --test live_rag_e2e -- --ignored --nocapture
+NOVEX_LIVE_MODEL_ROUTING_TEST=1 cargo test -p backend --test live_model_routing -- --ignored --nocapture
+NOVEX_LIVE_RAG_TEST=1 cargo test -p backend --test live_rag_e2e -- --ignored --nocapture
 NOVEX_LIVE_MINERU_TEST=1 PYTHONPATH=services/parser-worker python3 -m unittest services/parser-worker/tests/test_mineru_live.py
 ```
 

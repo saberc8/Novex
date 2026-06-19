@@ -190,9 +190,9 @@ fn model_loop_system_prompt_includes_workbench_context_without_user_text_mutatio
 Run:
 
 ```bash
-cargo test -p backend-rust workbench_context_normalization_bounds_lists_and_trims_values -- --nocapture
-cargo test -p backend-rust agent_run_command_payload_preserves_workbench_context -- --nocapture
-cargo test -p backend-rust model_loop_system_prompt_includes_workbench_context_without_user_text_mutation -- --nocapture
+cargo test -p backend workbench_context_normalization_bounds_lists_and_trims_values -- --nocapture
+cargo test -p backend agent_run_command_payload_preserves_workbench_context -- --nocapture
+cargo test -p backend model_loop_system_prompt_includes_workbench_context_without_user_text_mutation -- --nocapture
 ```
 
 Expected: FAIL because `AgentWorkbenchContext`, `workbench_context`, and `build_model_loop_system_prompt_with_context` do not exist.
@@ -382,10 +382,10 @@ Update call sites to pass `command.workbench_context.as_ref()` in the runtime pa
 Run:
 
 ```bash
-cargo test -p backend-rust workbench_context_normalization_bounds_lists_and_trims_values -- --nocapture
-cargo test -p backend-rust workbench_context_normalization_drops_empty_context -- --nocapture
-cargo test -p backend-rust agent_run_command_payload_preserves_workbench_context -- --nocapture
-cargo test -p backend-rust model_loop_system_prompt_includes_workbench_context_without_user_text_mutation -- --nocapture
+cargo test -p backend workbench_context_normalization_bounds_lists_and_trims_values -- --nocapture
+cargo test -p backend workbench_context_normalization_drops_empty_context -- --nocapture
+cargo test -p backend agent_run_command_payload_preserves_workbench_context -- --nocapture
+cargo test -p backend model_loop_system_prompt_includes_workbench_context_without_user_text_mutation -- --nocapture
 ```
 
 Expected: PASS.
@@ -540,8 +540,8 @@ async fn web_search_tool_returns_dry_run_when_provider_missing() {
 Run:
 
 ```bash
-cargo test -p backend-rust web_search_executor_selection_matches_tool_code_and_binding -- --nocapture
-cargo test -p backend-rust web_search_tool_returns_dry_run_when_provider_missing -- --nocapture
+cargo test -p backend web_search_executor_selection_matches_tool_code_and_binding -- --nocapture
+cargo test -p backend web_search_tool_returns_dry_run_when_provider_missing -- --nocapture
 ```
 
 Expected: FAIL because `WebSearch`, `WEB_SEARCH_TOOL_CODE`, and `execute_web_search_tool` do not exist.
@@ -619,8 +619,8 @@ Run:
 ```bash
 cargo test -p novex-tools agent_model_loop_tool_definitions_include_web_search -- --nocapture
 cargo test -p novex-tools web_search_executor_binding_is_builtin -- --nocapture
-cargo test -p backend-rust web_search_executor_selection_matches_tool_code_and_binding -- --nocapture
-cargo test -p backend-rust web_search_tool_returns_dry_run_when_provider_missing -- --nocapture
+cargo test -p backend web_search_executor_selection_matches_tool_code_and_binding -- --nocapture
+cargo test -p backend web_search_tool_returns_dry_run_when_provider_missing -- --nocapture
 ```
 
 Expected: PASS.
@@ -1781,12 +1781,12 @@ Expected: all commands exit 0.
 Run:
 
 ```bash
-cargo test -p backend-rust workbench_context_normalization_bounds_lists_and_trims_values -- --nocapture
-cargo test -p backend-rust workbench_context_normalization_drops_empty_context -- --nocapture
-cargo test -p backend-rust agent_run_command_payload_preserves_workbench_context -- --nocapture
-cargo test -p backend-rust model_loop_system_prompt_includes_workbench_context_without_user_text_mutation -- --nocapture
-cargo test -p backend-rust web_search_executor_selection_matches_tool_code_and_binding -- --nocapture
-cargo test -p backend-rust web_search_tool_returns_dry_run_when_provider_missing -- --nocapture
+cargo test -p backend workbench_context_normalization_bounds_lists_and_trims_values -- --nocapture
+cargo test -p backend workbench_context_normalization_drops_empty_context -- --nocapture
+cargo test -p backend agent_run_command_payload_preserves_workbench_context -- --nocapture
+cargo test -p backend model_loop_system_prompt_includes_workbench_context_without_user_text_mutation -- --nocapture
+cargo test -p backend web_search_executor_selection_matches_tool_code_and_binding -- --nocapture
+cargo test -p backend web_search_tool_returns_dry_run_when_provider_missing -- --nocapture
 cargo test -p novex-tools agent_model_loop_tool_definitions_include_web_search -- --nocapture
 cargo test -p novex-tools web_search_executor_binding_is_builtin -- --nocapture
 ```

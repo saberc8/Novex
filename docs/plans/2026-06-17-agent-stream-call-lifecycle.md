@@ -34,7 +34,7 @@ Add backend test `model_stream_call_lifecycle_exposes_purpose_route_and_source`.
 
 - [ ] **Step 2: Run focused test red**
 
-Run: `cargo test -p backend-rust model_stream_call_lifecycle --offline`
+Run: `cargo test -p backend model_stream_call_lifecycle --offline`
 
 Expected: FAIL because lifecycle metadata does not exist.
 
@@ -44,7 +44,7 @@ Add `ModelChatStreamLifecycle { purpose, requested_route_id, source }`. Build it
 
 - [ ] **Step 4: Verify green**
 
-Run: `cargo test -p backend-rust model_stream_call_lifecycle --offline`
+Run: `cargo test -p backend model_stream_call_lifecycle --offline`
 
 Expected: PASS.
 
@@ -67,7 +67,7 @@ Add backend test `agent_model_stream_call_lifecycle_owns_future_and_events`. It 
 
 - [ ] **Step 2: Run focused test red**
 
-Run: `cargo test -p backend-rust model_stream_call_lifecycle --offline`
+Run: `cargo test -p backend model_stream_call_lifecycle --offline`
 
 Expected: FAIL because Agent still splits the stream call into separate future and receiver parameters.
 
@@ -86,10 +86,10 @@ Run:
 ```bash
 cargo fmt -- --check
 git diff --check
-cargo test -p backend-rust model_stream_call_lifecycle --offline
-cargo test -p backend-rust model_stream_native_runtime_api --offline
-cargo test -p backend-rust model_stream_completion_builder --offline
-cargo test -p backend-rust streamed_tool_call_early_stop --offline
+cargo test -p backend model_stream_call_lifecycle --offline
+cargo test -p backend model_stream_native_runtime_api --offline
+cargo test -p backend model_stream_completion_builder --offline
+cargo test -p backend streamed_tool_call_early_stop --offline
 cargo test --workspace --offline
 ```
 

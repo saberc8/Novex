@@ -100,7 +100,7 @@ Use source-level tests for the service orchestration and pure prompt assertions 
 Run:
 
 ```bash
-cargo test -p backend-rust model_loop_prompt_allows_budget_bounded_multiple_tool_calls --offline
+cargo test -p backend model_loop_prompt_allows_budget_bounded_multiple_tool_calls --offline
 ```
 
 Expected: FAIL because the prompt still says one tool call.
@@ -130,8 +130,8 @@ Update the runtime loop row in `docs/plans/2026-06-16-codex-migration-matrix.md`
 Run:
 
 ```bash
-cargo test -p backend-rust model_loop agent_service_model_loop --offline
-cargo test -p backend-rust agent_runtime_records_poc_trace_contract_events --offline
+cargo test -p backend model_loop agent_service_model_loop --offline
+cargo test -p backend agent_runtime_records_poc_trace_contract_events --offline
 ```
 
 Expected: PASS.
@@ -150,7 +150,7 @@ Run:
 ```bash
 cargo fmt -- --check
 cargo test -p novex-agent-runtime --offline
-cargo test -p backend-rust model_loop agent_service_model_loop --offline
+cargo test -p backend model_loop agent_service_model_loop --offline
 cargo test --workspace --offline
 ```
 

@@ -45,7 +45,7 @@ fn chat_flow_migrations_define_session_message_and_permissions() {
 
 **Step 2: Run test to verify it fails**
 
-Run: `cargo test -p backend-rust --offline chat_flow_migrations_define_session_message_and_permissions`
+Run: `cargo test -p backend --offline chat_flow_migrations_define_session_message_and_permissions`
 
 Expected: fail because `chat_flow.rs` and migration files do not exist yet.
 
@@ -81,7 +81,7 @@ Create `202606060003_seed_ai_chat_flow_permissions.sql` following the existing `
 
 **Step 4: Run test to verify it passes**
 
-Run: `cargo test -p backend-rust --offline chat_flow_migrations_define_session_message_and_permissions`
+Run: `cargo test -p backend --offline chat_flow_migrations_define_session_message_and_permissions`
 
 Expected: pass.
 
@@ -132,7 +132,7 @@ fn chat_flow_message_record_keeps_rag_trace_and_citations() {
 
 **Step 2: Run test to verify it fails**
 
-Run: `cargo test -p backend-rust --offline chat_flow_message_record_keeps_rag_trace_and_citations`
+Run: `cargo test -p backend --offline chat_flow_message_record_keeps_rag_trace_and_citations`
 
 Expected: fail because repository types do not exist.
 
@@ -150,7 +150,7 @@ Use one SQL transaction for `append_turn`: insert user/assistant rows, increment
 
 **Step 4: Run test to verify it passes**
 
-Run: `cargo test -p backend-rust --offline chat_flow_message_record_keeps_rag_trace_and_citations`
+Run: `cargo test -p backend --offline chat_flow_message_record_keeps_rag_trace_and_citations`
 
 Expected: pass.
 
@@ -201,7 +201,7 @@ fn send_message_trims_content_and_clamps_limit() {
 
 **Step 2: Run test to verify it fails**
 
-Run: `cargo test -p backend-rust --offline chat_flow`
+Run: `cargo test -p backend --offline chat_flow`
 
 Expected: fail because service module does not exist.
 
@@ -236,7 +236,7 @@ Model send path builds `ModelChatCommand` from message content and file contexts
 
 **Step 4: Run test to verify it passes**
 
-Run: `cargo test -p backend-rust --offline chat_flow`
+Run: `cargo test -p backend --offline chat_flow`
 
 Expected: service tests pass.
 
@@ -281,7 +281,7 @@ Add route-registration test that `/ai/chat-flow/sessions` requires auth.
 
 **Step 2: Run test to verify it fails**
 
-Run: `cargo test -p backend-rust --offline chat_flow_session_rejects_missing_permission`
+Run: `cargo test -p backend --offline chat_flow_session_rejects_missing_permission`
 
 Expected: fail until handlers are wired.
 
@@ -304,7 +304,7 @@ Use `current_user.tenant_id` everywhere.
 
 **Step 4: Run test to verify it passes**
 
-Run: `cargo test -p backend-rust --offline chat_flow`
+Run: `cargo test -p backend --offline chat_flow`
 
 Expected: handler and service tests pass.
 
@@ -450,13 +450,13 @@ git commit -m "feat: wire chat web rag workflow"
 
 **Step 1: Run backend focused tests**
 
-Run: `cargo test -p backend-rust --offline chat_flow`
+Run: `cargo test -p backend --offline chat_flow`
 
 Expected: pass.
 
 **Step 2: Run backend full tests**
 
-Run: `cargo test -p backend-rust --offline`
+Run: `cargo test -p backend --offline`
 
 Expected: pass.
 

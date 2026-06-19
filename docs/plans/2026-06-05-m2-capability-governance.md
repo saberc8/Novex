@@ -52,7 +52,7 @@ Run:
 ```bash
 rg "CREATE TABLE IF NOT EXISTS ai_tool|CREATE TABLE IF NOT EXISTS ai_connector|CREATE TABLE IF NOT EXISTS ai_tool_call_audit" backend/migrations/202606050006_create_ai_capability_registry.sql
 rg "ai:tool:dryRun|ai:tool:audit:list|ai:mcp:list" backend/migrations/202606050007_seed_ai_capability_permissions.sql
-cargo test -p backend-rust --offline
+cargo test -p backend --offline
 ```
 
 **Step 3: Commit**
@@ -84,7 +84,7 @@ Test:
 Run:
 
 ```bash
-cargo test -p backend-rust capability --offline
+cargo test -p backend capability --offline
 ```
 
 Expected: fail because capability modules do not exist.
@@ -105,8 +105,8 @@ Return camelCase DTOs with `id`, `code`, `name`, `kind`, `status`, `riskLevel`, 
 **Step 3: Verify and commit**
 
 ```bash
-cargo test -p backend-rust capability --offline
-cargo test -p backend-rust --offline
+cargo test -p backend capability --offline
+cargo test -p backend --offline
 git add backend/src/infrastructure/persistence/ai_capability_repository.rs backend/src/application/ai/capability_service.rs backend/src/interfaces/http/ai/capability.rs backend/src/infrastructure/persistence/mod.rs backend/src/application/ai/mod.rs backend/src/interfaces/http/ai/mod.rs
 git commit -m "feat: add capability summary api"
 ```
@@ -129,7 +129,7 @@ Test:
 Run:
 
 ```bash
-cargo test -p backend-rust tool_dry_run --offline
+cargo test -p backend tool_dry_run --offline
 ```
 
 Expected: fail because dry-run API does not exist.
@@ -146,8 +146,8 @@ Dry-run never performs external calls. It validates registered tool code, writes
 **Step 3: Verify and commit**
 
 ```bash
-cargo test -p backend-rust tool_dry_run --offline
-cargo test -p backend-rust --offline
+cargo test -p backend tool_dry_run --offline
+cargo test -p backend --offline
 git add backend/src/application/ai/capability_service.rs backend/src/infrastructure/persistence/ai_capability_repository.rs backend/src/interfaces/http/ai/capability.rs
 git commit -m "feat: add dry run tool audit api"
 ```

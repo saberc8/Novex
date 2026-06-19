@@ -23,12 +23,12 @@ Backend slice is implemented and verified.
 Verification evidence:
 
 ```bash
-cargo test -p backend-rust notebook_migration_defines_workspace_source_and_artifact_tables --offline
-cargo test -p backend-rust notebook_ --offline
-cargo test -p backend-rust notebook_ask --offline
-cargo test -p backend-rust knowledge_service --offline
-cargo test -p backend-rust notebook_artifact --offline
-cargo test -p backend-rust --offline
+cargo test -p backend notebook_migration_defines_workspace_source_and_artifact_tables --offline
+cargo test -p backend notebook_ --offline
+cargo test -p backend notebook_ask --offline
+cargo test -p backend knowledge_service --offline
+cargo test -p backend notebook_artifact --offline
+cargo test -p backend --offline
 cargo fmt -- --check
 cargo test --workspace --offline
 ```
@@ -88,7 +88,7 @@ fn notebook_migration_defines_workspace_source_and_artifact_tables() {
 Run:
 
 ```bash
-cargo test -p backend-rust notebook_migration_defines_workspace_source_and_artifact_tables --offline
+cargo test -p backend notebook_migration_defines_workspace_source_and_artifact_tables --offline
 ```
 
 Expected: FAIL.
@@ -117,8 +117,8 @@ Add create/list/get methods:
 Run:
 
 ```bash
-cargo test -p backend-rust notebook_migration_defines_workspace_source_and_artifact_tables --offline
-cargo test -p backend-rust notebook_service --offline
+cargo test -p backend notebook_migration_defines_workspace_source_and_artifact_tables --offline
+cargo test -p backend notebook_service --offline
 ```
 
 Expected: PASS.
@@ -150,7 +150,7 @@ Add tests:
 Run:
 
 ```bash
-cargo test -p backend-rust notebook_workspace_route_is_registered_and_requires_auth --offline
+cargo test -p backend notebook_workspace_route_is_registered_and_requires_auth --offline
 ```
 
 Expected: FAIL.
@@ -178,7 +178,7 @@ Permissions:
 Run:
 
 ```bash
-cargo test -p backend-rust notebook_ --offline
+cargo test -p backend notebook_ --offline
 ```
 
 Expected: PASS.
@@ -210,7 +210,7 @@ Add:
 Run:
 
 ```bash
-cargo test -p backend-rust notebook_ask_retrieves_only_workspace_sources --offline
+cargo test -p backend notebook_ask_retrieves_only_workspace_sources --offline
 ```
 
 Expected: FAIL.
@@ -244,8 +244,8 @@ Behavior:
 Run:
 
 ```bash
-cargo test -p backend-rust notebook_ask --offline
-cargo test -p backend-rust knowledge_service --offline
+cargo test -p backend notebook_ask --offline
+cargo test -p backend knowledge_service --offline
 ```
 
 Expected: PASS.
@@ -276,7 +276,7 @@ Add:
 Run:
 
 ```bash
-cargo test -p backend-rust notebook_artifact_command_accepts_summary_faq_and_study_guide --offline
+cargo test -p backend notebook_artifact_command_accepts_summary_faq_and_study_guide --offline
 ```
 
 Expected: FAIL.
@@ -297,8 +297,8 @@ Prompt must include source citations and instruct the model to cite or state mis
 Run:
 
 ```bash
-cargo test -p backend-rust notebook_artifact --offline
-cargo test -p backend-rust --offline
+cargo test -p backend notebook_artifact --offline
+cargo test -p backend --offline
 ```
 
 Expected: PASS.

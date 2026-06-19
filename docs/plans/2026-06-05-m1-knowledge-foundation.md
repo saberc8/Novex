@@ -90,7 +90,7 @@ Grant them to admin role.
 
 **Step 3: Run backend tests**
 
-Run: `cargo test -p backend-rust --offline`
+Run: `cargo test -p backend --offline`
 
 Expected: PASS.
 
@@ -119,7 +119,7 @@ Test:
 
 **Step 2: Run tests to verify failure**
 
-Run: `cargo test -p backend-rust knowledge_service --offline`
+Run: `cargo test -p backend knowledge_service --offline`
 
 Expected: FAIL because the service does not exist.
 
@@ -141,7 +141,7 @@ Use `next_id()`, existing `AppError`, and `PageResp`.
 
 **Step 4: Run tests**
 
-Run: `cargo test -p backend-rust knowledge_service --offline`
+Run: `cargo test -p backend knowledge_service --offline`
 
 Expected: PASS.
 
@@ -168,7 +168,7 @@ Test:
 
 **Step 2: Run tests to verify failure**
 
-Run: `cargo test -p backend-rust ai::knowledge --offline`
+Run: `cargo test -p backend ai::knowledge --offline`
 
 Expected: FAIL because routes do not exist.
 
@@ -184,7 +184,7 @@ Use `require_permission`.
 
 **Step 4: Run backend tests**
 
-Run: `cargo test -p backend-rust --offline`
+Run: `cargo test -p backend --offline`
 
 Expected: PASS.
 

@@ -72,6 +72,6 @@ Backend unit tests:
 
 Acceptance:
 
-- `cargo test -p backend-rust parallel_tool --offline`
-- `cargo test -p backend-rust model_loop --offline`
+- `cargo test -p backend parallel_tool --offline`
+- `cargo test -p backend model_loop --offline`
 - `cargo test --workspace --offline`

@@ -13,10 +13,10 @@
 ### Task 1: Add RabbitMQ To Common Docker
 
 **Files:**
-- Modify: `/Users/yusenlin/Avalon/freedom/2026/aimanju/aether-loom/docker-compose.yml`
-- Modify: `/Users/yusenlin/Avalon/freedom/2026/aimanju/aether-loom/.env.example`
-- Modify: `/Users/yusenlin/Avalon/freedom/2026/aimanju/aether-loom/README.md`
-- Create: `/Users/yusenlin/Avalon/freedom/2026/aimanju/aether-loom/COMMON_DOCKER_README.md`
+- Modify: `/path/to/docker-common/docker-compose.yml`
+- Modify: `/path/to/docker-common/.env.example`
+- Modify: `/path/to/docker-common/README.md`
+- Create: `/path/to/docker-common/COMMON_DOCKER_README.md`
 
 **Steps:**
 1. Add `rabbitmq` service with `rabbitmq:4.0-management-alpine`, `docker-rabbitmq`, `DOCKER_RABBITMQ_AMQP_PORT`, `DOCKER_RABBITMQ_MANAGEMENT_PORT`, `RABBITMQ_DEFAULT_USER`, `RABBITMQ_DEFAULT_PASS`, healthcheck, and `docker-rabbitmq-data`.
@@ -26,10 +26,10 @@
 5. Run common compose config validation.
 6. Start RabbitMQ and verify container health.
 
-### Task 2: Move Novex Compose To Common Infrastructure
+### Task 2: Move Novex Runtime To Common Infrastructure
 
 **Files:**
-- Modify: `Novex/infra/docker-compose.yml`
+- Legacy: former Novex project Compose entrypoint
 - Modify: `Novex/infra/.env.poc.example`
 - Modify: `Novex/infra/.env.poc`
 
@@ -62,9 +62,8 @@
 - Modify: `Novex/backend/src/interfaces/http/ai/foundation.rs`
 
 **Steps:**
-1. Update compose contract assertions to expect only Novex project runtime services.
+1. Update local POC contract assertions to expect local Novex project runtime processes.
 2. Add assertions for external common network and common service connection strings.
-3. Run `cargo test -p backend-rust local_poc_compose_declares_foundation_runtime_services`.
+3. Run `cargo test -p backend local_poc_contract_uses_common_infra_and_local_processes`.
 4. Run Docker compose config checks for common and Novex.
 5. Run `docker ps` to confirm the common stack includes healthy RabbitMQ.
-

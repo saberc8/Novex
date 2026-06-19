@@ -38,7 +38,7 @@ This is live acceptance coverage, not an external integration dependency: it val
    - `LocalMcpServerCapture` for observed headers/body/auth.
    - `run_one_shot_mcp_server` that listens on `127.0.0.1:0`, parses one HTTP request through axum, sends captured request data over a oneshot channel, and returns a JSON-RPC `tools/call` result.
 2. Add RED test `mcp_tool_execution_live_http_dispatch_reaches_local_streamable_http_server` that calls `execute_mcp_tool_with_http_dispatch` with the real `dispatch_mcp_streamable_http_request` adapter.
-3. Run `cargo test -p backend-rust mcp_tool_execution_live_http_dispatch_reaches_local_streamable_http_server --offline` and confirm it fails because the harness/helper does not exist yet.
+3. Run `cargo test -p backend mcp_tool_execution_live_http_dispatch_reaches_local_streamable_http_server --offline` and confirm it fails because the harness/helper does not exist yet.
 4. Implement the smallest test-only server harness using existing backend dependencies: `axum`, `tokio`, `serde_json`, and `std::net`.
 5. Keep production code unchanged unless the local smoke exposes a real defect in dispatch behavior.
 6. Run focused MCP tests, backend MCP tests, formatting, whitespace checks, and full workspace tests.
@@ -48,8 +48,8 @@ This is live acceptance coverage, not an external integration dependency: it val
 
 - `cargo fmt --all -- --check`
 - `git diff --check`
-- `cargo test -p backend-rust mcp_tool_execution_live_http_dispatch_reaches_local_streamable_http_server --offline`
-- `cargo test -p backend-rust mcp_tool_execution --offline`
-- `cargo test -p backend-rust mcp --offline`
+- `cargo test -p backend mcp_tool_execution_live_http_dispatch_reaches_local_streamable_http_server --offline`
+- `cargo test -p backend mcp_tool_execution --offline`
+- `cargo test -p backend mcp --offline`
 - `cargo test -p novex-mcp mcp_streamable_http --offline`
 - `cargo test --workspace --offline`

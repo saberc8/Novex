@@ -65,7 +65,7 @@ fn model_provider_response_transport_adapter_source_contract() {
 
 - [ ] **Step 2: Verify red**
 
-Run: `cargo test -p backend-rust model_provider_response_transport_adapter --offline`
+Run: `cargo test -p backend model_provider_response_transport_adapter --offline`
 
 Expected: FAIL because response parsing still lives in `model_service.rs`.
 
@@ -132,7 +132,7 @@ let body_text = read_model_provider_response_text(response).await?;
 
 - [ ] **Step 5: Verify green for moved body reader contract**
 
-Run: `cargo test -p backend-rust model_provider_response_transport_adapter --offline`
+Run: `cargo test -p backend model_provider_response_transport_adapter --offline`
 
 Expected: still FAIL until parsing functions move; the failure should no longer be caused by missing `read_model_provider_response_text`.
 
@@ -182,11 +182,11 @@ let output = parse_model_chat_provider_output_from_text(body_text)?;
 Run:
 
 ```bash
-cargo test -p backend-rust model_provider_response_transport_adapter --offline
-cargo test -p backend-rust model_stream_completion_builder --offline
-cargo test -p backend-rust provider_token_delta --offline
-cargo test -p backend-rust provider_stream_response_id --offline
-cargo test -p backend-rust provider_stream_lease_id --offline
+cargo test -p backend model_provider_response_transport_adapter --offline
+cargo test -p backend model_stream_completion_builder --offline
+cargo test -p backend provider_token_delta --offline
+cargo test -p backend provider_stream_response_id --offline
+cargo test -p backend provider_stream_lease_id --offline
 ```
 
 Expected: all commands pass.
@@ -228,9 +228,9 @@ let output = parse_model_chat_compaction_provider_output_from_text(body_text)?;
 Run:
 
 ```bash
-cargo test -p backend-rust provider_compact_transport --offline
-cargo test -p backend-rust provider_compact_unary --offline
-cargo test -p backend-rust provider_background_response_capture --offline
+cargo test -p backend provider_compact_transport --offline
+cargo test -p backend provider_compact_unary --offline
+cargo test -p backend provider_background_response_capture --offline
 ```
 
 Expected: all commands pass.
@@ -264,20 +264,20 @@ Run:
 ```bash
 cargo fmt -- --check
 git diff --check
-cargo test -p backend-rust model_provider_response_transport_adapter --offline
-cargo test -p backend-rust model_provider_http_transport_adapter --offline
-cargo test -p backend-rust model_provider_stream_dispatch_mode --offline
-cargo test -p backend-rust model_provider_stream_dispatch_route_path --offline
-cargo test -p backend-rust model_stream_transport_executor --offline
-cargo test -p backend-rust model_stream_completion_builder --offline
-cargo test -p backend-rust provider_token_delta --offline
-cargo test -p backend-rust provider_stream_response_id --offline
-cargo test -p backend-rust provider_stream_lease_id --offline
-cargo test -p backend-rust provider_compact_transport --offline
-cargo test -p backend-rust provider_compact_unary --offline
-cargo test -p backend-rust provider_background_response_capture --offline
-cargo test -p backend-rust streamed_tool_call_early_stop --offline
-cargo test -p backend-rust provider_abort --offline
+cargo test -p backend model_provider_response_transport_adapter --offline
+cargo test -p backend model_provider_http_transport_adapter --offline
+cargo test -p backend model_provider_stream_dispatch_mode --offline
+cargo test -p backend model_provider_stream_dispatch_route_path --offline
+cargo test -p backend model_stream_transport_executor --offline
+cargo test -p backend model_stream_completion_builder --offline
+cargo test -p backend provider_token_delta --offline
+cargo test -p backend provider_stream_response_id --offline
+cargo test -p backend provider_stream_lease_id --offline
+cargo test -p backend provider_compact_transport --offline
+cargo test -p backend provider_compact_unary --offline
+cargo test -p backend provider_background_response_capture --offline
+cargo test -p backend streamed_tool_call_early_stop --offline
+cargo test -p backend provider_abort --offline
 cargo test --workspace --offline
 ```
 

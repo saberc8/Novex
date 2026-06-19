@@ -26,7 +26,7 @@ Add tests for:
 
 **Step 2: Run red tests**
 
-Run: `cargo test -p backend-rust provider_call_lease --offline`
+Run: `cargo test -p backend provider_call_lease --offline`
 
 Expected: FAIL because `model_provider_call_lease_record_from_provider_request`, `embed_texts_for_source`, and `rerank_documents_for_source` do not exist yet.
 
@@ -49,7 +49,7 @@ Add:
 
 **Step 2: Run green tests**
 
-Run: `cargo test -p backend-rust provider_call_lease --offline`
+Run: `cargo test -p backend provider_call_lease --offline`
 
 Expected: PASS.
 
@@ -70,8 +70,8 @@ Use:
 **Step 2: Run focused tests**
 
 Run:
-- `cargo test -p backend-rust runtime_embedding --offline`
-- `cargo test -p backend-rust rerank_ --offline`
+- `cargo test -p backend runtime_embedding --offline`
+- `cargo test -p backend rerank_ --offline`
 
 Expected: PASS.
 
@@ -101,9 +101,9 @@ Expected: PASS.
 Commit feature work, merge `feat/enterprise-agent-foundation` into `main`, rerun full verification on `main`, run `cargo clean` in both worktrees, and sync feature to main.
 
 **Verification evidence so far:**
-- Red: `cargo test -p backend-rust provider_call_lease --offline` failed on missing `model_provider_call_lease_record_from_provider_request`.
-- Green: `cargo test -p backend-rust provider_call_lease --offline`
-- Green: `cargo test -p backend-rust runtime_embedding --offline`
-- Green: `cargo test -p backend-rust rerank_ --offline`
+- Red: `cargo test -p backend provider_call_lease --offline` failed on missing `model_provider_call_lease_record_from_provider_request`.
+- Green: `cargo test -p backend provider_call_lease --offline`
+- Green: `cargo test -p backend runtime_embedding --offline`
+- Green: `cargo test -p backend rerank_ --offline`
 - Green: `cargo fmt -- --check`
 - Green: `cargo test --workspace --offline` passed with 739 backend unit tests, workspace crate tests/doc-tests, and one ignored live RAG e2e infra test.

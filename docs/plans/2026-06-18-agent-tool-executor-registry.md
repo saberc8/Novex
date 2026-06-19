@@ -4,7 +4,7 @@
 
 **Goal:** Add a Codex-style tool executor registry contract to `novex-tools` so tool routing and future executor dispatch share a stable, testable vocabulary instead of relying only on backend string branches.
 
-**Architecture:** `novex-tools` owns the provider-neutral executor registry types, default Agent model-loop executor bindings, duplicate/missing validation, and executor lookup errors. `backend-rust` keeps tenant context, repository access, connector credentials, model runtime access, audit persistence, and concrete tool I/O. The first slice is deliberately a registry/control-plane slice, not a full backend executor migration.
+**Architecture:** `novex-tools` owns the provider-neutral executor registry types, default Agent model-loop executor bindings, duplicate/missing validation, and executor lookup errors. `backend` keeps tenant context, repository access, connector credentials, model runtime access, audit persistence, and concrete tool I/O. The first slice is deliberately a registry/control-plane slice, not a full backend executor migration.
 
 **Tech Stack:** Rust 2021, `novex-tools`, `serde`, `serde_json`, backend source-contract tests, offline Cargo tests.
 
@@ -104,7 +104,7 @@ Run:
 
 ```bash
 cargo test -p novex-tools tool_executor_registry --offline
-cargo test -p backend-rust agent_tool_executor_registry_boundary_lives_in_novex_tools --offline
+cargo test -p backend agent_tool_executor_registry_boundary_lives_in_novex_tools --offline
 ```
 
 Expected: FAIL because the registry types do not exist yet.
@@ -208,7 +208,7 @@ Update the Tool router acceptance row with:
 
 ```bash
 cargo test -p novex-tools tool_executor_registry --offline
-cargo test -p backend-rust agent_tool_executor_registry_boundary_lives_in_novex_tools --offline
+cargo test -p backend agent_tool_executor_registry_boundary_lives_in_novex_tools --offline
 ```
 
 - [x] **Step 2: Run focused verification**
@@ -219,7 +219,7 @@ Run:
 cargo fmt --all -- --check
 git diff --check
 cargo test -p novex-tools tool_executor_registry --offline
-cargo test -p backend-rust agent_tool_executor_registry_boundary_lives_in_novex_tools --offline
+cargo test -p backend agent_tool_executor_registry_boundary_lives_in_novex_tools --offline
 cargo test -p novex-tools --offline
 cargo test --workspace --offline
 ```

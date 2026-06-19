@@ -35,7 +35,7 @@ Add tests named `model_stream_completion_builder_assembles_chat_sse_incrementall
 
 - [ ] **Step 2: Run focused test red**
 
-Run: `cargo test -p backend-rust model_stream_completion_builder --offline`
+Run: `cargo test -p backend model_stream_completion_builder --offline`
 
 Expected: FAIL because `ModelChatStreamCompletionBuilder` does not exist yet.
 
@@ -45,7 +45,7 @@ Move the existing `model_chat_provider_output_from_sse_text` state fields into `
 
 - [ ] **Step 4: Verify green**
 
-Run: `cargo test -p backend-rust model_stream_completion_builder --offline`
+Run: `cargo test -p backend model_stream_completion_builder --offline`
 
 Expected: PASS.
 
@@ -67,7 +67,7 @@ Add `model_stream_completion_builder_runtime_path_returns_provider_output`. Asse
 
 - [ ] **Step 2: Run focused test red**
 
-Run: `cargo test -p backend-rust model_stream_completion_builder --offline`
+Run: `cargo test -p backend model_stream_completion_builder --offline`
 
 Expected: FAIL because the runtime path still returns raw stream text.
 
@@ -85,11 +85,11 @@ Run:
 
 ```bash
 cargo fmt -- --check
-cargo test -p backend-rust model_stream_completion_builder --offline
-cargo test -p backend-rust model_stream_native_runtime_api --offline
-cargo test -p backend-rust provider_stream_response_id --offline
-cargo test -p backend-rust provider_stream_lease_id --offline
-cargo test -p backend-rust streamed_tool_call_early_stop --offline
+cargo test -p backend model_stream_completion_builder --offline
+cargo test -p backend model_stream_native_runtime_api --offline
+cargo test -p backend provider_stream_response_id --offline
+cargo test -p backend provider_stream_lease_id --offline
+cargo test -p backend streamed_tool_call_early_stop --offline
 cargo test --workspace --offline
 git diff --check
 ```

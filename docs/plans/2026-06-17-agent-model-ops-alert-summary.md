@@ -98,7 +98,7 @@ fn model_ops_route_row(
 Run:
 
 ```bash
-cargo test -p backend-rust model_ops_summary_includes_active_alerts --offline
+cargo test -p backend model_ops_summary_includes_active_alerts --offline
 ```
 
 Expected: FAIL because the summary function does not accept alert rows and response fields do not exist.
@@ -121,8 +121,8 @@ The alert response message should come from `event_payload["message"]` when it i
 Run:
 
 ```bash
-cargo test -p backend-rust model_ops_summary_includes_active_alerts --offline
-cargo test -p backend-rust model_ops_summary_marks_route_degraded --offline
+cargo test -p backend model_ops_summary_includes_active_alerts --offline
+cargo test -p backend model_ops_summary_marks_route_degraded --offline
 ```
 
 Expected: PASS.
@@ -163,7 +163,7 @@ fn model_ops_summary_source_contract_reads_active_model_ops_alerts() {
 Run:
 
 ```bash
-cargo test -p backend-rust model_ops_summary_source_contract_reads_active_model_ops_alerts --offline
+cargo test -p backend model_ops_summary_source_contract_reads_active_model_ops_alerts --offline
 ```
 
 Expected: FAIL because the SQL query and call site are not wired.
@@ -183,7 +183,7 @@ In `model_ops_summary`:
 Run:
 
 ```bash
-cargo test -p backend-rust model_ops_summary --offline
+cargo test -p backend model_ops_summary --offline
 ```
 
 Expected: PASS.
@@ -205,7 +205,7 @@ git commit -m "feat: read active model ops alerts"
 
 Change `slice-14 implemented` to `slice-15 implemented`. Update notes to include ops summary active alert exposure and narrow remaining work to frontend dashboard rendering and external alert delivery.
 
-Add `cargo test -p backend-rust model_ops_summary --offline` remains the focused acceptance command for this slice.
+Add `cargo test -p backend model_ops_summary --offline` remains the focused acceptance command for this slice.
 
 **Step 2: Run verification**
 
@@ -213,8 +213,8 @@ Run:
 
 ```bash
 cargo fmt -- --check
-cargo test -p backend-rust model_ops_summary --offline
-cargo test -p backend-rust model_health_alert --offline
+cargo test -p backend model_ops_summary --offline
+cargo test -p backend model_health_alert --offline
 cargo test --workspace --offline
 ```
 
@@ -232,10 +232,10 @@ git commit -m "docs: record model ops alert summary progress"
 After feature verification:
 
 ```bash
-cd /Users/yusenlin/Avalon/freedom/github/zm-agent/Novex
+cd /path/to/Novex
 git merge --no-ff feat/enterprise-agent-foundation -m "merge: enterprise agent foundation model ops alert summary"
 cargo fmt -- --check
 cargo test --workspace --offline
-cd /Users/yusenlin/Avalon/freedom/github/zm-agent/Novex/.worktrees/enterprise-agent-foundation
+cd /path/to/Novex/.worktrees/enterprise-agent-foundation
 git merge --ff-only main
 ```

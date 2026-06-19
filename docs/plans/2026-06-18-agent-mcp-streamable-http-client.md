@@ -51,6 +51,6 @@ This is an adapter port from Codex MCP ideas and current MCP Streamable HTTP tra
 - `cargo fmt --all -- --check`
 - `git diff --check`
 - `cargo test -p novex-mcp mcp_streamable_http --offline`
-- `cargo test -p backend-rust mcp_tool_execution --offline`
-- `cargo test -p backend-rust mcp --offline`
+- `cargo test -p backend mcp_tool_execution --offline`
+- `cargo test -p backend mcp --offline`
 - `cargo test --workspace --offline`

@@ -141,7 +141,7 @@ fn agent_service_model_loop_plans_parsed_tool_call_batches() {
 Run:
 
 ```bash
-cargo test -p backend-rust model_loop_prompt_advertises_tool_call_batches --offline
+cargo test -p backend model_loop_prompt_advertises_tool_call_batches --offline
 ```
 
 Expected: FAIL because prompt and backend loop do not mention batches.
@@ -171,8 +171,8 @@ Update Runtime loop and Parallel tools rows to say batch parsing and batch plan 
 Run:
 
 ```bash
-cargo test -p backend-rust model_loop --offline
-cargo test -p backend-rust agent_service --offline
+cargo test -p backend model_loop --offline
+cargo test -p backend agent_service --offline
 cargo fmt -- --check
 ```
 
@@ -191,8 +191,8 @@ Run:
 cargo fmt -- --check
 cargo test -p novex-agent-runtime --offline
 cargo test -p novex-tools --offline
-cargo test -p backend-rust model_loop --offline
-cargo test -p backend-rust agent_service --offline
+cargo test -p backend model_loop --offline
+cargo test -p backend agent_service --offline
 cargo test --workspace --offline
 git status --short
 ```

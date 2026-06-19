@@ -48,10 +48,10 @@ This follows the current event-evidence pattern used by runtime supervisor cance
 
 - `cargo fmt --all -- --check`
 - `git diff --check`
-- `cargo test -p backend-rust agent_tool_io_runtime --offline`
-- `cargo test -p backend-rust tool_io_observability --offline`
-- `cargo test -p backend-rust parallel_tool_io_batch --offline`
-- `cargo test -p backend-rust runtime_registry --offline`
-- `cargo test -p backend-rust model_loop --offline`
+- `cargo test -p backend agent_tool_io_runtime --offline`
+- `cargo test -p backend tool_io_observability --offline`
+- `cargo test -p backend parallel_tool_io_batch --offline`
+- `cargo test -p backend runtime_registry --offline`
+- `cargo test -p backend model_loop --offline`
 - `cargo test -p novex-eval tool_io --offline`
 - `cargo test --workspace --offline`

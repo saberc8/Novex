@@ -30,7 +30,7 @@ Add tests that:
 Run:
 
 ```bash
-cargo test -p backend-rust provider_abort --offline
+cargo test -p backend provider_abort --offline
 ```
 
 Expected: FAIL because the provider abort helper does not exist.
@@ -58,7 +58,7 @@ It uses `tokio::select!` with local token, persistent cancel future, and provide
 Run:
 
 ```bash
-cargo test -p backend-rust provider_abort --offline
+cargo test -p backend provider_abort --offline
 ```
 
 Expected: PASS.
@@ -83,7 +83,7 @@ Add source-contract tests proving:
 Run:
 
 ```bash
-cargo test -p backend-rust provider_abort --offline
+cargo test -p backend provider_abort --offline
 ```
 
 Expected: FAIL until the watcher exists.
@@ -115,9 +115,9 @@ Use the new helper for:
 Run:
 
 ```bash
-cargo test -p backend-rust provider_abort --offline
-cargo test -p backend-rust external_cancel --offline
-cargo test -p backend-rust model_loop_compaction --offline
+cargo test -p backend provider_abort --offline
+cargo test -p backend external_cancel --offline
+cargo test -p backend model_loop_compaction --offline
 ```
 
 Expected: PASS.
