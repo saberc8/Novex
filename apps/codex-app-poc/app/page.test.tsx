@@ -24,8 +24,14 @@ describe("Codex app POC page", () => {
     expect(screen.getByRole("button", { name: "插件" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "自动化" })).toBeTruthy();
     expect(screen.getByText("完全访问")).toBeTruthy();
-    expect(screen.getByText("5.5")).toBeTruthy();
-    expect(screen.getByText("超高")).toBeTruthy();
+    expect(screen.getAllByText("novex-agent").length).toBeGreaterThan(0);
+    expect(screen.getByText("暂无对话")).toBeTruthy();
+    expect(screen.getByRole("button", { name: /选择模型 runtime\.llm/i })).toBeTruthy();
+    expect(screen.queryByText("5.5")).toBeNull();
+    expect(screen.queryByText("超高")).toBeNull();
+    expect(screen.queryByText("ai-edu")).toBeNull();
+    expect(screen.queryByText("codex-sentinel")).toBeNull();
+    expect(screen.queryByText("Finish the one-command training-web POC launcher on main")).toBeNull();
   });
 
   it("opens and closes the slash command menu from the composer", () => {
@@ -172,11 +178,16 @@ describe("Codex app POC page", () => {
       })
     );
     expect(await screen.findByText("Done")).toBeTruthy();
-    expect(await screen.findByText("Live model output")).toBeTruthy();
+    expect((await screen.findAllByText("Live model output")).length).toBeGreaterThan(0);
     expect(await screen.findByText("Hello world")).toBeTruthy();
+    expect(await screen.findByText("输出")).toBeTruthy();
+    expect(await screen.findByText("浏览器")).toBeTruthy();
+    expect(await screen.findByText("来源")).toBeTruthy();
+    expect(screen.getAllByText("search policy").length).toBeGreaterThan(0);
+    expect(screen.queryByText("Finish the one-command training-web POC launcher on main")).toBeNull();
   });
 
-  it("shows workbench context controls", async () => {
+  it("keeps context controls available without static home chrome", async () => {
     vi.stubGlobal(
       "fetch",
       vi.fn(async () => ({
@@ -187,11 +198,52 @@ describe("Codex app POC page", () => {
 
     render(<Page />);
 
-    expect(await screen.findByText("Context")).toBeTruthy();
-    expect(screen.getByRole("button", { name: /Files/i })).toBeTruthy();
-    expect(screen.getByRole("button", { name: /Skills/i })).toBeTruthy();
-    expect(screen.getByRole("button", { name: /MCP/i })).toBeTruthy();
+    expect(screen.queryByText("Context")).toBeNull();
+    expect(screen.getByLabelText("Upload files")).toBeTruthy();
     expect(screen.getByRole("switch", { name: /Web search/i })).toBeTruthy();
+  });
+
+  it("selects a configured model route from the composer", async () => {
+    const fetchMock = vi.fn(async (url: string) => {
+      const href = String(url);
+      if (href.includes("/ai/capabilities")) {
+        return { ok: true, json: async () => ({ code: "200", data: { list: [], total: 0 } }) };
+      }
+      if (href.includes("/ai/agents/runs") && !href.includes("/events")) {
+        return {
+          ok: true,
+          json: async () => ({
+            code: "200",
+            data: { runId: 13, status: "succeeded", traceId: "agent-13" }
+          })
+        };
+      }
+      if (href.includes("/events")) {
+        return { ok: true, json: async () => ({ code: "200", data: { list: [], total: 0 } }) };
+      }
+      return { ok: true, json: async () => ({ code: "200", data: {} }) };
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    vi.stubEnv(
+      "NEXT_PUBLIC_AGENT_MODEL_ROUTE_OPTIONS",
+      "runtime.llm:DeepSeek Flash,runtime.llm.code_agent:Code Agent"
+    );
+    vi.stubEnv("NEXT_PUBLIC_AGENT_MODEL_ROUTE_ID", "runtime.llm");
+
+    render(<Page />);
+
+    fireEvent.click(screen.getByRole("button", { name: /选择模型 DeepSeek Flash/i }));
+    fireEvent.click(screen.getByRole("option", { name: /Code Agent runtime\.llm\.code_agent/i }));
+    fireEvent.change(screen.getByLabelText("任务输入"), {
+      target: { value: "Use the code model" }
+    });
+    fireEvent.click(screen.getByLabelText("发送"));
+
+    const runCall = fetchMock.mock.calls.find(([url]) =>
+      String(url).includes("/ai/agents/runs")
+    ) as unknown as [string, RequestInit];
+    expect(String(runCall[1].body)).toContain('"modelRouteId":"runtime.llm.code_agent"');
+    expect(String(runCall[1].body)).toContain('"routeId":"runtime.llm.code_agent"');
   });
 
   it("submits selected workbench context with a direct question", async () => {
