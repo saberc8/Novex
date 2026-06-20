@@ -1,6 +1,6 @@
 import { ensureDevAuthToken, getAuthToken } from "./auth";
 
-const DEFAULT_API_BASE_URL = "http://localhost:4398";
+const DEFAULT_API_BASE_URL = "http://localhost:62601";
 
 type ApiEnvelope<T> = {
   code?: string;

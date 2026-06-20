@@ -128,7 +128,7 @@ mod tests {
             .connect_lazy("postgres://postgres:postgres@localhost:5432/avalon_admin")
             .unwrap();
         let jwt = JwtService::new("test-secret".to_owned(), 24);
-        let app = build_router(db, &["http://localhost:4399".to_owned()], jwt).unwrap();
+        let app = build_router(db, &["http://localhost:62602".to_owned()], jwt).unwrap();
 
         let response = app
             .oneshot(

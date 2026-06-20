@@ -37,13 +37,13 @@ describe("system identity api wrappers", () => {
     await listIdentityPolicies({ page: 1, size: 20 });
 
     expect(fetchMock.mock.calls[0]?.[0]).toBe(
-      "http://localhost:4398/system/identity/providers?page=1&size=20&providerType=github"
+      "http://localhost:62601/system/identity/providers?page=1&size=20&providerType=github"
     );
     expect(fetchMock.mock.calls[1]?.[0]).toBe(
-      "http://localhost:4398/system/identity/accounts?providerCode=github.login"
+      "http://localhost:62601/system/identity/accounts?providerCode=github.login"
     );
     expect(fetchMock.mock.calls[2]?.[0]).toBe(
-      "http://localhost:4398/system/identity/policies?page=1&size=20"
+      "http://localhost:62601/system/identity/policies?page=1&size=20"
     );
   });
 });

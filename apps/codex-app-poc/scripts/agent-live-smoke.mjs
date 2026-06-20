@@ -1,4 +1,4 @@
-const DEFAULT_API_BASE_URL = "http://localhost:4398";
+const DEFAULT_API_BASE_URL = "http://localhost:62601";
 const DEFAULT_INPUT =
   "Answer directly with a short final answer: Novex configured model agent loop smoke.";
 const TERMINAL_STATUSES = new Set(["succeeded", "failed", "cancelled", "waiting_approval"]);

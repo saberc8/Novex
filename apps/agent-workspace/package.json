@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "next dev -p 4403",
+    "dev": "next dev --webpack -p ${AGENT_WORKSPACE_PORT:-62605}",
     "build": "next build",
     "lint": "eslint .",
     "typecheck": "tsc --noEmit",

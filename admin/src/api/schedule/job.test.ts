@@ -39,17 +39,17 @@ describe("schedule job api wrappers", () => {
     await listJobLog(7, { page: 1, size: 10 });
 
     expect(fetchMock.mock.calls[0]?.[0]).toBe(
-      "http://localhost:4398/schedule/job/page?page=2&size=20&description=sync&sort=id%2Cdesc"
+      "http://localhost:62601/schedule/job/page?page=2&size=20&description=sync&sort=id%2Cdesc"
     );
-    expect(fetchMock.mock.calls[1]?.[0]).toBe("http://localhost:4398/schedule/job/7/status");
+    expect(fetchMock.mock.calls[1]?.[0]).toBe("http://localhost:62601/schedule/job/7/status");
     expect(fetchMock.mock.calls[1]?.[1]).toMatchObject({ method: "PATCH" });
-    expect(fetchMock.mock.calls[2]?.[0]).toBe("http://localhost:4398/schedule/job/7/run");
+    expect(fetchMock.mock.calls[2]?.[0]).toBe("http://localhost:62601/schedule/job/7/run");
     expect(fetchMock.mock.calls[2]?.[1]).toMatchObject({ method: "POST" });
-    expect(fetchMock.mock.calls[3]?.[0]).toBe("http://localhost:4398/schedule/job");
+    expect(fetchMock.mock.calls[3]?.[0]).toBe("http://localhost:62601/schedule/job");
     expect(fetchMock.mock.calls[3]?.[1]).toMatchObject({
       method: "DELETE",
       body: JSON.stringify({ ids: [7] })
     });
-    expect(fetchMock.mock.calls[4]?.[0]).toBe("http://localhost:4398/schedule/job/7/log?page=1&size=10");
+    expect(fetchMock.mock.calls[4]?.[0]).toBe("http://localhost:62601/schedule/job/7/log?page=1&size=10");
   });
 });

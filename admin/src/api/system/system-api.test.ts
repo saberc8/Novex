@@ -39,10 +39,10 @@ describe("system api wrappers", () => {
     await deleteUser(7);
 
     expect(fetchMock.mock.calls[0]?.[0]).toBe(
-      "http://localhost:4398/system/user?page=2&size=20&description=admin&sort=id%2Cdesc"
+      "http://localhost:62601/system/user?page=2&size=20&description=admin&sort=id%2Cdesc"
     );
     expect(fetchMock.mock.calls[0]?.[1]).toMatchObject({ method: "GET" });
-    expect(fetchMock.mock.calls[1]?.[0]).toBe("http://localhost:4398/system/user");
+    expect(fetchMock.mock.calls[1]?.[0]).toBe("http://localhost:62601/system/user");
     expect(fetchMock.mock.calls[1]?.[1]).toMatchObject({
       method: "DELETE",
       body: JSON.stringify({ ids: [7] })
@@ -54,11 +54,11 @@ describe("system api wrappers", () => {
     await clearMenuCache();
     await listDept({ status: 1 });
 
-    expect(fetchMock.mock.calls[0]?.[0]).toBe("http://localhost:4398/system/role/3/permission");
+    expect(fetchMock.mock.calls[0]?.[0]).toBe("http://localhost:62601/system/role/3/permission");
     expect(fetchMock.mock.calls[0]?.[1]).toMatchObject({ method: "PUT" });
-    expect(fetchMock.mock.calls[1]?.[0]).toBe("http://localhost:4398/system/menu/cache");
+    expect(fetchMock.mock.calls[1]?.[0]).toBe("http://localhost:62601/system/menu/cache");
     expect(fetchMock.mock.calls[1]?.[1]).toMatchObject({ method: "DELETE" });
-    expect(fetchMock.mock.calls[2]?.[0]).toBe("http://localhost:4398/system/dept/tree?status=1");
+    expect(fetchMock.mock.calls[2]?.[0]).toBe("http://localhost:62601/system/dept/tree?status=1");
     expect(fetchMock.mock.calls[2]?.[1]).toMatchObject({ method: "GET" });
   });
 });

@@ -1,10 +1,10 @@
 {
-  "name": "@novex/chat-web",
+  "name": "@novex/notebooklm",
   "version": "0.1.0",
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "next dev -p 4402",
+    "dev": "next dev --webpack -p ${NOTEBOOKLM_PORT:-62604}",
     "build": "next build",
     "lint": "eslint .",
     "typecheck": "tsc --noEmit",

@@ -49,7 +49,7 @@ describe("training knowledge api", () => {
     await listDatasets({ page: 2, size: 10 });
 
     expect(fetchMock.mock.calls[0]?.[0]).toBe(
-      "http://localhost:4398/ai/knowledge/datasets?page=2&size=10"
+      "http://localhost:62601/ai/knowledge/datasets?page=2&size=10"
     );
     expect(fetchMock.mock.calls[0]?.[1]).toMatchObject({
       method: "GET"
@@ -78,7 +78,7 @@ describe("training knowledge api", () => {
     });
 
     expect(fetchMock.mock.calls[0]?.[0]).toBe(
-      "http://localhost:4398/ai/knowledge/datasets/10/ask"
+      "http://localhost:62601/ai/knowledge/datasets/10/ask"
     );
     expect(fetchMock.mock.calls[0]?.[1]).toMatchObject({
       method: "POST",
@@ -109,7 +109,7 @@ describe("training knowledge api", () => {
       reason: "答案没有覆盖培训截止时间"
     });
 
-    expect(fetchMock.mock.calls[0]?.[0]).toBe("http://localhost:4398/ai/knowledge/feedback");
+    expect(fetchMock.mock.calls[0]?.[0]).toBe("http://localhost:62601/ai/knowledge/feedback");
     expect(fetchMock.mock.calls[0]?.[1]).toMatchObject({
       method: "POST",
       headers: expect.objectContaining({
@@ -148,7 +148,7 @@ describe("training knowledge api", () => {
       }
     });
 
-    expect(fetchMock.mock.calls[0]?.[0]).toBe("http://localhost:4398/ai/feedback");
+    expect(fetchMock.mock.calls[0]?.[0]).toBe("http://localhost:62601/ai/feedback");
     expect(fetchMock.mock.calls[0]?.[1]).toMatchObject({
       method: "POST",
       headers: expect.objectContaining({
@@ -228,7 +228,7 @@ describe("training knowledge api", () => {
 
     const [, init] = fetchMock.mock.calls[0] ?? [];
     expect(fetchMock.mock.calls[0]?.[0]).toBe(
-      "http://localhost:4398/ai/knowledge/datasets/10/documents/files"
+      "http://localhost:62601/ai/knowledge/datasets/10/documents/files"
     );
     expect(init).toMatchObject({
       method: "POST",
@@ -274,7 +274,7 @@ describe("training knowledge api", () => {
     await getParseJob(10, 99);
 
     expect(fetchMock.mock.calls[0]?.[0]).toBe(
-      "http://localhost:4398/ai/knowledge/datasets/10/parse-jobs/99"
+      "http://localhost:62601/ai/knowledge/datasets/10/parse-jobs/99"
     );
     expect(fetchMock.mock.calls[0]?.[1]).toMatchObject({
       method: "GET"

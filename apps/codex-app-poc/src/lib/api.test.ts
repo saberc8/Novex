@@ -37,7 +37,7 @@ describe("codex poc api client", () => {
     expect(window.localStorage.getItem("novex_token")).toBe("dev-token");
     expect(fetchMock).toHaveBeenNthCalledWith(
       2,
-      "http://localhost:4398/auth/login",
+      "http://localhost:62601/auth/login",
       expect.objectContaining({
         body: JSON.stringify({
           username: "admin",
@@ -50,7 +50,7 @@ describe("codex poc api client", () => {
     );
     expect(fetchMock).toHaveBeenNthCalledWith(
       3,
-      "http://localhost:4398/ai/capabilities/skills?page=1&size=20",
+      "http://localhost:62601/ai/capabilities/skills?page=1&size=20",
       expect.objectContaining({
         headers: expect.objectContaining({
           Authorization: "Bearer dev-token"

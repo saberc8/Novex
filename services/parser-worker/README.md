@@ -79,7 +79,7 @@ Worker entry points:
 The runner can also be used as a process boundary:
 
 ```bash
-export PARSER_BACKEND_BASE_URL="http://127.0.0.1:4398"
+export PARSER_BACKEND_BASE_URL="http://127.0.0.1:62601"
 export PARSER_BACKEND_TOKEN="<backend JWT or service token>"
 cat parse-request.json | PYTHONPATH=services/parser-worker uv run --no-project --with-requirements services/parser-worker/requirements.txt python -m parser_worker.runner
 ```
@@ -115,7 +115,7 @@ services/parser-worker/.venv/bin/python -m pip install -r services/parser-worker
 Run the worker with uv:
 
 ```bash
-export PARSER_BACKEND_BASE_URL="http://127.0.0.1:4398"
+export PARSER_BACKEND_BASE_URL="http://127.0.0.1:62601"
 export PARSER_BACKEND_TOKEN="<backend service token>"
 export RABBITMQ_URL="amqp://guest:guest@127.0.0.1:5673/%2f"
 export REDIS_URL="redis://127.0.0.1:16379/0"

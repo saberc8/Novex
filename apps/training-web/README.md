@@ -9,7 +9,7 @@ Scope:
 
 Status:
 
-- Next.js app scaffold on port `4401`.
+- Next.js app scaffold on port `62603`.
 - POC navigation and template pages: learning, ask, quiz, records, notifications.
 - Live knowledge Q&A uses `/ai/knowledge/datasets` and `/ai/knowledge/datasets/:id/ask`.
 - Training material upload uses `/ai/knowledge/datasets/:id/documents/files`, which stores the source file and creates a parser job for the selected dataset.

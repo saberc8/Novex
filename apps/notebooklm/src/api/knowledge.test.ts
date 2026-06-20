@@ -41,7 +41,7 @@ describe("chat knowledge api", () => {
     await listDatasets({ page: 1, size: 20 });
 
     expect(fetchMock.mock.calls[0]?.[0]).toBe(
-      "http://localhost:4398/ai/knowledge/datasets?page=1&size=20"
+      "http://localhost:62601/ai/knowledge/datasets?page=1&size=20"
     );
     expect(fetchMock.mock.calls[0]?.[1]).toMatchObject({
       method: "GET"
@@ -71,7 +71,7 @@ describe("chat knowledge api", () => {
     });
 
     expect(fetchMock.mock.calls[0]?.[0]).toBe(
-      "http://localhost:4398/ai/knowledge/datasets/10/ask"
+      "http://localhost:62601/ai/knowledge/datasets/10/ask"
     );
     expect(fetchMock.mock.calls[0]?.[1]).toMatchObject({
       method: "POST",
@@ -94,7 +94,7 @@ describe("chat knowledge api", () => {
     await deleteDataset(10);
 
     expect(fetchMock.mock.calls[0]?.[0]).toBe(
-      "http://localhost:4398/ai/knowledge/datasets/10"
+      "http://localhost:62601/ai/knowledge/datasets/10"
     );
     expect(fetchMock.mock.calls[0]?.[1]).toMatchObject({
       method: "DELETE",
@@ -120,7 +120,7 @@ describe("chat knowledge api", () => {
       reason: "chat-answer-feedback"
     });
 
-    expect(fetchMock.mock.calls[0]?.[0]).toBe("http://localhost:4398/ai/knowledge/feedback");
+    expect(fetchMock.mock.calls[0]?.[0]).toBe("http://localhost:62601/ai/knowledge/feedback");
     expect(fetchMock.mock.calls[0]?.[1]).toMatchObject({
       method: "POST",
       headers: expect.objectContaining({

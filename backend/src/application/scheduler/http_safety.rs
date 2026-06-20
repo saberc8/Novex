@@ -81,7 +81,7 @@ mod tests {
     fn default_mode_allows_localhost_and_configured_hosts() {
         let config = default_config();
 
-        assert!(validate_http_target("http://localhost:4398/health", &config).is_ok());
+        assert!(validate_http_target("http://localhost:62601/health", &config).is_ok());
         assert!(validate_http_target("https://api.example.com/jobs/run", &config).is_ok());
     }
 

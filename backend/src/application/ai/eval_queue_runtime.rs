@@ -275,11 +275,11 @@ mod tests {
 
     fn test_app_config() -> AppConfig {
         AppConfig {
-            http_port: 4398,
+            http_port: 62601,
             database_url: "postgres://postgres:postgres@localhost:5432/avalon_admin".to_owned(),
             database_max_connections: 5,
             db_auto_migrate: false,
-            cors_allowed_origins: vec!["http://localhost:4399".to_owned()],
+            cors_allowed_origins: vec!["http://localhost:62602".to_owned()],
             auth_jwt_secret: "local-dev-only-change-this-secret-32chars-min".to_owned(),
             auth_jwt_ttl_hours: 24,
             scheduler_embedded: false,

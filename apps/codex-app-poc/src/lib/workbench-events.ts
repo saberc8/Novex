@@ -39,12 +39,27 @@ export function summarizeWorkbenchEvent(event: AgentRunEventResp): WorkbenchEven
 
   if (toolCode === "web.search") {
     const dryRun = output?.dryRun === true || output?.status === "dry_run";
-    return evidence(
-      event,
-      "web_search",
-      "Web search",
-      dryRun ? "web.search dry-run; provider is not configured" : "web.search returned results"
-    );
+    const status = stringValue(output?.status) ?? event.status;
+    const provider = stringValue(output?.provider);
+    const error = stringValue(output?.error);
+    const resultCount = Array.isArray(output?.results) ? output.results.length : null;
+    let text = "web.search returned results";
+
+    if (dryRun) {
+      text = "web.search dry-run; provider is not configured";
+    } else if (status === "failed" || error) {
+      text = [
+        "web.search failed",
+        provider ? `via ${provider}` : null,
+        error ? `: ${error}` : null
+      ]
+        .filter(Boolean)
+        .join(" ");
+    } else if (resultCount !== null) {
+      text = `${resultCount} results from web.search${provider ? ` via ${provider}` : ""}`;
+    }
+
+    return evidence(event, "web_search", "Web search", text);
   }
 
   if (toolCode?.startsWith("mcp.")) {

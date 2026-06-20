@@ -14,7 +14,7 @@ describe("capability api", () => {
     await listSkills({ page: 1, size: 20 });
 
     expect(fetchMock).toHaveBeenCalledWith(
-      "http://localhost:4398/ai/capabilities/skills?page=1&size=20",
+      "http://localhost:62601/ai/capabilities/skills?page=1&size=20",
       expect.objectContaining({ method: "GET" })
     );
   });
@@ -31,12 +31,12 @@ describe("capability api", () => {
 
     expect(fetchMock).toHaveBeenNthCalledWith(
       1,
-      "http://localhost:4398/ai/capabilities/mcp/servers?page=1&size=20",
+      "http://localhost:62601/ai/capabilities/mcp/servers?page=1&size=20",
       expect.objectContaining({ method: "GET" })
     );
     expect(fetchMock).toHaveBeenNthCalledWith(
       2,
-      "http://localhost:4398/ai/capabilities/mcp/servers/12/tools",
+      "http://localhost:62601/ai/capabilities/mcp/servers/12/tools",
       expect.objectContaining({ method: "GET" })
     );
   });

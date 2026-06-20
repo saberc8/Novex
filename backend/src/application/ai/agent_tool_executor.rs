@@ -44,6 +44,8 @@ pub(super) const WEB_SEARCH_TOOL_CODE: &str = "web.search";
 enum WebSearchProvider {
     GoogleNewsRss,
     BingNewsRss,
+    Searxng,
+    Brave,
     Tavily,
 }
 
@@ -54,6 +56,8 @@ impl WebSearchProvider {
                 Some(Self::GoogleNewsRss)
             }
             "bing" | "bing_news" | "bing_news_rss" => Some(Self::BingNewsRss),
+            "searxng" | "searx" => Some(Self::Searxng),
+            "brave" | "brave_search" => Some(Self::Brave),
             "tavily" => Some(Self::Tavily),
             _ => None,
         }
@@ -63,6 +67,8 @@ impl WebSearchProvider {
         match self {
             Self::GoogleNewsRss => "google_news_rss",
             Self::BingNewsRss => "bing_news_rss",
+            Self::Searxng => "searxng",
+            Self::Brave => "brave",
             Self::Tavily => "tavily",
         }
     }
@@ -71,16 +77,27 @@ impl WebSearchProvider {
         match self {
             Self::GoogleNewsRss => "https://news.google.com/rss/search",
             Self::BingNewsRss => "https://www.bing.com/news/search",
+            Self::Searxng => "http://localhost:8080/search",
+            Self::Brave => "https://api.search.brave.com/res/v1/web/search",
             Self::Tavily => "https://api.tavily.com/search",
         }
+    }
+
+    fn requires_api_key(self) -> bool {
+        matches!(self, Self::Brave | Self::Tavily)
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct WebSearchConfig {
+struct WebSearchProviderConfig {
     provider: WebSearchProvider,
     endpoint_url: String,
     api_key: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WebSearchConfig {
+    providers: Vec<WebSearchProviderConfig>,
 }
 
 impl WebSearchConfig {
@@ -88,40 +105,120 @@ impl WebSearchConfig {
     where
         F: FnMut(&str) -> Option<String>,
     {
-        let provider_code = env_get("NOVEX_WEB_SEARCH_PROVIDER")
-            .or_else(|| env_get("WEB_SEARCH_PROVIDER"))
-            .map(|value| value.trim().to_owned())
-            .filter(|value| !value.is_empty())
-            .unwrap_or_else(|| "google_news_rss".to_owned());
-        if matches!(
-            provider_code.to_ascii_lowercase().as_str(),
-            "disabled" | "disable" | "none" | "off" | "dry_run" | "dry-run"
-        ) {
-            return None;
-        }
-        let provider = WebSearchProvider::from_code(&provider_code)?;
-        let endpoint_url = env_get("NOVEX_WEB_SEARCH_ENDPOINT")
-            .or_else(|| env_get("WEB_SEARCH_ENDPOINT"))
-            .map(|value| value.trim().trim_end_matches('/').to_owned())
-            .filter(|value| !value.is_empty())
-            .unwrap_or_else(|| provider.default_endpoint().to_owned());
-        let api_key = env_get("NOVEX_WEB_SEARCH_API_KEY")
-            .or_else(|| env_get("WEB_SEARCH_API_KEY"))
-            .or_else(|| env_get("NOVEX_TAVILY_API_KEY"))
-            .or_else(|| env_get("TAVILY_API_KEY"))
-            .map(|value| value.trim().to_owned())
-            .filter(|value| !value.is_empty());
+        let provider_codes = read_first_env(
+            &mut env_get,
+            &["NOVEX_WEB_SEARCH_PROVIDERS", "WEB_SEARCH_PROVIDERS"],
+        )
+        .map(|value| split_provider_codes(&value))
+        .unwrap_or_else(|| {
+            vec![read_first_env(
+                &mut env_get,
+                &["NOVEX_WEB_SEARCH_PROVIDER", "WEB_SEARCH_PROVIDER"],
+            )
+            .unwrap_or_else(|| "google_news_rss".to_owned())]
+        });
+        let provider_count = provider_codes.len().max(1);
+        let global_endpoint = read_first_env(
+            &mut env_get,
+            &["NOVEX_WEB_SEARCH_ENDPOINT", "WEB_SEARCH_ENDPOINT"],
+        );
+        let searxng_endpoint = read_first_env(
+            &mut env_get,
+            &["NOVEX_SEARXNG_ENDPOINT", "SEARXNG_ENDPOINT"],
+        );
+        let brave_endpoint = read_first_env(
+            &mut env_get,
+            &["NOVEX_BRAVE_SEARCH_ENDPOINT", "BRAVE_SEARCH_ENDPOINT"],
+        );
+        let tavily_endpoint =
+            read_first_env(&mut env_get, &["NOVEX_TAVILY_ENDPOINT", "TAVILY_ENDPOINT"]);
+        let generic_api_key = read_first_env(
+            &mut env_get,
+            &["NOVEX_WEB_SEARCH_API_KEY", "WEB_SEARCH_API_KEY"],
+        );
+        let brave_api_key = read_first_env(
+            &mut env_get,
+            &[
+                "NOVEX_BRAVE_SEARCH_API_KEY",
+                "BRAVE_SEARCH_API_KEY",
+                "BRAVE_API_KEY",
+            ],
+        );
+        let tavily_api_key =
+            read_first_env(&mut env_get, &["NOVEX_TAVILY_API_KEY", "TAVILY_API_KEY"]);
 
-        if matches!(provider, WebSearchProvider::Tavily) && api_key.is_none() {
-            return None;
-        }
+        let providers = provider_codes
+            .into_iter()
+            .filter(|code| !is_disabled_web_search_provider(code))
+            .filter_map(|code| WebSearchProvider::from_code(&code))
+            .filter_map(|provider| {
+                let endpoint_url = match provider {
+                    WebSearchProvider::Searxng => searxng_endpoint.clone(),
+                    WebSearchProvider::Brave => brave_endpoint.clone(),
+                    WebSearchProvider::Tavily => tavily_endpoint.clone(),
+                    WebSearchProvider::GoogleNewsRss | WebSearchProvider::BingNewsRss => None,
+                }
+                .or_else(|| {
+                    (provider_count == 1)
+                        .then(|| global_endpoint.clone())
+                        .flatten()
+                })
+                .unwrap_or_else(|| provider.default_endpoint().to_owned());
 
-        Some(Self {
-            provider,
-            endpoint_url,
-            api_key,
-        })
+                let api_key = match provider {
+                    WebSearchProvider::Brave => brave_api_key.clone().or_else(|| {
+                        (provider_count == 1)
+                            .then(|| generic_api_key.clone())
+                            .flatten()
+                    }),
+                    WebSearchProvider::Tavily => {
+                        tavily_api_key.clone().or_else(|| generic_api_key.clone())
+                    }
+                    WebSearchProvider::GoogleNewsRss
+                    | WebSearchProvider::BingNewsRss
+                    | WebSearchProvider::Searxng => None,
+                };
+
+                if provider.requires_api_key() && api_key.is_none() {
+                    return None;
+                }
+
+                Some(WebSearchProviderConfig {
+                    provider,
+                    endpoint_url,
+                    api_key,
+                })
+            })
+            .collect::<Vec<_>>();
+
+        (!providers.is_empty()).then_some(Self { providers })
     }
+}
+
+fn read_first_env<F>(env_get: &mut F, keys: &[&str]) -> Option<String>
+where
+    F: FnMut(&str) -> Option<String>,
+{
+    keys.iter()
+        .find_map(|key| env_get(key))
+        .map(|value| value.trim().trim_end_matches('/').to_owned())
+        .filter(|value| !value.is_empty())
+}
+
+fn split_provider_codes(value: &str) -> Vec<String> {
+    value
+        .split(',')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
+fn is_disabled_web_search_provider(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "disabled" | "disable" | "none" | "off" | "dry_run" | "dry-run"
+    )
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -305,11 +402,11 @@ async fn execute_web_search_tool(input: &Value) -> AgentToolExecution {
 async fn execute_web_search_tool_with_env_and_dispatch<EnvGet, Dispatch, DispatchFuture>(
     input: &Value,
     env_get: EnvGet,
-    dispatch: Dispatch,
+    mut dispatch: Dispatch,
 ) -> AgentToolExecution
 where
     EnvGet: FnMut(&str) -> Option<String>,
-    Dispatch: FnOnce(WebSearchRequestPlan) -> DispatchFuture,
+    Dispatch: FnMut(WebSearchRequestPlan) -> DispatchFuture,
     DispatchFuture: Future<Output = Result<WebSearchHttpResponse, String>>,
 {
     let query = input
@@ -355,106 +452,110 @@ where
         );
     };
 
-    let plan = match web_search_request_plan(config, query, limit) {
-        Ok(plan) => plan,
-        Err(error) => {
-            return AgentToolExecution::failed(
-                json!({
-                    "dryRun": false,
-                    "status": "failed",
-                    "toolCode": WEB_SEARCH_TOOL_CODE,
-                    "query": query,
-                    "limit": limit,
-                    "error": error
-                }),
-                error,
-                "Agent failed to prepare web search.".to_owned(),
-            );
-        }
-    };
-    let provider = plan.provider.code();
-    let endpoint_url = plan.endpoint_url.clone();
+    let mut attempts = Vec::new();
+    let mut last_error = "web.search providers are not configured".to_owned();
 
-    let response = match dispatch(plan.clone()).await {
-        Ok(response) => response,
-        Err(error) => {
-            return AgentToolExecution::failed(
-                json!({
-                    "dryRun": false,
+    for provider_config in config.providers {
+        let plan = match web_search_request_plan(provider_config, query, limit) {
+            Ok(plan) => plan,
+            Err(error) => {
+                last_error = error.clone();
+                attempts.push(json!({
                     "status": "failed",
-                    "toolCode": WEB_SEARCH_TOOL_CODE,
+                    "error": error
+                }));
+                continue;
+            }
+        };
+        let provider = plan.provider.code();
+        let endpoint_url = plan.endpoint_url.clone();
+
+        let response = match dispatch(plan.clone()).await {
+            Ok(response) => response,
+            Err(error) => {
+                last_error = error.clone();
+                attempts.push(json!({
                     "provider": provider,
-                    "query": query,
-                    "limit": limit,
+                    "status": "failed",
                     "endpointUrl": endpoint_url,
                     "error": error
-                }),
-                error,
-                "Agent failed to execute web search.".to_owned(),
-            );
-        }
-    };
+                }));
+                continue;
+            }
+        };
 
-    if !(200..300).contains(&response.status) {
-        let error = format!("web.search provider returned HTTP {}", response.status);
-        return AgentToolExecution::failed(
+        if !(200..300).contains(&response.status) {
+            last_error = format!("web.search provider returned HTTP {}", response.status);
+            attempts.push(json!({
+                "provider": provider,
+                "status": "failed",
+                "endpointUrl": endpoint_url,
+                "httpStatus": response.status,
+                "error": last_error,
+                "responsePreview": preview_text(&response.body, 512)
+            }));
+            continue;
+        }
+
+        let results = match parse_web_search_response(&plan, &response.body) {
+            Ok(results) => results,
+            Err(error) => {
+                last_error = error.clone();
+                attempts.push(json!({
+                    "provider": provider,
+                    "status": "failed",
+                    "endpointUrl": endpoint_url,
+                    "httpStatus": response.status,
+                    "error": error,
+                    "responsePreview": preview_text(&response.body, 512)
+                }));
+                continue;
+            }
+        };
+
+        let result_count = results.len();
+        attempts.push(json!({
+            "provider": provider,
+            "status": "succeeded",
+            "endpointUrl": endpoint_url,
+            "httpStatus": response.status,
+            "resultCount": result_count
+        }));
+        return AgentToolExecution::succeeded(
             json!({
                 "dryRun": false,
-                "status": "failed",
+                "status": "succeeded",
                 "toolCode": WEB_SEARCH_TOOL_CODE,
                 "provider": provider,
                 "query": query,
                 "limit": limit,
                 "endpointUrl": endpoint_url,
-                "error": error,
-                "responsePreview": preview_text(&response.body, 512)
+                "results": results,
+                "attempts": attempts,
+                "message": "web.search returned live results"
             }),
-            error,
-            "Agent failed to execute web search.".to_owned(),
+            false,
+            format!("Web search returned {result_count} result(s)."),
         );
     }
 
-    let results = match parse_web_search_response(&plan, &response.body) {
-        Ok(results) => results,
-        Err(error) => {
-            return AgentToolExecution::failed(
-                json!({
-                    "dryRun": false,
-                    "status": "failed",
-                    "toolCode": WEB_SEARCH_TOOL_CODE,
-                    "provider": provider,
-                    "query": query,
-                    "limit": limit,
-                    "endpointUrl": endpoint_url,
-                    "error": error,
-                    "responsePreview": preview_text(&response.body, 512)
-                }),
-                error,
-                "Agent failed to parse web search results.".to_owned(),
-            );
-        }
-    };
-
-    let result_count = results.len();
-    AgentToolExecution::succeeded(
+    AgentToolExecution::failed(
         json!({
             "dryRun": false,
-            "status": "succeeded",
+            "status": "failed",
             "toolCode": WEB_SEARCH_TOOL_CODE,
-            "provider": provider,
             "query": query,
             "limit": limit,
-            "endpointUrl": endpoint_url,
-            "results": results,
-            "message": "web.search returned live results"
+            "attempts": attempts,
+            "error": last_error
         }),
-        false,
-        format!("Web search returned {result_count} result(s)."),
+        last_error,
+        "Agent failed to execute web search.".to_owned(),
     )
 }
 
 fn web_search_request_plan(
-    config: WebSearchConfig,
+    config: WebSearchProviderConfig,
     query: &str,
     limit: i64,
 ) -> Result<WebSearchRequestPlan, String> {
@@ -472,6 +573,17 @@ fn web_search_request_plan(
             url.query_pairs_mut()
                 .append_pair("q", query)
                 .append_pair("format", "rss");
+        }
+        WebSearchProvider::Searxng => {
+            url.query_pairs_mut()
+                .append_pair("q", query)
+                .append_pair("format", "json")
+                .append_pair("language", "zh-CN");
+        }
+        WebSearchProvider::Brave => {
+            url.query_pairs_mut()
+                .append_pair("q", query)
+                .append_pair("count", &limit.to_string());
         }
         WebSearchProvider::Tavily => {}
     }
@@ -512,6 +624,20 @@ async fn dispatch_web_search_request(
                 .send()
                 .await
         }
+        WebSearchProvider::Brave => {
+            let api_key = plan
+                .api_key
+                .as_deref()
+                .filter(|value| !value.trim().is_empty())
+                .ok_or_else(|| "Brave Search API key is required for web.search".to_owned())?;
+            client
+                .get(&plan.endpoint_url)
+                .header("Accept", "application/json")
+                .header("X-Subscription-Token", api_key)
+                .send()
+                .await
+        }
+        WebSearchProvider::Searxng => client.get(&plan.endpoint_url).send().await,
         WebSearchProvider::GoogleNewsRss | WebSearchProvider::BingNewsRss => {
             client.get(&plan.endpoint_url).send().await
         }
@@ -535,8 +661,77 @@ fn parse_web_search_response(
         WebSearchProvider::GoogleNewsRss | WebSearchProvider::BingNewsRss => {
             Ok(parse_news_rss_results(body, plan.limit as usize))
         }
+        WebSearchProvider::Searxng => parse_searxng_search_results(body, plan.limit as usize),
+        WebSearchProvider::Brave => parse_brave_search_results(body, plan.limit as usize),
         WebSearchProvider::Tavily => parse_tavily_search_results(body, plan.limit as usize),
     }
+}
+
+fn parse_searxng_search_results(body: &str, limit: usize) -> Result<Vec<Value>, String> {
+    let payload: Value = serde_json::from_str(body)
+        .map_err(|err| format!("SearXNG search response JSON is invalid: {err}"))?;
+    let results = payload
+        .get("results")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .take(limit)
+                .map(|item| {
+                    json!({
+                        "title": item.get("title").and_then(Value::as_str).unwrap_or(""),
+                        "url": item.get("url").and_then(Value::as_str).unwrap_or(""),
+                        "snippet": item
+                            .get("content")
+                            .or_else(|| item.get("snippet"))
+                            .and_then(Value::as_str)
+                            .unwrap_or(""),
+                        "publishedAt": item
+                            .get("publishedDate")
+                            .or_else(|| item.get("published_date"))
+                            .and_then(Value::as_str),
+                        "score": item.get("score"),
+                        "source": "searxng"
+                    })
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    Ok(results)
+}
+
+fn parse_brave_search_results(body: &str, limit: usize) -> Result<Vec<Value>, String> {
+    let payload: Value = serde_json::from_str(body)
+        .map_err(|err| format!("Brave search response JSON is invalid: {err}"))?;
+    let results = payload
+        .get("web")
+        .and_then(|web| web.get("results"))
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .take(limit)
+                .map(|item| {
+                    json!({
+                        "title": item.get("title").and_then(Value::as_str).unwrap_or(""),
+                        "url": item.get("url").and_then(Value::as_str).unwrap_or(""),
+                        "snippet": item
+                            .get("description")
+                            .or_else(|| item.get("content"))
+                            .and_then(Value::as_str)
+                            .unwrap_or(""),
+                        "publishedAt": item
+                            .get("age")
+                            .or_else(|| item.get("published_date"))
+                            .and_then(Value::as_str),
+                        "score": item.get("score"),
+                        "source": "brave"
+                    })
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    Ok(results)
 }
 
 fn parse_tavily_search_results(body: &str, limit: usize) -> Result<Vec<Value>, String> {
@@ -2120,6 +2315,153 @@ mod tests {
         assert_eq!(
             output.response_payload["results"][0]["snippet"],
             "Loop and eval systems shipped."
+        );
+    }
+
+    #[tokio::test]
+    async fn web_search_tool_falls_back_to_next_provider_after_dispatch_failure() {
+        use std::sync::{Arc, Mutex};
+
+        let attempted_providers = Arc::new(Mutex::new(Vec::new()));
+        let output = execute_web_search_tool_with_env_and_dispatch(
+            &json!({"query": "regional news", "limit": 1}),
+            |key| match key {
+                "NOVEX_WEB_SEARCH_PROVIDERS" => Some("tavily,bing_news_rss".to_owned()),
+                "NOVEX_TAVILY_API_KEY" => Some("secret-key".to_owned()),
+                _ => None,
+            },
+            {
+                let attempted_providers = Arc::clone(&attempted_providers);
+                move |plan| {
+                    let attempted_providers = Arc::clone(&attempted_providers);
+                    async move {
+                        attempted_providers
+                            .lock()
+                            .expect("attempted providers")
+                            .push(plan.provider.code().to_owned());
+                        if plan.provider == WebSearchProvider::Tavily {
+                            return Err("regional proxy blocked tavily".to_owned());
+                        }
+
+                        Ok(WebSearchHttpResponse {
+                            status: 200,
+                            body: r#"<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0"><channel>
+<item><title>Bing fallback story</title><link>https://example.com/bing</link><description>Fallback summary</description></item>
+</channel></rss>"#
+                                .to_owned(),
+                        })
+                    }
+                }
+            },
+        )
+        .await;
+
+        assert!(output.succeeded_status());
+        assert_eq!(output.response_payload["provider"], "bing_news_rss");
+        assert_eq!(
+            output.response_payload["results"][0]["title"],
+            "Bing fallback story"
+        );
+        assert_eq!(output.response_payload["attempts"][0]["provider"], "tavily");
+        assert_eq!(output.response_payload["attempts"][0]["status"], "failed");
+        assert_eq!(
+            output.response_payload["attempts"][1]["provider"],
+            "bing_news_rss"
+        );
+        assert_eq!(
+            attempted_providers
+                .lock()
+                .expect("attempted providers")
+                .as_slice(),
+            ["tavily", "bing_news_rss"]
+        );
+    }
+
+    #[tokio::test]
+    async fn web_search_tool_dispatches_searxng_provider_when_configured() {
+        let output = execute_web_search_tool_with_env_and_dispatch(
+            &json!({"query": "open source search", "limit": 2}),
+            |key| match key {
+                "NOVEX_WEB_SEARCH_PROVIDER" => Some("searxng".to_owned()),
+                "NOVEX_SEARXNG_ENDPOINT" => Some("http://searxng.local/search".to_owned()),
+                _ => None,
+            },
+            |plan| async move {
+                assert_eq!(plan.provider, WebSearchProvider::Searxng);
+                assert!(plan
+                    .endpoint_url
+                    .starts_with("http://searxng.local/search?"));
+                assert!(plan.endpoint_url.contains("q=open+source+search"));
+                assert!(plan.endpoint_url.contains("format=json"));
+
+                Ok(WebSearchHttpResponse {
+                    status: 200,
+                    body: json!({
+                        "results": [{
+                            "title": "SearXNG result",
+                            "url": "https://example.com/searxng",
+                            "content": "Metasearch result content.",
+                            "publishedDate": "2026-06-20"
+                        }]
+                    })
+                    .to_string(),
+                })
+            },
+        )
+        .await;
+
+        assert!(output.succeeded_status());
+        assert_eq!(output.response_payload["provider"], "searxng");
+        assert_eq!(output.response_payload["results"][0]["source"], "searxng");
+        assert_eq!(
+            output.response_payload["results"][0]["snippet"],
+            "Metasearch result content."
+        );
+    }
+
+    #[tokio::test]
+    async fn web_search_tool_dispatches_brave_provider_when_configured() {
+        let output = execute_web_search_tool_with_env_and_dispatch(
+            &json!({"query": "independent search", "limit": 1}),
+            |key| match key {
+                "NOVEX_WEB_SEARCH_PROVIDER" => Some("brave".to_owned()),
+                "NOVEX_BRAVE_SEARCH_API_KEY" => Some("brave-key".to_owned()),
+                _ => None,
+            },
+            |plan| async move {
+                assert_eq!(plan.provider, WebSearchProvider::Brave);
+                assert!(plan
+                    .endpoint_url
+                    .contains("api.search.brave.com/res/v1/web/search"));
+                assert!(plan.endpoint_url.contains("q=independent+search"));
+                assert!(plan.endpoint_url.contains("count=1"));
+                assert_eq!(plan.api_key.as_deref(), Some("brave-key"));
+
+                Ok(WebSearchHttpResponse {
+                    status: 200,
+                    body: json!({
+                        "web": {
+                            "results": [{
+                                "title": "Brave result",
+                                "url": "https://example.com/brave",
+                                "description": "Independent index summary.",
+                                "age": "Jun 20, 2026"
+                            }]
+                        }
+                    })
+                    .to_string(),
+                })
+            },
+        )
+        .await;
+
+        assert!(output.succeeded_status());
+        assert_eq!(output.response_payload["provider"], "brave");
+        assert_eq!(output.response_payload["results"][0]["source"], "brave");
+        assert_eq!(
+            output.response_payload["results"][0]["snippet"],
+            "Independent index summary."
         );
     }
 

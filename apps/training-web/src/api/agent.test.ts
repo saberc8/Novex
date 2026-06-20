@@ -65,7 +65,7 @@ describe("training agent api", () => {
       }
     });
 
-    expect(fetchMock.mock.calls[0]?.[0]).toBe("http://localhost:4398/ai/agents/runs");
+    expect(fetchMock.mock.calls[0]?.[0]).toBe("http://localhost:62601/ai/agents/runs");
     expect(fetchMock.mock.calls[0]?.[1]).toMatchObject({
       method: "POST",
       headers: expect.objectContaining({

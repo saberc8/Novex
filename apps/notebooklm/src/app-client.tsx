@@ -62,7 +62,7 @@ import type { CitationResp, DatasetResp, DocumentResp, ParserJobResp } from "@/t
 import type { ModelRoutePurpose, ModelRuntimeRouteSummary } from "@/types/model";
 import type { MindMapContent, StudioActionResp, StudioArtifactResp } from "@/types/studio";
 
-const CHAT_CLIENT_ID = "novex-chat-web";
+const CHAT_CLIENT_ID = "novex-notebooklm";
 const DEFAULT_NOTEBOOK_NAME = "未命名的笔记本";
 const DEFAULT_MIND_MAP_MAX_NODES = 72;
 const MIN_MIND_MAP_MAX_NODES = 12;

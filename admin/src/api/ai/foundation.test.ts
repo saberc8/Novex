@@ -34,7 +34,7 @@ describe("foundation api wrappers", () => {
   it("uses the foundation summary endpoint", async () => {
     await getFoundationSummary();
 
-    expect(fetchMock.mock.calls[0]?.[0]).toBe("http://localhost:4398/ai/foundation/summary");
+    expect(fetchMock.mock.calls[0]?.[0]).toBe("http://localhost:62601/ai/foundation/summary");
     expect(fetchMock.mock.calls[0]?.[1]).toMatchObject({
       method: "GET"
     });

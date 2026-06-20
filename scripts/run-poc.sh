@@ -241,7 +241,7 @@ mask_value() {
 }
 
 print_local_commands() {
-  local backend_port="${HTTP_PORT:-4398}"
+  local backend_port="${HTTP_PORT:-62601}"
   cat <<EOF
 Novex POC local process startup
 -------------------------------
@@ -263,20 +263,20 @@ Run each command in a separate terminal from the repo root:
   (set -a; . .env; set +a; PARSER_BACKEND_BASE_URL=http://127.0.0.1:${backend_port} PARSER_BACKEND_TOKEN="\${PARSER_CALLBACK_TOKEN}" PYTHONPATH=services/parser-worker services/parser-worker/.venv/bin/python -m parser_worker.worker)
       # Parser worker fallback with .venv
 
-  (cd admin && pnpm install && NEXT_PUBLIC_API_BASE_URL=http://localhost:${backend_port} pnpm dev)
-      # Admin: http://localhost:${ADMIN_PORT:-4399}
+  (set -a; . .env; set +a; cd admin && pnpm install && NEXT_PUBLIC_API_BASE_URL=http://localhost:${backend_port} pnpm dev)
+      # Admin: http://localhost:${ADMIN_PORT:-62602}
 
-  (cd apps/training-web && pnpm install && NEXT_PUBLIC_API_BASE_URL=http://localhost:${backend_port} pnpm dev)
-      # Training Web: http://localhost:${TRAINING_WEB_PORT:-4401}
+  (set -a; . .env; set +a; cd apps/training-web && pnpm install && NEXT_PUBLIC_API_BASE_URL=http://localhost:${backend_port} pnpm dev)
+      # Training Web: http://localhost:${TRAINING_WEB_PORT:-62603}
 
-  (cd apps/chat-web && pnpm install && NEXT_PUBLIC_API_BASE_URL=http://localhost:${backend_port} pnpm dev)
-      # Chat Web: http://localhost:${CHAT_WEB_PORT:-4402}
+  (set -a; . .env; set +a; cd apps/notebooklm && pnpm install && NEXT_PUBLIC_API_BASE_URL=http://localhost:${backend_port} pnpm dev)
+      # NotebookLM: http://localhost:${NOTEBOOKLM_PORT:-62604}
 
-  (cd apps/agent-workspace && pnpm install && NEXT_PUBLIC_API_BASE_URL=http://localhost:${backend_port} pnpm dev)
-      # Agent Workspace: http://localhost:${AGENT_WORKSPACE_PORT:-4403}
+  (set -a; . .env; set +a; cd apps/agent-workspace && pnpm install && NEXT_PUBLIC_API_BASE_URL=http://localhost:${backend_port} pnpm dev)
+      # Agent Workspace: http://localhost:${AGENT_WORKSPACE_PORT:-62605}
 
-  (cd apps/codex-app-poc && pnpm install && NEXT_PUBLIC_API_BASE_URL=http://localhost:${backend_port} pnpm dev)
-      # Codex App POC: http://localhost:${CODEX_APP_POC_PORT:-4413}
+  (set -a; . .env; set +a; cd apps/codex-app-poc && pnpm install && NEXT_PUBLIC_API_BASE_URL=http://localhost:${backend_port} pnpm dev)
+      # Codex App POC: http://localhost:${CODEX_APP_POC_PORT:-62606}
 
 Shared service URLs:
   RabbitMQ UI:   ${RABBITMQ_MANAGEMENT_URL:-http://localhost:15673}
@@ -298,13 +298,21 @@ EOF
 }
 
 print_local_status_hint() {
-  local backend_port="${HTTP_PORT:-4398}"
-  local admin_port="${ADMIN_PORT:-4399}"
+  local backend_port="${HTTP_PORT:-62601}"
+  local admin_port="${ADMIN_PORT:-62602}"
+  local training_port="${TRAINING_WEB_PORT:-62603}"
+  local notebooklm_port="${NOTEBOOKLM_PORT:-62604}"
+  local agent_port="${AGENT_WORKSPACE_PORT:-62605}"
+  local codex_port="${CODEX_APP_POC_PORT:-62606}"
   cat <<EOF
 Novex project services are local processes now.
 Check the terminals where you started cargo/uv/venv/pnpm, or inspect ports:
   lsof -nP -iTCP:${backend_port} -sTCP:LISTEN
   lsof -nP -iTCP:${admin_port} -sTCP:LISTEN
+  lsof -nP -iTCP:${training_port} -sTCP:LISTEN
+  lsof -nP -iTCP:${notebooklm_port} -sTCP:LISTEN
+  lsof -nP -iTCP:${agent_port} -sTCP:LISTEN
+  lsof -nP -iTCP:${codex_port} -sTCP:LISTEN
 EOF
 }
 
@@ -333,12 +341,12 @@ POC aggregate env entry:
   .env
 
 Default local URLs:
-  Backend          http://localhost:4398
-  Admin            http://localhost:4399
-  Training Web     http://localhost:4401
-  Chat Web         http://localhost:4402
-  Agent Workspace  http://localhost:4403
-  Codex App POC    http://localhost:4413
+  Backend          http://localhost:62601
+  Admin            http://localhost:62602
+  Training Web     http://localhost:62603
+  NotebookLM       http://localhost:62604
+  Agent Workspace  http://localhost:62605
+  Codex App POC    http://localhost:62606
 EOF
 }
 

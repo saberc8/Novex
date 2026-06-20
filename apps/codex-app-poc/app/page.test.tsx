@@ -4,6 +4,7 @@ import Page from "./page";
 
 describe("Codex app POC page", () => {
   afterEach(() => {
+    window.localStorage.clear();
     vi.unstubAllGlobals();
     vi.unstubAllEnvs();
   });
@@ -185,6 +186,75 @@ describe("Codex app POC page", () => {
     expect(await screen.findByText("来源")).toBeTruthy();
     expect(screen.getAllByText("search policy").length).toBeGreaterThan(0);
     expect(screen.queryByText("Finish the one-command training-web POC launcher on main")).toBeNull();
+  });
+
+  it("keeps earlier turns visible when submitting another prompt in the same project", async () => {
+    let runIndex = 0;
+    const fetchMock = vi.fn(async (url: string) => {
+      const href = String(url);
+      if (href.includes("/ai/capabilities")) {
+        return {
+          ok: true,
+          json: async () => ({ code: "200", data: { list: [], total: 0 } })
+        };
+      }
+      if (href.includes("/ai/agents/runs") && !href.includes("/events")) {
+        runIndex += 1;
+        return {
+          ok: true,
+          json: async () => ({
+            code: "200",
+            data: {
+              runId: runIndex,
+              traceId: `agent-${runIndex}`,
+              status: "succeeded",
+              finalOutput: `Done ${runIndex}`
+            }
+          })
+        };
+      }
+      if (href.includes("/events")) {
+        return {
+          ok: true,
+          json: async () => ({ code: "200", data: { list: [], total: 0 } })
+        };
+      }
+      return {
+        ok: true,
+        json: async () => ({ code: "200", data: {} })
+      };
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<Page />);
+
+    fireEvent.change(screen.getByLabelText("任务输入"), { target: { value: "first prompt" } });
+    fireEvent.click(screen.getByLabelText("发送"));
+    expect(await screen.findByText("Done 1")).toBeTruthy();
+
+    fireEvent.change(screen.getByLabelText("任务输入"), { target: { value: "second prompt" } });
+    fireEvent.click(screen.getByLabelText("发送"));
+
+    expect(await screen.findByText("Done 2")).toBeTruthy();
+    expect(screen.getAllByText("first prompt").length).toBeGreaterThan(0);
+    expect(screen.getByText("Done 1")).toBeTruthy();
+    expect(screen.getAllByText("second prompt").length).toBeGreaterThan(0);
+  });
+
+  it("creates a new project from the sidebar", () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => ({
+        ok: true,
+        json: async () => ({ code: "200", data: { list: [], total: 0 } })
+      }))
+    );
+
+    render(<Page />);
+
+    fireEvent.click(screen.getByRole("button", { name: "新建项目" }));
+
+    expect(screen.getByText("新项目 1")).toBeTruthy();
   });
 
   it("keeps context controls available without static home chrome", async () => {

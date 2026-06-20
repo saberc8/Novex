@@ -82,7 +82,7 @@ mod tests {
             .connect_lazy("postgres://postgres:postgres@localhost:5432/avalon_admin")
             .unwrap();
         let jwt = JwtService::new("test-secret".to_owned(), 24);
-        let app = build_router(db, &["http://localhost:4399".to_owned()], jwt).unwrap();
+        let app = build_router(db, &["http://localhost:62602".to_owned()], jwt).unwrap();
 
         let response = app
             .oneshot(
@@ -107,7 +107,7 @@ mod tests {
             .connect_lazy("postgres://postgres:postgres@localhost:5432/avalon_admin")
             .unwrap();
         let jwt = JwtService::new("test-secret".to_owned(), 24);
-        let app = build_router(db, &["http://localhost:4399".to_owned()], jwt).unwrap();
+        let app = build_router(db, &["http://localhost:62602".to_owned()], jwt).unwrap();
 
         let response = app
             .oneshot(
@@ -183,7 +183,7 @@ mod tests {
         let parser_env = include_str!("../../../../../services/parser-worker/.env.example");
         let admin_env = include_str!("../../../../../admin/.env.example");
         let training_env = include_str!("../../../../../apps/training-web/.env.example");
-        let chat_env = include_str!("../../../../../apps/chat-web/.env.example");
+        let chat_env = include_str!("../../../../../apps/notebooklm/.env.example");
         let agent_env = include_str!("../../../../../apps/agent-workspace/.env.example");
         let codex_env = include_str!("../../../../../apps/codex-app-poc/.env.example");
 
@@ -235,7 +235,7 @@ mod tests {
         }
 
         for contract in [
-            "PARSER_BACKEND_BASE_URL=http://127.0.0.1:4398",
+            "PARSER_BACKEND_BASE_URL=http://127.0.0.1:62601",
             "RABBITMQ_PARSER_EXECUTE_QUEUE=novex.parser.execute",
             "MINERU_TOKEN=",
         ] {
@@ -247,7 +247,7 @@ mod tests {
 
         for frontend_env in [admin_env, training_env, chat_env, agent_env, codex_env] {
             assert!(
-                frontend_env.contains("NEXT_PUBLIC_API_BASE_URL=http://localhost:4398"),
+                frontend_env.contains("NEXT_PUBLIC_API_BASE_URL=http://localhost:62601"),
                 "frontend env schema should declare the backend API URL"
             );
         }
@@ -306,7 +306,7 @@ mod tests {
             "RIGHT_CODE_DRAW_API_KEY",
             "MINERU_TOKEN",
             "PARSER_WORKER_MODE",
-            "http://localhost:4401",
+            "http://localhost:62603",
             "http://localhost:15673",
             "http://localhost:19011",
         ] {

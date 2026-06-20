@@ -120,7 +120,7 @@ function session(overrides: Partial<ChatFlowSessionResp> = {}): ChatFlowSessionR
   return {
     id: 501,
     tenantId: 1,
-    appCode: "chat-web",
+    appCode: "notebooklm",
     mode: "knowledge",
     datasetId: 10,
     title: "Machine Learning Tools for Environmental Microplastic Analysis",
@@ -502,7 +502,7 @@ describe("Chat web page", () => {
         username: "admin",
         password: "admin123",
         authType: "ACCOUNT",
-        clientId: "novex-chat-web"
+        clientId: "novex-notebooklm"
       })
     );
     expect(window.localStorage.getItem("novex_token")).toBe("token-2");

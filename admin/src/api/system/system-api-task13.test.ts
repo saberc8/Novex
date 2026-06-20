@@ -41,10 +41,10 @@ describe("system api wrappers task 13", () => {
     await clearDictCache("user_status");
 
     expect(fetchMock.mock.calls[0]?.[0]).toBe(
-      "http://localhost:4398/system/dict/item?page=1&size=10&dictId=100&status=1"
+      "http://localhost:62601/system/dict/item?page=1&size=10&dictId=100&status=1"
     );
     expect(fetchMock.mock.calls[0]?.[1]).toMatchObject({ method: "GET" });
-    expect(fetchMock.mock.calls[1]?.[0]).toBe("http://localhost:4398/system/dict/cache/user_status");
+    expect(fetchMock.mock.calls[1]?.[0]).toBe("http://localhost:62601/system/dict/cache/user_status");
     expect(fetchMock.mock.calls[1]?.[1]).toMatchObject({ method: "DELETE" });
   });
 
@@ -53,9 +53,9 @@ describe("system api wrappers task 13", () => {
     await createDir("/docs", "reports");
 
     expect(fetchMock.mock.calls[0]?.[0]).toBe(
-      "http://localhost:4398/system/file?page=1&size=20&parentPath=%2Fdocs&sort=id%2Cdesc"
+      "http://localhost:62601/system/file?page=1&size=20&parentPath=%2Fdocs&sort=id%2Cdesc"
     );
-    expect(fetchMock.mock.calls[1]?.[0]).toBe("http://localhost:4398/system/file/dir");
+    expect(fetchMock.mock.calls[1]?.[0]).toBe("http://localhost:62601/system/file/dir");
     expect(fetchMock.mock.calls[1]?.[1]).toMatchObject({
       method: "POST",
       body: JSON.stringify({ parentPath: "/docs", originalName: "reports" })
@@ -68,13 +68,13 @@ describe("system api wrappers task 13", () => {
     await setDefaultStorage(5);
     await listClient({ page: 2, size: 10, clientType: "PC", authType: ["ACCOUNT"], status: 1 });
 
-    expect(fetchMock.mock.calls[0]?.[0]).toBe("http://localhost:4398/system/option?category=SITE");
-    expect(fetchMock.mock.calls[1]?.[0]).toBe("http://localhost:4398/system/option/value");
+    expect(fetchMock.mock.calls[0]?.[0]).toBe("http://localhost:62601/system/option?category=SITE");
+    expect(fetchMock.mock.calls[1]?.[0]).toBe("http://localhost:62601/system/option/value");
     expect(fetchMock.mock.calls[1]?.[1]).toMatchObject({ method: "PATCH" });
-    expect(fetchMock.mock.calls[2]?.[0]).toBe("http://localhost:4398/system/storage/5/default");
+    expect(fetchMock.mock.calls[2]?.[0]).toBe("http://localhost:62601/system/storage/5/default");
     expect(fetchMock.mock.calls[2]?.[1]).toMatchObject({ method: "PUT" });
     expect(fetchMock.mock.calls[3]?.[0]).toBe(
-      "http://localhost:4398/system/client?page=2&size=10&clientType=PC&authType=ACCOUNT&status=1"
+      "http://localhost:62601/system/client?page=2&size=10&clientType=PC&authType=ACCOUNT&status=1"
     );
   });
 
@@ -90,10 +90,10 @@ describe("system api wrappers task 13", () => {
     });
 
     expect(fetchMock.mock.calls[0]?.[0]).toBe(
-      "http://localhost:4398/system/secrets?page=1&size=20&scopeType=tenant&code=github.connector"
+      "http://localhost:62601/system/secrets?page=1&size=20&scopeType=tenant&code=github.connector"
     );
     expect(fetchMock.mock.calls[0]?.[1]).toMatchObject({ method: "GET" });
-    expect(fetchMock.mock.calls[1]?.[0]).toBe("http://localhost:4398/system/secrets");
+    expect(fetchMock.mock.calls[1]?.[0]).toBe("http://localhost:62601/system/secrets");
     expect(fetchMock.mock.calls[1]?.[1]).toMatchObject({
       method: "POST",
       body: JSON.stringify({

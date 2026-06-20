@@ -39,6 +39,8 @@ import type { CapabilityItemResp, McpToolResp } from "@/types/capability";
 
 const CURRENT_PROJECT_NAME = "novex-agent";
 const DEFAULT_MODEL_ROUTE_ID = "runtime.llm";
+const PROJECT_STORAGE_KEY = "novex_codex_poc_projects_v1";
+const ACTIVE_PROJECT_STORAGE_KEY = "novex_codex_poc_active_project_v1";
 
 const navigationItems = [
   { label: "新对话", icon: SquarePen, active: true },
@@ -68,6 +70,21 @@ type ConversationSummary = {
   status: string;
 };
 
+type ConversationTurn = {
+  id: string;
+  prompt: string;
+  modelRouteId: string;
+  runResult: AgentRunResp | null;
+  runEvents: AgentRunEventResp[];
+  runError: string | null;
+};
+
+type ProjectRecord = {
+  id: string;
+  name: string;
+  turns: ConversationTurn[];
+};
+
 type ModelRouteOption = {
   routeId: string;
   label: string;
@@ -85,28 +102,58 @@ type WorkbenchUploadedFile = {
 };
 
 export function CodexPocApp() {
-  const [conversations, setConversations] = useState<ConversationSummary[]>([]);
-  const [activeConversationId, setActiveConversationId] = useState<string | null>(null);
+  const [projects, setProjects] = useState<ProjectRecord[]>(() => readStoredProjects());
+  const [activeProjectId, setActiveProjectId] = useState(() => readStoredActiveProjectId());
+  const activeProject = useMemo(
+    () => projects.find((project) => project.id === activeProjectId) ?? projects[0],
+    [activeProjectId, projects]
+  );
+  const activeConversationId = activeProject?.turns.at(-1)?.id ?? null;
+  const conversations = useMemo(
+    () => conversationSummariesForProject(activeProject),
+    [activeProject]
+  );
 
-  function upsertConversation(summary: ConversationSummary) {
-    setConversations((items) => {
-      const next = items.filter((item) => item.id !== summary.id);
-      return [summary, ...next].slice(0, 12);
-    });
-    setActiveConversationId(summary.id);
+  useEffect(() => {
+    writeStoredProjects(projects);
+  }, [projects]);
+
+  useEffect(() => {
+    writeStoredActiveProjectId(activeProject?.id ?? null);
+  }, [activeProject?.id]);
+
+  function updateProject(projectId: string, updater: (project: ProjectRecord) => ProjectRecord) {
+    setProjects((items) =>
+      items.map((project) => (project.id === projectId ? updater(project) : project))
+    );
+  }
+
+  function handleNewProject() {
+    const nextProject: ProjectRecord = {
+      id: `project-${Date.now()}`,
+      name: `新项目 ${nextProjectNumber(projects)}`,
+      turns: []
+    };
+    setProjects((items) => [nextProject, ...items]);
+    setActiveProjectId(nextProject.id);
   }
 
   return (
     <main className="flex min-h-screen overflow-hidden bg-[#F4F2F1] text-[#111111]">
       <Sidebar
         activeConversationId={activeConversationId}
+        activeProjectId={activeProject?.id ?? null}
         conversations={conversations}
+        onNewProject={handleNewProject}
+        onProjectSelect={setActiveProjectId}
+        projects={projects}
       />
       <section className="relative min-w-0 flex-1 p-0">
         <div className="min-h-screen rounded-tl-[18px] border-l border-t border-[#E5E5E5] bg-white">
           <Workbench
             activeConversationId={activeConversationId}
-            onConversationUpdate={upsertConversation}
+            activeProject={activeProject}
+            onProjectUpdate={updateProject}
           />
         </div>
       </section>
@@ -116,10 +163,18 @@ export function CodexPocApp() {
 
 function Sidebar({
   activeConversationId,
-  conversations
+  activeProjectId,
+  conversations,
+  onNewProject,
+  onProjectSelect,
+  projects
 }: {
   activeConversationId: string | null;
+  activeProjectId: string | null;
   conversations: ConversationSummary[];
+  onNewProject: () => void;
+  onProjectSelect: (id: string) => void;
+  projects: ProjectRecord[];
 }) {
   return (
     <aside className="flex h-screen w-[306px] shrink-0 flex-col bg-[#F4F2F1] px-[18px] pb-5 pt-[18px] text-[15px] text-[#111111]">
@@ -152,8 +207,22 @@ function Sidebar({
       </nav>
 
       <div className="mt-8 min-h-0 flex-1 overflow-hidden">
-        <SidebarGroup title="项目">
-          <ProjectRow active name={CURRENT_PROJECT_NAME} />
+        <SidebarGroup
+          action={
+            <IconButton label="新建项目" onClick={onNewProject}>
+              <Plus aria-hidden="true" className="h-[17px] w-[17px]" strokeWidth={1.9} />
+            </IconButton>
+          }
+          title="项目"
+        >
+          {projects.map((project) => (
+            <ProjectRow
+              active={project.id === activeProjectId}
+              key={project.id}
+              name={project.name}
+              onClick={() => onProjectSelect(project.id)}
+            />
+          ))}
         </SidebarGroup>
 
         <SidebarGroup className="mt-7" title="对话">
@@ -192,23 +261,38 @@ function Sidebar({
 }
 
 function SidebarGroup({
+  action,
   children,
   className = "",
   title
 }: {
+  action?: React.ReactNode;
   children: React.ReactNode;
   className?: string;
   title: string;
 }) {
   return (
     <section className={className}>
-      <h2 className="mb-2 px-0.5 text-[15px] font-medium text-[#9A9A9A]">{title}</h2>
+      <div className="mb-2 flex items-center justify-between gap-2">
+        <h2 className="px-0.5 text-[15px] font-medium text-[#9A9A9A]">{title}</h2>
+        {action}
+      </div>
       <div className="space-y-1">{children}</div>
     </section>
   );
 }
 
-function ProjectRow({ active = false, linked = false, name }: { active?: boolean; linked?: boolean; name: string }) {
+function ProjectRow({
+  active = false,
+  linked = false,
+  name,
+  onClick
+}: {
+  active?: boolean;
+  linked?: boolean;
+  name: string;
+  onClick?: () => void;
+}) {
   const Icon = linked ? FolderGit2 : Folder;
 
   return (
@@ -217,6 +301,7 @@ function ProjectRow({ active = false, linked = false, name }: { active?: boolean
         "flex h-9 w-full items-center gap-3 rounded-[8px] px-0.5 text-left text-[15px] transition-colors hover:bg-[#EBE8E6]",
         active ? "font-medium text-[#111111]" : "font-normal text-[#5E5A5A]"
       ].join(" ")}
+      onClick={onClick}
       type="button"
     >
       <Icon aria-hidden="true" className="h-[18px] w-[18px] shrink-0 text-[#6E6969]" strokeWidth={1.8} />
@@ -227,20 +312,18 @@ function ProjectRow({ active = false, linked = false, name }: { active?: boolean
 
 function Workbench({
   activeConversationId,
-  onConversationUpdate
+  activeProject,
+  onProjectUpdate
 }: {
   activeConversationId: string | null;
-  onConversationUpdate: (summary: ConversationSummary) => void;
+  activeProject: ProjectRecord | undefined;
+  onProjectUpdate: (projectId: string, updater: (project: ProjectRecord) => ProjectRecord) => void;
 }) {
   const [composerValue, setComposerValue] = useState("");
-  const [submittedPrompt, setSubmittedPrompt] = useState("");
-  const [localConversationId, setLocalConversationId] = useState<string | null>(null);
+  const [composerError, setComposerError] = useState<string | null>(null);
   const [isCommandMenuOpen, setIsCommandMenuOpen] = useState(false);
   const [activeCommandIndex, setActiveCommandIndex] = useState(0);
   const [isSubmitting, setIsSubmitting] = useState(false);
-  const [runResult, setRunResult] = useState<AgentRunResp | null>(null);
-  const [runEvents, setRunEvents] = useState<AgentRunEventResp[]>([]);
-  const [runError, setRunError] = useState<string | null>(null);
   const [skills, setSkills] = useState<CapabilityItemResp[]>([]);
   const [mcpTools, setMcpTools] = useState<McpToolResp[]>([]);
   const [selectedSkillCodes, setSelectedSkillCodes] = useState<string[]>([]);
@@ -254,10 +337,23 @@ function Workbench({
   );
   const selectedModel =
     modelOptions.find((option) => option.routeId === selectedModelRouteId) ?? modelOptions[0];
+  const turns = activeProject?.turns ?? [];
+  const latestTurn = turns.at(-1) ?? null;
+  const runResult = latestTurn?.runResult ?? null;
+  const runEvents = latestTurn?.runEvents ?? [];
+  const runError = latestTurn?.runError ?? composerError;
   const modelDeltaSummary = useMemo(() => summarizeModelDeltas(runEvents), [runEvents]);
   const eventEvidence = useMemo(() => runEvents.map(summarizeWorkbenchEvent), [runEvents]);
-  const hasConversation = Boolean(submittedPrompt || runResult || runError || isSubmitting);
-  const conversationTitle = submittedPrompt ? conversationTitleFromPrompt(submittedPrompt) : "新对话";
+  const hasConversation = turns.length > 0 || Boolean(runError) || isSubmitting;
+  const conversationTitle = latestTurn
+    ? conversationTitleFromPrompt(latestTurn.prompt)
+    : activeProject?.name ?? "新对话";
+
+  useEffect(() => {
+    setComposerValue("");
+    setComposerError(null);
+    setIsCommandMenuOpen(false);
+  }, [activeProject?.id]);
 
   useEffect(() => {
     let cancelled = false;
@@ -332,51 +428,52 @@ function Workbench({
   async function handleSubmit() {
     const input = composerValue.trim();
     if (!input || isSubmitting) {
-      setRunError("请输入任务");
+      setComposerError("请输入任务");
+      return;
+    }
+    if (!activeProject) {
+      setComposerError("请先创建项目");
       return;
     }
 
-    const nextConversationId = localConversationId ?? `conversation-${Date.now()}`;
-    const nextTitle = conversationTitleFromPrompt(input);
-    setLocalConversationId(nextConversationId);
-    setSubmittedPrompt(input);
+    const projectId = activeProject.id;
+    const turnId = `conversation-${Date.now()}`;
+    const modelRouteId = selectedModelRouteId;
+    const nextTurn: ConversationTurn = {
+      id: turnId,
+      prompt: input,
+      modelRouteId,
+      runResult: null,
+      runEvents: [],
+      runError: null
+    };
     setComposerValue("");
     setIsCommandMenuOpen(false);
     setIsSubmitting(true);
-    setRunError(null);
-    setRunResult(null);
-    setRunEvents([]);
-    onConversationUpdate({
-      id: nextConversationId,
-      title: nextTitle,
-      age: "刚刚",
-      status: "running"
-    });
+    setComposerError(null);
+    onProjectUpdate(projectId, (project) => ({
+      ...project,
+      turns: [...project.turns, nextTurn]
+    }));
 
     try {
       const result = await createConfiguredModelAgentRun(input, buildWorkbenchContext());
-      setRunResult(result);
-      onConversationUpdate({
-        id: nextConversationId,
-        title: nextTitle,
-        age: "刚刚",
-        status: result.status
-      });
+      let nextRunEvents: AgentRunEventResp[] = [];
       try {
         const eventPage = await listAgentRunEvents(result.runId, { page: 1, size: 100 });
-        setRunEvents(eventPage.list);
+        nextRunEvents = eventPage.list;
       } catch {
-        setRunEvents([]);
+        nextRunEvents = [];
       }
+      onProjectUpdate(projectId, (project) => updateProjectTurn(project, turnId, {
+        runResult: result,
+        runEvents: nextRunEvents
+      }));
     } catch (error) {
       const message = error instanceof Error ? error.message : "提交失败";
-      setRunError(message);
-      onConversationUpdate({
-        id: nextConversationId,
-        title: nextTitle,
-        age: "刚刚",
-        status: "failed"
-      });
+      onProjectUpdate(projectId, (project) => updateProjectTurn(project, turnId, {
+        runError: message
+      }));
     } finally {
       setIsSubmitting(false);
     }
@@ -427,7 +524,7 @@ function Workbench({
         }
       }
     } catch (error) {
-      setRunError(error instanceof Error ? error.message : "无法准备文件数据集");
+      setComposerError(error instanceof Error ? error.message : "无法准备文件数据集");
     }
   }
 
@@ -505,13 +602,10 @@ function Workbench({
         <div className="min-h-0 flex-1 overflow-y-auto">
           <div className="mx-auto w-full max-w-[1020px] px-8 pb-10 pt-8">
             <ConversationTranscript
-              eventEvidence={eventEvidence}
               isSubmitting={isSubmitting}
-              modelDeltaSummary={modelDeltaSummary}
-              prompt={submittedPrompt}
-              runError={runError}
-              runResult={runResult}
-              selectedModel={selectedModel}
+              modelOptions={modelOptions}
+              pendingError={turns.length === 0 ? runError : null}
+              turns={turns}
             />
           </div>
         </div>
@@ -812,37 +906,67 @@ function ConversationHeader({ title }: { title: string }) {
 }
 
 function ConversationTranscript({
-  eventEvidence,
   isSubmitting,
-  modelDeltaSummary,
-  prompt,
-  runError,
-  runResult,
-  selectedModel
+  modelOptions,
+  pendingError,
+  turns
 }: {
-  eventEvidence: WorkbenchEventEvidence[];
   isSubmitting: boolean;
-  modelDeltaSummary: ModelDeltaSummary | null;
-  prompt: string;
-  runError: string | null;
-  runResult: AgentRunResp | null;
-  selectedModel: ModelRouteOption;
+  modelOptions: ModelRouteOption[];
+  pendingError: string | null;
+  turns: ConversationTurn[];
 }) {
+  const latestTurnId = turns.at(-1)?.id ?? null;
+
   return (
-    <article aria-live="polite" className="pb-10">
+    <div aria-live="polite" className="space-y-10 pb-10">
+      {turns.map((turn) => (
+        <ConversationTurnTranscript
+          isSubmitting={isSubmitting && turn.id === latestTurnId}
+          key={turn.id}
+          selectedModel={modelOptionForRoute(modelOptions, turn.modelRouteId)}
+          turn={turn}
+        />
+      ))}
+      {pendingError ? (
+        <p className="rounded-[8px] border border-[#F3B5B5] bg-[#FFF5F5] px-4 py-3 text-[14px] text-[#A12626]" role="alert">
+          {pendingError}
+        </p>
+      ) : null}
+    </div>
+  );
+}
+
+function ConversationTurnTranscript({
+  isSubmitting,
+  selectedModel,
+  turn
+}: {
+  isSubmitting: boolean;
+  selectedModel: ModelRouteOption;
+  turn: ConversationTurn;
+}) {
+  const modelDeltaSummary = useMemo(() => summarizeModelDeltas(turn.runEvents), [turn.runEvents]);
+  const eventEvidence = useMemo(
+    () => turn.runEvents.map(summarizeWorkbenchEvent),
+    [turn.runEvents]
+  );
+
+  return (
+    <article>
       <p className="whitespace-pre-wrap text-[17px] font-medium leading-8 text-[#111111]">
-        {prompt}
+        {turn.prompt}
       </p>
 
       <div className="mt-7 flex flex-wrap items-center gap-2 text-[14px] text-[#6F6F6F]">
-        {runResult ? (
+        {turn.runResult ? (
           <>
             <span className="rounded-[7px] bg-[#EFEFEF] px-2 py-0.5 font-mono text-[13px] text-[#333333]">
-              Run #{runResult.runId}
+              Run #{turn.runResult.runId}
             </span>
-            <span>{runResult.status}</span>
+            <span>{turn.runResult.status}</span>
             <span className="rounded-[7px] bg-[#EFEFEF] px-2 py-0.5 font-mono text-[13px] text-[#333333]">
-              {runResult.traceId}
+              {turn.runResult.traceId}
             </span>
           </>
         ) : (
@@ -853,13 +977,13 @@ function ConversationTranscript({
         </span>
       </div>
 
-      {runError ? (
+      {turn.runError ? (
         <p className="mt-4 rounded-[8px] border border-[#F3B5B5] bg-[#FFF5F5] px-4 py-3 text-[14px] text-[#A12626]" role="alert">
-          {runError}
+          {turn.runError}
         </p>
       ) : null}
 
-      {runResult ? (
+      {turn.runResult ? (
         <section className="mt-4 rounded-[10px] bg-[#EFEFEF] px-4 py-4 font-mono text-[14px] leading-6 text-[#333333]">
           <div className="mb-3 flex items-center justify-between gap-2 text-[13px] text-[#6F6F6F]">
             <span>text</span>
@@ -869,7 +993,7 @@ function ConversationTranscript({
             </div>
           </div>
           <p className="whitespace-pre-wrap">
-            {runResult.finalOutput || `Agent run ${runResult.status}`}
+            {turn.runResult.finalOutput || `Agent run ${turn.runResult.status}`}
           </p>
         </section>
       ) : null}
@@ -974,7 +1098,7 @@ function OutputRail({
             <Globe2 aria-hidden="true" className="h-[18px] w-[18px] shrink-0 text-[#444444]" strokeWidth={1.9} />
             <div className="min-w-0">
               <div className="truncate">Developer Agent Workbench</div>
-              <div className="truncate text-[12px] text-[#8A8A8A]">localhost:4413</div>
+              <div className="truncate text-[12px] text-[#8A8A8A]">localhost:62606</div>
             </div>
           </div>
         </section>
@@ -1097,9 +1221,17 @@ function CommandMenu({ activeIndex }: { activeIndex: number }) {
   );
 }
 
-function IconButton({ children, label }: { children: React.ReactNode; label: string }) {
+function IconButton({
+  children,
+  label,
+  onClick
+}: {
+  children: React.ReactNode;
+  label: string;
+  onClick?: () => void;
+}) {
   return (
-    <button aria-label={label} className="flex h-7 w-7 items-center justify-center rounded-[8px] text-[#8A8A8A] hover:bg-[#EDEDED] hover:text-[#111111]" type="button">
+    <button aria-label={label} className="flex h-7 w-7 items-center justify-center rounded-[8px] text-[#8A8A8A] hover:bg-[#EDEDED] hover:text-[#111111]" onClick={onClick} type="button">
       {children}
     </button>
   );
@@ -1116,6 +1248,145 @@ function TopRightControls() {
       <PanelLeft aria-hidden="true" className="h-[17px] w-[17px]" strokeWidth={1.8} />
     </div>
   );
+}
+
+function defaultProjects(): ProjectRecord[] {
+  return [{ id: "project-default", name: CURRENT_PROJECT_NAME, turns: [] }];
+}
+
+function readStoredProjects(): ProjectRecord[] {
+  if (typeof window === "undefined" || !window.localStorage) {
+    return defaultProjects();
+  }
+
+  try {
+    const parsed = JSON.parse(window.localStorage.getItem(PROJECT_STORAGE_KEY) ?? "null");
+    if (!Array.isArray(parsed)) {
+      return defaultProjects();
+    }
+    const projects = parsed
+      .map(projectRecordFromValue)
+      .filter((project): project is ProjectRecord => project !== null);
+    return projects.length > 0 ? projects : defaultProjects();
+  } catch {
+    return defaultProjects();
+  }
+}
+
+function writeStoredProjects(projects: ProjectRecord[]) {
+  if (typeof window === "undefined" || !window.localStorage) {
+    return;
+  }
+  window.localStorage.setItem(PROJECT_STORAGE_KEY, JSON.stringify(projects));
+}
+
+function readStoredActiveProjectId() {
+  if (typeof window === "undefined" || !window.localStorage) {
+    return "project-default";
+  }
+  return window.localStorage.getItem(ACTIVE_PROJECT_STORAGE_KEY) ?? "project-default";
+}
+
+function writeStoredActiveProjectId(projectId: string | null) {
+  if (typeof window === "undefined" || !window.localStorage) {
+    return;
+  }
+  if (projectId) {
+    window.localStorage.setItem(ACTIVE_PROJECT_STORAGE_KEY, projectId);
+  } else {
+    window.localStorage.removeItem(ACTIVE_PROJECT_STORAGE_KEY);
+  }
+}
+
+function projectRecordFromValue(value: unknown): ProjectRecord | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+  const record = value as Record<string, unknown>;
+  const id = typeof record.id === "string" && record.id.trim() ? record.id : null;
+  const name = typeof record.name === "string" && record.name.trim() ? record.name : null;
+  if (!id || !name) {
+    return null;
+  }
+  const turns = Array.isArray(record.turns)
+    ? record.turns
+        .map(conversationTurnFromValue)
+        .filter((turn): turn is ConversationTurn => turn !== null)
+    : [];
+
+  return { id, name, turns };
+}
+
+function conversationTurnFromValue(value: unknown): ConversationTurn | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+  const record = value as Record<string, unknown>;
+  const id = typeof record.id === "string" && record.id.trim() ? record.id : null;
+  const prompt = typeof record.prompt === "string" ? record.prompt : null;
+  if (!id || prompt === null) {
+    return null;
+  }
+
+  return {
+    id,
+    prompt,
+    modelRouteId:
+      typeof record.modelRouteId === "string" && record.modelRouteId.trim()
+        ? record.modelRouteId
+        : DEFAULT_MODEL_ROUTE_ID,
+    runResult: objectOrNull<AgentRunResp>(record.runResult),
+    runEvents: Array.isArray(record.runEvents)
+      ? (record.runEvents.filter((event) => event && typeof event === "object") as AgentRunEventResp[])
+      : [],
+    runError: typeof record.runError === "string" ? record.runError : null
+  };
+}
+
+function objectOrNull<T>(value: unknown): T | null {
+  return value && typeof value === "object" && !Array.isArray(value) ? (value as T) : null;
+}
+
+function nextProjectNumber(projects: ProjectRecord[]) {
+  const used = new Set(
+    projects
+      .map((project) => /^新项目 (\d+)$/.exec(project.name)?.[1])
+      .filter((value): value is string => Boolean(value))
+      .map((value) => Number(value))
+  );
+  let next = 1;
+  while (used.has(next)) {
+    next += 1;
+  }
+  return next;
+}
+
+function updateProjectTurn(
+  project: ProjectRecord,
+  turnId: string,
+  patch: Partial<ConversationTurn>
+): ProjectRecord {
+  return {
+    ...project,
+    turns: project.turns.map((turn) => (turn.id === turnId ? { ...turn, ...patch } : turn))
+  };
+}
+
+function conversationSummariesForProject(project: ProjectRecord | undefined): ConversationSummary[] {
+  return (project?.turns ?? [])
+    .slice()
+    .reverse()
+    .slice(0, 12)
+    .map((turn) => ({
+      id: turn.id,
+      title: conversationTitleFromPrompt(turn.prompt),
+      age: "刚刚",
+      status: turn.runError ? "failed" : turn.runResult?.status ?? "running"
+    }));
+}
+
+function modelOptionForRoute(options: ModelRouteOption[], routeId: string): ModelRouteOption {
+  return options.find((option) => option.routeId === routeId) ?? { routeId, label: labelForRoute(routeId) };
 }
 
 function toggleString(values: string[], value: string) {

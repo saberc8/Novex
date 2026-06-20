@@ -53,7 +53,7 @@ describe("AiDashboardPage", () => {
           id: "M1",
           name: "Knowledge Base MVP",
           status: "poc_limited",
-          summary: "RAG query path, citations, trace, and training/chat-web pages are present.",
+          summary: "RAG query path, citations, trace, and training-web/notebooklm pages are present.",
           evidence: ["Admin knowledge control plane"],
           limitations: ["Milvus is wired through metadata but live POC still supports local fallback."]
         }

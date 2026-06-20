@@ -30,7 +30,7 @@ use crate::{
     shared::{error::AppError, id::next_id},
 };
 
-const CHAT_FLOW_APP_CODE: &str = "chat-web";
+const CHAT_FLOW_APP_CODE: &str = "notebooklm";
 const CHAT_FLOW_MODE_KNOWLEDGE: &str = "knowledge";
 const CHAT_FLOW_MODE_MODEL: &str = "model";
 const CHAT_FLOW_SESSION_STATUS_ACTIVE: i16 = 1;

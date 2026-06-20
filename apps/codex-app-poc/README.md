@@ -16,7 +16,7 @@ Run this after starting the backend with database migrations and a configured `C
 
 ```bash
 NOVEX_LIVE_AGENT_SMOKE=1 \
-NEXT_PUBLIC_API_BASE_URL=http://localhost:4398 \
+NEXT_PUBLIC_API_BASE_URL=http://localhost:62601 \
 NEXT_PUBLIC_AGENT_MODEL_ROUTE_ID=runtime.llm \
 NOVEX_AGENT_SMOKE_TOKEN=<jwt-if-needed> \
 pnpm smoke:agent-live

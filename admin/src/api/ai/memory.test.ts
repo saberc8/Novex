@@ -49,9 +49,9 @@ describe("memory api wrappers", () => {
     await deleteMemory(99);
 
     expect(fetchMock.mock.calls[0]?.[0]).toBe(
-      "http://localhost:4398/ai/memories?page=1&size=20&scopeType=user&scopeId=1"
+      "http://localhost:62601/ai/memories?page=1&size=20&scopeType=user&scopeId=1"
     );
-    expect(fetchMock.mock.calls[1]?.[0]).toBe("http://localhost:4398/ai/memories");
+    expect(fetchMock.mock.calls[1]?.[0]).toBe("http://localhost:62601/ai/memories");
     expect(fetchMock.mock.calls[1]?.[1]).toMatchObject({
       method: "POST",
       body: JSON.stringify({
@@ -68,7 +68,7 @@ describe("memory api wrappers", () => {
         status: 1
       })
     });
-    expect(fetchMock.mock.calls[2]?.[0]).toBe("http://localhost:4398/ai/memories/99");
+    expect(fetchMock.mock.calls[2]?.[0]).toBe("http://localhost:62601/ai/memories/99");
     expect(fetchMock.mock.calls[2]?.[1]).toMatchObject({ method: "DELETE" });
   });
 });

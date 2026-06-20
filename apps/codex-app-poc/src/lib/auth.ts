@@ -1,5 +1,5 @@
 const TOKEN_KEY = "novex_token";
-const DEFAULT_API_BASE_URL = "http://localhost:4398";
+const DEFAULT_API_BASE_URL = "http://localhost:62601";
 const DEFAULT_DEV_USERNAME = "admin";
 const DEFAULT_DEV_PASSWORD = "admin123";
 const DEFAULT_DEV_CLIENT_ID = "codex-app-poc";

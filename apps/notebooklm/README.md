@@ -1,4 +1,4 @@
-# Chat Web
+# NotebookLM
 
 Default customer-facing knowledge chat template.
 

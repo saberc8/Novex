@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "next dev -p 4401",
+    "dev": "next dev --webpack -p ${TRAINING_WEB_PORT:-62603}",
     "build": "next build",
     "lint": "eslint .",
     "typecheck": "tsc --noEmit",

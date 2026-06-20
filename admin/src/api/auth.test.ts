@@ -41,7 +41,7 @@ describe("auth api wrappers", () => {
   it("loads image captcha from the backend captcha endpoint", async () => {
     const captcha = await getImageCaptcha();
 
-    expect(fetchMock.mock.calls[0]?.[0]).toBe("http://localhost:4398/captcha/image");
+    expect(fetchMock.mock.calls[0]?.[0]).toBe("http://localhost:62601/captcha/image");
     expect(fetchMock.mock.calls[0]?.[1]).toMatchObject({ method: "GET" });
     expect(captcha.uuid).toBe("captcha-uuid");
     expect(captcha.img).toBe("data:image/svg+xml;base64,abc");

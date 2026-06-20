@@ -53,8 +53,8 @@ export default function Page() {
           <div className="flex items-center gap-3">
             <Settings aria-hidden="true" className="h-6 w-6 text-neutral-700" />
             <div>
-              <h2 className="text-xl font-semibold">Chat Web 配置</h2>
-              <p className="mt-1 text-sm text-neutral-500">客户侧聊天模板的页面、权限和模型运行配置。</p>
+              <h2 className="text-xl font-semibold">NotebookLM 配置</h2>
+              <p className="mt-1 text-sm text-neutral-500">知识工作区的页面、权限和模型运行配置。</p>
             </div>
           </div>
           <div className="mt-6 grid gap-4 md:grid-cols-2">

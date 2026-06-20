@@ -1,7 +1,7 @@
 import type { ApiResponse } from "@/types/api";
 import { getAuthToken } from "./auth";
 
-const DEFAULT_API_BASE_URL = "http://localhost:4398";
+const DEFAULT_API_BASE_URL = "http://localhost:62601";
 
 export class ApiClientError extends Error {
   constructor(message: string) {

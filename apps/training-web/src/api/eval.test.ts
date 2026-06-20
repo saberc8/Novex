@@ -43,7 +43,7 @@ describe("training eval api", () => {
     await listEvalDatasets({ page: 1, size: 20, code: "training_regression" });
 
     expect(fetchMock.mock.calls[0]?.[0]).toBe(
-      "http://localhost:4398/ai/evals/datasets?page=1&size=20&code=training_regression"
+      "http://localhost:62601/ai/evals/datasets?page=1&size=20&code=training_regression"
     );
     expect(fetchMock.mock.calls[0]?.[1]).toMatchObject({
       method: "GET",
@@ -74,7 +74,7 @@ describe("training eval api", () => {
 
     await runEval({ datasetCode: "training_regression" });
 
-    expect(fetchMock.mock.calls[0]?.[0]).toBe("http://localhost:4398/ai/evals/runs");
+    expect(fetchMock.mock.calls[0]?.[0]).toBe("http://localhost:62601/ai/evals/runs");
     expect(fetchMock.mock.calls[0]?.[1]).toMatchObject({
       method: "POST",
       headers: expect.objectContaining({
@@ -93,7 +93,7 @@ describe("training eval api", () => {
     await listEvalRuns({ page: 1, size: 5, datasetCode: "training_regression" });
 
     expect(fetchMock.mock.calls[0]?.[0]).toBe(
-      "http://localhost:4398/ai/evals/runs?page=1&size=5&datasetCode=training_regression"
+      "http://localhost:62601/ai/evals/runs?page=1&size=5&datasetCode=training_regression"
     );
     expect(fetchMock.mock.calls[0]?.[1]).toMatchObject({
       method: "GET",
@@ -109,7 +109,7 @@ describe("training eval api", () => {
     await listEvalResults(800, { page: 1, size: 5 });
 
     expect(fetchMock.mock.calls[0]?.[0]).toBe(
-      "http://localhost:4398/ai/evals/runs/800/results?page=1&size=5"
+      "http://localhost:62601/ai/evals/runs/800/results?page=1&size=5"
     );
     expect(fetchMock.mock.calls[0]?.[1]).toMatchObject({
       method: "GET",

@@ -62,26 +62,26 @@ describe("model runtime api wrappers", () => {
     await runModelHealthCheck({ target: "all" });
 
     expect(fetchMock.mock.calls[0]?.[0]).toBe(
-      "http://localhost:4398/ai/models/runtime-config"
+      "http://localhost:62601/ai/models/runtime-config"
     );
     expect(fetchMock.mock.calls[0]?.[1]).toMatchObject({ method: "GET" });
     expect(fetchMock.mock.calls[1]?.[0]).toBe(
-      "http://localhost:4398/ai/models/registry"
+      "http://localhost:62601/ai/models/registry"
     );
     expect(fetchMock.mock.calls[1]?.[1]).toMatchObject({ method: "GET" });
     expect(fetchMock.mock.calls[2]?.[0]).toBe(
-      "http://localhost:4398/ai/models/registry/routes"
+      "http://localhost:62601/ai/models/registry/routes"
     );
     expect(fetchMock.mock.calls[2]?.[1]).toMatchObject({
       method: "POST",
       body: expect.stringContaining('"credentialRef":"env:LLM_API_KEY"')
     });
     expect(fetchMock.mock.calls[3]?.[0]).toBe(
-      "http://localhost:4398/ai/models/registry/routes/42"
+      "http://localhost:62601/ai/models/registry/routes/42"
     );
     expect(fetchMock.mock.calls[3]?.[1]).toMatchObject({ method: "DELETE" });
     expect(fetchMock.mock.calls[4]?.[0]).toBe(
-      "http://localhost:4398/ai/models/health-check"
+      "http://localhost:62601/ai/models/health-check"
     );
     expect(fetchMock.mock.calls[4]?.[1]).toMatchObject({
       method: "POST",

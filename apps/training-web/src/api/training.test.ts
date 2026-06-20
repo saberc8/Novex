@@ -37,7 +37,7 @@ describe("training learning api", () => {
     await listTrainingLearningRecords({ scope: "self" });
 
     expect(fetchMock.mock.calls[0]?.[0]).toBe(
-      "http://localhost:4398/ai/training/learning-records?scope=self"
+      "http://localhost:62601/ai/training/learning-records?scope=self"
     );
     const init = fetchMock.mock.calls[0]?.[1] as RequestInit;
     expect((init.headers as Record<string, string>).Authorization).toBe("Bearer token-1");

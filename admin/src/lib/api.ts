@@ -1,7 +1,7 @@
 import { authHeader, clearToken } from "@/lib/auth";
 import type { ApiResponse } from "@/types/api";
 
-const DEFAULT_API_BASE_URL = "http://localhost:4398";
+const DEFAULT_API_BASE_URL = "http://localhost:62601";
 
 export interface RequestOptions extends Omit<RequestInit, "body"> {
   query?: Record<string, unknown>;

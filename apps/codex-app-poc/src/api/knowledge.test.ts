@@ -14,7 +14,7 @@ describe("knowledge api", () => {
     await listDatasets({ name: "Codex Workbench Inbox", page: 1, size: 10 });
 
     expect(fetchMock).toHaveBeenCalledWith(
-      "http://localhost:4398/ai/knowledge/datasets?name=Codex+Workbench+Inbox&page=1&size=10",
+      "http://localhost:62601/ai/knowledge/datasets?name=Codex+Workbench+Inbox&page=1&size=10",
       expect.objectContaining({ method: "GET" })
     );
   });
@@ -78,7 +78,7 @@ describe("knowledge api", () => {
     await getParseJob(7, 29);
 
     expect(fetchMock).toHaveBeenCalledWith(
-      "http://localhost:4398/ai/knowledge/datasets/7/parse-jobs/29",
+      "http://localhost:62601/ai/knowledge/datasets/7/parse-jobs/29",
       expect.objectContaining({ method: "GET" })
     );
   });

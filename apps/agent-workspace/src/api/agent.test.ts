@@ -71,7 +71,7 @@ describe("agent workspace api", () => {
       budget: { maxSteps: 6, maxToolCalls: 1 }
     });
 
-    expect(fetchMock.mock.calls[0]?.[0]).toBe("http://localhost:4398/ai/agents/runs");
+    expect(fetchMock.mock.calls[0]?.[0]).toBe("http://localhost:62601/ai/agents/runs");
     expect(fetchMock.mock.calls[0]?.[1]).toMatchObject({
       method: "POST",
       headers: expect.objectContaining({
@@ -98,12 +98,12 @@ describe("agent workspace api", () => {
     await cancelAgentRun(42);
 
     expect(fetchMock.mock.calls[0]?.[0]).toBe(
-      "http://localhost:4398/ai/agents/runs?page=1&size=20&status=waiting_approval"
+      "http://localhost:62601/ai/agents/runs?page=1&size=20&status=waiting_approval"
     );
     expect(fetchMock.mock.calls[1]?.[0]).toBe(
-      "http://localhost:4398/ai/agents/runs/42/events?page=1&size=100"
+      "http://localhost:62601/ai/agents/runs/42/events?page=1&size=100"
     );
-    expect(fetchMock.mock.calls[2]?.[0]).toBe("http://localhost:4398/ai/agents/runs/42/resume");
+    expect(fetchMock.mock.calls[2]?.[0]).toBe("http://localhost:62601/ai/agents/runs/42/resume");
     expect(fetchMock.mock.calls[2]?.[1]).toMatchObject({
       method: "POST",
       body: JSON.stringify({
@@ -111,7 +111,7 @@ describe("agent workspace api", () => {
         input: { source: "agent-workspace" }
       })
     });
-    expect(fetchMock.mock.calls[3]?.[0]).toBe("http://localhost:4398/ai/agents/runs/42/cancel");
+    expect(fetchMock.mock.calls[3]?.[0]).toBe("http://localhost:62601/ai/agents/runs/42/cancel");
     expect(fetchMock.mock.calls[3]?.[1]).toMatchObject({
       method: "POST"
     });
@@ -129,7 +129,7 @@ describe("agent workspace api", () => {
     });
 
     expect(fetchMock.mock.calls[0]?.[0]).toBe(
-      "http://localhost:4398/ai/agents/runs/42/events/stream?afterSequenceNo=9&batchSize=25&pollMs=500&maxIdleMs=30000"
+      "http://localhost:62601/ai/agents/runs/42/events/stream?afterSequenceNo=9&batchSize=25&pollMs=500&maxIdleMs=30000"
     );
     expect(fetchMock.mock.calls[0]?.[1]).toMatchObject({
       method: "GET",
@@ -155,7 +155,7 @@ describe("agent workspace api", () => {
       ticket: "ws-ticket-1",
       expiresInSeconds: 60
     });
-    expect(fetchMock.mock.calls[0]?.[0]).toBe("http://localhost:4398/ai/agents/runs/42/events/ws-ticket");
+    expect(fetchMock.mock.calls[0]?.[0]).toBe("http://localhost:62601/ai/agents/runs/42/events/ws-ticket");
     expect(fetchMock.mock.calls[0]?.[1]).toMatchObject({
       method: "POST",
       headers: expect.objectContaining({
@@ -171,7 +171,7 @@ describe("agent workspace api", () => {
     });
 
     expect(url).toBe(
-      "ws://localhost:4398/ai/agents/runs/42/events/ws?afterSequenceNo=9&batchSize=25&ticket=ws-ticket-1"
+      "ws://localhost:62601/ai/agents/runs/42/events/ws?afterSequenceNo=9&batchSize=25&ticket=ws-ticket-1"
     );
   });
 });

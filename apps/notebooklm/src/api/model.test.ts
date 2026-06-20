@@ -60,7 +60,7 @@ describe("chat model api", () => {
       maxTokens: 1024
     });
 
-    expect(fetchMock.mock.calls[0]?.[0]).toBe("http://localhost:4398/ai/models/chat");
+    expect(fetchMock.mock.calls[0]?.[0]).toBe("http://localhost:62601/ai/models/chat");
     expect(fetchMock.mock.calls[0]?.[1]).toMatchObject({
       method: "POST",
       headers: expect.objectContaining({
@@ -87,7 +87,7 @@ describe("chat model api", () => {
 
     await listChatConversations();
 
-    expect(fetchMock.mock.calls[0]?.[0]).toBe("http://localhost:4398/ai/models/chat/conversations");
+    expect(fetchMock.mock.calls[0]?.[0]).toBe("http://localhost:62601/ai/models/chat/conversations");
     expect(fetchMock.mock.calls[0]?.[1]).toMatchObject({
       method: "GET",
       headers: expect.objectContaining({
@@ -101,7 +101,7 @@ describe("chat model api", () => {
 
     await getModelRuntimeConfig();
 
-    expect(fetchMock.mock.calls[0]?.[0]).toBe("http://localhost:4398/ai/models/runtime-config");
+    expect(fetchMock.mock.calls[0]?.[0]).toBe("http://localhost:62601/ai/models/runtime-config");
     expect(fetchMock.mock.calls[0]?.[1]).toMatchObject({
       method: "GET",
       headers: expect.objectContaining({

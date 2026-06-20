@@ -62,9 +62,9 @@ describe("ai integration api wrappers", () => {
     await revokePublicLink(456);
 
     expect(fetchMock.mock.calls[0]?.[0]).toBe(
-      "http://localhost:4398/ai/integrations/api-keys?page=1&size=20&appId=training_app"
+      "http://localhost:62601/ai/integrations/api-keys?page=1&size=20&appId=training_app"
     );
-    expect(fetchMock.mock.calls[1]?.[0]).toBe("http://localhost:4398/ai/integrations/api-keys");
+    expect(fetchMock.mock.calls[1]?.[0]).toBe("http://localhost:62601/ai/integrations/api-keys");
     expect(fetchMock.mock.calls[1]?.[1]).toMatchObject({
       method: "POST",
       body: JSON.stringify({
@@ -76,11 +76,11 @@ describe("ai integration api wrappers", () => {
         expiresAt: "2026-12-31T00:00:00Z"
       })
     });
-    expect(fetchMock.mock.calls[2]?.[0]).toBe("http://localhost:4398/ai/integrations/api-keys/123/revoke");
+    expect(fetchMock.mock.calls[2]?.[0]).toBe("http://localhost:62601/ai/integrations/api-keys/123/revoke");
     expect(fetchMock.mock.calls[3]?.[0]).toBe(
-      "http://localhost:4398/ai/integrations/public-links?page=1&size=20&appId=training_app"
+      "http://localhost:62601/ai/integrations/public-links?page=1&size=20&appId=training_app"
     );
-    expect(fetchMock.mock.calls[4]?.[0]).toBe("http://localhost:4398/ai/integrations/public-links");
-    expect(fetchMock.mock.calls[5]?.[0]).toBe("http://localhost:4398/ai/integrations/public-links/456/revoke");
+    expect(fetchMock.mock.calls[4]?.[0]).toBe("http://localhost:62601/ai/integrations/public-links");
+    expect(fetchMock.mock.calls[5]?.[0]).toBe("http://localhost:62601/ai/integrations/public-links/456/revoke");
   });
 });

@@ -41,7 +41,7 @@ describe("training auth api", () => {
   it("loads image captcha before account login", async () => {
     await getImageCaptcha();
 
-    expect(fetchMock.mock.calls[0]?.[0]).toBe("http://localhost:4398/captcha/image");
+    expect(fetchMock.mock.calls[0]?.[0]).toBe("http://localhost:62601/captcha/image");
     expect(fetchMock.mock.calls[0]?.[1]).toMatchObject({
       method: "GET"
     });
@@ -62,7 +62,7 @@ describe("training auth api", () => {
       clientId: "novex-training-web"
     });
 
-    expect(fetchMock.mock.calls[0]?.[0]).toBe("http://localhost:4398/auth/login");
+    expect(fetchMock.mock.calls[0]?.[0]).toBe("http://localhost:62601/auth/login");
     expect(fetchMock.mock.calls[0]?.[1]).toMatchObject({
       method: "POST",
       headers: expect.objectContaining({

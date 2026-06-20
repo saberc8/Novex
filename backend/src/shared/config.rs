@@ -2,8 +2,13 @@ use std::env;
 
 use anyhow::{bail, Context, Result};
 
-const DEFAULT_CORS_ALLOWED_ORIGINS: &str =
-    "http://localhost:4399,http://127.0.0.1:4399,http://localhost:5173,http://127.0.0.1:5173";
+const DEFAULT_CORS_ALLOWED_ORIGINS: &str = concat!(
+    "http://localhost:62602,http://127.0.0.1:62602,",
+    "http://localhost:62603,http://127.0.0.1:62603,",
+    "http://localhost:62604,http://127.0.0.1:62604,",
+    "http://localhost:62605,http://127.0.0.1:62605,",
+    "http://localhost:62606,http://127.0.0.1:62606"
+);
 const JWT_SECRET_PLACEHOLDER: &str = "dev-only-change-me";
 const JWT_SECRET_MIN_LEN: usize = 32;
 
@@ -80,7 +85,7 @@ pub struct AppConfig {
 impl AppConfig {
     pub fn from_env() -> Result<Self> {
         let http_port = env::var("HTTP_PORT")
-            .unwrap_or_else(|_| "4398".to_owned())
+            .unwrap_or_else(|_| "62601".to_owned())
             .parse::<u16>()
             .context("HTTP_PORT must be a valid TCP port")?;
 
@@ -443,11 +448,13 @@ mod tests {
     }
 
     #[test]
-    fn default_cors_allowed_origins_include_nextjs_dev_port() {
+    fn default_cors_allowed_origins_include_poc_frontend_ports() {
         let origins = parse_cors_allowed_origins(DEFAULT_CORS_ALLOWED_ORIGINS);
 
-        assert!(origins.contains(&"http://localhost:4399".to_owned()));
-        assert!(origins.contains(&"http://127.0.0.1:4399".to_owned()));
+        for port in [62602, 62603, 62604, 62605, 62606] {
+            assert!(origins.contains(&format!("http://localhost:{port}")));
+            assert!(origins.contains(&format!("http://127.0.0.1:{port}")));
+        }
     }
 
     #[test]
@@ -456,8 +463,8 @@ mod tests {
         let env = std::fs::read_to_string(env_path).expect("read backend env schema");
 
         assert!(env.contains("CORS_ALLOWED_ORIGINS="));
-        assert!(env.contains("http://localhost:4413"));
-        assert!(env.contains("http://127.0.0.1:4413"));
+        assert!(env.contains("http://localhost:62606"));
+        assert!(env.contains("http://127.0.0.1:62606"));
     }
 
     #[test]

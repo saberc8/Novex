@@ -67,12 +67,12 @@ fn milestone_coverage() -> Vec<FoundationMilestoneCoverage> {
             id: "M1",
             name: "Knowledge Base MVP",
             status: "poc_limited",
-            summary: "Knowledge datasets, documents, parser contract, RAG query path, citations, trace, and training/chat-web pages are present.",
+            summary: "Knowledge datasets, documents, parser contract, RAG query path, citations, trace, and training-web/notebooklm pages are present.",
             evidence: vec![
                 "novex-rag runtime contracts",
                 "parser-worker sidecar contracts",
                 "Admin knowledge control plane",
-                "training-web and chat-web knowledge pages",
+                "training-web and notebooklm knowledge pages",
             ],
             limitations: vec![
                 "Milvus is wired through control-plane and compose metadata, while the live POC path still supports local/vector fallback when production vector storage is unavailable.",

@@ -86,7 +86,7 @@ describe("agent live smoke runner", () => {
     const result = await runAgentLiveSmoke({
       env: {
         NOVEX_LIVE_AGENT_SMOKE: "1",
-        NEXT_PUBLIC_API_BASE_URL: "http://localhost:4398",
+        NEXT_PUBLIC_API_BASE_URL: "http://localhost:62601",
         NEXT_PUBLIC_AGENT_MODEL_ROUTE_ID: "runtime.llm.code_agent",
         NOVEX_AGENT_SMOKE_TOKEN: "jwt-1",
         NOVEX_AGENT_SMOKE_MAX_POLLS: "1"
@@ -103,7 +103,7 @@ describe("agent live smoke runner", () => {
     });
     expect(fetchMock).toHaveBeenNthCalledWith(
       1,
-      "http://localhost:4398/ai/agents/runs",
+      "http://localhost:62601/ai/agents/runs",
       expect.objectContaining({
         method: "POST",
         headers: expect.objectContaining({
@@ -114,7 +114,7 @@ describe("agent live smoke runner", () => {
     );
     expect(fetchMock).toHaveBeenNthCalledWith(
       2,
-      "http://localhost:4398/ai/agents/runs/42/events?page=1&size=100",
+      "http://localhost:62601/ai/agents/runs/42/events?page=1&size=100",
       expect.objectContaining({
         method: "GET",
         headers: expect.objectContaining({

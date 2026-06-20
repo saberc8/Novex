@@ -41,7 +41,7 @@ describe("chat studio api", () => {
     await listStudioActions({ surface: "knowledge" });
 
     expect(fetchMock.mock.calls[0]?.[0]).toBe(
-      "http://localhost:4398/ai/studio/actions?surface=knowledge"
+      "http://localhost:62601/ai/studio/actions?surface=knowledge"
     );
     expect(fetchMock.mock.calls[0]?.[1]).toMatchObject({
       method: "GET"
@@ -54,7 +54,7 @@ describe("chat studio api", () => {
     await listDatasetStudioArtifacts(10);
 
     expect(fetchMock.mock.calls[0]?.[0]).toBe(
-      "http://localhost:4398/ai/knowledge/datasets/10/artifacts"
+      "http://localhost:62601/ai/knowledge/datasets/10/artifacts"
     );
     expect(fetchMock.mock.calls[0]?.[1]).toMatchObject({
       method: "GET",
@@ -75,7 +75,7 @@ describe("chat studio api", () => {
     });
 
     expect(fetchMock.mock.calls[0]?.[0]).toBe(
-      "http://localhost:4398/ai/knowledge/datasets/10/artifacts"
+      "http://localhost:62601/ai/knowledge/datasets/10/artifacts"
     );
     expect(fetchMock.mock.calls[0]?.[1]).toMatchObject({
       method: "POST",
@@ -98,7 +98,7 @@ describe("chat studio api", () => {
     await deleteStudioArtifact(8801);
 
     expect(fetchMock.mock.calls[0]?.[0]).toBe(
-      "http://localhost:4398/ai/studio/artifacts/8801"
+      "http://localhost:62601/ai/studio/artifacts/8801"
     );
     expect(fetchMock.mock.calls[0]?.[1]).toMatchObject({
       method: "DELETE",

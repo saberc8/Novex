@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "next dev -p 4413",
+    "dev": "next dev --webpack -p ${CODEX_APP_POC_PORT:-62606}",
     "build": "next build",
     "lint": "eslint .",
     "smoke:agent-live": "node scripts/agent-live-smoke.mjs",

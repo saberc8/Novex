@@ -54,10 +54,10 @@ describe("knowledge api wrappers", () => {
     await askDataset(7, { question: "When does training start?", limit: 3 });
 
     expect(fetchMock.mock.calls[0]?.[0]).toBe(
-      "http://localhost:4398/ai/knowledge/datasets?page=2&size=20&name=handbook&status=1"
+      "http://localhost:62601/ai/knowledge/datasets?page=2&size=20&name=handbook&status=1"
     );
     expect(fetchMock.mock.calls[0]?.[1]).toMatchObject({ method: "GET" });
-    expect(fetchMock.mock.calls[1]?.[0]).toBe("http://localhost:4398/ai/knowledge/datasets");
+    expect(fetchMock.mock.calls[1]?.[0]).toBe("http://localhost:62601/ai/knowledge/datasets");
     expect(fetchMock.mock.calls[1]?.[1]).toMatchObject({
       method: "POST",
       body: JSON.stringify({
@@ -68,10 +68,10 @@ describe("knowledge api wrappers", () => {
       })
     });
     expect(fetchMock.mock.calls[2]?.[0]).toBe(
-      "http://localhost:4398/ai/knowledge/datasets/7/documents?page=1&size=10"
+      "http://localhost:62601/ai/knowledge/datasets/7/documents?page=1&size=10"
     );
     expect(fetchMock.mock.calls[3]?.[0]).toBe(
-      "http://localhost:4398/ai/knowledge/datasets/7/documents/text"
+      "http://localhost:62601/ai/knowledge/datasets/7/documents/text"
     );
     expect(fetchMock.mock.calls[3]?.[1]).toMatchObject({
       method: "POST",
@@ -81,7 +81,7 @@ describe("knowledge api wrappers", () => {
         contentType: "text/plain"
       })
     });
-    expect(fetchMock.mock.calls[4]?.[0]).toBe("http://localhost:4398/ai/knowledge/datasets/7/ask");
+    expect(fetchMock.mock.calls[4]?.[0]).toBe("http://localhost:62601/ai/knowledge/datasets/7/ask");
     expect(fetchMock.mock.calls[4]?.[1]).toMatchObject({
       method: "POST",
       body: JSON.stringify({ question: "When does training start?", limit: 3 })

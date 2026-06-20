@@ -54,7 +54,7 @@ describe("training capability api", () => {
     });
 
     expect(fetchMock.mock.calls[0]?.[0]).toBe(
-      "http://localhost:4398/ai/capabilities/tools/dry-run"
+      "http://localhost:62601/ai/capabilities/tools/dry-run"
     );
     expect(fetchMock.mock.calls[0]?.[1]).toMatchObject({
       method: "POST",

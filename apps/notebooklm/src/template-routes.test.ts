@@ -2,7 +2,7 @@ import { existsSync } from "node:fs";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 
-describe("chat-web template routes", () => {
+describe("notebooklm template routes", () => {
   it("has Next page routes for the chat and knowledge template entry points", () => {
     const appDir = path.join(process.cwd(), "app");
 

@@ -26,7 +26,7 @@ const emptyJob: JobCommand = {
   maxRetry: 0,
   timeoutSeconds: 30,
   httpMethod: "POST",
-  httpUrl: "http://localhost:4398/health",
+  httpUrl: "http://localhost:62601/health",
   httpHeaders: {},
   httpBody: "",
   builtinKey: "",

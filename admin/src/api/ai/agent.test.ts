@@ -50,7 +50,7 @@ describe("agent api wrappers", () => {
     await resumeAgentRun(42, { approved: true, input: { note: "approved" } });
     await cancelAgentRun(42);
 
-    expect(fetchMock.mock.calls[0]?.[0]).toBe("http://localhost:4398/ai/agents/runs");
+    expect(fetchMock.mock.calls[0]?.[0]).toBe("http://localhost:62601/ai/agents/runs");
     expect(fetchMock.mock.calls[0]?.[1]).toMatchObject({
       method: "POST",
       body: JSON.stringify({
@@ -60,18 +60,18 @@ describe("agent api wrappers", () => {
       })
     });
     expect(fetchMock.mock.calls[1]?.[0]).toBe(
-      "http://localhost:4398/ai/agents/runs?page=1&size=20&status=waiting_approval"
+      "http://localhost:62601/ai/agents/runs?page=1&size=20&status=waiting_approval"
     );
-    expect(fetchMock.mock.calls[2]?.[0]).toBe("http://localhost:4398/ai/agents/runs/42");
+    expect(fetchMock.mock.calls[2]?.[0]).toBe("http://localhost:62601/ai/agents/runs/42");
     expect(fetchMock.mock.calls[3]?.[0]).toBe(
-      "http://localhost:4398/ai/agents/runs/42/events?page=1&size=100"
+      "http://localhost:62601/ai/agents/runs/42/events?page=1&size=100"
     );
-    expect(fetchMock.mock.calls[4]?.[0]).toBe("http://localhost:4398/ai/agents/runs/42/resume");
+    expect(fetchMock.mock.calls[4]?.[0]).toBe("http://localhost:62601/ai/agents/runs/42/resume");
     expect(fetchMock.mock.calls[4]?.[1]).toMatchObject({
       method: "POST",
       body: JSON.stringify({ approved: true, input: { note: "approved" } })
     });
-    expect(fetchMock.mock.calls[5]?.[0]).toBe("http://localhost:4398/ai/agents/runs/42/cancel");
+    expect(fetchMock.mock.calls[5]?.[0]).toBe("http://localhost:62601/ai/agents/runs/42/cancel");
     expect(fetchMock.mock.calls[5]?.[1]).toMatchObject({ method: "POST" });
   });
 });

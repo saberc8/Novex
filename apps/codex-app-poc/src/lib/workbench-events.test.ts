@@ -75,6 +75,29 @@ describe("workbench event summaries", () => {
     expect(summary.text).toContain("dry-run");
   });
 
+  it("summarizes failed web search evidence with the provider error", () => {
+    const summary = summarizeWorkbenchEvent(
+      event("observation", {
+        item: {
+          type: "tool_observation",
+          toolCode: "web.search",
+          output: {
+            dryRun: false,
+            status: "failed",
+            provider: "google_news_rss",
+            error: "web.search dispatch failed: error sending request"
+          }
+        }
+      })
+    );
+
+    expect(summary.kind).toBe("web_search");
+    expect(summary.title).toBe("Web search");
+    expect(summary.status).toBe("running");
+    expect(summary.text).toContain("google_news_rss");
+    expect(summary.text).toContain("error sending request");
+  });
+
   it("keeps raw fallback evidence readable", () => {
     const summary = summarizeWorkbenchEvent(event("unknown", { hello: "world" }));
 

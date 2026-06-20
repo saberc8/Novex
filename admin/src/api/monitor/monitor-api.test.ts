@@ -38,9 +38,9 @@ describe("monitor and profile api wrappers", () => {
     await kickout("token-1");
 
     expect(fetchMock.mock.calls[0]?.[0]).toBe(
-      "http://localhost:4398/monitor/online?page=1&size=20&nickname=admin&sort=loginTime%2Cdesc"
+      "http://localhost:62601/monitor/online?page=1&size=20&nickname=admin&sort=loginTime%2Cdesc"
     );
-    expect(fetchMock.mock.calls[1]?.[0]).toBe("http://localhost:4398/monitor/online/token-1");
+    expect(fetchMock.mock.calls[1]?.[0]).toBe("http://localhost:62601/monitor/online/token-1");
     expect(fetchMock.mock.calls[1]?.[1]).toMatchObject({ method: "DELETE" });
   });
 
@@ -50,19 +50,19 @@ describe("monitor and profile api wrappers", () => {
     await exportOperationLog({ module: "系统" });
 
     expect(fetchMock.mock.calls[0]?.[0]).toBe(
-      "http://localhost:4398/system/log?page=2&size=10&module=%E7%99%BB%E5%BD%95&status=1"
+      "http://localhost:62601/system/log?page=2&size=10&module=%E7%99%BB%E5%BD%95&status=1"
     );
-    expect(fetchMock.mock.calls[1]?.[0]).toBe("http://localhost:4398/system/log/9");
-    expect(fetchMock.mock.calls[2]?.[0]).toBe("http://localhost:4398/system/log/export/operation?module=%E7%B3%BB%E7%BB%9F");
+    expect(fetchMock.mock.calls[1]?.[0]).toBe("http://localhost:62601/system/log/9");
+    expect(fetchMock.mock.calls[2]?.[0]).toBe("http://localhost:62601/system/log/export/operation?module=%E7%B3%BB%E7%BB%9F");
   });
 
   it("uses profile update endpoints", async () => {
     await updateUserBaseInfo({ nickname: "管理员", gender: 1 });
     await updateUserPassword({ oldPassword: "old", newPassword: "new" });
 
-    expect(fetchMock.mock.calls[0]?.[0]).toBe("http://localhost:4398/user/profile/basic/info");
+    expect(fetchMock.mock.calls[0]?.[0]).toBe("http://localhost:62601/user/profile/basic/info");
     expect(fetchMock.mock.calls[0]?.[1]).toMatchObject({ method: "PATCH" });
-    expect(fetchMock.mock.calls[1]?.[0]).toBe("http://localhost:4398/user/profile/password");
+    expect(fetchMock.mock.calls[1]?.[0]).toBe("http://localhost:62601/user/profile/password");
     expect(fetchMock.mock.calls[1]?.[1]).toMatchObject({
       method: "PATCH",
       body: JSON.stringify({ oldPassword: "old", newPassword: "new" })

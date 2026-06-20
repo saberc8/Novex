@@ -92,29 +92,29 @@ describe("capability api wrappers", () => {
     await dryRunTool({ toolCode: "rag.search", input: { query: "hello" } });
     await listToolAudits({ page: 1, size: 5, toolCode: "rag.search" });
 
-    expect(fetchMock.mock.calls[0]?.[0]).toBe("http://localhost:4398/ai/capabilities/summary");
+    expect(fetchMock.mock.calls[0]?.[0]).toBe("http://localhost:62601/ai/capabilities/summary");
     expect(fetchMock.mock.calls[1]?.[0]).toBe(
-      "http://localhost:4398/ai/capabilities/skills?page=1&size=10"
+      "http://localhost:62601/ai/capabilities/skills?page=1&size=10"
     );
     expect(fetchMock.mock.calls[2]?.[0]).toBe(
-      "http://localhost:4398/ai/capabilities/tools?page=2&size=20&kind=media"
+      "http://localhost:62601/ai/capabilities/tools?page=2&size=20&kind=media"
     );
     expect(fetchMock.mock.calls[3]?.[0]).toBe(
-      "http://localhost:4398/ai/capabilities/connectors?status=1"
+      "http://localhost:62601/ai/capabilities/connectors?status=1"
     );
     expect(fetchMock.mock.calls[4]?.[0]).toBe(
-      "http://localhost:4398/ai/capabilities/connectors/credentials?connectorCode=github.default"
+      "http://localhost:62601/ai/capabilities/connectors/credentials?connectorCode=github.default"
     );
-    expect(fetchMock.mock.calls[5]?.[0]).toBe("http://localhost:4398/ai/capabilities/plugins");
+    expect(fetchMock.mock.calls[5]?.[0]).toBe("http://localhost:62601/ai/capabilities/plugins");
     expect(fetchMock.mock.calls[6]?.[0]).toBe(
-      "http://localhost:4398/ai/capabilities/plugins/installations?pluginCode=builtin.github-basic&enabled=true"
+      "http://localhost:62601/ai/capabilities/plugins/installations?pluginCode=builtin.github-basic&enabled=true"
     );
-    expect(fetchMock.mock.calls[7]?.[0]).toBe("http://localhost:4398/ai/capabilities/triggers");
+    expect(fetchMock.mock.calls[7]?.[0]).toBe("http://localhost:62601/ai/capabilities/triggers");
     expect(fetchMock.mock.calls[8]?.[0]).toBe(
-      "http://localhost:4398/ai/capabilities/mcp-servers?kind=tenant"
+      "http://localhost:62601/ai/capabilities/mcp-servers?kind=tenant"
     );
     expect(fetchMock.mock.calls[9]?.[0]).toBe(
-      "http://localhost:4398/ai/capabilities/connectors/credentials"
+      "http://localhost:62601/ai/capabilities/connectors/credentials"
     );
     expect(fetchMock.mock.calls[9]?.[1]).toMatchObject({
       method: "POST",
@@ -129,7 +129,7 @@ describe("capability api wrappers", () => {
       })
     });
     expect(fetchMock.mock.calls[10]?.[0]).toBe(
-      "http://localhost:4398/ai/capabilities/plugins/installations"
+      "http://localhost:62601/ai/capabilities/plugins/installations"
     );
     expect(fetchMock.mock.calls[10]?.[1]).toMatchObject({
       method: "POST",
@@ -142,7 +142,7 @@ describe("capability api wrappers", () => {
       })
     });
     expect(fetchMock.mock.calls[11]?.[0]).toBe(
-      "http://localhost:4398/ai/capabilities/mcp-servers"
+      "http://localhost:62601/ai/capabilities/mcp-servers"
     );
     expect(fetchMock.mock.calls[11]?.[1]).toMatchObject({
       method: "POST",
@@ -160,13 +160,13 @@ describe("capability api wrappers", () => {
         enabled: true
       })
     });
-    expect(fetchMock.mock.calls[12]?.[0]).toBe("http://localhost:4398/ai/capabilities/tools/dry-run");
+    expect(fetchMock.mock.calls[12]?.[0]).toBe("http://localhost:62601/ai/capabilities/tools/dry-run");
     expect(fetchMock.mock.calls[12]?.[1]).toMatchObject({
       method: "POST",
       body: JSON.stringify({ toolCode: "rag.search", input: { query: "hello" } })
     });
     expect(fetchMock.mock.calls[13]?.[0]).toBe(
-      "http://localhost:4398/ai/capabilities/tools/audits?page=1&size=5&toolCode=rag.search"
+      "http://localhost:62601/ai/capabilities/tools/audits?page=1&size=5&toolCode=rag.search"
     );
   });
 
@@ -177,7 +177,7 @@ describe("capability api wrappers", () => {
     await importSkill(formData);
 
     expect(fetchMock.mock.calls[0]?.[0]).toBe(
-      "http://localhost:4398/ai/capabilities/skills/import"
+      "http://localhost:62601/ai/capabilities/skills/import"
     );
     expect(fetchMock.mock.calls[0]?.[1]).toMatchObject({
       method: "POST",
@@ -198,7 +198,7 @@ describe("capability api wrappers", () => {
     await importSkillPackage(packageData);
 
     expect(fetchMock.mock.calls[0]?.[0]).toBe(
-      "http://localhost:4398/ai/capabilities/skills/import/preview"
+      "http://localhost:62601/ai/capabilities/skills/import/preview"
     );
     expect(fetchMock.mock.calls[0]?.[1]).toMatchObject({
       method: "POST",
@@ -207,7 +207,7 @@ describe("capability api wrappers", () => {
       })
     });
     expect(fetchMock.mock.calls[1]?.[0]).toBe(
-      "http://localhost:4398/ai/capabilities/skills/import/source"
+      "http://localhost:62601/ai/capabilities/skills/import/source"
     );
     expect(fetchMock.mock.calls[1]?.[1]).toMatchObject({
       method: "POST",
@@ -217,7 +217,7 @@ describe("capability api wrappers", () => {
       })
     });
     expect(fetchMock.mock.calls[2]?.[0]).toBe(
-      "http://localhost:4398/ai/capabilities/skills/import/package"
+      "http://localhost:62601/ai/capabilities/skills/import/package"
     );
     expect(fetchMock.mock.calls[2]?.[1]).toMatchObject({
       method: "POST",

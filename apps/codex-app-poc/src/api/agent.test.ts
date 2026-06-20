@@ -159,7 +159,7 @@ describe("codex poc agent api", () => {
     });
 
     expect(fetchMock).toHaveBeenCalledWith(
-      "http://localhost:4398/ai/agents/runs/7/events/stream?afterSequenceNo=4&batchSize=10",
+      "http://localhost:62601/ai/agents/runs/7/events/stream?afterSequenceNo=4&batchSize=10",
       expect.objectContaining({
         method: "GET",
         headers: expect.objectContaining({
@@ -201,7 +201,7 @@ describe("codex poc agent api", () => {
 
     expect(page.total).toBe(1);
     expect(fetchMock).toHaveBeenCalledWith(
-      "http://localhost:4398/ai/agents/runs/7/events?page=1&size=100",
+      "http://localhost:62601/ai/agents/runs/7/events?page=1&size=100",
       expect.objectContaining({
         method: "GET"
       })
@@ -229,7 +229,7 @@ describe("codex poc agent api", () => {
       expiresInSeconds: 60
     });
     expect(fetchMock).toHaveBeenCalledWith(
-      "http://localhost:4398/ai/agents/runs/7/events/ws-ticket",
+      "http://localhost:62601/ai/agents/runs/7/events/ws-ticket",
       expect.objectContaining({
         method: "POST",
         headers: expect.objectContaining({
@@ -246,7 +246,7 @@ describe("codex poc agent api", () => {
     });
 
     expect(url).toBe(
-      "ws://localhost:4398/ai/agents/runs/7/events/ws?afterSequenceNo=4&batchSize=10&ticket=ws-ticket-1"
+      "ws://localhost:62601/ai/agents/runs/7/events/ws?afterSequenceNo=4&batchSize=10&ticket=ws-ticket-1"
     );
   });
 });

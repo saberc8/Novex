@@ -55,7 +55,7 @@ describe("chat integration api", () => {
 
     await resolvePublicShare("nxl_public_token_1234");
 
-    expect(fetchMock.mock.calls[0]?.[0]).toBe("http://localhost:4398/share/nxl_public_token_1234");
+    expect(fetchMock.mock.calls[0]?.[0]).toBe("http://localhost:62601/share/nxl_public_token_1234");
     expect(fetchMock.mock.calls[0]?.[1]).toMatchObject({
       method: "GET"
     });

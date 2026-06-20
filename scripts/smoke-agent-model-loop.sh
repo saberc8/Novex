@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-BASE_URL="${BASE_URL:-http://localhost:4398}"
+BASE_URL="${BASE_URL:-http://localhost:62601}"
 TOKEN="${TOKEN:-}"
 
 if [[ -z "${TOKEN}" ]]; then
