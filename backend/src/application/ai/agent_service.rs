@@ -61,7 +61,10 @@ use crate::{
             RunEventRecord, RunEventSaveRecord, RunPauseSaveRecord, RunSaveRecord, RunStatusUpdate,
             RunStepSaveRecord,
         },
-        ai_capability_repository::{AiCapabilityRepository, ToolAuditSaveRecord, ToolLookupRecord},
+        ai_capability_repository::{
+            AiCapabilityRepository, CapabilityFilter, CapabilityRecord, CapabilityResource,
+            SkillResourceRecord, ToolAuditSaveRecord, ToolLookupRecord,
+        },
         ai_media_repository::{AiMediaRepository, MediaAssetSaveRecord, MediaJobSaveRecord},
         ai_memory_repository::{AiMemoryRepository, MemoryFilter, MemoryRecord},
     },
@@ -1065,6 +1068,51 @@ impl AgentService {
         .await
     }
 
+    async fn resolve_agent_skill_context(
+        &self,
+        context: Option<&AgentWorkbenchContext>,
+        question: &str,
+    ) -> Result<Option<String>, AppError> {
+        let Some(context) = context else {
+            return Ok(None);
+        };
+        if context.skill_codes.is_empty() {
+            return Ok(None);
+        }
+
+        let mut sections = Vec::new();
+        for skill_code in &context.skill_codes {
+            let mut records = self
+                .capability_repo
+                .list(
+                    CapabilityResource::Skill,
+                    &CapabilityFilter {
+                        tenant_id: self.tenant_id,
+                        status: Some(1),
+                        kind: Some(skill_code.as_str()),
+                        limit: 1,
+                        offset: 0,
+                    },
+                )
+                .await?;
+            let Some(record) = records.pop() else {
+                return Err(AppError::bad_request(format!(
+                    "Skill `{skill_code}` 不存在或已停用"
+                )));
+            };
+            let resources = self
+                .capability_repo
+                .list_skill_resources(self.tenant_id, record.id, None)
+                .await?;
+            sections.push(agent_skill_context_for_record(
+                &record, &resources, question,
+            ));
+        }
+
+        Ok((!sections.is_empty())
+            .then(|| preview_chars(&sections.join("\n\n---\n\n"), AGENT_SKILL_CONTEXT_CHARS)))
+    }
+
     async fn execute_model_loop_existing_run(
         &self,
         user_id: i64,
@@ -1097,6 +1145,9 @@ impl AgentService {
         let executor_registry = build_model_loop_tool_executor_registry()
             .map_err(tool_executor_registry_error_to_app_error)?;
         let tool_codes = tool_router.tool_codes();
+        let skill_context = self
+            .resolve_agent_skill_context(command.workbench_context.as_ref(), &command.input)
+            .await?;
         let mut last_tool_terminal_status = RunStatus::Succeeded;
 
         for _turn_index in 0..runtime_state.budget.max_turns {
@@ -1117,6 +1168,7 @@ impl AgentService {
                     &command.input,
                     &tool_codes,
                     command.workbench_context.as_ref(),
+                    skill_context.as_deref(),
                     &runtime_state.items,
                 );
                 let model_stream_call = self
@@ -3833,6 +3885,11 @@ fn normalize_agent_execution_mode(execution_mode: Option<String>) -> Result<Stri
 
 const WORKBENCH_CONTEXT_MAX_IDS: usize = 16;
 const WORKBENCH_CONTEXT_MAX_CODES: usize = 16;
+const AGENT_SKILL_CONTEXT_CHARS: usize = 8000;
+const AGENT_SKILL_MD_CHARS: usize = 2400;
+const AGENT_SKILL_METADATA_CHARS: usize = 1600;
+const AGENT_SKILL_REFERENCE_CHARS: usize = 1200;
+const AGENT_SKILL_REFERENCE_LIMIT: usize = 3;
 
 fn normalize_agent_workbench_context(
     context: Option<AgentWorkbenchContext>,
@@ -3964,6 +4021,7 @@ fn build_model_loop_system_prompt_for_date(
 fn build_model_loop_system_prompt_with_context(
     tool_codes: &[String],
     context: Option<&AgentWorkbenchContext>,
+    skill_context: Option<&str>,
 ) -> String {
     let mut prompt = build_model_loop_system_prompt(tool_codes);
     if let Some(context) = context {
@@ -4009,7 +4067,207 @@ fn build_model_loop_system_prompt_with_context(
         prompt.push(' ');
         prompt.push_str(&lines.join(" "));
     }
+    if let Some(skill_context) = skill_context
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        prompt.push(' ');
+        prompt.push_str("Loaded skill instructions:\n");
+        prompt.push_str(skill_context);
+    }
     prompt
+}
+
+fn agent_skill_context_for_record(
+    record: &CapabilityRecord,
+    resources: &[SkillResourceRecord],
+    question: &str,
+) -> String {
+    let mut parts = Vec::new();
+    parts.push(format!("Skill: {} ({})", record.name, record.code));
+
+    let skill_md = resources
+        .iter()
+        .find(|resource| {
+            resource.resource_type == "skill_md"
+                || resource.relative_path.eq_ignore_ascii_case("SKILL.md")
+        })
+        .and_then(|resource| resource.content_text.as_deref())
+        .or_else(|| record.metadata.get("skillMd").and_then(Value::as_str))
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    if let Some(skill_md) = skill_md {
+        parts.push(preview_chars(skill_md, AGENT_SKILL_MD_CHARS));
+    }
+
+    let metadata_instruction = agent_skill_metadata_instruction(record);
+    if !metadata_instruction.is_empty() {
+        parts.push(metadata_instruction);
+    }
+
+    if let Some(reference_instruction) = agent_skill_reference_instruction_for_question(
+        question,
+        resources,
+        AGENT_SKILL_REFERENCE_LIMIT,
+    ) {
+        parts.push(reference_instruction);
+    }
+
+    preview_chars(&parts.join("\n\n"), AGENT_SKILL_CONTEXT_CHARS)
+}
+
+fn agent_skill_metadata_instruction(record: &CapabilityRecord) -> String {
+    let mut parts = Vec::new();
+    push_json_instruction(&mut parts, &record.metadata, "systemPrompt");
+    push_json_instruction(&mut parts, &record.metadata, "instruction");
+    push_json_instruction(&mut parts, &record.metadata, "instructions");
+    push_json_instruction(&mut parts, &record.metadata, "prompt");
+    push_json_instruction(&mut parts, &record.metadata, "promptRules");
+    push_json_instruction(&mut parts, &record.metadata, "rules");
+    if parts.is_empty() && !record.description.trim().is_empty() {
+        parts.push(record.description.trim().to_owned());
+    }
+    preview_chars(&parts.join("\n"), AGENT_SKILL_METADATA_CHARS)
+}
+
+fn push_json_instruction(parts: &mut Vec<String>, metadata: &Value, key: &str) {
+    match metadata.get(key) {
+        Some(Value::String(value)) => {
+            let value = value.trim();
+            if !value.is_empty() {
+                parts.push(value.to_owned());
+            }
+        }
+        Some(Value::Array(values)) => {
+            for value in values {
+                if let Some(value) = value
+                    .as_str()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                {
+                    parts.push(format!("- {value}"));
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn agent_skill_reference_instruction_for_question(
+    question: &str,
+    resources: &[SkillResourceRecord],
+    limit: usize,
+) -> Option<String> {
+    if limit == 0 || question.trim().is_empty() {
+        return None;
+    }
+    let chunks = resources
+        .iter()
+        .filter(|resource| resource.resource_type == "reference")
+        .filter_map(|resource| {
+            let content_text = resource.content_text.as_deref()?.trim();
+            if content_text.is_empty() {
+                return None;
+            }
+            Some(agent_skill_reference_chunk(resource, content_text))
+        })
+        .collect::<Vec<_>>();
+    if chunks.is_empty() {
+        return None;
+    }
+    let hits = novex_rag::keyword_retrieve(question, &chunks, limit);
+    if hits.is_empty() {
+        return None;
+    }
+
+    let mut instruction =
+        "Relevant Skill References:\nUse these skill-local references only when they help the current run. Do not execute imported scripts or claim unavailable tools ran."
+            .to_owned();
+    let mut appended = false;
+    for hit in hits
+        .into_iter()
+        .filter(|hit| agent_skill_reference_has_relevant_overlap(question, &hit.chunk.text))
+    {
+        appended = true;
+        let path = hit
+            .chunk
+            .metadata
+            .source_file_name
+            .as_deref()
+            .unwrap_or(&hit.chunk.chunk_id);
+        instruction.push_str("\n\n[");
+        instruction.push_str(path);
+        instruction.push_str("]\n");
+        instruction.push_str(&preview_chars(&hit.chunk.text, AGENT_SKILL_REFERENCE_CHARS));
+    }
+    appended.then(|| preview_chars(&instruction, AGENT_SKILL_CONTEXT_CHARS))
+}
+
+fn agent_skill_reference_has_relevant_overlap(question: &str, text: &str) -> bool {
+    let query_terms = agent_skill_terms(question);
+    if query_terms.is_empty() {
+        return false;
+    }
+    let text_terms = agent_skill_terms(text);
+    query_terms.iter().any(|term| text_terms.contains(term))
+}
+
+fn agent_skill_terms(text: &str) -> BTreeSet<String> {
+    text.split(|character: char| !character.is_ascii_alphanumeric())
+        .map(str::trim)
+        .filter(|term| term.len() >= 3)
+        .map(|term| term.to_ascii_lowercase())
+        .map(|term| {
+            if term.len() > 4 && term.ends_with('s') {
+                term.trim_end_matches('s').to_owned()
+            } else {
+                term
+            }
+        })
+        .filter(|term| !AGENT_SKILL_STOP_WORDS.contains(&term.as_str()))
+        .collect()
+}
+
+const AGENT_SKILL_STOP_WORDS: &[&str] = &[
+    "the", "and", "for", "with", "that", "this", "can", "you", "your", "after", "before", "within",
+    "from", "into", "onto", "are", "was", "were", "has", "have", "had", "requires", "required",
+];
+
+fn agent_skill_reference_chunk(
+    resource: &SkillResourceRecord,
+    content_text: &str,
+) -> novex_rag::DocumentChunk {
+    let mut metadata = novex_rag::ChunkMetadata::default();
+    metadata.source_file_name = Some(resource.relative_path.clone());
+    metadata.source_title = Some(resource.relative_path.clone());
+    metadata.source_content_type = Some(resource.mime_type.clone());
+    novex_rag::DocumentChunk {
+        document_id: format!("skill-reference:{}", resource.skill_id),
+        chunk_id: resource.relative_path.clone(),
+        chunk_index: 0,
+        text: content_text.to_owned(),
+        semantic_search_text: format!("{}\n{}", resource.relative_path, content_text),
+        token_count: content_text.split_whitespace().count(),
+        citation: novex_rag::CitationRef {
+            document_id: format!("skill-reference:{}", resource.skill_id),
+            chunk_id: resource.relative_path.clone(),
+            page_no: None,
+            section_path: vec![],
+        },
+        metadata,
+    }
+}
+
+fn preview_chars(text: &str, limit: usize) -> String {
+    if text.chars().count() <= limit {
+        return text.to_owned();
+    }
+    let mut preview = text
+        .chars()
+        .take(limit.saturating_sub(3))
+        .collect::<String>();
+    preview.push_str("...");
+    preview
 }
 
 fn join_i64_values(values: &[i64]) -> String {
@@ -4443,11 +4701,16 @@ fn build_model_loop_messages_from_history(
     original_input: &str,
     tool_codes: &[String],
     workbench_context: Option<&AgentWorkbenchContext>,
+    skill_context: Option<&str>,
     history: &[AgentTurnItem],
 ) -> Vec<ModelChatMessage> {
     let mut messages = vec![ModelChatMessage {
         role: "system".to_owned(),
-        content: build_model_loop_system_prompt_with_context(tool_codes, workbench_context),
+        content: build_model_loop_system_prompt_with_context(
+            tool_codes,
+            workbench_context,
+            skill_context,
+        ),
     }];
     let original_user_input = history
         .iter()
@@ -5362,6 +5625,46 @@ mod tests {
         }
     }
 
+    fn test_capability_record(
+        id: i64,
+        code: &str,
+        name: &str,
+        description: &str,
+        metadata: Value,
+    ) -> crate::infrastructure::persistence::ai_capability_repository::CapabilityRecord {
+        crate::infrastructure::persistence::ai_capability_repository::CapabilityRecord {
+            id,
+            code: code.to_owned(),
+            name: name.to_owned(),
+            description: description.to_owned(),
+            kind: code.to_owned(),
+            status: 1,
+            risk_level: None,
+            metadata,
+            create_time: Utc::now().naive_utc(),
+        }
+    }
+
+    fn test_skill_resource_record(
+        skill_id: i64,
+        resource_type: &str,
+        relative_path: &str,
+        content_text: &str,
+    ) -> crate::infrastructure::persistence::ai_capability_repository::SkillResourceRecord {
+        crate::infrastructure::persistence::ai_capability_repository::SkillResourceRecord {
+            id: next_id(),
+            skill_id,
+            resource_type: resource_type.to_owned(),
+            relative_path: relative_path.to_owned(),
+            mime_type: "text/markdown".to_owned(),
+            content_text: Some(content_text.to_owned()),
+            storage_ref: None,
+            content_sha256: "test".to_owned(),
+            size_bytes: content_text.len() as i64,
+            metadata: Value::Null,
+        }
+    }
+
     fn test_executed_tool_call(prepared: PreparedAgentToolCall) -> ExecutedAgentToolCall {
         ExecutedAgentToolCall {
             prepared,
@@ -5701,6 +6004,7 @@ mod tests {
                 "mcp.docs.search".to_owned(),
             ],
             context.as_ref(),
+            None,
         );
 
         assert!(prompt.contains("Workbench context:"));
@@ -5709,6 +6013,79 @@ mod tests {
         assert!(prompt.contains("Selected MCP tool codes: mcp.docs.search"));
         assert!(prompt.contains("Web search is enabled; web.search may be used"));
         assert!(!prompt.contains("What changed in the handbook?"));
+    }
+
+    #[test]
+    fn model_loop_system_prompt_expands_selected_skill_instructions_and_references() {
+        let context = normalize_agent_workbench_context(Some(AgentWorkbenchContext {
+            mode: "agent".to_owned(),
+            dataset_id: None,
+            document_ids: vec![],
+            file_ids: vec![],
+            skill_codes: vec!["support.refund".to_owned()],
+            mcp_tool_codes: vec![],
+            web_search_enabled: false,
+            route_id: None,
+        }));
+        let skill_context = "Skill: Refund support (support.refund)\nCheck refund windows before suggesting escalation.\n\nRelevant Skill References:\n[references/policy.md]\nRefunds within 7 days can be self-served.";
+
+        let prompt = build_model_loop_system_prompt_with_context(
+            &["rag.search".to_owned()],
+            context.as_ref(),
+            Some(skill_context),
+        );
+
+        assert!(prompt.contains("Loaded skill instructions:"));
+        assert!(prompt.contains("Skill: Refund support (support.refund)"));
+        assert!(prompt.contains("Check refund windows before suggesting escalation."));
+        assert!(prompt.contains("references/policy.md"));
+        assert!(prompt.contains("Refunds within 7 days can be self-served."));
+    }
+
+    #[test]
+    fn agent_skill_context_uses_skill_md_and_relevant_references() {
+        let skill = test_capability_record(
+            7,
+            "support.refund",
+            "Refund support",
+            "Handle refund requests carefully.",
+            json!({
+                "promptRules": ["Never promise a refund before checking eligibility."]
+            }),
+        );
+        let resources = vec![
+            test_skill_resource_record(
+                7,
+                "skill_md",
+                "SKILL.md",
+                "name: support.refund\n---\nAlways ask for the order id first.",
+            ),
+            test_skill_resource_record(
+                7,
+                "reference",
+                "references/policy.md",
+                "Refunds within 7 days can be self-served. Escalate damaged goods.",
+            ),
+            test_skill_resource_record(
+                7,
+                "reference",
+                "references/unrelated.md",
+                "Enterprise invoice setup requires an admin seat.",
+            ),
+        ];
+
+        let context = agent_skill_context_for_record(
+            &skill,
+            &resources,
+            "Can I refund an order after 3 days?",
+        );
+
+        assert!(context.contains("Skill: Refund support (support.refund)"));
+        assert!(context.contains("Always ask for the order id first."));
+        assert!(context.contains("Never promise a refund before checking eligibility."));
+        assert!(context.contains("references/policy.md"));
+        assert!(context.contains("Refunds within 7 days"));
+        assert!(!context.contains("Enterprise invoice setup"));
     }
 
     #[test]
@@ -7420,7 +7797,7 @@ mod tests {
 
         assert!(source.contains("build_model_loop_messages_from_history"));
         assert!(normalized_source.contains(
-            "build_model_loop_messages_from_history( &command.input, &tool_codes, command.workbench_context.as_ref(), &runtime_state.items, )"
+            "build_model_loop_messages_from_history( &command.input, &tool_codes, command.workbench_context.as_ref(), skill_context.as_deref(), &runtime_state.items, )"
         ));
         assert!(!model_loop.contains("let mut messages = vec!"));
         assert!(!model_loop.contains("messages.push(ModelChatMessage"));
@@ -7456,6 +7833,7 @@ mod tests {
         let messages = build_model_loop_messages_from_history(
             "Find refund policy",
             &tool_codes,
+            None,
             None,
             &history,
         );
@@ -7496,6 +7874,7 @@ mod tests {
         let messages = build_model_loop_messages_from_history(
             "Find refund policy",
             &tool_codes,
+            None,
             None,
             &history,
         );

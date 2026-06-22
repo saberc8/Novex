@@ -20,11 +20,13 @@ describe("Codex app POC page", () => {
     render(<Page />);
 
     expect(screen.getByRole("heading", { name: "我们应该在当前项目中做些什么？" })).toBeTruthy();
-    expect(screen.getByRole("button", { name: "新对话" })).toBeTruthy();
-    expect(screen.getByRole("button", { name: "搜索" })).toBeTruthy();
-    expect(screen.getByRole("button", { name: "插件" })).toBeTruthy();
-    expect(screen.getByRole("button", { name: "自动化" })).toBeTruthy();
-    expect(screen.getByText("完全访问")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "新对话" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "搜索" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "插件" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "自动化" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "设置" })).toBeNull();
+    expect(screen.queryByText("完全访问")).toBeNull();
+    expect(screen.queryByRole("button", { name: "语音输入" })).toBeNull();
     expect(screen.getAllByText("novex-agent").length).toBeGreaterThan(0);
     expect(screen.getByText("暂无对话")).toBeTruthy();
     expect(screen.getByRole("button", { name: /选择模型 runtime\.llm/i })).toBeTruthy();
@@ -35,7 +37,7 @@ describe("Codex app POC page", () => {
     expect(screen.queryByText("Finish the one-command training-web POC launcher on main")).toBeNull();
   });
 
-  it("opens and closes the slash command menu from the composer", () => {
+  it("does not expose static slash commands that are not wired to runtime behavior", () => {
     vi.stubGlobal(
       "fetch",
       vi.fn(async () => ({
@@ -48,19 +50,8 @@ describe("Codex app POC page", () => {
     const input = screen.getByLabelText("任务输入");
     fireEvent.change(input, { target: { value: "/" } });
 
-    expect(screen.getByRole("listbox", { name: "命令菜单" })).toBeTruthy();
-    expect(screen.getByRole("option", { name: /MCP/ })).toBeTruthy();
-    expect(screen.getByRole("option", { name: /个性/ })).toBeTruthy();
-    expect(screen.getByRole("option", { name: /推理模式/ })).toBeTruthy();
-    expect(screen.getByRole("option", { name: /模型/ })).toBeTruthy();
-    expect(screen.getByRole("option", { name: /状态/ })).toBeTruthy();
-    expect(screen.getByRole("option", { name: /记忆/ })).toBeTruthy();
-
-    fireEvent.keyDown(input, { key: "ArrowDown" });
-    expect(screen.getByRole("option", { name: /个性/ }).getAttribute("aria-selected")).toBe("true");
-
-    fireEvent.keyDown(input, { key: "Escape" });
     expect(screen.queryByRole("listbox", { name: "命令菜单" })).toBeNull();
+    expect((input as HTMLTextAreaElement).value).toBe("/");
   });
 
   it("submits composer input as model loop agent run", async () => {
@@ -182,7 +173,7 @@ describe("Codex app POC page", () => {
     expect((await screen.findAllByText("Live model output")).length).toBeGreaterThan(0);
     expect(await screen.findByText("Hello world")).toBeTruthy();
     expect(await screen.findByText("输出")).toBeTruthy();
-    expect(await screen.findByText("浏览器")).toBeTruthy();
+    expect(screen.queryByText("浏览器")).toBeNull();
     expect(await screen.findByText("来源")).toBeTruthy();
     expect(screen.getAllByText("search policy").length).toBeGreaterThan(0);
     expect(screen.queryByText("Finish the one-command training-web POC launcher on main")).toBeNull();

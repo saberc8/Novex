@@ -2,30 +2,15 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
-  ArrowLeft,
-  ArrowRight,
   ArrowUp,
   Blocks,
   Check,
   ChevronDown,
-  Circle,
-  Clock3,
-  Copy,
-  ExternalLink,
   FileText,
   Folder,
   FolderGit2,
   Globe2,
-  ListFilter,
-  MessageCircle,
-  Mic,
-  MoreHorizontal,
-  PanelLeft,
   Plus,
-  Search,
-  Settings,
-  ShieldAlert,
-  SquarePen,
   Wrench
 } from "lucide-react";
 import { createConfiguredModelAgentRun, listAgentRunEvents } from "@/api/agent";
@@ -41,27 +26,6 @@ const CURRENT_PROJECT_NAME = "novex-agent";
 const DEFAULT_MODEL_ROUTE_ID = "runtime.llm";
 const PROJECT_STORAGE_KEY = "novex_codex_poc_projects_v1";
 const ACTIVE_PROJECT_STORAGE_KEY = "novex_codex_poc_active_project_v1";
-
-const navigationItems = [
-  { label: "新对话", icon: SquarePen, active: true },
-  { label: "搜索", icon: Search },
-  { label: "插件", icon: Blocks },
-  { label: "自动化", icon: Clock3 }
-];
-
-const commandItems = [
-  { name: "MCP", description: "显示 MCP 服务器状态", icon: Blocks },
-  { name: "个性", description: "选择 Agent 的回应方式", icon: Circle },
-  { name: "反馈", description: "发送有关此聊天的反馈", icon: MessageCircle },
-  { name: "宠物", description: "唤醒或收起桌面宠物", icon: PanelLeft },
-  { name: "推理模式", description: "按模型配置", icon: Settings },
-  { name: "模型", description: "选择模型路由", icon: FolderGit2 },
-  { name: "状态", description: "显示对话 ID、上下文使用情况及额度限制", icon: Clock3 },
-  { name: "目标", description: "设置 Agent 将持续努力实现的目标", icon: ShieldAlert },
-  { name: "聊天", description: "不在项目中工作", icon: MessageCircle },
-  { name: "计划模式", description: "开启计划模式", icon: SquarePen },
-  { name: "记忆", description: "使用开，生成开", icon: Blocks }
-];
 
 type ConversationSummary = {
   id: string;
@@ -178,35 +142,7 @@ function Sidebar({
 }) {
   return (
     <aside className="flex h-screen w-[306px] shrink-0 flex-col bg-[#F4F2F1] px-[18px] pb-5 pt-[18px] text-[15px] text-[#111111]">
-      <div className="mb-6 flex items-center justify-center gap-6 text-[#8A8A8A]">
-        <IconButton label="切换侧栏">
-          <PanelLeft aria-hidden="true" className="h-[18px] w-[18px]" strokeWidth={1.8} />
-        </IconButton>
-        <IconButton label="后退">
-          <ArrowLeft aria-hidden="true" className="h-[18px] w-[18px]" strokeWidth={1.8} />
-        </IconButton>
-        <IconButton label="前进">
-          <ArrowRight aria-hidden="true" className="h-[18px] w-[18px]" strokeWidth={1.8} />
-        </IconButton>
-      </div>
-
-      <nav aria-label="主导航" className="space-y-2">
-        {navigationItems.map((item) => (
-          <button
-            className={[
-              "flex h-9 w-full items-center gap-3 rounded-[10px] px-1.5 text-left text-[16px] font-medium transition-colors",
-              item.active ? "text-[#111111]" : "text-[#3f3b3b] hover:bg-[#EBE8E6]"
-            ].join(" ")}
-            key={item.label}
-            type="button"
-          >
-            <item.icon aria-hidden="true" className="h-[18px] w-[18px] shrink-0" strokeWidth={1.9} />
-            <span>{item.label}</span>
-          </button>
-        ))}
-      </nav>
-
-      <div className="mt-8 min-h-0 flex-1 overflow-hidden">
+      <div className="min-h-0 flex-1 overflow-hidden">
         <SidebarGroup
           action={
             <IconButton label="新建项目" onClick={onNewProject}>
@@ -251,11 +187,6 @@ function Sidebar({
           )}
         </SidebarGroup>
       </div>
-
-      <button className="mt-4 flex h-10 w-full items-center gap-3 rounded-[10px] px-1.5 text-left text-[16px] font-medium hover:bg-[#EBE8E6]" type="button">
-        <Settings aria-hidden="true" className="h-[19px] w-[19px]" strokeWidth={1.9} />
-        设置
-      </button>
     </aside>
   );
 }
@@ -321,8 +252,6 @@ function Workbench({
 }) {
   const [composerValue, setComposerValue] = useState("");
   const [composerError, setComposerError] = useState<string | null>(null);
-  const [isCommandMenuOpen, setIsCommandMenuOpen] = useState(false);
-  const [activeCommandIndex, setActiveCommandIndex] = useState(0);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [skills, setSkills] = useState<CapabilityItemResp[]>([]);
   const [mcpTools, setMcpTools] = useState<McpToolResp[]>([]);
@@ -352,7 +281,6 @@ function Workbench({
   useEffect(() => {
     setComposerValue("");
     setComposerError(null);
-    setIsCommandMenuOpen(false);
   }, [activeProject?.id]);
 
   useEffect(() => {
@@ -392,37 +320,6 @@ function Workbench({
 
   function handleComposerChange(value: string) {
     setComposerValue(value);
-    if (value.includes("/")) {
-      setIsCommandMenuOpen(true);
-      setActiveCommandIndex(0);
-    }
-  }
-
-  function handleComposerKeyDown(event: React.KeyboardEvent<HTMLTextAreaElement>) {
-    if (!isCommandMenuOpen) {
-      return;
-    }
-
-    if (event.key === "ArrowDown") {
-      event.preventDefault();
-      setActiveCommandIndex((current) => (current + 1) % commandItems.length);
-    }
-
-    if (event.key === "ArrowUp") {
-      event.preventDefault();
-      setActiveCommandIndex((current) => (current - 1 + commandItems.length) % commandItems.length);
-    }
-
-    if (event.key === "Escape") {
-      event.preventDefault();
-      setIsCommandMenuOpen(false);
-    }
-
-    if (event.key === "Enter") {
-      event.preventDefault();
-      setComposerValue(`/${commandItems[activeCommandIndex].name} `);
-      setIsCommandMenuOpen(false);
-    }
   }
 
   async function handleSubmit() {
@@ -448,7 +345,6 @@ function Workbench({
       runError: null
     };
     setComposerValue("");
-    setIsCommandMenuOpen(false);
     setIsSubmitting(true);
     setComposerError(null);
     onProjectUpdate(projectId, (project) => ({
@@ -556,16 +452,13 @@ function Workbench({
 
   const composer = (
     <ComposerSurface
-      activeCommandIndex={activeCommandIndex}
       capabilityError={capabilityError}
       compact={hasConversation}
       composerValue={composerValue}
-      isCommandMenuOpen={isCommandMenuOpen}
       isSubmitting={isSubmitting}
       mcpTools={mcpTools}
       modelOptions={modelOptions}
       onComposerChange={handleComposerChange}
-      onComposerKeyDown={handleComposerKeyDown}
       onModelSelect={setSelectedModelRouteId}
       onSubmit={handleSubmit}
       onToggleMcpTool={toggleMcpTool}
@@ -583,15 +476,12 @@ function Workbench({
 
   if (!hasConversation) {
     return (
-      <>
-        <TopRightControls />
-        <div className="mx-auto min-h-screen w-full max-w-[1180px] px-8 pb-12 pt-[22vh]">
-          <h1 className="text-center text-[30px] font-medium leading-tight text-[#111111]">
-            我们应该在当前项目中做些什么？
-          </h1>
-          <div className="mt-12">{composer}</div>
-        </div>
-      </>
+      <div className="mx-auto min-h-screen w-full max-w-[1180px] px-8 pb-12 pt-[22vh]">
+        <h1 className="text-center text-[30px] font-medium leading-tight text-[#111111]">
+          我们应该在当前项目中做些什么？
+        </h1>
+        <div className="mt-12">{composer}</div>
+      </div>
     );
   }
 
@@ -632,16 +522,13 @@ function Workbench({
 }
 
 function ComposerSurface({
-  activeCommandIndex,
   capabilityError,
   compact,
   composerValue,
-  isCommandMenuOpen,
   isSubmitting,
   mcpTools,
   modelOptions,
   onComposerChange,
-  onComposerKeyDown,
   onModelSelect,
   onSubmit,
   onToggleMcpTool,
@@ -655,16 +542,13 @@ function ComposerSurface({
   uploadedFiles,
   webSearchEnabled
 }: {
-  activeCommandIndex: number;
   capabilityError: string | null;
   compact: boolean;
   composerValue: string;
-  isCommandMenuOpen: boolean;
   isSubmitting: boolean;
   mcpTools: McpToolResp[];
   modelOptions: ModelRouteOption[];
   onComposerChange: (value: string) => void;
-  onComposerKeyDown: (event: React.KeyboardEvent<HTMLTextAreaElement>) => void;
   onModelSelect: (routeId: string) => void;
   onSubmit: () => void;
   onToggleMcpTool: (code: string) => void;
@@ -682,7 +566,6 @@ function ComposerSurface({
 
   return (
     <div className="relative w-full">
-      {isCommandMenuOpen ? <CommandMenu activeIndex={activeCommandIndex} /> : null}
       <div
         className={[
           "border border-[#DCDCDC] bg-white shadow-[0_14px_34px_rgba(17,17,17,0.06)]",
@@ -700,8 +583,7 @@ function ComposerSurface({
             ].join(" ")}
             id="task-input"
             onChange={(event) => onComposerChange(event.target.value)}
-            onKeyDown={onComposerKeyDown}
-            placeholder="描述你希望 Agent 在当前仓库中完成的任务，或输入 / 打开命令菜单"
+            placeholder="描述你希望 Agent 在当前仓库中完成的任务"
             value={composerValue}
           />
           <div className="mt-3 flex items-center justify-between gap-3">
@@ -722,14 +604,6 @@ function ComposerSurface({
                 ref={fileInputRef}
                 type="file"
               />
-              <button
-                className="inline-flex h-8 items-center gap-1.5 rounded-[9px] px-2 text-[15px] font-medium text-[#F97316] hover:bg-[#FFF3EA]"
-                type="button"
-              >
-                <ShieldAlert aria-hidden="true" className="h-[17px] w-[17px]" strokeWidth={2} />
-                完全访问
-                <ChevronDown aria-hidden="true" className="h-[15px] w-[15px]" strokeWidth={2} />
-              </button>
               <button
                 aria-checked={webSearchEnabled}
                 aria-label="Web search"
@@ -753,9 +627,6 @@ function ComposerSurface({
                 options={modelOptions}
                 selectedRouteId={selectedModelRouteId}
               />
-              <IconButton label="语音输入">
-                <Mic aria-hidden="true" className="h-[17px] w-[17px]" strokeWidth={1.9} />
-              </IconButton>
               <button
                 aria-label="发送"
                 className="flex h-[42px] w-[42px] items-center justify-center rounded-full bg-[#050505] text-white shadow-sm hover:bg-[#222222] disabled:cursor-not-allowed disabled:bg-[#B8B8B8]"
@@ -879,27 +750,9 @@ function ContextChipDock({
 
 function ConversationHeader({ title }: { title: string }) {
   return (
-    <header className="flex h-[62px] items-center justify-between border-b border-[#EFEFEF] px-6">
+    <header className="flex h-[62px] items-center border-b border-[#EFEFEF] px-6">
       <div className="flex min-w-0 items-center gap-3">
         <h1 className="min-w-0 truncate text-[17px] font-semibold text-[#111111]">{title}</h1>
-        <button
-          aria-label="更多会话操作"
-          className="flex h-8 w-8 items-center justify-center rounded-[8px] text-[#8A8A8A] hover:bg-[#F1F1F1] hover:text-[#111111]"
-          type="button"
-        >
-          <MoreHorizontal aria-hidden="true" className="h-[20px] w-[20px]" strokeWidth={1.9} />
-        </button>
-      </div>
-      <div className="flex items-center gap-3 text-[#8A8A8A]">
-        <IconButton label="视图">
-          <ListFilter aria-hidden="true" className="h-[18px] w-[18px]" strokeWidth={1.8} />
-        </IconButton>
-        <IconButton label="复制会话链接">
-          <ExternalLink aria-hidden="true" className="h-[18px] w-[18px]" strokeWidth={1.8} />
-        </IconButton>
-        <IconButton label="切换面板">
-          <PanelLeft aria-hidden="true" className="h-[18px] w-[18px]" strokeWidth={1.8} />
-        </IconButton>
       </div>
     </header>
   );
@@ -985,13 +838,6 @@ function ConversationTurnTranscript({
 
       {turn.runResult ? (
         <section className="mt-4 rounded-[10px] bg-[#EFEFEF] px-4 py-4 font-mono text-[14px] leading-6 text-[#333333]">
-          <div className="mb-3 flex items-center justify-between gap-2 text-[13px] text-[#6F6F6F]">
-            <span>text</span>
-            <div className="flex items-center gap-2">
-              <ArrowRight aria-hidden="true" className="h-4 w-4" strokeWidth={1.8} />
-              <Copy aria-hidden="true" className="h-4 w-4" strokeWidth={1.8} />
-            </div>
-          </div>
           <p className="whitespace-pre-wrap">
             {turn.runResult.finalOutput || `Agent run ${turn.runResult.status}`}
           </p>
@@ -1093,17 +939,6 @@ function OutputRail({
         </section>
 
         <section className="mt-5 border-t border-[#EFEFEF] pt-5">
-          <h2 className="mb-4 text-[15px] font-medium text-[#9A9A9A]">浏览器</h2>
-          <div className="flex min-w-0 items-center gap-3 text-[15px] text-[#333333]">
-            <Globe2 aria-hidden="true" className="h-[18px] w-[18px] shrink-0 text-[#444444]" strokeWidth={1.9} />
-            <div className="min-w-0">
-              <div className="truncate">Developer Agent Workbench</div>
-              <div className="truncate text-[12px] text-[#8A8A8A]">localhost:62606</div>
-            </div>
-          </div>
-        </section>
-
-        <section className="mt-5 border-t border-[#EFEFEF] pt-5">
           <h2 className="mb-4 text-[15px] font-medium text-[#9A9A9A]">来源</h2>
           <div className="flex flex-wrap gap-2">
             {sourceItems.map((source, index) => (
@@ -1193,34 +1028,6 @@ function ModelSelector({
   );
 }
 
-function CommandMenu({ activeIndex }: { activeIndex: number }) {
-  return (
-    <div
-      aria-label="命令菜单"
-      className="absolute bottom-[calc(100%+14px)] left-0 right-0 z-20 overflow-y-auto rounded-[26px] border border-[#E3E3E3] bg-white p-2 shadow-[0_18px_48px_rgba(17,17,17,0.12)]"
-      role="listbox"
-      style={{ maxHeight: "min(390px, calc(100vh - 580px))" }}
-    >
-      {commandItems.map((item, index) => (
-        <div
-          aria-label={item.name}
-          aria-selected={index === activeIndex}
-          className={[
-            "flex h-[54px] items-center gap-4 rounded-[18px] px-4 text-left transition-colors",
-            index === activeIndex ? "bg-[#F1F1F1]" : "hover:bg-[#F7F7F7]"
-          ].join(" ")}
-          key={item.name}
-          role="option"
-        >
-          <item.icon aria-hidden="true" className="h-[22px] w-[22px] shrink-0 text-[#6F6F6F]" strokeWidth={1.85} />
-          <span className="min-w-0 shrink-0 text-[20px] font-semibold text-[#111111]">{item.name}</span>
-          <span className="min-w-0 truncate text-[18px] text-[#8A8A8A]">{item.description}</span>
-        </div>
-      ))}
-    </div>
-  );
-}
-
 function IconButton({
   children,
   label,
@@ -1234,19 +1041,6 @@ function IconButton({
     <button aria-label={label} className="flex h-7 w-7 items-center justify-center rounded-[8px] text-[#8A8A8A] hover:bg-[#EDEDED] hover:text-[#111111]" onClick={onClick} type="button">
       {children}
     </button>
-  );
-}
-
-function TopRightControls() {
-  return (
-    <div className="pointer-events-none absolute right-7 top-5 z-10 flex items-center gap-4 text-[#8A8A8A]">
-      <div className="pointer-events-auto flex h-8 items-center gap-2 rounded-[12px] border border-[#E5E5E5] bg-white px-2 shadow-sm">
-        <span className="flex h-5 w-5 items-center justify-center rounded-[6px] bg-[#F7FAFF] text-[11px] font-semibold text-[#0A84FF]">V</span>
-        <ChevronDown aria-hidden="true" className="h-[14px] w-[14px]" strokeWidth={1.8} />
-      </div>
-      <Circle aria-hidden="true" className="h-[17px] w-[17px]" strokeWidth={1.8} />
-      <PanelLeft aria-hidden="true" className="h-[17px] w-[17px]" strokeWidth={1.8} />
-    </div>
   );
 }
 
