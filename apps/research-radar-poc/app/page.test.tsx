@@ -487,9 +487,9 @@ describe("Research Radar POC page", () => {
     });
     fireEvent.click(screen.getByRole("button", { name: "启动雷达扫描" }));
 
-    expect(await screen.findByText("Research Map")).toBeTruthy();
+    expect(await screen.findByText("研究图谱")).toBeTruthy();
     expect(await screen.findByRole("button", { name: /acme\/agent/ })).toBeTruthy();
-    expect(screen.getByRole("button", { name: "Evidence Drawer" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "证据抽屉" })).toBeTruthy();
     expect(await screen.findByText("leaderboards unavailable")).toBeTruthy();
     expect(calls.findIndex((url) => url.includes("/ai/research-radar/scans"))).toBeLessThan(
       calls.findIndex((url) => url.includes("/ai/agents/runs"))
@@ -679,14 +679,15 @@ describe("Research Radar POC page", () => {
     fireEvent.click(screen.getByRole("button", { name: "启动雷达扫描" }));
     fireEvent.click(await screen.findByRole("button", { name: /Workflow reliability/ }));
 
-    expect(await screen.findByText("Node Inspector")).toBeTruthy();
+    expect(await screen.findByText("节点详情")).toBeTruthy();
     expect(await screen.findByText("Execution consistency across long-horizon coding tasks.")).toBeTruthy();
-    expect(await screen.findByText("Connected evidence")).toBeTruthy();
+    expect(await screen.findByText("关联证据")).toBeTruthy();
     expect((await screen.findByRole("link", { name: /acme\/agent/ })).getAttribute("href")).toBe(
       "https://github.com/acme/agent"
     );
     expect((await screen.findAllByText("Source coverage is partial.")).length).toBeGreaterThan(0);
-    expect(await screen.findByText("Suggested next action")).toBeTruthy();
+    expect(await screen.findByText("来源链接")).toBeTruthy();
+    expect(await screen.findByText("建议下一步")).toBeTruthy();
   });
 
   it("keeps the source-derived graph and shows a model degradation fallback when the Agent run fails", async () => {
@@ -758,7 +759,7 @@ describe("Research Radar POC page", () => {
     });
     fireEvent.click(screen.getByRole("button", { name: "启动雷达扫描" }));
 
-    expect(await screen.findByText("Research Map")).toBeTruthy();
+    expect(await screen.findByText("研究图谱")).toBeTruthy();
     expect(await screen.findByRole("button", { name: /acme\/agent/ })).toBeTruthy();
     expect((await screen.findByRole("alert")).textContent).toContain("模型分析暂不可用");
   });
@@ -832,8 +833,93 @@ describe("Research Radar POC page", () => {
     });
     fireEvent.click(screen.getByRole("button", { name: "启动雷达扫描" }));
 
-    expect(await screen.findByText("Research Map")).toBeTruthy();
-    expect(await screen.findByText("No usable graph nodes")).toBeTruthy();
+    expect(await screen.findByText("研究图谱")).toBeTruthy();
+    expect(await screen.findByText("暂无可用图谱节点")).toBeTruthy();
     expect(await screen.findByText("leaderboards unavailable")).toBeTruthy();
+  });
+
+  it("switches graph surfaces to English after locale selection", async () => {
+    const fetchMock = vi.fn(async (url: string) => {
+      const href = String(url);
+      if (href.includes("/ai/research-radar/scans")) {
+        return {
+          ok: true,
+          json: async () => ({
+            code: "200",
+            data: {
+              topic: "AI coding agents",
+              ranking: "balanced",
+              status: "partial",
+              warnings: ["leaderboards unavailable"],
+              promptContext: "Research Radar Evidence\n[github] Project: acme/agent",
+              sources: [
+                {
+                  source: "github",
+                  status: "succeeded",
+                  warning: null,
+                  items: [
+                    {
+                      id: "github:acme/agent",
+                      source: "github",
+                      kind: "project",
+                      title: "acme/agent",
+                      url: "https://github.com/acme/agent",
+                      summary: "Agent workflows",
+                      authors: [],
+                      organization: null,
+                      publishedAt: null,
+                      updatedAt: "2026-06-01T00:00:00Z",
+                      metrics: [{ label: "stars", value: 1200 }],
+                      tags: ["agents"],
+                      metadata: {}
+                    }
+                  ]
+                },
+                {
+                  source: "leaderboards",
+                  status: "failed",
+                  warning: "leaderboards unavailable",
+                  items: []
+                }
+              ],
+              items: []
+            }
+          })
+        };
+      }
+      if (href.includes("/ai/agents/runs") && !href.includes("/events")) {
+        return {
+          ok: true,
+          json: async () => ({
+            code: "200",
+            data: {
+              runId: 91,
+              traceId: "agent-91",
+              status: "succeeded",
+              finalOutput: "## Research Overview\nReport"
+            }
+          })
+        };
+      }
+      if (href.includes("/events")) {
+        return {
+          ok: true,
+          json: async () => ({ code: "200", data: { list: [], total: 0 } })
+        };
+      }
+      return { ok: true, json: async () => ({ code: "200", data: {} }) };
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<Page />);
+
+    fireEvent.click(screen.getByRole("button", { name: "English" }));
+    fireEvent.change(screen.getByLabelText("Research topic"), {
+      target: { value: "AI coding agents" }
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Start radar scan" }));
+
+    expect(await screen.findByText("Research Map")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Evidence Drawer" })).toBeTruthy();
   });
 });

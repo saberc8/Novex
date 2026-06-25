@@ -97,6 +97,52 @@ describe("ResearchMap", () => {
     expect(screen.getByText("supports")).toBeTruthy();
   });
 
+  it("uses supplied Chinese map copy", () => {
+    render(
+      <ResearchMap
+        graph={graph}
+        selectedNodeId={null}
+        onNodeSelect={() => {}}
+        copy={{
+          title: "研究图谱",
+          description: "探索主题、证据、空白与实验之间的联系。",
+          graphLabel: "研究关系图",
+          nodeCount: (count) => `${count} 个节点`,
+          noUsableNodes: "暂无可用图谱节点",
+          noUsableNodesDescription: "覆盖受限时，来源警告和限制会显示在下方。",
+          caveats: "限制",
+          layers: {
+            papers: "论文",
+            people: "人物",
+            projects: "项目",
+            models: "模型",
+            datasets: "数据集",
+            benchmarks: "基准",
+            questions: "问题",
+            experiments: "实验"
+          },
+          nodeKinds: {
+            topic: "主题",
+            hotspot: "热点",
+            paper: "论文",
+            project: "项目",
+            model: "模型",
+            dataset: "数据集",
+            benchmark: "基准",
+            author: "作者",
+            institution: "机构",
+            open_question: "开放问题",
+            experiment: "实验"
+          }
+        }}
+      />
+    );
+
+    expect(screen.getByText("研究图谱")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "论文" })).toBeTruthy();
+    expect(screen.getByLabelText("研究关系图")).toBeTruthy();
+  });
+
   it("selects a node when clicked", () => {
     const onNodeSelect = vi.fn();
     render(<ResearchMap graph={graph} selectedNodeId={null} onNodeSelect={onNodeSelect} />);

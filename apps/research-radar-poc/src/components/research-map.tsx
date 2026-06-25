@@ -14,9 +14,9 @@ import {
   Users
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
+import type { ResearchMapCopy } from "@/lib/i18n";
 import type {
   ResearchGraph,
-  ResearchGraphLayer,
   ResearchGraphNode,
   ResearchGraphNodeKind
 } from "@/types/research";
@@ -25,9 +25,10 @@ export type ResearchMapProps = {
   graph: ResearchGraph;
   selectedNodeId: string | null;
   onNodeSelect: (nodeId: string) => void;
+  copy?: ResearchMapCopy;
 };
 
-type MapLayer = ResearchGraphLayer | "people";
+type MapLayer = keyof ResearchMapCopy["layers"];
 
 type PositionedNode = ResearchGraphNode & {
   x: number;
@@ -36,15 +37,15 @@ type PositionedNode = ResearchGraphNode & {
   category: "topic" | "hotspot" | "other";
 };
 
-const LAYERS: Array<{ layer: MapLayer; label: string; kinds: ResearchGraphNodeKind[] }> = [
-  { layer: "papers", label: "Papers", kinds: ["paper"] },
-  { layer: "people", label: "People", kinds: ["author", "institution"] },
-  { layer: "projects", label: "Projects", kinds: ["project"] },
-  { layer: "models", label: "Models", kinds: ["model"] },
-  { layer: "datasets", label: "Datasets", kinds: ["dataset"] },
-  { layer: "benchmarks", label: "Benchmarks", kinds: ["benchmark"] },
-  { layer: "questions", label: "Questions", kinds: ["open_question"] },
-  { layer: "experiments", label: "Experiments", kinds: ["experiment"] }
+const LAYERS: Array<{ layer: MapLayer; kinds: ResearchGraphNodeKind[] }> = [
+  { layer: "papers", kinds: ["paper"] },
+  { layer: "people", kinds: ["author", "institution"] },
+  { layer: "projects", kinds: ["project"] },
+  { layer: "models", kinds: ["model"] },
+  { layer: "datasets", kinds: ["dataset"] },
+  { layer: "benchmarks", kinds: ["benchmark"] },
+  { layer: "questions", kinds: ["open_question"] },
+  { layer: "experiments", kinds: ["experiment"] }
 ];
 
 const KIND_ICON: Record<ResearchGraphNodeKind, LucideIcon> = {
@@ -67,7 +68,45 @@ const CATEGORY_ORDER: Record<PositionedNode["category"], number> = {
   other: 2
 };
 
-export function ResearchMap({ graph, selectedNodeId, onNodeSelect }: ResearchMapProps) {
+const DEFAULT_MAP_COPY: ResearchMapCopy = {
+  title: "Research Map",
+  description: "Explore how topics, evidence, gaps, and experiments connect.",
+  graphLabel: "Research graph",
+  nodeCount: (count) => `${count} nodes`,
+  noUsableNodes: "No usable graph nodes",
+  noUsableNodesDescription: "Source warnings and caveats are listed below when coverage is limited.",
+  caveats: "Caveats",
+  layers: {
+    papers: "Papers",
+    people: "People",
+    projects: "Projects",
+    models: "Models",
+    datasets: "Datasets",
+    benchmarks: "Benchmarks",
+    questions: "Questions",
+    experiments: "Experiments"
+  },
+  nodeKinds: {
+    topic: "topic",
+    hotspot: "hotspot",
+    paper: "paper",
+    project: "project",
+    model: "model",
+    dataset: "dataset",
+    benchmark: "benchmark",
+    author: "author",
+    institution: "institution",
+    open_question: "open question",
+    experiment: "experiment"
+  }
+};
+
+export function ResearchMap({
+  graph,
+  selectedNodeId,
+  onNodeSelect,
+  copy = DEFAULT_MAP_COPY
+}: ResearchMapProps) {
   const [enabledLayers, setEnabledLayers] = useState<Set<MapLayer>>(
     () => new Set(LAYERS.map((layer) => layer.layer))
   );
@@ -86,15 +125,13 @@ export function ResearchMap({ graph, selectedNodeId, onNodeSelect }: ResearchMap
         <div className="min-w-0">
           <h3 className="flex items-center gap-2 text-[16px] font-semibold">
             <Network aria-hidden="true" className="h-4 w-4 text-[#0E6B5F]" strokeWidth={1.9} />
-            Research Map
+            {copy.title}
           </h3>
-          <p className="mt-1 text-[12px] text-[#6B776F]">
-            Explore how topics, evidence, gaps, and experiments connect.
-          </p>
+          <p className="mt-1 text-[12px] text-[#6B776F]">{copy.description}</p>
         </div>
 
         <div className="rounded-[7px] bg-[#EEF3ED] px-2 py-1 text-[12px] text-[#66736B]">
-          {graph.nodes.length} nodes
+          {copy.nodeCount(graph.nodes.length)}
         </div>
       </div>
 
@@ -126,7 +163,7 @@ export function ResearchMap({ graph, selectedNodeId, onNodeSelect }: ResearchMap
                     });
                   }}
                 >
-                  {layer.label}
+                  {copy.layers[layer.layer]}
                 </button>
               );
             })}
@@ -134,7 +171,7 @@ export function ResearchMap({ graph, selectedNodeId, onNodeSelect }: ResearchMap
 
           <div className="mt-5">
             <div
-              aria-label="Research graph"
+              aria-label={copy.graphLabel}
               className="relative aspect-[16/10] min-h-[420px] overflow-hidden rounded-[8px] border border-[#E4EBE4] bg-[#F9FBF8]"
             >
               <svg
@@ -213,7 +250,8 @@ export function ResearchMap({ graph, selectedNodeId, onNodeSelect }: ResearchMap
                   : node.category === "hotspot"
                     ? "#1F7C6D"
                     : "#4E6A85";
-                const title = `${node.title} - ${node.kind.replaceAll("_", " ")} - ${node.summary}`;
+                const nodeKind = copy.nodeKinds[node.kind];
+                const title = `${node.title} - ${nodeKind} - ${node.summary}`;
 
                 return (
                   <button
@@ -248,7 +286,7 @@ export function ResearchMap({ graph, selectedNodeId, onNodeSelect }: ResearchMap
                         {node.title}
                       </span>
                       <span className="block truncate text-[10px] uppercase tracking-[0.08em] text-[#6B776F]">
-                        {node.kind.replaceAll("_", " ")}
+                        {nodeKind}
                       </span>
                     </span>
                   </button>
@@ -259,16 +297,16 @@ export function ResearchMap({ graph, selectedNodeId, onNodeSelect }: ResearchMap
         </>
       ) : (
         <div className="mt-5 rounded-[8px] border border-dashed border-[#D7E0D7] bg-[#FBFCFA] px-4 py-5">
-          <p className="text-[14px] font-medium text-[#17251F]">No usable graph nodes</p>
+          <p className="text-[14px] font-medium text-[#17251F]">{copy.noUsableNodes}</p>
           <p className="mt-1 text-[12px] leading-5 text-[#6B776F]">
-            Source warnings and caveats are listed below when coverage is limited.
+            {copy.noUsableNodesDescription}
           </p>
         </div>
       )}
 
       {graph.caveats.length > 0 ? (
         <div className="mt-4 rounded-[8px] border border-[#E5ECE5] bg-[#FAFCF9] px-3 py-2 text-[12px] text-[#5F6B64]">
-          <span className="font-medium text-[#49564F]">Caveats:</span> {graph.caveats.join("; ")}
+          <span className="font-medium text-[#49564F]">{copy.caveats}:</span> {graph.caveats.join("; ")}
         </div>
       ) : null}
     </section>

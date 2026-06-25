@@ -291,11 +291,13 @@ export function ResearchRadarApp() {
         </section>
         <EvidenceRail
           activeScan={activeScan}
-          copy={copy}
+          copy={copy.evidence}
           eventEvidence={eventEvidence}
+          inspectorCopy={copy.inspector}
           modelDeltaSummary={modelDeltaSummary}
           researchGraph={researchGraph}
           selectedGraphNode={selectedGraphNode}
+          statusCopy={copy.status}
         />
       </div>
     </main>
@@ -597,6 +599,7 @@ function ReportWorkspace({
 
       {researchGraph ? (
         <ResearchMap
+          copy={copy.map}
           graph={researchGraph}
           onNodeSelect={onGraphNodeSelect}
           selectedNodeId={selectedGraphNodeId}
@@ -631,28 +634,34 @@ function ReportWorkspace({
         })}
       </div>
 
-      {activeScan.sourceScan ? <EvidenceDrawer sources={activeScan.sourceScan.sources} /> : null}
+      {activeScan.sourceScan ? (
+        <EvidenceDrawer copy={copy.drawer} sources={activeScan.sourceScan.sources} />
+      ) : null}
     </section>
   );
 }
 
-function EvidenceDrawer({ sources }: { sources: ResearchSourceResult[] }) {
+function EvidenceDrawer({
+  copy,
+  sources
+}: {
+  copy: ResearchRadarCopy["drawer"];
+  sources: ResearchSourceResult[];
+}) {
   const [open, setOpen] = useState(false);
 
   return (
     <section className="rounded-[8px] border border-[#DEE6DE] bg-white p-4">
       <button
-        aria-label="Evidence Drawer"
+        aria-label={copy.title}
         aria-expanded={open}
         className="flex w-full items-center justify-between gap-3 text-left"
         onClick={() => setOpen((value) => !value)}
         type="button"
       >
         <span>
-          <span className="block text-[15px] font-semibold text-[#17251F]">Evidence Drawer</span>
-          <span className="block text-[12px] text-[#6B776F]">
-            Raw API results and source warnings
-          </span>
+          <span className="block text-[15px] font-semibold text-[#17251F]">{copy.title}</span>
+          <span className="block text-[12px] text-[#6B776F]">{copy.description}</span>
         </span>
         <ChevronDown
           aria-hidden="true"
@@ -662,20 +671,26 @@ function EvidenceDrawer({ sources }: { sources: ResearchSourceResult[] }) {
       </button>
       {open ? (
         <div className="mt-4">
-          <SourceResults sources={sources} />
+          <SourceResults copy={copy} sources={sources} />
         </div>
       ) : null}
     </section>
   );
 }
 
-function SourceResults({ sources }: { sources: ResearchSourceResult[] }) {
+function SourceResults({
+  copy,
+  sources
+}: {
+  copy: ResearchRadarCopy["drawer"];
+  sources: ResearchSourceResult[];
+}) {
   if (sources.length === 0) {
     return (
       <section className="rounded-[8px] border border-[#DEE6DE] bg-white p-5">
-        <h3 className="text-[15px] font-semibold text-[#17251F]">Source Results</h3>
+        <h3 className="text-[15px] font-semibold text-[#17251F]">{copy.sourceResults}</h3>
         <p className="mt-3 rounded-[8px] border border-dashed border-[#D7E0D7] bg-[#FBFCFA] px-3 py-3 text-[13px] text-[#7A857E]">
-          Waiting for source evidence
+          {copy.waiting}
         </p>
       </section>
     );
@@ -685,26 +700,30 @@ function SourceResults({ sources }: { sources: ResearchSourceResult[] }) {
     <section className="rounded-[8px] border border-[#DEE6DE] bg-white p-5">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
-          <h3 className="text-[15px] font-semibold text-[#17251F]">Source Results</h3>
-          <p className="mt-1 text-[12px] text-[#6B776F]">
-            API evidence collected before the model report
-          </p>
+          <h3 className="text-[15px] font-semibold text-[#17251F]">{copy.sourceResults}</h3>
+          <p className="mt-1 text-[12px] text-[#6B776F]">{copy.sourceResultsDescription}</p>
         </div>
         <span className="rounded-[7px] bg-[#EEF3ED] px-2 py-1 text-[12px] text-[#66736B]">
-          {sources.reduce((total, source) => total + source.items.length, 0)} items
+          {copy.items(sources.reduce((total, source) => total + source.items.length, 0))}
         </span>
       </div>
 
       <div className="mt-4 divide-y divide-[#E8EEE8]">
         {sources.map((source) => (
-          <SourceResultRow key={source.source} source={source} />
+          <SourceResultRow copy={copy} key={source.source} source={source} />
         ))}
       </div>
     </section>
   );
 }
 
-function SourceResultRow({ source }: { source: ResearchSourceResult }) {
+function SourceResultRow({
+  copy,
+  source
+}: {
+  copy: ResearchRadarCopy["drawer"];
+  source: ResearchSourceResult;
+}) {
   const statusTone = sourceStatusTone(source.status);
 
   return (
@@ -726,7 +745,7 @@ function SourceResultRow({ source }: { source: ResearchSourceResult }) {
             {SOURCE_STATUS_LABELS[source.status] ?? source.status}
           </span>
           <span className="rounded-[7px] bg-[#EEF3ED] px-2 py-1 text-[#66736B]">
-            {source.items.length} items
+            {copy.items(source.items.length)}
           </span>
         </div>
       </div>
@@ -752,7 +771,7 @@ function SourceResultRow({ source }: { source: ResearchSourceResult }) {
                     </h5>
                   </div>
                   <p className="mt-1 line-clamp-2 text-[12px] leading-5 text-[#5B675F]">
-                    {item.summary || item.authors.slice(0, 3).join(", ") || item.organization || "No summary"}
+                    {item.summary || item.authors.slice(0, 3).join(", ") || item.organization || copy.noSummary}
                   </p>
                 </div>
                 {item.url ? (
@@ -775,7 +794,7 @@ function SourceResultRow({ source }: { source: ResearchSourceResult }) {
         </div>
       ) : (
         <p className="mt-3 rounded-[8px] border border-dashed border-[#D7E0D7] bg-[#FBFCFA] px-3 py-2 text-[12px] text-[#7A857E]">
-          No items returned
+          {copy.noItems}
         </p>
       )}
     </article>
@@ -813,33 +832,37 @@ function EvidenceRail({
   activeScan,
   copy,
   eventEvidence,
+  inspectorCopy,
   modelDeltaSummary,
   researchGraph,
-  selectedGraphNode
+  selectedGraphNode,
+  statusCopy
 }: {
   activeScan: ResearchScan | null;
-  copy: ResearchRadarCopy;
+  copy: ResearchRadarCopy["evidence"];
   eventEvidence: ResearchEventEvidence[];
+  inspectorCopy: ResearchRadarCopy["inspector"];
   modelDeltaSummary: ModelDeltaSummary | null;
   researchGraph: ResearchGraph | null;
   selectedGraphNode: ResearchGraphNodeDetails | null;
+  statusCopy: ResearchRadarCopy["status"];
 }) {
   return (
     <aside className="hidden min-h-screen bg-[#FAFBF8] px-5 py-5 xl:block">
       <div className="rounded-[8px] border border-[#E0E7E0] bg-white p-4 shadow-[0_10px_26px_rgba(34,45,38,0.06)]">
         <h2 className="mb-4 flex items-center gap-2 text-[14px] font-semibold text-[#59665F]">
           <Globe2 aria-hidden="true" className="h-4 w-4" strokeWidth={1.9} />
-          {copy.evidence.title}
+          {copy.title}
         </h2>
         {selectedGraphNode ? (
           <section className="mb-4 rounded-[8px] border border-[#D7E7FF] bg-[#F8FBFF] p-3">
-            <h2 className="text-[14px] font-semibold text-[#1D2B39]">Node Inspector</h2>
+            <h2 className="text-[14px] font-semibold text-[#1D2B39]">{inspectorCopy.title}</h2>
             <div className="mt-2 flex flex-wrap gap-1.5">
               <span className="rounded-[7px] bg-white px-2 py-0.5 text-[11px] text-[#53687F]">
-                kind {selectedGraphNode.node.kind}
+                {inspectorCopy.kind} {selectedGraphNode.node.kind}
               </span>
               <span className="rounded-[7px] bg-white px-2 py-0.5 text-[11px] text-[#53687F]">
-                importance {selectedGraphNode.node.importance.toFixed(2)}
+                {inspectorCopy.importance} {selectedGraphNode.node.importance.toFixed(2)}
               </span>
               <span className="rounded-[7px] bg-white px-2 py-0.5 text-[11px] text-[#53687F]">
                 evidence {selectedGraphNode.connectedNodes.length}
@@ -849,7 +872,7 @@ function EvidenceRail({
               {selectedGraphNode.node.title}
             </h3>
             <p className="mt-2 whitespace-pre-wrap text-[13px] leading-5 text-[#3D4841]">
-              {selectedGraphNode.node.summary || "No node summary available."}
+              {selectedGraphNode.node.summary || inspectorCopy.noSummary}
             </p>
             {selectedGraphNode.node.tags.length > 0 ? (
               <div className="mt-3 flex flex-wrap gap-1.5">
@@ -860,7 +883,7 @@ function EvidenceRail({
                 ))}
               </div>
             ) : null}
-            <InspectorSection title="Connected evidence">
+            <InspectorSection title={inspectorCopy.connectedEvidence}>
               {selectedGraphNode.connectedNodes.length > 0 ? (
                 <div className="space-y-2">
                   {selectedGraphNode.connectedNodes.slice(0, 6).map((connection) => (
@@ -886,7 +909,7 @@ function EvidenceRail({
                 <p className="text-[12px] text-[#5B675F]">No connected evidence yet.</p>
               )}
             </InspectorSection>
-            <InspectorSection title="Source links">
+            <InspectorSection title={inspectorCopy.sourceLinks}>
               {selectedGraphNode.sourceItems.length > 0 ? (
                 <div className="space-y-2">
                   {selectedGraphNode.sourceItems.slice(0, 6).map((item) => (
@@ -914,7 +937,7 @@ function EvidenceRail({
               )}
             </InspectorSection>
             {selectedGraphNode.caveats.length > 0 ? (
-              <InspectorSection title="Caveats">
+              <InspectorSection title={inspectorCopy.caveats}>
                 <ul className="space-y-1.5 text-[12px] leading-5 text-[#5B675F]">
                   {selectedGraphNode.caveats.slice(0, 4).map((caveat) => (
                     <li key={caveat}>{caveat}</li>
@@ -922,7 +945,7 @@ function EvidenceRail({
                 </ul>
               </InspectorSection>
             ) : null}
-            <InspectorSection title="Suggested next action">
+            <InspectorSection title={inspectorCopy.suggestedNextAction}>
               <p className="text-[12px] leading-5 text-[#3D4841]">
                 {selectedGraphNode.suggestedNextAction}
               </p>
@@ -930,25 +953,25 @@ function EvidenceRail({
           </section>
         ) : researchGraph ? (
           <p className="mb-4 rounded-[8px] border border-dashed border-[#D7E0D7] bg-[#FBFCFA] px-3 py-3 text-[13px] text-[#7A857E]">
-            Select a node in the research map
+            {inspectorCopy.selectNode}
           </p>
         ) : activeScan?.runResult ? (
           <div className="mb-4 grid grid-cols-2 gap-2">
-            <EvidenceMeta label={copy.evidence.run} value={`#${activeScan.runResult.runId}`} />
-            <EvidenceMeta label={copy.evidence.status} value={statusLabel(copy, activeScan.runResult.status)} />
-            <EvidenceMeta className="col-span-2" label={copy.evidence.trace} value={activeScan.runResult.traceId} />
+            <EvidenceMeta label={copy.run} value={`#${activeScan.runResult.runId}`} />
+            <EvidenceMeta label={copy.status} value={statusLabelFromValues(activeScan.runResult.status, statusCopy)} />
+            <EvidenceMeta className="col-span-2" label={copy.trace} value={activeScan.runResult.traceId} />
           </div>
         ) : (
           <p className="rounded-[8px] border border-dashed border-[#D7E0D7] bg-[#FBFCFA] px-3 py-3 text-[13px] text-[#7A857E]">
-            {copy.evidence.waiting}
+            {copy.waiting}
           </p>
         )}
 
         {modelDeltaSummary ? (
           <section className="mb-4 rounded-[8px] border border-[#D7E7FF] bg-[#F8FBFF] p-3">
             <div className="mb-2 flex items-center justify-between gap-2 text-[12px] text-[#53687F]">
-              <span className="font-semibold text-[#1D2B39]">{copy.evidence.liveModelOutput}</span>
-              <span>{modelDeltaSummary.chunkCount} {copy.evidence.chunks}</span>
+              <span className="font-semibold text-[#1D2B39]">{copy.liveModelOutput}</span>
+              <span>{modelDeltaSummary.chunkCount} {copy.chunks}</span>
             </div>
             <p className="whitespace-pre-wrap text-[13px] leading-5 text-[#263747]">
               {modelDeltaSummary.text}
@@ -1155,26 +1178,30 @@ function researchErrorMessage(copy: ResearchRadarCopy, error: ResearchUiError) {
 }
 
 function statusLabel(copy: ResearchRadarCopy, status: string) {
+  return statusLabelFromValues(status, copy.status);
+}
+
+function statusLabelFromValues(status: string, values: ResearchRadarCopy["status"]) {
   if (status === "ready") {
-    return copy.status.ready;
+    return values.ready;
   }
   if (status === "scanning") {
-    return copy.status.scanning;
+    return values.scanning;
   }
   if (status === "failed") {
-    return copy.status.failed;
+    return values.failed;
   }
   if (status === "pending") {
-    return copy.status.pending;
+    return values.pending;
   }
   if (status === "running") {
-    return copy.status.running;
+    return values.running;
   }
   if (status === "succeeded") {
-    return copy.status.succeeded;
+    return values.succeeded;
   }
   if (status === "limited") {
-    return copy.status.limited;
+    return values.limited;
   }
   return status;
 }

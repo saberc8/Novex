@@ -52,6 +52,34 @@ export function researchReportLanguageInstruction(locale: ResearchLocale) {
   return "请用中文撰写 markdown 报告。论文标题、项目名、数据集名、URL 和作者名保留原始语言";
 }
 
+type ResearchMapNodeKind =
+  | "topic"
+  | "hotspot"
+  | "paper"
+  | "project"
+  | "model"
+  | "dataset"
+  | "benchmark"
+  | "author"
+  | "institution"
+  | "open_question"
+  | "experiment";
+
+export type ResearchMapCopy = {
+  title: string;
+  description: string;
+  graphLabel: string;
+  nodeCount: (count: number) => string;
+  noUsableNodes: string;
+  noUsableNodesDescription: string;
+  caveats: string;
+  layers: Record<
+    "papers" | "people" | "projects" | "models" | "datasets" | "benchmarks" | "questions" | "experiments",
+    string
+  >;
+  nodeKinds: Record<ResearchMapNodeKind, string>;
+};
+
 export type ResearchRadarCopy = {
   status: {
     ready: string;
@@ -92,6 +120,17 @@ export type ResearchRadarCopy = {
     run: string;
     pendingModelOutput: string;
   };
+  map: ResearchMapCopy;
+  drawer: {
+    title: string;
+    description: string;
+    sourceResults: string;
+    sourceResultsDescription: string;
+    waiting: string;
+    items: (count: number) => string;
+    noItems: string;
+    noSummary: string;
+  };
   evidence: {
     title: string;
     waiting: string;
@@ -100,6 +139,17 @@ export type ResearchRadarCopy = {
     run: string;
     status: string;
     trace: string;
+  };
+  inspector: {
+    title: string;
+    kind: string;
+    importance: string;
+    noSummary: string;
+    connectedEvidence: string;
+    sourceLinks: string;
+    caveats: string;
+    suggestedNextAction: string;
+    selectNode: string;
   };
 };
 
@@ -156,6 +206,48 @@ export const RESEARCH_RADAR_COPY: Record<ResearchLocale, ResearchRadarCopy> = {
       run: "运行",
       pendingModelOutput: "等待模型输出"
     },
+    map: {
+      title: "研究图谱",
+      description: "探索主题、证据、空白与实验之间的联系。",
+      graphLabel: "研究关系图",
+      nodeCount: (count) => `${count} 个节点`,
+      noUsableNodes: "暂无可用图谱节点",
+      noUsableNodesDescription: "覆盖受限时，来源警告和限制会显示在下方。",
+      caveats: "限制",
+      layers: {
+        papers: "论文",
+        people: "人物",
+        projects: "项目",
+        models: "模型",
+        datasets: "数据集",
+        benchmarks: "基准",
+        questions: "问题",
+        experiments: "实验"
+      },
+      nodeKinds: {
+        topic: "主题",
+        hotspot: "热点",
+        paper: "论文",
+        project: "项目",
+        model: "模型",
+        dataset: "数据集",
+        benchmark: "基准",
+        author: "作者",
+        institution: "机构",
+        open_question: "开放问题",
+        experiment: "实验"
+      }
+    },
+    drawer: {
+      title: "证据抽屉",
+      description: "原始 API 结果和来源警告",
+      sourceResults: "来源结果",
+      sourceResultsDescription: "模型报告前收集的 API 证据",
+      waiting: "等待来源证据",
+      items: (count) => `${count} 条`,
+      noItems: "没有返回条目",
+      noSummary: "暂无摘要"
+    },
     evidence: {
       title: "证据",
       waiting: "等待扫描",
@@ -164,6 +256,17 @@ export const RESEARCH_RADAR_COPY: Record<ResearchLocale, ResearchRadarCopy> = {
       run: "运行",
       status: "状态",
       trace: "追踪"
+    },
+    inspector: {
+      title: "节点详情",
+      kind: "类型",
+      importance: "重要性",
+      noSummary: "暂无节点摘要。",
+      connectedEvidence: "关联证据",
+      sourceLinks: "来源链接",
+      caveats: "限制",
+      suggestedNextAction: "建议下一步",
+      selectNode: "在研究图谱中选择一个节点"
     }
   },
   "en-US": {
@@ -218,6 +321,48 @@ export const RESEARCH_RADAR_COPY: Record<ResearchLocale, ResearchRadarCopy> = {
       run: "Run",
       pendingModelOutput: "Pending model output"
     },
+    map: {
+      title: "Research Map",
+      description: "Explore how topics, evidence, gaps, and experiments connect.",
+      graphLabel: "Research graph",
+      nodeCount: (count) => `${count} nodes`,
+      noUsableNodes: "No usable graph nodes",
+      noUsableNodesDescription: "Source warnings and caveats are listed below when coverage is limited.",
+      caveats: "Caveats",
+      layers: {
+        papers: "Papers",
+        people: "People",
+        projects: "Projects",
+        models: "Models",
+        datasets: "Datasets",
+        benchmarks: "Benchmarks",
+        questions: "Questions",
+        experiments: "Experiments"
+      },
+      nodeKinds: {
+        topic: "topic",
+        hotspot: "hotspot",
+        paper: "paper",
+        project: "project",
+        model: "model",
+        dataset: "dataset",
+        benchmark: "benchmark",
+        author: "author",
+        institution: "institution",
+        open_question: "open question",
+        experiment: "experiment"
+      }
+    },
+    drawer: {
+      title: "Evidence Drawer",
+      description: "Raw API results and source warnings",
+      sourceResults: "Source Results",
+      sourceResultsDescription: "API evidence collected before the model report",
+      waiting: "Waiting for source evidence",
+      items: (count) => `${count} items`,
+      noItems: "No items returned",
+      noSummary: "No summary"
+    },
     evidence: {
       title: "Evidence",
       waiting: "Waiting for scan",
@@ -226,6 +371,17 @@ export const RESEARCH_RADAR_COPY: Record<ResearchLocale, ResearchRadarCopy> = {
       run: "run",
       status: "status",
       trace: "trace"
+    },
+    inspector: {
+      title: "Node Inspector",
+      kind: "kind",
+      importance: "importance",
+      noSummary: "No node summary available.",
+      connectedEvidence: "Connected evidence",
+      sourceLinks: "Source links",
+      caveats: "Caveats",
+      suggestedNextAction: "Suggested next action",
+      selectNode: "Select a node in the research map"
     }
   }
 };
