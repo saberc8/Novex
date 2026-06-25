@@ -35,6 +35,24 @@ describe("research radar i18n", () => {
     expect(storage.setItem).toHaveBeenCalledWith(RESEARCH_LOCALE_STORAGE_KEY, "zh-CN");
   });
 
+  it("falls back to Chinese when the default browser storage access throws", () => {
+    const originalWindow = window;
+    const failingWindow = {
+      get localStorage() {
+        throw new Error("blocked");
+      }
+    } as unknown as Window;
+
+    vi.stubGlobal("window", failingWindow);
+
+    try {
+      expect(readSavedResearchLocale()).toBe("zh-CN");
+      expect(() => saveResearchLocale("en-US")).not.toThrow();
+    } finally {
+      vi.stubGlobal("window", originalWindow);
+    }
+  });
+
   it("falls back to Chinese when storage has invalid values or throws", () => {
     expect(readSavedResearchLocale(memoryStorage({ [RESEARCH_LOCALE_STORAGE_KEY]: "bad" }))).toBe("zh-CN");
     expect(readSavedResearchLocale({
