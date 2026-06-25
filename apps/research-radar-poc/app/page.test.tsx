@@ -227,8 +227,9 @@ describe("Research Radar POC page", () => {
     });
     fireEvent.click(screen.getByRole("button", { name: "启动雷达扫描" }));
 
-    expect(await screen.findByText("Source Results")).toBeTruthy();
-    expect(await screen.findByText("acme/agent")).toBeTruthy();
+    expect(await screen.findByText("Research Map")).toBeTruthy();
+    expect(await screen.findByRole("button", { name: /acme\/agent/ })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Evidence Drawer" })).toBeTruthy();
     expect(await screen.findByText("leaderboards unavailable")).toBeTruthy();
     expect(calls.findIndex((url) => url.includes("/ai/research-radar/scans"))).toBeLessThan(
       calls.findIndex((url) => url.includes("/ai/agents/runs"))
@@ -273,5 +274,137 @@ describe("Research Radar POC page", () => {
 
     expect(await screen.findByText("all sources failed")).toBeTruthy();
     expect(fetchMock.mock.calls.some(([url]) => String(url).includes("/ai/agents/runs"))).toBe(false);
+  });
+
+  it("updates the right rail when a graph node is selected", async () => {
+    const fetchMock = vi.fn(async (url: string) => {
+      const href = String(url);
+      if (href.includes("/ai/research-radar/scans")) {
+        return {
+          ok: true,
+          json: async () => ({
+            code: "200",
+            data: {
+              topic: "AI coding agents",
+              ranking: "balanced",
+              status: "succeeded",
+              warnings: [],
+              promptContext: "Research Radar Evidence\n[github] Project: acme/agent",
+              sources: [
+                {
+                  source: "github",
+                  status: "succeeded",
+                  warning: null,
+                  items: [
+                    {
+                      id: "github:acme/agent",
+                      source: "github",
+                      kind: "project",
+                      title: "acme/agent",
+                      url: "https://github.com/acme/agent",
+                      summary: "Agent workflow runtime",
+                      authors: [],
+                      organization: "acme",
+                      publishedAt: null,
+                      updatedAt: "2026-06-01T00:00:00Z",
+                      metrics: [{ label: "stars", value: 1200 }],
+                      tags: ["workflow"],
+                      metadata: {}
+                    }
+                  ]
+                }
+              ],
+              items: []
+            }
+          })
+        };
+      }
+      if (href.includes("/ai/agents/runs") && !href.includes("/events")) {
+        return {
+          ok: true,
+          json: async () => ({
+            code: "200",
+            data: {
+              runId: 92,
+              traceId: "agent-92",
+              status: "succeeded",
+              finalOutput: [
+                "```research-graph-json",
+                JSON.stringify({
+                  topic: "AI coding agents",
+                  nodes: [
+                    {
+                      id: "topic:ai-coding-agents",
+                      kind: "topic",
+                      title: "AI coding agents",
+                      summary: "Coding-focused agent systems",
+                      importance: 1,
+                      sourceItemIds: [],
+                      tags: []
+                    },
+                    {
+                      id: "source:github:acme/agent",
+                      kind: "project",
+                      title: "acme/agent",
+                      summary: "Agent workflow runtime",
+                      importance: 0.8,
+                      sourceItemIds: ["github:acme/agent"],
+                      tags: ["workflow"]
+                    }
+                  ],
+                  edges: [
+                    {
+                      id: "topic:ai-coding-agents->source:github:acme/agent:implements",
+                      from: "topic:ai-coding-agents",
+                      to: "source:github:acme/agent",
+                      relation: "implements",
+                      evidenceItemIds: ["github:acme/agent"]
+                    }
+                  ],
+                  caveats: []
+                }),
+                "```",
+                "## Research Overview",
+                "Report",
+                "## Active Topics",
+                "Workflow reliability",
+                "## Key Authors And Institutions",
+                "acme",
+                "## Representative Work",
+                "acme/agent",
+                "## Reading Route",
+                "Start with workflow runtimes.",
+                "## Research Openings",
+                "- Better planning reliability",
+                "## Experiment Plans",
+                "- Compare workflow runtimes",
+                "## Sources And Caveats",
+                "Source coverage is partial."
+              ].join("\n")
+            }
+          })
+        };
+      }
+      if (href.includes("/events")) {
+        return {
+          ok: true,
+          json: async () => ({ code: "200", data: { list: [], total: 0 } })
+        };
+      }
+      return { ok: true, json: async () => ({ code: "200", data: {} }) };
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<Page />);
+
+    fireEvent.change(screen.getByLabelText("研究主题"), {
+      target: { value: "AI coding agents" }
+    });
+    fireEvent.click(screen.getByRole("button", { name: "启动雷达扫描" }));
+    fireEvent.click(await screen.findByRole("button", { name: /acme\/agent/ }));
+
+    expect(await screen.findByText("Node Inspector")).toBeTruthy();
+    expect(await screen.findByText("Agent workflow runtime")).toBeTruthy();
+    expect(await screen.findByText("project")).toBeTruthy();
   });
 });

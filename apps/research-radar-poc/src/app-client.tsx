@@ -26,7 +26,9 @@ import { listAgentRunEvents } from "@/api/agent";
 import { configuredModelRouteOptions, createResearchRadarRun } from "@/api/research";
 import { createResearchRadarSourceScan } from "@/api/source-scan";
 import { summarizeModelDeltas, summarizeResearchEvent } from "@/lib/agent-events";
+import { buildResearchGraph, nodeDetailsFor } from "@/lib/research-graph";
 import { parseResearchReport } from "@/lib/research-report";
+import { ResearchMap } from "@/components/research-map";
 import type { ModelDeltaSummary, ResearchEventEvidence } from "@/lib/agent-events";
 import type { AgentRunEventResp } from "@/types/agent";
 import type {
@@ -35,6 +37,8 @@ import type {
   ResearchFilter,
   ResearchRanking,
   ResearchScan,
+  ResearchGraph,
+  ResearchGraphNode,
   ResearchSource,
   ResearchSourceMetric,
   ResearchSourceResult,
@@ -98,12 +102,29 @@ export function ResearchRadarApp() {
   const [selectedRouteId, setSelectedRouteId] = useState(modelOptions[0]?.routeId ?? "runtime.llm");
   const [scans, setScans] = useState<ResearchScan[]>([]);
   const [activeScanId, setActiveScanId] = useState<string | null>(null);
+  const [selectedGraphNodeId, setSelectedGraphNodeId] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [composerError, setComposerError] = useState<string | null>(null);
   const activeScan = scans.find((scan) => scan.id === activeScanId) ?? scans[0] ?? null;
   const parsedReport = useMemo(
     () => parseResearchReport(activeScan?.runResult?.finalOutput ?? ""),
     [activeScan?.runResult?.finalOutput]
+  );
+  const researchGraph = useMemo(
+    () =>
+      activeScan && activeScan.sourceScan?.status !== "failed"
+        ? buildResearchGraph({
+            topic: activeScan.topic,
+            sourceScan: activeScan.sourceScan,
+            parsedReport,
+            finalOutput: activeScan.runResult?.finalOutput ?? ""
+          })
+        : null,
+    [activeScan, parsedReport]
+  );
+  const selectedGraphNode = useMemo(
+    () => (researchGraph && selectedGraphNodeId ? nodeDetailsFor(researchGraph, selectedGraphNodeId) : null),
+    [researchGraph, selectedGraphNodeId]
   );
   const eventEvidence = useMemo(
     () =>
@@ -140,6 +161,7 @@ export function ResearchRadarApp() {
 
     setScans((items) => [nextScan, ...items]);
     setActiveScanId(scanId);
+    setSelectedGraphNodeId(null);
     setComposerError(null);
     setIsSubmitting(true);
 
@@ -222,7 +244,10 @@ export function ResearchRadarApp() {
             <ReportWorkspace
               activeScan={activeScan}
               isSubmitting={isSubmitting}
+              onGraphNodeSelect={setSelectedGraphNodeId}
               parsedReport={parsedReport}
+              researchGraph={researchGraph}
+              selectedGraphNodeId={selectedGraphNodeId}
             />
           </div>
         </section>
@@ -230,6 +255,8 @@ export function ResearchRadarApp() {
           activeScan={activeScan}
           eventEvidence={eventEvidence}
           modelDeltaSummary={modelDeltaSummary}
+          researchGraph={researchGraph}
+          selectedGraphNode={selectedGraphNode}
         />
       </div>
     </main>
@@ -443,11 +470,17 @@ function RankingControl({
 function ReportWorkspace({
   activeScan,
   isSubmitting,
-  parsedReport
+  onGraphNodeSelect,
+  parsedReport,
+  researchGraph,
+  selectedGraphNodeId
 }: {
   activeScan: ResearchScan | null;
   isSubmitting: boolean;
+  onGraphNodeSelect: (nodeId: string) => void;
   parsedReport: ParsedResearchReport;
+  researchGraph: ResearchGraph | null;
+  selectedGraphNodeId: string | null;
 }) {
   if (!activeScan) {
     return (
@@ -496,7 +529,13 @@ function ReportWorkspace({
         </div>
       </div>
 
-      {activeScan.sourceScan ? <SourceResults sources={activeScan.sourceScan.sources} /> : null}
+      {researchGraph ? (
+        <ResearchMap
+          graph={researchGraph}
+          onNodeSelect={onGraphNodeSelect}
+          selectedNodeId={selectedGraphNodeId}
+        />
+      ) : null}
 
       {activeScan.runError ? (
         <p className="rounded-[8px] border border-[#F4C7C3] bg-[#FFF7F5] px-4 py-3 text-[14px] text-[#A33A2D]" role="alert">
@@ -525,6 +564,41 @@ function ReportWorkspace({
           );
         })}
       </div>
+
+      {activeScan.sourceScan ? <EvidenceDrawer sources={activeScan.sourceScan.sources} /> : null}
+    </section>
+  );
+}
+
+function EvidenceDrawer({ sources }: { sources: ResearchSourceResult[] }) {
+  const [open, setOpen] = useState(false);
+
+  return (
+    <section className="rounded-[8px] border border-[#DEE6DE] bg-white p-4">
+      <button
+        aria-label="Evidence Drawer"
+        aria-expanded={open}
+        className="flex w-full items-center justify-between gap-3 text-left"
+        onClick={() => setOpen((value) => !value)}
+        type="button"
+      >
+        <span>
+          <span className="block text-[15px] font-semibold text-[#17251F]">Evidence Drawer</span>
+          <span className="block text-[12px] text-[#6B776F]">
+            Raw API results and source warnings
+          </span>
+        </span>
+        <ChevronDown
+          aria-hidden="true"
+          className={["h-4 w-4 shrink-0 transition", open ? "rotate-180" : ""].join(" ")}
+          strokeWidth={1.9}
+        />
+      </button>
+      {open ? (
+        <div className="mt-4">
+          <SourceResults sources={sources} />
+        </div>
+      ) : null}
     </section>
   );
 }
@@ -672,11 +746,15 @@ function sourceStatusTone(status: ResearchSourceStatus) {
 function EvidenceRail({
   activeScan,
   eventEvidence,
-  modelDeltaSummary
+  modelDeltaSummary,
+  researchGraph,
+  selectedGraphNode
 }: {
   activeScan: ResearchScan | null;
   eventEvidence: ResearchEventEvidence[];
   modelDeltaSummary: ModelDeltaSummary | null;
+  researchGraph: ResearchGraph | null;
+  selectedGraphNode: ResearchGraphNode | null;
 }) {
   return (
     <aside className="hidden min-h-screen bg-[#FAFBF8] px-5 py-5 xl:block">
@@ -685,7 +763,38 @@ function EvidenceRail({
           <Globe2 aria-hidden="true" className="h-4 w-4" strokeWidth={1.9} />
           Evidence
         </h2>
-        {activeScan?.runResult ? (
+        {selectedGraphNode ? (
+          <section className="mb-4 rounded-[8px] border border-[#D7E7FF] bg-[#F8FBFF] p-3">
+            <h2 className="text-[14px] font-semibold text-[#1D2B39]">Node Inspector</h2>
+            <div className="mt-2 flex flex-wrap gap-1.5">
+              <span className="rounded-[7px] bg-white px-2 py-0.5 text-[11px] text-[#53687F]">
+                kind {selectedGraphNode.kind}
+              </span>
+              <span className="rounded-[7px] bg-white px-2 py-0.5 text-[11px] text-[#53687F]">
+                importance {selectedGraphNode.importance.toFixed(2)}
+              </span>
+            </div>
+            <h3 className="mt-3 text-[15px] font-semibold text-[#17251F]">
+              {selectedGraphNode.title}
+            </h3>
+            <p className="mt-2 whitespace-pre-wrap text-[13px] leading-5 text-[#3D4841]">
+              {selectedGraphNode.summary || "No node summary available."}
+            </p>
+            {selectedGraphNode.tags.length > 0 ? (
+              <div className="mt-3 flex flex-wrap gap-1.5">
+                {selectedGraphNode.tags.slice(0, 6).map((tag) => (
+                  <span className="rounded-[7px] bg-white px-2 py-0.5 text-[11px] text-[#53687F]" key={tag}>
+                    {tag}
+                  </span>
+                ))}
+              </div>
+            ) : null}
+          </section>
+        ) : researchGraph ? (
+          <p className="mb-4 rounded-[8px] border border-dashed border-[#D7E0D7] bg-[#FBFCFA] px-3 py-3 text-[13px] text-[#7A857E]">
+            Select a node in the research map
+          </p>
+        ) : activeScan?.runResult ? (
           <div className="mb-4 grid grid-cols-2 gap-2">
             <EvidenceMeta label="run" value={`#${activeScan.runResult.runId}`} />
             <EvidenceMeta label="status" value={activeScan.runResult.status} />
