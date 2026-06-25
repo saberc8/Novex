@@ -137,4 +137,17 @@ describe("ResearchMap", () => {
     expect(screen.getByRole("button", { name: /agent workflow/ })).toBeTruthy();
     expect(screen.getByRole("button", { name: /planning/ })).toBeTruthy();
   });
+
+  it("shows an empty state instead of a blank map when there are no usable nodes", () => {
+    render(
+      <ResearchMap
+        graph={{ topic: "agent workflow", nodes: [], edges: [], caveats: ["leaderboards unavailable"] }}
+        selectedNodeId={null}
+        onNodeSelect={() => {}}
+      />
+    );
+
+    expect(screen.getByText("No usable graph nodes")).toBeTruthy();
+    expect(screen.getByText("leaderboards unavailable")).toBeTruthy();
+  });
 });

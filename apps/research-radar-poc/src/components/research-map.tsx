@@ -72,6 +72,7 @@ export function ResearchMap({ graph, selectedNodeId, onNodeSelect }: ResearchMap
     () => new Set(LAYERS.map((layer) => layer.layer))
   );
 
+  const hasUsableNodes = graph.nodes.some((node) => node.kind !== "topic");
   const positionedNodes = useMemo(() => layoutGraph(graph.nodes), [graph.nodes]);
   const visibleNodes = positionedNodes.filter(
     (node) => node.category !== "other" || nodeVisibleForLayers(node, enabledLayers)
@@ -97,162 +98,173 @@ export function ResearchMap({ graph, selectedNodeId, onNodeSelect }: ResearchMap
         </div>
       </div>
 
-      <div className="mt-4 flex flex-wrap gap-2">
-        {LAYERS.map((layer) => {
-          const active = enabledLayers.has(layer.layer);
-          return (
-            <button
-              key={layer.layer}
-              type="button"
-              aria-pressed={active}
-              className={[
-                "inline-flex h-8 items-center rounded-[8px] border px-2.5 text-[12px] font-medium transition",
-                active
-                  ? "border-[#0E6B5F] bg-[#E9F7F3] text-[#0B5D53]"
-                  : "border-[#DDE5DD] bg-white text-[#66736B]"
-              ].join(" ")}
-              onClick={() => {
-                setEnabledLayers((current) => {
-                  const next = new Set(current);
-                  if (next.has(layer.layer)) {
-                    next.delete(layer.layer);
-                  } else {
-                    next.add(layer.layer);
-                  }
-                  return next;
-                });
-              }}
-            >
-              {layer.label}
-            </button>
-          );
-        })}
-      </div>
-
-      <div className="mt-5">
-        <div
-          aria-label="Research graph"
-          className="relative aspect-[16/10] min-h-[420px] overflow-hidden rounded-[8px] border border-[#E4EBE4] bg-[#F9FBF8]"
-        >
-          <svg
-            aria-hidden="true"
-            className="absolute inset-0 h-full w-full"
-            viewBox="0 0 1000 625"
-            preserveAspectRatio="none"
-          >
-            <defs>
-              <linearGradient id="research-map-edge" x1="0%" x2="100%" y1="0%" y2="0%">
-                <stop offset="0%" stopColor="#BFD4CB" />
-                <stop offset="100%" stopColor="#D9E3DA" />
-              </linearGradient>
-            </defs>
-            {visibleEdges.map((edge) => {
-              const from = positionedNodes.find((node) => node.id === edge.from);
-              const to = positionedNodes.find((node) => node.id === edge.to);
-              if (!from || !to) {
-                return null;
-              }
-
-              const midX = (from.x + to.x) / 2;
-              const midY = (from.y + to.y) / 2;
-              const angle = Math.atan2(to.y - from.y, to.x - from.x);
-
+      {hasUsableNodes ? (
+        <>
+          <div className="mt-4 flex flex-wrap gap-2">
+            {LAYERS.map((layer) => {
+              const active = enabledLayers.has(layer.layer);
               return (
-                <g key={edge.id}>
-                  <line
-                    x1={from.x}
-                    y1={from.y}
-                    x2={to.x}
-                    y2={to.y}
-                    stroke="url(#research-map-edge)"
-                    strokeWidth="2"
-                    strokeLinecap="round"
-                  />
-                  <circle
-                    cx={midX}
-                    cy={midY}
-                    r="12"
-                    fill="#F9FBF8"
-                    opacity="0.92"
-                    transform={`rotate(${(angle * 180) / Math.PI} ${midX} ${midY})`}
-                  />
-                </g>
+                <button
+                  key={layer.layer}
+                  type="button"
+                  aria-pressed={active}
+                  className={[
+                    "inline-flex h-8 items-center rounded-[8px] border px-2.5 text-[12px] font-medium transition",
+                    active
+                      ? "border-[#0E6B5F] bg-[#E9F7F3] text-[#0B5D53]"
+                      : "border-[#DDE5DD] bg-white text-[#66736B]"
+                  ].join(" ")}
+                  onClick={() => {
+                    setEnabledLayers((current) => {
+                      const next = new Set(current);
+                      if (next.has(layer.layer)) {
+                        next.delete(layer.layer);
+                      } else {
+                        next.add(layer.layer);
+                      }
+                      return next;
+                    });
+                  }}
+                >
+                  {layer.label}
+                </button>
               );
             })}
-          </svg>
+          </div>
 
-          {visibleEdges.map((edge) => {
-            const from = positionedNodes.find((node) => node.id === edge.from);
-            const to = positionedNodes.find((node) => node.id === edge.to);
-            if (!from || !to) {
-              return null;
-            }
-
-            return (
-              <span
-                key={`${edge.id}:label`}
-                className="pointer-events-none absolute -translate-x-1/2 -translate-y-1/2 rounded-full border border-[#DCE5DD] bg-white px-2 py-[2px] text-[10px] font-medium uppercase tracking-[0.08em] text-[#627068] shadow-[0_4px_10px_rgba(34,45,38,0.06)]"
-                style={{
-                  left: `${(from.x + to.x) / 2 / 10}%`,
-                  top: `${(from.y + to.y) / 2 / 6.25}%`
-                }}
+          <div className="mt-5">
+            <div
+              aria-label="Research graph"
+              className="relative aspect-[16/10] min-h-[420px] overflow-hidden rounded-[8px] border border-[#E4EBE4] bg-[#F9FBF8]"
+            >
+              <svg
+                aria-hidden="true"
+                className="absolute inset-0 h-full w-full"
+                viewBox="0 0 1000 625"
+                preserveAspectRatio="none"
               >
-                {edge.relation}
-              </span>
-            );
-          })}
+                <defs>
+                  <linearGradient id="research-map-edge" x1="0%" x2="100%" y1="0%" y2="0%">
+                    <stop offset="0%" stopColor="#BFD4CB" />
+                    <stop offset="100%" stopColor="#D9E3DA" />
+                  </linearGradient>
+                </defs>
+                {visibleEdges.map((edge) => {
+                  const from = positionedNodes.find((node) => node.id === edge.from);
+                  const to = positionedNodes.find((node) => node.id === edge.to);
+                  if (!from || !to) {
+                    return null;
+                  }
 
-          {visibleNodes.map((node) => {
-            const Icon = KIND_ICON[node.kind];
-            const selected = node.id === selectedNodeId;
-            const accent = node.category === "topic"
-              ? "#0E6B5F"
-              : node.category === "hotspot"
-                ? "#1F7C6D"
-                : "#4E6A85";
-            const title = `${node.title} - ${node.kind.replaceAll("_", " ")} - ${node.summary}`;
+                  const midX = (from.x + to.x) / 2;
+                  const midY = (from.y + to.y) / 2;
+                  const angle = Math.atan2(to.y - from.y, to.x - from.x);
 
-            return (
-              <button
-                key={node.id}
-                type="button"
-                aria-pressed={selected}
-                aria-label={node.title}
-                title={title}
-                className={[
-                  "absolute flex -translate-x-1/2 -translate-y-1/2 items-center gap-2 rounded-[8px] border px-3 py-2 text-left shadow-[0_8px_18px_rgba(34,45,38,0.08)] transition",
-                  selected
-                    ? "border-[#0E6B5F] bg-white ring-2 ring-[#BFE5DC]"
-                    : "border-[#DCE5DD] bg-white hover:border-[#B6C7BA]"
-                ].join(" ")}
-                style={{
-                  left: `${(node.x / 1000) * 100}%`,
-                  top: `${(node.y / 625) * 100}%`,
-                  minWidth: node.category === "topic" ? "186px" : "174px",
-                  zIndex: selected ? 3 : 2
-                }}
-                onClick={() => onNodeSelect(node.id)}
-              >
-                <span
-                  className="flex h-8 w-8 shrink-0 items-center justify-center rounded-[7px] text-white"
-                  style={{ backgroundColor: accent }}
-                  aria-hidden="true"
-                >
-                  <Icon className="h-4 w-4" strokeWidth={2} />
-                </span>
-                <span className="min-w-0">
-                  <span className="block truncate text-[12px] font-semibold text-[#17251F]">
-                    {node.title}
+                  return (
+                    <g key={edge.id}>
+                      <line
+                        x1={from.x}
+                        y1={from.y}
+                        x2={to.x}
+                        y2={to.y}
+                        stroke="url(#research-map-edge)"
+                        strokeWidth="2"
+                        strokeLinecap="round"
+                      />
+                      <circle
+                        cx={midX}
+                        cy={midY}
+                        r="12"
+                        fill="#F9FBF8"
+                        opacity="0.92"
+                        transform={`rotate(${(angle * 180) / Math.PI} ${midX} ${midY})`}
+                      />
+                    </g>
+                  );
+                })}
+              </svg>
+
+              {visibleEdges.map((edge) => {
+                const from = positionedNodes.find((node) => node.id === edge.from);
+                const to = positionedNodes.find((node) => node.id === edge.to);
+                if (!from || !to) {
+                  return null;
+                }
+
+                return (
+                  <span
+                    key={`${edge.id}:label`}
+                    className="pointer-events-none absolute -translate-x-1/2 -translate-y-1/2 rounded-full border border-[#DCE5DD] bg-white px-2 py-[2px] text-[10px] font-medium uppercase tracking-[0.08em] text-[#627068] shadow-[0_4px_10px_rgba(34,45,38,0.06)]"
+                    style={{
+                      left: `${(from.x + to.x) / 2 / 10}%`,
+                      top: `${(from.y + to.y) / 2 / 6.25}%`
+                    }}
+                  >
+                    {edge.relation}
                   </span>
-                  <span className="block truncate text-[10px] uppercase tracking-[0.08em] text-[#6B776F]">
-                    {node.kind.replaceAll("_", " ")}
-                  </span>
-                </span>
-              </button>
-            );
-          })}
+                );
+              })}
+
+              {visibleNodes.map((node) => {
+                const Icon = KIND_ICON[node.kind];
+                const selected = node.id === selectedNodeId;
+                const accent = node.category === "topic"
+                  ? "#0E6B5F"
+                  : node.category === "hotspot"
+                    ? "#1F7C6D"
+                    : "#4E6A85";
+                const title = `${node.title} - ${node.kind.replaceAll("_", " ")} - ${node.summary}`;
+
+                return (
+                  <button
+                    key={node.id}
+                    type="button"
+                    aria-pressed={selected}
+                    aria-label={node.title}
+                    title={title}
+                    className={[
+                      "absolute flex -translate-x-1/2 -translate-y-1/2 items-center gap-2 rounded-[8px] border px-3 py-2 text-left shadow-[0_8px_18px_rgba(34,45,38,0.08)] transition",
+                      selected
+                        ? "border-[#0E6B5F] bg-white ring-2 ring-[#BFE5DC]"
+                        : "border-[#DCE5DD] bg-white hover:border-[#B6C7BA]"
+                    ].join(" ")}
+                    style={{
+                      left: `${(node.x / 1000) * 100}%`,
+                      top: `${(node.y / 625) * 100}%`,
+                      minWidth: node.category === "topic" ? "186px" : "174px",
+                      zIndex: selected ? 3 : 2
+                    }}
+                    onClick={() => onNodeSelect(node.id)}
+                  >
+                    <span
+                      className="flex h-8 w-8 shrink-0 items-center justify-center rounded-[7px] text-white"
+                      style={{ backgroundColor: accent }}
+                      aria-hidden="true"
+                    >
+                      <Icon className="h-4 w-4" strokeWidth={2} />
+                    </span>
+                    <span className="min-w-0">
+                      <span className="block truncate text-[12px] font-semibold text-[#17251F]">
+                        {node.title}
+                      </span>
+                      <span className="block truncate text-[10px] uppercase tracking-[0.08em] text-[#6B776F]">
+                        {node.kind.replaceAll("_", " ")}
+                      </span>
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        </>
+      ) : (
+        <div className="mt-5 rounded-[8px] border border-dashed border-[#D7E0D7] bg-[#FBFCFA] px-4 py-5">
+          <p className="text-[14px] font-medium text-[#17251F]">No usable graph nodes</p>
+          <p className="mt-1 text-[12px] leading-5 text-[#6B776F]">
+            Source warnings and caveats are listed below when coverage is limited.
+          </p>
         </div>
-      </div>
+      )}
 
       {graph.caveats.length > 0 ? (
         <div className="mt-4 rounded-[8px] border border-[#E5ECE5] bg-[#FAFCF9] px-3 py-2 text-[12px] text-[#5F6B64]">

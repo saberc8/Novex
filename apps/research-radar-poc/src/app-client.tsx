@@ -164,6 +164,7 @@ export function ResearchRadarApp() {
     setSelectedGraphNodeId(null);
     setComposerError(null);
     setIsSubmitting(true);
+    let hasUsableSourceScan = false;
 
     try {
       const sourceScan = await createResearchRadarSourceScan({
@@ -172,6 +173,7 @@ export function ResearchRadarApp() {
         ranking
       });
       updateScan(scanId, { sourceScan });
+      hasUsableSourceScan = sourceScan.status !== "failed";
 
       if (sourceScan.status === "failed") {
         updateScan(scanId, {
@@ -197,7 +199,11 @@ export function ResearchRadarApp() {
       updateScan(scanId, { runResult, runEvents });
     } catch (error) {
       updateScan(scanId, {
-        runError: error instanceof Error ? error.message : "雷达扫描失败"
+        runError: hasUsableSourceScan
+          ? "model analysis unavailable"
+          : error instanceof Error
+            ? error.message
+            : "雷达扫描失败"
       });
     } finally {
       setIsSubmitting(false);

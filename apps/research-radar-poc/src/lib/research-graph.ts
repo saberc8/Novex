@@ -58,17 +58,30 @@ export function parseResearchGraphBlock(markdown: string): ResearchGraph | null 
 }
 
 export function buildResearchGraph(input: BuildResearchGraphInput): ResearchGraph {
+  const sourceDerivedGraph = buildSourceDerivedGraph(input);
   const parsed = parseResearchGraphBlock(input.finalOutput);
   if (parsed) {
-    return parsed;
+    const graph = {
+      ...parsed,
+      caveats: uniqueStrings([...parsed.caveats, ...sourceDerivedGraph.caveats])
+    };
+
+    if (hasUsableGraphNodes(graph) || !hasUsableGraphNodes(sourceDerivedGraph)) {
+      return graph;
+    }
   }
 
+  return sourceDerivedGraph;
+}
+
+export function nodeDetailsFor(graph: ResearchGraph, nodeId: string): ResearchGraphNode | null {
+  return graph.nodes.find((node) => node.id === nodeId) ?? null;
+}
+
+function buildSourceDerivedGraph(input: BuildResearchGraphInput): ResearchGraph {
   const topicNode = topicGraphNode(input.topic);
   const sourceItems = input.sourceScan?.sources.flatMap((source) => source.items) ?? [];
-  const caveats = uniqueStrings([
-    ...(input.sourceScan?.warnings ?? []),
-    ...(input.sourceScan?.sources.flatMap((source) => (source.warning ? [source.warning] : [])) ?? [])
-  ]);
+  const caveats = sourceGraphCaveats(input.sourceScan);
   const hotspots = buildHotspotNodes(input.topic, sourceItems);
   const evidenceNodes = sourceItems.map(sourceItemToNode);
   const reportNodes = reportDerivedNodes(input.parsedReport);
@@ -93,8 +106,15 @@ export function buildResearchGraph(input: BuildResearchGraphInput): ResearchGrap
   };
 }
 
-export function nodeDetailsFor(graph: ResearchGraph, nodeId: string): ResearchGraphNode | null {
-  return graph.nodes.find((node) => node.id === nodeId) ?? null;
+function sourceGraphCaveats(sourceScan?: ResearchSourceScanResp | null) {
+  return uniqueStrings([
+    ...(sourceScan?.warnings ?? []),
+    ...(sourceScan?.sources.flatMap((source) => (source.warning ? [source.warning] : [])) ?? [])
+  ]);
+}
+
+function hasUsableGraphNodes(graph: ResearchGraph) {
+  return graph.nodes.some((node) => node.kind !== "topic");
 }
 
 function normalizeGraph(value: unknown): ResearchGraph | null {

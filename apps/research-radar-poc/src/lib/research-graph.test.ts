@@ -134,6 +134,140 @@ describe("research graph", () => {
     expect(graph.caveats).toContain("Leaderboards: endpoints are not configured");
   });
 
+  it("preserves source caveats when model graph JSON parses successfully", () => {
+    const sourceScan: ResearchSourceScanResp = {
+      topic: "agent workflow",
+      ranking: "balanced",
+      status: "partial",
+      promptContext: "",
+      warnings: ["Leaderboards: endpoints are not configured"],
+      sources: [
+        {
+          source: "github",
+          status: "succeeded",
+          warning: null,
+          items: [
+            {
+              id: "github:agent",
+              source: "github",
+              kind: "project",
+              title: "acme/agent-workflow",
+              url: "https://github.com/acme/agent-workflow",
+              summary: "Open source workflow runtime for agents.",
+              authors: [],
+              organization: "acme",
+              publishedAt: null,
+              updatedAt: "2026-02-01",
+              metrics: [{ label: "stars", value: 1200 }],
+              tags: ["workflow"],
+              metadata: {}
+            }
+          ]
+        }
+      ],
+      items: []
+    };
+
+    const graph = buildResearchGraph({
+      topic: "agent workflow",
+      sourceScan,
+      parsedReport: { structured: false, sections: [] },
+      finalOutput: [
+        "```research-graph-json",
+        JSON.stringify({
+          topic: "agent workflow",
+          nodes: [
+            {
+              id: "topic:agent-workflow",
+              kind: "topic",
+              title: "agent workflow",
+              summary: "workflow orchestration for agents",
+              importance: 1,
+              sourceItemIds: [],
+              tags: []
+            },
+            {
+              id: "source:github:agent",
+              kind: "project",
+              title: "acme/agent-workflow",
+              summary: "Open source workflow runtime for agents.",
+              importance: 0.8,
+              sourceItemIds: ["github:agent"],
+              tags: ["workflow"]
+            }
+          ],
+          edges: [
+            {
+              id: "topic:agent-workflow->source:github:agent:implements",
+              from: "topic:agent-workflow",
+              to: "source:github:agent",
+              relation: "implements",
+              evidenceItemIds: ["github:agent"]
+            }
+          ],
+          caveats: ["model caveat"]
+        }),
+        "```"
+      ].join("\n")
+    });
+
+    expect(graph.caveats).toContain("model caveat");
+    expect(graph.caveats).toContain("Leaderboards: endpoints are not configured");
+  });
+
+  it("falls back to a source-derived graph when model graph JSON has no usable nodes", () => {
+    const sourceScan: ResearchSourceScanResp = {
+      topic: "agent workflow",
+      ranking: "balanced",
+      status: "succeeded",
+      promptContext: "",
+      warnings: [],
+      sources: [
+        {
+          source: "github",
+          status: "succeeded",
+          warning: null,
+          items: [
+            {
+              id: "github:agent",
+              source: "github",
+              kind: "project",
+              title: "acme/agent-workflow",
+              url: "https://github.com/acme/agent-workflow",
+              summary: "Open source workflow runtime for agents.",
+              authors: [],
+              organization: "acme",
+              publishedAt: null,
+              updatedAt: "2026-02-01",
+              metrics: [{ label: "stars", value: 1200 }],
+              tags: ["workflow"],
+              metadata: {}
+            }
+          ]
+        }
+      ],
+      items: []
+    };
+
+    const graph = buildResearchGraph({
+      topic: "agent workflow",
+      sourceScan,
+      parsedReport: { structured: false, sections: [] },
+      finalOutput: [
+        "```research-graph-json",
+        JSON.stringify({
+          topic: "agent workflow",
+          nodes: [],
+          edges: [],
+          caveats: []
+        }),
+        "```"
+      ].join("\n")
+    });
+
+    expect(graph.nodes.some((node) => node.kind === "project" && node.title === "acme/agent-workflow")).toBe(true);
+  });
+
   it("returns node details by id", () => {
     const graph = buildResearchGraph({
       topic: "agent workflow",

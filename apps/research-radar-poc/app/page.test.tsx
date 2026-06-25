@@ -407,4 +407,152 @@ describe("Research Radar POC page", () => {
     expect(await screen.findByText("Agent workflow runtime")).toBeTruthy();
     expect(await screen.findByText("project")).toBeTruthy();
   });
+
+  it("keeps the source-derived graph and shows a model degradation fallback when the Agent run fails", async () => {
+    const fetchMock = vi.fn(async (url: string) => {
+      const href = String(url);
+      if (href.includes("/ai/research-radar/scans")) {
+        return {
+          ok: true,
+          json: async () => ({
+            code: "200",
+            data: {
+              topic: "AI coding agents",
+              ranking: "balanced",
+              status: "partial",
+              warnings: ["leaderboards unavailable"],
+              promptContext: "Research Radar Evidence\n[github] Project: acme/agent",
+              sources: [
+                {
+                  source: "github",
+                  status: "succeeded",
+                  warning: null,
+                  items: [
+                    {
+                      id: "github:acme/agent",
+                      source: "github",
+                      kind: "project",
+                      title: "acme/agent",
+                      url: "https://github.com/acme/agent",
+                      summary: "Agent workflow runtime",
+                      authors: [],
+                      organization: "acme",
+                      publishedAt: null,
+                      updatedAt: "2026-06-01T00:00:00Z",
+                      metrics: [{ label: "stars", value: 1200 }],
+                      tags: ["workflow"],
+                      metadata: {}
+                    }
+                  ]
+                },
+                {
+                  source: "leaderboards",
+                  status: "failed",
+                  warning: "leaderboards unavailable",
+                  items: []
+                }
+              ],
+              items: []
+            }
+          })
+        };
+      }
+      if (href.includes("/ai/agents/runs") && !href.includes("/events")) {
+        return {
+          ok: false,
+          json: async () => ({
+            code: "500",
+            msg: "arbitrary backend failure"
+          })
+        };
+      }
+      return { ok: true, json: async () => ({ code: "200", data: {} }) };
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<Page />);
+
+    fireEvent.change(screen.getByLabelText("研究主题"), {
+      target: { value: "AI coding agents" }
+    });
+    fireEvent.click(screen.getByRole("button", { name: "启动雷达扫描" }));
+
+    expect(await screen.findByText("Research Map")).toBeTruthy();
+    expect(await screen.findByRole("button", { name: /acme\/agent/ })).toBeTruthy();
+    expect((await screen.findByRole("alert")).textContent).toContain("model analysis unavailable");
+  });
+
+  it("shows a clear empty graph state with source warnings when the model graph has no usable nodes", async () => {
+    const fetchMock = vi.fn(async (url: string) => {
+      const href = String(url);
+      if (href.includes("/ai/research-radar/scans")) {
+        return {
+          ok: true,
+          json: async () => ({
+            code: "200",
+            data: {
+              topic: "AI coding agents",
+              ranking: "balanced",
+              status: "partial",
+              warnings: ["leaderboards unavailable"],
+              promptContext: "Research Radar Evidence\nNo usable source items",
+              sources: [
+                {
+                  source: "leaderboards",
+                  status: "failed",
+                  warning: "leaderboards unavailable",
+                  items: []
+                }
+              ],
+              items: []
+            }
+          })
+        };
+      }
+      if (href.includes("/ai/agents/runs") && !href.includes("/events")) {
+        return {
+          ok: true,
+          json: async () => ({
+            code: "200",
+            data: {
+              runId: 93,
+              traceId: "agent-93",
+              status: "succeeded",
+              finalOutput: [
+                "```research-graph-json",
+                JSON.stringify({
+                  topic: "AI coding agents",
+                  nodes: [],
+                  edges: [],
+                  caveats: []
+                }),
+                "```",
+                "## Research Overview",
+                "Report"
+              ].join("\n")
+            }
+          })
+        };
+      }
+      if (href.includes("/events")) {
+        return {
+          ok: true,
+          json: async () => ({ code: "200", data: { list: [], total: 0 } })
+        };
+      }
+      return { ok: true, json: async () => ({ code: "200", data: {} }) };
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<Page />);
+
+    fireEvent.change(screen.getByLabelText("研究主题"), {
+      target: { value: "AI coding agents" }
+    });
+    fireEvent.click(screen.getByRole("button", { name: "启动雷达扫描" }));
+
+    expect(await screen.findByText("Research Map")).toBeTruthy();
+    expect(await screen.findByText("No usable graph nodes")).toBeTruthy();
+    expect(await screen.findByText("leaderboards unavailable")).toBeTruthy();
+  });
 });
