@@ -144,9 +144,12 @@ export type ResearchRadarCopy = {
     title: string;
     kind: string;
     importance: string;
+    evidenceCount: (count: number) => string;
     noSummary: string;
     connectedEvidence: string;
+    emptyConnectedEvidence: string;
     sourceLinks: string;
+    emptySourceLinks: string;
     caveats: string;
     suggestedNextAction: string;
     selectNode: string;
@@ -261,9 +264,12 @@ export const RESEARCH_RADAR_COPY: Record<ResearchLocale, ResearchRadarCopy> = {
       title: "节点详情",
       kind: "类型",
       importance: "重要性",
+      evidenceCount: (count) => `证据 ${count}`,
       noSummary: "暂无节点摘要。",
       connectedEvidence: "关联证据",
+      emptyConnectedEvidence: "暂无关联证据。",
       sourceLinks: "来源链接",
+      emptySourceLinks: "暂无来源链接。",
       caveats: "限制",
       suggestedNextAction: "建议下一步",
       selectNode: "在研究图谱中选择一个节点"
@@ -376,9 +382,12 @@ export const RESEARCH_RADAR_COPY: Record<ResearchLocale, ResearchRadarCopy> = {
       title: "Node Inspector",
       kind: "kind",
       importance: "importance",
+      evidenceCount: (count) => `evidence ${count}`,
       noSummary: "No node summary available.",
       connectedEvidence: "Connected evidence",
+      emptyConnectedEvidence: "No connected evidence yet.",
       sourceLinks: "Source links",
+      emptySourceLinks: "No linked source URLs.",
       caveats: "Caveats",
       suggestedNextAction: "Suggested next action",
       selectNode: "Select a node in the research map"

@@ -294,6 +294,7 @@ export function ResearchRadarApp() {
           copy={copy.evidence}
           eventEvidence={eventEvidence}
           inspectorCopy={copy.inspector}
+          mapCopy={copy.map}
           modelDeltaSummary={modelDeltaSummary}
           researchGraph={researchGraph}
           selectedGraphNode={selectedGraphNode}
@@ -635,7 +636,7 @@ function ReportWorkspace({
       </div>
 
       {activeScan.sourceScan ? (
-        <EvidenceDrawer copy={copy.drawer} sources={activeScan.sourceScan.sources} />
+        <EvidenceDrawer copy={copy.drawer} sources={activeScan.sourceScan.sources} statusCopy={copy.status} />
       ) : null}
     </section>
   );
@@ -643,10 +644,12 @@ function ReportWorkspace({
 
 function EvidenceDrawer({
   copy,
-  sources
+  sources,
+  statusCopy
 }: {
   copy: ResearchRadarCopy["drawer"];
   sources: ResearchSourceResult[];
+  statusCopy: ResearchRadarCopy["status"];
 }) {
   const [open, setOpen] = useState(false);
 
@@ -671,19 +674,21 @@ function EvidenceDrawer({
       </button>
       {open ? (
         <div className="mt-4">
-          <SourceResults copy={copy} sources={sources} />
+          <SourceResults copy={copy} sources={sources} statusCopy={statusCopy} />
         </div>
       ) : null}
     </section>
   );
 }
 
-function SourceResults({
+export function SourceResults({
   copy,
-  sources
+  sources,
+  statusCopy
 }: {
   copy: ResearchRadarCopy["drawer"];
   sources: ResearchSourceResult[];
+  statusCopy: ResearchRadarCopy["status"];
 }) {
   if (sources.length === 0) {
     return (
@@ -710,7 +715,7 @@ function SourceResults({
 
       <div className="mt-4 divide-y divide-[#E8EEE8]">
         {sources.map((source) => (
-          <SourceResultRow copy={copy} key={source.source} source={source} />
+          <SourceResultRow copy={copy} key={source.source} source={source} statusCopy={statusCopy} />
         ))}
       </div>
     </section>
@@ -719,10 +724,12 @@ function SourceResults({
 
 function SourceResultRow({
   copy,
-  source
+  source,
+  statusCopy
 }: {
   copy: ResearchRadarCopy["drawer"];
   source: ResearchSourceResult;
+  statusCopy: ResearchRadarCopy["status"];
 }) {
   const statusTone = sourceStatusTone(source.status);
 
@@ -742,7 +749,7 @@ function SourceResultRow({
         </div>
         <div className="flex items-center gap-2 text-[12px]">
           <span className={["rounded-[7px] px-2 py-1", statusTone.badge].join(" ")}>
-            {SOURCE_STATUS_LABELS[source.status] ?? source.status}
+            {sourceStatusLabel(source.status, statusCopy)}
           </span>
           <span className="rounded-[7px] bg-[#EEF3ED] px-2 py-1 text-[#66736B]">
             {copy.items(source.items.length)}
@@ -828,11 +835,12 @@ function sourceStatusTone(status: ResearchSourceStatus) {
   };
 }
 
-function EvidenceRail({
+export function EvidenceRail({
   activeScan,
   copy,
   eventEvidence,
   inspectorCopy,
+  mapCopy,
   modelDeltaSummary,
   researchGraph,
   selectedGraphNode,
@@ -842,6 +850,7 @@ function EvidenceRail({
   copy: ResearchRadarCopy["evidence"];
   eventEvidence: ResearchEventEvidence[];
   inspectorCopy: ResearchRadarCopy["inspector"];
+  mapCopy: ResearchRadarCopy["map"];
   modelDeltaSummary: ModelDeltaSummary | null;
   researchGraph: ResearchGraph | null;
   selectedGraphNode: ResearchGraphNodeDetails | null;
@@ -859,13 +868,13 @@ function EvidenceRail({
             <h2 className="text-[14px] font-semibold text-[#1D2B39]">{inspectorCopy.title}</h2>
             <div className="mt-2 flex flex-wrap gap-1.5">
               <span className="rounded-[7px] bg-white px-2 py-0.5 text-[11px] text-[#53687F]">
-                {inspectorCopy.kind} {selectedGraphNode.node.kind}
+                {inspectorCopy.kind} {mapCopy.nodeKinds[selectedGraphNode.node.kind]}
               </span>
               <span className="rounded-[7px] bg-white px-2 py-0.5 text-[11px] text-[#53687F]">
                 {inspectorCopy.importance} {selectedGraphNode.node.importance.toFixed(2)}
               </span>
               <span className="rounded-[7px] bg-white px-2 py-0.5 text-[11px] text-[#53687F]">
-                evidence {selectedGraphNode.connectedNodes.length}
+                {inspectorCopy.evidenceCount(selectedGraphNode.connectedNodes.length)}
               </span>
             </div>
             <h3 className="mt-3 text-[15px] font-semibold text-[#17251F]">
@@ -900,13 +909,13 @@ function EvidenceRail({
                         </span>
                       </div>
                       <p className="mt-1 text-[11px] leading-5 text-[#5B675F]">
-                        {connection.node.kind.replaceAll("_", " ")}
+                        {mapCopy.nodeKinds[connection.node.kind]}
                       </p>
                     </div>
                   ))}
                 </div>
               ) : (
-                <p className="text-[12px] text-[#5B675F]">No connected evidence yet.</p>
+                <p className="text-[12px] text-[#5B675F]">{inspectorCopy.emptyConnectedEvidence}</p>
               )}
             </InspectorSection>
             <InspectorSection title={inspectorCopy.sourceLinks}>
@@ -933,7 +942,7 @@ function EvidenceRail({
                   ))}
                 </div>
               ) : (
-                <p className="text-[12px] text-[#5B675F]">No linked source URLs.</p>
+                <p className="text-[12px] text-[#5B675F]">{inspectorCopy.emptySourceLinks}</p>
               )}
             </InspectorSection>
             {selectedGraphNode.caveats.length > 0 ? (
@@ -1179,6 +1188,10 @@ function researchErrorMessage(copy: ResearchRadarCopy, error: ResearchUiError) {
 
 function statusLabel(copy: ResearchRadarCopy, status: string) {
   return statusLabelFromValues(status, copy.status);
+}
+
+function sourceStatusLabel(status: ResearchSourceStatus, values: ResearchRadarCopy["status"]) {
+  return statusLabelFromValues(SOURCE_STATUS_LABELS[status] ?? status, values);
 }
 
 function statusLabelFromValues(status: string, values: ResearchRadarCopy["status"]) {

@@ -1,6 +1,7 @@
 import { fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import Page from "./page";
+import { researchRadarCopy } from "@/lib/i18n";
 
 describe("Research Radar POC page", () => {
   afterEach(() => {
@@ -688,6 +689,136 @@ describe("Research Radar POC page", () => {
     expect((await screen.findAllByText("Source coverage is partial.")).length).toBeGreaterThan(0);
     expect(await screen.findByText("来源链接")).toBeTruthy();
     expect(await screen.findByText("建议下一步")).toBeTruthy();
+  });
+
+  it("localizes inspector node-kind labels in Chinese", async () => {
+    const appClient = await import("@/app-client");
+    const EvidenceRail = (appClient as any).EvidenceRail;
+    const copy = researchRadarCopy("zh-CN");
+
+    render(
+      <EvidenceRail
+        activeScan={null}
+        copy={copy.evidence}
+        eventEvidence={[]}
+        inspectorCopy={copy.inspector}
+        mapCopy={copy.map}
+        modelDeltaSummary={null}
+        researchGraph={null}
+        selectedGraphNode={{
+          node: {
+            id: "question:planning",
+            kind: "open_question",
+            title: "Planning reliability",
+            summary: "How should long-horizon plans be stabilized?",
+            importance: 0.74,
+            sourceItemIds: [],
+            tags: []
+          },
+          connectedNodes: [
+            {
+              node: {
+                id: "project:agent-runtime",
+                kind: "project",
+                title: "agent-runtime",
+                summary: "Workflow runtime",
+                importance: 0.64,
+                sourceItemIds: [],
+                tags: []
+              },
+              relation: "implements",
+              direction: "incoming",
+              evidenceItemIds: []
+            }
+          ],
+          sourceItemIds: [],
+          sourceItems: [],
+          caveats: [],
+          suggestedNextAction: "Compare planning loops."
+        }}
+        statusCopy={copy.status}
+      />
+    );
+
+    expect(screen.getByText("类型 开放问题")).toBeTruthy();
+    expect(screen.getByText("证据 1")).toBeTruthy();
+    expect(screen.getByText("项目")).toBeTruthy();
+  });
+
+  it("localizes inspector fallback copy in Chinese", async () => {
+    const appClient = await import("@/app-client");
+    const EvidenceRail = (appClient as any).EvidenceRail;
+    const copy = researchRadarCopy("zh-CN");
+
+    render(
+      <EvidenceRail
+        activeScan={null}
+        copy={copy.evidence}
+        eventEvidence={[]}
+        inspectorCopy={copy.inspector}
+        mapCopy={copy.map}
+        modelDeltaSummary={null}
+        researchGraph={null}
+        selectedGraphNode={{
+          node: {
+            id: "question:planning",
+            kind: "open_question",
+            title: "Planning reliability",
+            summary: "",
+            importance: 0.74,
+            sourceItemIds: [],
+            tags: []
+          },
+          connectedNodes: [],
+          sourceItemIds: [],
+          sourceItems: [],
+          caveats: [],
+          suggestedNextAction: "Compare planning loops."
+        }}
+        statusCopy={copy.status}
+      />
+    );
+
+    expect(screen.getByText("暂无节点摘要。")).toBeTruthy();
+    expect(screen.getByText("暂无关联证据。")).toBeTruthy();
+    expect(screen.getByText("暂无来源链接。")).toBeTruthy();
+  });
+
+  it("localizes source result status badges in Chinese", async () => {
+    const appClient = await import("@/app-client");
+    const SourceResults = (appClient as any).SourceResults;
+    const copy = researchRadarCopy("zh-CN");
+
+    render(
+      <SourceResults
+        copy={copy.drawer}
+        sources={[
+          {
+            source: "github",
+            status: "succeeded",
+            warning: null,
+            items: []
+          },
+          {
+            source: "leaderboards",
+            status: "degraded",
+            warning: "coverage limited",
+            items: []
+          },
+          {
+            source: "arxiv",
+            status: "failed",
+            warning: "request failed",
+            items: []
+          }
+        ]}
+        statusCopy={copy.status}
+      />
+    );
+
+    expect(screen.getByText("就绪")).toBeTruthy();
+    expect(screen.getByText("受限")).toBeTruthy();
+    expect(screen.getByText("失败")).toBeTruthy();
   });
 
   it("keeps the source-derived graph and shows a model degradation fallback when the Agent run fails", async () => {
