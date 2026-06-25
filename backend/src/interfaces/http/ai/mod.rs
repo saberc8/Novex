@@ -13,6 +13,7 @@ pub mod knowledge;
 pub mod memory;
 pub mod model;
 pub mod notebook;
+pub mod research_radar;
 pub mod studio;
 pub mod training;
 pub mod trigger;
@@ -30,6 +31,7 @@ pub fn routes() -> Router<AppState> {
         .merge(memory::routes())
         .merge(model::routes())
         .merge(notebook::routes())
+        .merge(research_radar::routes())
         .merge(studio::routes())
         .merge(trigger::routes())
         .merge(training::routes())
