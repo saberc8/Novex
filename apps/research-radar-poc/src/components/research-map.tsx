@@ -27,6 +27,8 @@ export type ResearchMapProps = {
   onNodeSelect: (nodeId: string) => void;
 };
 
+type MapLayer = ResearchGraphLayer | "people";
+
 type PositionedNode = ResearchGraphNode & {
   x: number;
   y: number;
@@ -34,8 +36,9 @@ type PositionedNode = ResearchGraphNode & {
   category: "topic" | "hotspot" | "other";
 };
 
-const LAYERS: Array<{ layer: ResearchGraphLayer; label: string; kinds: ResearchGraphNodeKind[] }> = [
+const LAYERS: Array<{ layer: MapLayer; label: string; kinds: ResearchGraphNodeKind[] }> = [
   { layer: "papers", label: "Papers", kinds: ["paper"] },
+  { layer: "people", label: "People", kinds: ["author", "institution"] },
   { layer: "projects", label: "Projects", kinds: ["project"] },
   { layer: "models", label: "Models", kinds: ["model"] },
   { layer: "datasets", label: "Datasets", kinds: ["dataset"] },
@@ -65,7 +68,7 @@ const CATEGORY_ORDER: Record<PositionedNode["category"], number> = {
 };
 
 export function ResearchMap({ graph, selectedNodeId, onNodeSelect }: ResearchMapProps) {
-  const [enabledLayers, setEnabledLayers] = useState<Set<ResearchGraphLayer>>(
+  const [enabledLayers, setEnabledLayers] = useState<Set<MapLayer>>(
     () => new Set(LAYERS.map((layer) => layer.layer))
   );
 
@@ -207,6 +210,7 @@ export function ResearchMap({ graph, selectedNodeId, onNodeSelect }: ResearchMap
               : node.category === "hotspot"
                 ? "#1F7C6D"
                 : "#4E6A85";
+            const title = `${node.title} - ${node.kind.replaceAll("_", " ")} - ${node.summary}`;
 
             return (
               <button
@@ -214,6 +218,7 @@ export function ResearchMap({ graph, selectedNodeId, onNodeSelect }: ResearchMap
                 type="button"
                 aria-pressed={selected}
                 aria-label={node.title}
+                title={title}
                 className={[
                   "absolute flex -translate-x-1/2 -translate-y-1/2 items-center gap-2 rounded-[8px] border px-3 py-2 text-left shadow-[0_8px_18px_rgba(34,45,38,0.08)] transition",
                   selected
@@ -260,13 +265,13 @@ export function ResearchMap({ graph, selectedNodeId, onNodeSelect }: ResearchMap
 
 function nodeVisibleForLayers(
   node: ResearchGraphNode,
-  enabledLayers: Set<ResearchGraphLayer>
+  enabledLayers: Set<MapLayer>
 ): boolean {
   const layer = layerForKind(node.kind);
   return layer === null ? true : enabledLayers.has(layer);
 }
 
-function layerForKind(kind: ResearchGraphNodeKind): ResearchGraphLayer | null {
+function layerForKind(kind: ResearchGraphNodeKind): MapLayer | null {
   for (const layer of LAYERS) {
     if (layer.kinds.includes(kind)) {
       return layer.layer;

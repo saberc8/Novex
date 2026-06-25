@@ -35,6 +35,24 @@ const graph: ResearchGraph = {
       tags: ["planning"]
     },
     {
+      id: "author:ada",
+      kind: "author",
+      title: "Ada Lovelace",
+      summary: "paper author",
+      importance: 0.55,
+      sourceItemIds: ["arxiv:1"],
+      tags: ["people"]
+    },
+    {
+      id: "institution:openai",
+      kind: "institution",
+      title: "OpenAI",
+      summary: "research institution",
+      importance: 0.5,
+      sourceItemIds: ["arxiv:1"],
+      tags: ["people"]
+    },
+    {
       id: "experiment:compare-runtimes",
       kind: "experiment",
       title: "Compare workflow runtimes",
@@ -57,6 +75,13 @@ const graph: ResearchGraph = {
       from: "hotspot:planning",
       to: "source:arxiv:1",
       relation: "supports",
+      evidenceItemIds: ["arxiv:1"]
+    },
+    {
+      id: "source:arxiv:1->author:ada:mentions",
+      from: "source:arxiv:1",
+      to: "author:ada",
+      relation: "mentions",
       evidenceItemIds: ["arxiv:1"]
     }
   ]
@@ -81,6 +106,18 @@ describe("ResearchMap", () => {
     expect(onNodeSelect).toHaveBeenCalledWith("source:arxiv:1");
   });
 
+  it("exposes useful hover metadata and selected state for nodes", () => {
+    render(
+      <ResearchMap graph={graph} selectedNodeId="source:arxiv:1" onNodeSelect={() => {}} />
+    );
+
+    const paperNode = screen.getByRole("button", { name: /Workflow Planning for AI Agents/ });
+
+    expect(paperNode.getAttribute("title")).toBe("Workflow Planning for AI Agents - paper - paper summary");
+    expect(paperNode.getAttribute("aria-pressed")).toBe("true");
+    expect(paperNode.className).toContain("ring-2");
+  });
+
   it("hides paper nodes when the Papers layer is disabled", () => {
     render(<ResearchMap graph={graph} selectedNodeId={null} onNodeSelect={() => {}} />);
 
@@ -88,5 +125,16 @@ describe("ResearchMap", () => {
 
     expect(screen.queryByRole("button", { name: /Workflow Planning for AI Agents/ })).toBeNull();
     expect(screen.getByRole("button", { name: /agent workflow/ })).toBeTruthy();
+  });
+
+  it("hides author and institution nodes when the People layer is disabled", () => {
+    render(<ResearchMap graph={graph} selectedNodeId={null} onNodeSelect={() => {}} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "People" }));
+
+    expect(screen.queryByRole("button", { name: /Ada Lovelace/ })).toBeNull();
+    expect(screen.queryByRole("button", { name: /OpenAI/ })).toBeNull();
+    expect(screen.getByRole("button", { name: /agent workflow/ })).toBeTruthy();
+    expect(screen.getByRole("button", { name: /planning/ })).toBeTruthy();
   });
 });
