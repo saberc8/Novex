@@ -73,6 +73,7 @@ export type ResearchRadarCopy = {
     emptyError: string;
     sourceScanFailed: string;
     modelUnavailable: string;
+    scanFailed: string;
     filters: Record<"papers" | "projects" | "datasets" | "benchmarks" | "news" | "community", string>;
     rankings: Record<"balanced" | "importance" | "recency" | "beginner", string>;
   };
@@ -88,6 +89,8 @@ export type ResearchRadarCopy = {
     sources: string;
     events: string;
     sections: string;
+    run: string;
+    pendingModelOutput: string;
   };
   evidence: {
     title: string;
@@ -122,6 +125,7 @@ export const RESEARCH_RADAR_COPY: Record<ResearchLocale, ResearchRadarCopy> = {
       emptyError: "请输入研究主题",
       sourceScanFailed: "研究来源扫描失败",
       modelUnavailable: "模型分析暂不可用",
+      scanFailed: "雷达扫描失败",
       filters: {
         papers: "论文",
         projects: "开源项目",
@@ -148,7 +152,9 @@ export const RESEARCH_RADAR_COPY: Record<ResearchLocale, ResearchRadarCopy> = {
     workspace: {
       sources: "来源",
       events: "事件",
-      sections: "章节"
+      sections: "章节",
+      run: "运行",
+      pendingModelOutput: "等待模型输出"
     },
     evidence: {
       title: "证据",
@@ -181,6 +187,7 @@ export const RESEARCH_RADAR_COPY: Record<ResearchLocale, ResearchRadarCopy> = {
       emptyError: "Enter a research topic",
       sourceScanFailed: "Research source scan failed",
       modelUnavailable: "model analysis unavailable",
+      scanFailed: "Radar scan failed",
       filters: {
         papers: "Papers",
         projects: "Projects",
@@ -207,7 +214,9 @@ export const RESEARCH_RADAR_COPY: Record<ResearchLocale, ResearchRadarCopy> = {
     workspace: {
       sources: "sources",
       events: "events",
-      sections: "sections"
+      sections: "sections",
+      run: "Run",
+      pendingModelOutput: "Pending model output"
     },
     evidence: {
       title: "Evidence",

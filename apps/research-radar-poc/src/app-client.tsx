@@ -46,7 +46,9 @@ import type { AgentRunEventResp } from "@/types/agent";
 import type {
   ModelRouteOption,
   ParsedResearchReport,
+  ResearchAppErrorCode,
   ResearchFilter,
+  ResearchUiError,
   ResearchRanking,
   ResearchScan,
   ResearchGraph,
@@ -117,7 +119,7 @@ export function ResearchRadarApp() {
   const [activeScanId, setActiveScanId] = useState<string | null>(null);
   const [selectedGraphNodeId, setSelectedGraphNodeId] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
-  const [composerError, setComposerError] = useState<string | null>(null);
+  const [composerError, setComposerError] = useState<ResearchUiError | null>(null);
   const activeScan = scans.find((scan) => scan.id === activeScanId) ?? scans[0] ?? null;
   const parsedReport = useMemo(
     () => parseResearchReport(activeScan?.runResult?.finalOutput ?? ""),
@@ -157,7 +159,7 @@ export function ResearchRadarApp() {
   async function handleSubmit() {
     const normalizedTopic = topic.trim();
     if (!normalizedTopic || isSubmitting) {
-      setComposerError(copy.composer.emptyError);
+      setComposerError(appResearchError("empty_topic"));
       return;
     }
 
@@ -193,7 +195,9 @@ export function ResearchRadarApp() {
 
       if (sourceScan.status === "failed") {
         updateScan(scanId, {
-          runError: sourceScan.warnings.join("\n") || copy.composer.sourceScanFailed
+          runError: sourceScan.warnings.join("\n")
+            ? rawResearchError(sourceScan.warnings.join("\n"))
+            : appResearchError("source_scan_failed")
         });
         return;
       }
@@ -217,10 +221,10 @@ export function ResearchRadarApp() {
     } catch (error) {
       updateScan(scanId, {
         runError: hasUsableSourceScan
-          ? copy.composer.modelUnavailable
+          ? appResearchError("model_unavailable")
           : error instanceof Error
-            ? error.message
-            : "雷达扫描失败"
+            ? rawResearchError(error.message)
+            : appResearchError("scan_failed")
       });
     } finally {
       setIsSubmitting(false);
@@ -402,7 +406,7 @@ function TopicComposer({
   ranking,
   topic
 }: {
-  composerError: string | null;
+  composerError: ResearchUiError | null;
   copy: ResearchRadarCopy;
   filters: ResearchFilter[];
   isSubmitting: boolean;
@@ -441,7 +445,7 @@ function TopicComposer({
       </div>
       {composerError ? (
         <p className="mt-2 rounded-[8px] border border-[#F4C7C3] bg-[#FFF7F5] px-3 py-2 text-[13px] text-[#A33A2D]" role="alert">
-          {composerError}
+          {researchErrorMessage(copy, composerError)}
         </p>
       ) : null}
       <div className="mt-4 flex flex-col gap-3 2xl:flex-row 2xl:items-center 2xl:justify-between">
@@ -565,7 +569,9 @@ function ReportWorkspace({
             <div className="mt-2 flex flex-wrap items-center gap-2 text-[12px] text-[#6B776F]">
               <span className="rounded-[7px] bg-[#EEF3ED] px-2 py-1">{rankingLabel(activeScan.ranking, copy)}</span>
               {activeScan.runResult ? (
-                <span className="rounded-[7px] bg-[#EEF3ED] px-2 py-1">Run #{activeScan.runResult.runId}</span>
+                <span className="rounded-[7px] bg-[#EEF3ED] px-2 py-1">
+                  {copy.workspace.run} #{activeScan.runResult.runId}
+                </span>
               ) : null}
               <span className="rounded-[7px] bg-[#EEF3ED] px-2 py-1">
                 {activeScan.runResult
@@ -599,7 +605,7 @@ function ReportWorkspace({
 
       {activeScan.runError ? (
         <p className="rounded-[8px] border border-[#F4C7C3] bg-[#FFF7F5] px-4 py-3 text-[14px] text-[#A33A2D]" role="alert">
-          {activeScan.runError}
+          {researchErrorMessage(copy, activeScan.runError)}
         </p>
       ) : null}
 
@@ -618,7 +624,7 @@ function ReportWorkspace({
                 <h3 className="text-[15px] font-semibold text-[#17251F]">{section.title}</h3>
               </div>
               <p className="whitespace-pre-wrap text-[14px] leading-6 text-[#3D4841]">
-                {section.content || "Pending model output"}
+                {section.content || copy.workspace.pendingModelOutput}
               </p>
             </article>
           );
@@ -1113,6 +1119,39 @@ function EvidenceMeta({
 
 function rankingLabel(ranking: ResearchRanking, copy: ResearchRadarCopy) {
   return copy.composer.rankings[ranking];
+}
+
+function appResearchError(code: ResearchAppErrorCode): ResearchUiError {
+  return {
+    kind: "app",
+    code
+  };
+}
+
+function rawResearchError(message: string): ResearchUiError {
+  return {
+    kind: "raw",
+    message
+  };
+}
+
+function researchErrorMessage(copy: ResearchRadarCopy, error: ResearchUiError) {
+  if (error.kind === "raw") {
+    return error.message;
+  }
+
+  switch (error.code) {
+    case "empty_topic":
+      return copy.composer.emptyError;
+    case "source_scan_failed":
+      return copy.composer.sourceScanFailed;
+    case "model_unavailable":
+      return copy.composer.modelUnavailable;
+    case "scan_failed":
+      return copy.composer.scanFailed;
+    default:
+      return copy.composer.scanFailed;
+  }
 }
 
 function statusLabel(copy: ResearchRadarCopy, status: string) {

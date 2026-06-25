@@ -60,6 +60,238 @@ describe("Research Radar POC page", () => {
     expect(screen.getByLabelText("研究主题")).toBeTruthy();
   });
 
+  it("re-renders app-generated run errors after switching locale", async () => {
+    const fetchMock = vi.fn(async (url: string) => {
+      const href = String(url);
+      if (href.includes("/ai/research-radar/scans")) {
+        return {
+          ok: true,
+          json: async () => ({
+            code: "200",
+            data: {
+              topic: "AI coding agents",
+              ranking: "balanced",
+              status: "partial",
+              warnings: [],
+              promptContext: "Research Radar Evidence\n[github] Project: acme/agent",
+              sources: [
+                {
+                  source: "github",
+                  status: "succeeded",
+                  warning: null,
+                  items: [
+                    {
+                      id: "github:acme/agent",
+                      source: "github",
+                      kind: "project",
+                      title: "acme/agent",
+                      url: "https://github.com/acme/agent",
+                      summary: "Agent workflows",
+                      authors: [],
+                      organization: null,
+                      publishedAt: null,
+                      updatedAt: "2026-06-01T00:00:00Z",
+                      metrics: [{ label: "stars", value: 1200 }],
+                      tags: ["agents"],
+                      metadata: {}
+                    }
+                  ]
+                }
+              ],
+              items: []
+            }
+          })
+        };
+      }
+      if (href.includes("/ai/agents/runs") && !href.includes("/events")) {
+        return {
+          ok: false,
+          json: async () => ({
+            code: "500",
+            msg: "arbitrary backend failure"
+          })
+        };
+      }
+      return {
+        ok: true,
+        json: async () => ({ code: "200", data: {} })
+      };
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<Page />);
+
+    fireEvent.change(screen.getByLabelText("研究主题"), {
+      target: { value: "AI coding agents" }
+    });
+    fireEvent.click(screen.getByRole("button", { name: "启动雷达扫描" }));
+
+    expect((await screen.findByRole("alert")).textContent).toContain("模型分析暂不可用");
+
+    fireEvent.click(screen.getByRole("button", { name: "English" }));
+
+    expect((await screen.findByRole("alert")).textContent).toContain("model analysis unavailable");
+  });
+
+  it("localizes the active run chip and pending section fallback in Chinese", async () => {
+    const fetchMock = vi.fn(async (url: string) => {
+      const href = String(url);
+      if (href.includes("/ai/research-radar/scans")) {
+        return {
+          ok: true,
+          json: async () => ({
+            code: "200",
+            data: {
+              topic: "AI coding agents",
+              ranking: "balanced",
+              status: "succeeded",
+              warnings: [],
+              promptContext: "Research Radar Evidence\n[arxiv] Paper: AI coding agents",
+              sources: [],
+              items: []
+            }
+          })
+        };
+      }
+      if (href.includes("/ai/agents/runs") && !href.includes("/events")) {
+        return {
+          ok: true,
+          json: async () => ({
+            code: "200",
+            data: {
+              runId: 91,
+              traceId: "agent-91",
+              status: "succeeded",
+              finalOutput: ""
+            }
+          })
+        };
+      }
+      if (href.includes("/events")) {
+        return {
+          ok: true,
+          json: async () => ({
+            code: "200",
+            data: {
+              list: [],
+              total: 0
+            }
+          })
+        };
+      }
+      return {
+        ok: true,
+        json: async () => ({ code: "200", data: {} })
+      };
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<Page />);
+
+    fireEvent.change(screen.getByLabelText("研究主题"), {
+      target: { value: "AI coding agents" }
+    });
+    fireEvent.click(screen.getByRole("button", { name: "启动雷达扫描" }));
+
+    expect(await screen.findByText("运行 #91")).toBeTruthy();
+    expect(await screen.findByText("等待模型输出")).toBeTruthy();
+  });
+
+  it("forwards the English report-language payload when English is selected", async () => {
+    const fetchMock = vi.fn(async (url: string) => {
+      const href = String(url);
+      if (href.includes("/ai/research-radar/scans")) {
+        return {
+          ok: true,
+          json: async () => ({
+            code: "200",
+            data: {
+              topic: "AI coding agents",
+              ranking: "balanced",
+              status: "succeeded",
+              warnings: [],
+              promptContext: "Research Radar Evidence\n[arxiv] Paper: AI coding agents",
+              sources: [],
+              items: []
+            }
+          })
+        };
+      }
+      if (href.includes("/ai/agents/runs") && !href.includes("/events")) {
+        return {
+          ok: true,
+          json: async () => ({
+            code: "200",
+            data: {
+              runId: 91,
+              traceId: "agent-91",
+              status: "succeeded",
+              finalOutput: "## Research Overview\nReport"
+            }
+          })
+        };
+      }
+      if (href.includes("/events")) {
+        return {
+          ok: true,
+          json: async () => ({
+            code: "200",
+            data: {
+              list: [],
+              total: 0
+            }
+          })
+        };
+      }
+      return {
+        ok: true,
+        json: async () => ({ code: "200", data: {} })
+      };
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<Page />);
+
+    fireEvent.click(screen.getByRole("button", { name: "English" }));
+    fireEvent.change(screen.getByLabelText("Research topic"), {
+      target: { value: "AI coding agents" }
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Start radar scan" }));
+
+    await screen.findByText("Research Report");
+
+    const runCall = fetchMock.mock.calls.find(([url]) =>
+      String(url).includes("/ai/agents/runs") && !String(url).includes("/events")
+    ) as unknown as [string, RequestInit];
+    expect(String(runCall[1].body)).toContain("Write the markdown report in English");
+  });
+
+  it("localizes the generic fallback scan error in English", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => {
+        const href = String(url);
+        if (href.includes("/ai/research-radar/scans")) {
+          throw "network down";
+        }
+        return {
+          ok: true,
+          json: async () => ({ code: "200", data: {} })
+        };
+      })
+    );
+
+    render(<Page />);
+
+    fireEvent.click(screen.getByRole("button", { name: "English" }));
+    fireEvent.change(screen.getByLabelText("Research topic"), {
+      target: { value: "AI coding agents" }
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Start radar scan" }));
+
+    expect((await screen.findByRole("alert")).textContent).toContain("Radar scan failed");
+  });
+
   it("submits a topic and renders structured research output with evidence", async () => {
     const fetchMock = vi.fn(async (url: string) => {
       const href = String(url);
@@ -163,7 +395,7 @@ describe("Research Radar POC page", () => {
     fireEvent.click(screen.getByRole("button", { name: "启动雷达扫描" }));
 
     expect(await screen.findByText("AI coding agents are moving from task completion toward durable engineering workflows.")).toBeTruthy();
-    expect(await screen.findByText("Run #91")).toBeTruthy();
+    expect(await screen.findByText("运行 #91")).toBeTruthy();
     expect(await screen.findByText("Live radar")).toBeTruthy();
     expect(await screen.findByText("dry-run: web.search returned no live provider result")).toBeTruthy();
 

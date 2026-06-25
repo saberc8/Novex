@@ -20,11 +20,27 @@ export type ResearchScanInput = {
   sourceScan?: ResearchSourceScanResp | null;
 };
 
+export type ResearchAppErrorCode =
+  | "empty_topic"
+  | "source_scan_failed"
+  | "model_unavailable"
+  | "scan_failed";
+
+export type ResearchUiError =
+  | {
+      kind: "app";
+      code: ResearchAppErrorCode;
+    }
+  | {
+      kind: "raw";
+      message: string;
+    };
+
 export type ResearchScan = ResearchScanInput & {
   id: string;
   runResult: AgentRunResp | null;
   runEvents: AgentRunEventResp[];
-  runError: string | null;
+  runError: ResearchUiError | null;
   createdAt: number;
 };
 
