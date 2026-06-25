@@ -1,0 +1,47 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --background: #f6f8f5;
+  --panel: #ffffff;
+  --text: #171717;
+  --muted: #6b776f;
+  --line: #dfe5df;
+  --accent: #0e6b5f;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  min-height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--background);
+  color: var(--text);
+  font-family:
+    Inter, "SF Pro Display", "SF Pro Text", "PingFang SC", system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
+    sans-serif;
+}
+
+button,
+textarea {
+  font: inherit;
+}
+
+button {
+  cursor: pointer;
+}
+
+textarea {
+  color: inherit;
+}
+
+::selection {
+  background: #d8eee8;
+}
