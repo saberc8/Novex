@@ -21,12 +21,13 @@ import {
   Sparkles,
   Users
 } from "lucide-react";
+import type { LucideIcon } from "lucide-react";
 import { listAgentRunEvents } from "@/api/agent";
 import { configuredModelRouteOptions, createResearchRadarRun } from "@/api/research";
 import { summarizeModelDeltas, summarizeResearchEvent } from "@/lib/agent-events";
 import { parseResearchReport } from "@/lib/research-report";
 import type { ModelDeltaSummary, ResearchEventEvidence } from "@/lib/agent-events";
-import type { AgentRunEventResp, AgentRunResp } from "@/types/agent";
+import type { AgentRunEventResp } from "@/types/agent";
 import type {
   ModelRouteOption,
   ParsedResearchReport,
@@ -40,7 +41,7 @@ const DEFAULT_FILTERS: ResearchFilter[] = ["papers", "projects", "datasets", "be
 const FILTERS: Array<{
   code: ResearchFilter;
   label: string;
-  icon: React.ComponentType<{ className?: string; "aria-hidden"?: string; strokeWidth?: number }>;
+  icon: LucideIcon;
 }> = [
   { code: "papers", label: "Papers", icon: FileText },
   { code: "projects", label: "Projects", icon: GitBranch },
@@ -57,7 +58,7 @@ const RANKINGS: Array<{ code: ResearchRanking; label: string }> = [
   { code: "beginner", label: "Beginner" }
 ];
 
-const SECTION_ICONS: Record<string, React.ComponentType<{ className?: string; "aria-hidden"?: string; strokeWidth?: number }>> = {
+const SECTION_ICONS: Record<string, LucideIcon> = {
   "research-overview": Brain,
   "active-topics": Activity,
   "key-authors-and-institutions": Users,
@@ -365,7 +366,7 @@ function FilterDock({
             onClick={() => onToggle(filter.code)}
             type="button"
           >
-            <Icon aria-hidden="true" className="h-3.5 w-3.5" strokeWidth={1.9} />
+            <Icon aria-hidden={true} className="h-3.5 w-3.5" strokeWidth={1.9} />
             {filter.label}
           </button>
         );
@@ -472,7 +473,7 @@ function ReportWorkspace({
             >
               <div className="mb-3 flex items-center gap-2">
                 <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-[8px] bg-[#EDF7F4] text-[#0E6B5F]">
-                  <Icon aria-hidden="true" className="h-4 w-4" strokeWidth={1.9} />
+                  <Icon aria-hidden={true} className="h-4 w-4" strokeWidth={1.9} />
                 </span>
                 <h3 className="text-[15px] font-semibold text-[#17251F]">{section.title}</h3>
               </div>
