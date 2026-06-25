@@ -93,6 +93,29 @@ describe("research radar agent command", () => {
     expect(command.input.length).toBeLessThanOrEqual(4000);
   });
 
+  it("asks for a Chinese markdown report by default", () => {
+    const command = buildResearchRadarAgentRunCommand({
+      topic: "agent workflow",
+      filters: ["papers"],
+      ranking: "balanced",
+      routeId: "runtime.llm"
+    });
+
+    expect(command.input).toContain("请用中文撰写 markdown 报告");
+  });
+
+  it("asks for an English markdown report when English is selected", () => {
+    const command = buildResearchRadarAgentRunCommand({
+      topic: "agent workflow",
+      filters: ["papers"],
+      ranking: "balanced",
+      routeId: "runtime.llm",
+      locale: "en-US"
+    });
+
+    expect(command.input).toContain("Write the markdown report in English");
+  });
+
   it("keeps Agent input within the backend character limit when source evidence is long", () => {
     const longEvidence = [
       "Research Radar Evidence",

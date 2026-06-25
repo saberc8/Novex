@@ -1,4 +1,5 @@
 import type { AgentRunEventResp, AgentRunResp } from "./agent";
+import type { ResearchLocale } from "@/lib/i18n";
 
 export type ResearchRanking = "balanced" | "importance" | "recency" | "beginner";
 
@@ -15,6 +16,7 @@ export type ResearchScanInput = {
   filters: ResearchFilter[];
   ranking: ResearchRanking;
   routeId?: string;
+  locale?: ResearchLocale;
   sourceScan?: ResearchSourceScanResp | null;
 };
 

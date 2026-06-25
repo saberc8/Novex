@@ -1,4 +1,5 @@
 import { createAgentRun } from "./agent";
+import { normalizeResearchLocale, researchReportLanguageInstruction } from "@/lib/i18n";
 import type { AgentRunCommand, AgentRunResp } from "@/types/agent";
 import type { ModelRouteOption, ResearchFilter, ResearchRanking, ResearchScanInput } from "@/types/research";
 
@@ -110,6 +111,7 @@ export async function createResearchRadarRun(input: ResearchScanInput): Promise<
 }
 
 function buildResearchRadarPrompt(input: ResearchScanInput) {
+  const locale = normalizeResearchLocale(input.locale);
   const filters = input.filters.length > 0
     ? input.filters.map((filter) => FILTER_LABELS[filter]).join(", ")
     : "Papers, Open source projects, Datasets, Benchmarks, News, Community discussion";
@@ -118,7 +120,8 @@ function buildResearchRadarPrompt(input: ResearchScanInput) {
     "You are an AI research radar for scientists entering a new research direction.",
     `Research topic: ${input.topic.trim()}`,
     `Focus sources: ${filters}`,
-    `Ranking priority: ${ranking}`
+    `Ranking priority: ${ranking}`,
+    researchReportLanguageInstruction(locale)
   ];
   const afterEvidence = [
     "Use web search when useful. Prefer recent, source-grounded information, but clearly mark uncertainty, stale information, and missing coverage.",
