@@ -276,7 +276,7 @@ describe("Research Radar POC page", () => {
     expect(fetchMock.mock.calls.some(([url]) => String(url).includes("/ai/agents/runs"))).toBe(false);
   });
 
-  it("updates the right rail when a graph node is selected", async () => {
+  it("updates the right rail with connected evidence, source links, caveats, and next action when a graph node is selected", async () => {
     const fetchMock = vi.fn(async (url: string) => {
       const href = String(url);
       if (href.includes("/ai/research-radar/scans")) {
@@ -343,6 +343,15 @@ describe("Research Radar POC page", () => {
                       tags: []
                     },
                     {
+                      id: "hotspot:workflow-reliability",
+                      kind: "hotspot",
+                      title: "Workflow reliability",
+                      summary: "Execution consistency across long-horizon coding tasks.",
+                      importance: 0.88,
+                      sourceItemIds: [],
+                      tags: ["workflow", "reliability"]
+                    },
+                    {
                       id: "source:github:acme/agent",
                       kind: "project",
                       title: "acme/agent",
@@ -354,14 +363,21 @@ describe("Research Radar POC page", () => {
                   ],
                   edges: [
                     {
-                      id: "topic:ai-coding-agents->source:github:acme/agent:implements",
+                      id: "topic:ai-coding-agents->hotspot:workflow-reliability:mentions",
                       from: "topic:ai-coding-agents",
+                      to: "hotspot:workflow-reliability",
+                      relation: "mentions",
+                      evidenceItemIds: []
+                    },
+                    {
+                      id: "hotspot:workflow-reliability->source:github:acme/agent:implements",
+                      from: "hotspot:workflow-reliability",
                       to: "source:github:acme/agent",
                       relation: "implements",
                       evidenceItemIds: ["github:acme/agent"]
                     }
                   ],
-                  caveats: []
+                  caveats: ["Source coverage is partial."]
                 }),
                 "```",
                 "## Research Overview",
@@ -401,11 +417,16 @@ describe("Research Radar POC page", () => {
       target: { value: "AI coding agents" }
     });
     fireEvent.click(screen.getByRole("button", { name: "启动雷达扫描" }));
-    fireEvent.click(await screen.findByRole("button", { name: /acme\/agent/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /Workflow reliability/ }));
 
     expect(await screen.findByText("Node Inspector")).toBeTruthy();
-    expect(await screen.findByText("Agent workflow runtime")).toBeTruthy();
-    expect(await screen.findByText("project")).toBeTruthy();
+    expect(await screen.findByText("Execution consistency across long-horizon coding tasks.")).toBeTruthy();
+    expect(await screen.findByText("Connected evidence")).toBeTruthy();
+    expect((await screen.findByRole("link", { name: /acme\/agent/ })).getAttribute("href")).toBe(
+      "https://github.com/acme/agent"
+    );
+    expect((await screen.findAllByText("Source coverage is partial.")).length).toBeGreaterThan(0);
+    expect(await screen.findByText("Suggested next action")).toBeTruthy();
   });
 
   it("keeps the source-derived graph and shows a model degradation fallback when the Agent run fails", async () => {

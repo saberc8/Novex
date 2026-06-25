@@ -1,6 +1,7 @@
 "use client";
 
 import { useMemo, useState } from "react";
+import type { ReactNode } from "react";
 import {
   Activity,
   ArrowUpRight,
@@ -26,10 +27,14 @@ import { listAgentRunEvents } from "@/api/agent";
 import { configuredModelRouteOptions, createResearchRadarRun } from "@/api/research";
 import { createResearchRadarSourceScan } from "@/api/source-scan";
 import { summarizeModelDeltas, summarizeResearchEvent } from "@/lib/agent-events";
-import { buildResearchGraph, nodeDetailsFor } from "@/lib/research-graph";
+import {
+  buildResearchGraph,
+  nodeDetailsFor
+} from "@/lib/research-graph";
 import { parseResearchReport } from "@/lib/research-report";
 import { ResearchMap } from "@/components/research-map";
 import type { ModelDeltaSummary, ResearchEventEvidence } from "@/lib/agent-events";
+import type { ResearchGraphNodeDetails } from "@/lib/research-graph";
 import type { AgentRunEventResp } from "@/types/agent";
 import type {
   ModelRouteOption,
@@ -38,7 +43,6 @@ import type {
   ResearchRanking,
   ResearchScan,
   ResearchGraph,
-  ResearchGraphNode,
   ResearchSource,
   ResearchSourceMetric,
   ResearchSourceResult,
@@ -123,8 +127,11 @@ export function ResearchRadarApp() {
     [activeScan, parsedReport]
   );
   const selectedGraphNode = useMemo(
-    () => (researchGraph && selectedGraphNodeId ? nodeDetailsFor(researchGraph, selectedGraphNodeId) : null),
-    [researchGraph, selectedGraphNodeId]
+    () =>
+      researchGraph && selectedGraphNodeId
+        ? nodeDetailsFor(researchGraph, selectedGraphNodeId, activeScan?.sourceScan)
+        : null,
+    [activeScan?.sourceScan, researchGraph, selectedGraphNodeId]
   );
   const eventEvidence = useMemo(
     () =>
@@ -760,7 +767,7 @@ function EvidenceRail({
   eventEvidence: ResearchEventEvidence[];
   modelDeltaSummary: ModelDeltaSummary | null;
   researchGraph: ResearchGraph | null;
-  selectedGraphNode: ResearchGraphNode | null;
+  selectedGraphNode: ResearchGraphNodeDetails | null;
 }) {
   return (
     <aside className="hidden min-h-screen bg-[#FAFBF8] px-5 py-5 xl:block">
@@ -774,27 +781,97 @@ function EvidenceRail({
             <h2 className="text-[14px] font-semibold text-[#1D2B39]">Node Inspector</h2>
             <div className="mt-2 flex flex-wrap gap-1.5">
               <span className="rounded-[7px] bg-white px-2 py-0.5 text-[11px] text-[#53687F]">
-                kind {selectedGraphNode.kind}
+                kind {selectedGraphNode.node.kind}
               </span>
               <span className="rounded-[7px] bg-white px-2 py-0.5 text-[11px] text-[#53687F]">
-                importance {selectedGraphNode.importance.toFixed(2)}
+                importance {selectedGraphNode.node.importance.toFixed(2)}
+              </span>
+              <span className="rounded-[7px] bg-white px-2 py-0.5 text-[11px] text-[#53687F]">
+                evidence {selectedGraphNode.connectedNodes.length}
               </span>
             </div>
             <h3 className="mt-3 text-[15px] font-semibold text-[#17251F]">
-              {selectedGraphNode.title}
+              {selectedGraphNode.node.title}
             </h3>
             <p className="mt-2 whitespace-pre-wrap text-[13px] leading-5 text-[#3D4841]">
-              {selectedGraphNode.summary || "No node summary available."}
+              {selectedGraphNode.node.summary || "No node summary available."}
             </p>
-            {selectedGraphNode.tags.length > 0 ? (
+            {selectedGraphNode.node.tags.length > 0 ? (
               <div className="mt-3 flex flex-wrap gap-1.5">
-                {selectedGraphNode.tags.slice(0, 6).map((tag) => (
+                {selectedGraphNode.node.tags.slice(0, 6).map((tag) => (
                   <span className="rounded-[7px] bg-white px-2 py-0.5 text-[11px] text-[#53687F]" key={tag}>
                     {tag}
                   </span>
                 ))}
               </div>
             ) : null}
+            <InspectorSection title="Connected evidence">
+              {selectedGraphNode.connectedNodes.length > 0 ? (
+                <div className="space-y-2">
+                  {selectedGraphNode.connectedNodes.slice(0, 6).map((connection) => (
+                    <div
+                      className="rounded-[7px] border border-[#DCE8F7] bg-white px-2.5 py-2"
+                      key={`${connection.direction}-${connection.relation}-${connection.node.id}`}
+                    >
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="truncate text-[12px] font-medium text-[#17251F]">
+                          {connection.node.title}
+                        </span>
+                        <span className="shrink-0 rounded-[7px] bg-[#EEF4FB] px-2 py-0.5 text-[10px] uppercase tracking-[0.08em] text-[#53687F]">
+                          {formatRelationLabel(connection.relation)}
+                        </span>
+                      </div>
+                      <p className="mt-1 text-[11px] leading-5 text-[#5B675F]">
+                        {connection.node.kind.replaceAll("_", " ")}
+                      </p>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <p className="text-[12px] text-[#5B675F]">No connected evidence yet.</p>
+              )}
+            </InspectorSection>
+            <InspectorSection title="Source links">
+              {selectedGraphNode.sourceItems.length > 0 ? (
+                <div className="space-y-2">
+                  {selectedGraphNode.sourceItems.slice(0, 6).map((item) => (
+                    <a
+                      className="flex items-center justify-between gap-3 rounded-[7px] border border-[#DCE8F7] bg-white px-2.5 py-2 text-[12px] text-[#1D2B39] transition hover:border-[#B7CCE8]"
+                      href={item.url ?? undefined}
+                      key={item.id}
+                      rel="noreferrer"
+                      target="_blank"
+                    >
+                      <span className="min-w-0">
+                        <span className="block truncate font-medium">{item.title}</span>
+                        <span className="block truncate text-[11px] text-[#5B675F]">
+                          {SOURCE_LABELS[item.source] ?? item.source}
+                        </span>
+                      </span>
+                      {item.url ? (
+                        <ArrowUpRight aria-hidden="true" className="h-3.5 w-3.5 shrink-0 text-[#6A7A8D]" strokeWidth={1.9} />
+                      ) : null}
+                    </a>
+                  ))}
+                </div>
+              ) : (
+                <p className="text-[12px] text-[#5B675F]">No linked source URLs.</p>
+              )}
+            </InspectorSection>
+            {selectedGraphNode.caveats.length > 0 ? (
+              <InspectorSection title="Caveats">
+                <ul className="space-y-1.5 text-[12px] leading-5 text-[#5B675F]">
+                  {selectedGraphNode.caveats.slice(0, 4).map((caveat) => (
+                    <li key={caveat}>{caveat}</li>
+                  ))}
+                </ul>
+              </InspectorSection>
+            ) : null}
+            <InspectorSection title="Suggested next action">
+              <p className="text-[12px] leading-5 text-[#3D4841]">
+                {selectedGraphNode.suggestedNextAction}
+              </p>
+            </InspectorSection>
           </section>
         ) : researchGraph ? (
           <p className="mb-4 rounded-[8px] border border-dashed border-[#D7E0D7] bg-[#FBFCFA] px-3 py-3 text-[13px] text-[#7A857E]">
@@ -842,6 +919,27 @@ function EvidenceRail({
       </div>
     </aside>
   );
+}
+
+function InspectorSection({
+  children,
+  title
+}: {
+  children: ReactNode;
+  title: string;
+}) {
+  return (
+    <section className="mt-4">
+      <h3 className="text-[11px] font-semibold uppercase tracking-[0.08em] text-[#53687F]">
+        {title}
+      </h3>
+      <div className="mt-2">{children}</div>
+    </section>
+  );
+}
+
+function formatRelationLabel(relation: string) {
+  return relation.replaceAll("_", " ");
 }
 
 function ModelSelector({

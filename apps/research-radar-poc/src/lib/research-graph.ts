@@ -16,6 +16,22 @@ export type BuildResearchGraphInput = {
   finalOutput: string;
 };
 
+export type ResearchGraphNodeConnection = {
+  node: ResearchGraphNode;
+  relation: ResearchGraphRelation;
+  direction: "incoming" | "outgoing";
+  evidenceItemIds: string[];
+};
+
+export type ResearchGraphNodeDetails = {
+  node: ResearchGraphNode;
+  connectedNodes: ResearchGraphNodeConnection[];
+  sourceItemIds: string[];
+  sourceItems: ResearchSourceItem[];
+  caveats: string[];
+  suggestedNextAction: string;
+};
+
 const GRAPH_BLOCK_PATTERN = /```research-graph-json\s*([\s\S]*?)```/i;
 const MAX_HOTSPOTS = 6;
 const MAX_REPORT_DERIVED_NODES = 4;
@@ -61,9 +77,14 @@ export function buildResearchGraph(input: BuildResearchGraphInput): ResearchGrap
   const sourceDerivedGraph = buildSourceDerivedGraph(input);
   const parsed = parseResearchGraphBlock(input.finalOutput);
   if (parsed) {
+    const repairedGraph = repairParsedGraph(parsed, sourceDerivedGraph);
+    if (!repairedGraph) {
+      return sourceDerivedGraph;
+    }
+
     const graph = {
-      ...parsed,
-      caveats: uniqueStrings([...parsed.caveats, ...sourceDerivedGraph.caveats])
+      ...repairedGraph,
+      caveats: uniqueStrings([...repairedGraph.caveats, ...sourceDerivedGraph.caveats])
     };
 
     if (hasUsableGraphNodes(graph) || !hasUsableGraphNodes(sourceDerivedGraph)) {
@@ -74,13 +95,58 @@ export function buildResearchGraph(input: BuildResearchGraphInput): ResearchGrap
   return sourceDerivedGraph;
 }
 
-export function nodeDetailsFor(graph: ResearchGraph, nodeId: string): ResearchGraphNode | null {
-  return graph.nodes.find((node) => node.id === nodeId) ?? null;
+export function nodeDetailsFor(
+  graph: ResearchGraph,
+  nodeId: string,
+  sourceScan?: ResearchSourceScanResp | null
+): ResearchGraphNodeDetails | null {
+  const node = graph.nodes.find((candidate) => candidate.id === nodeId);
+  if (!node) {
+    return null;
+  }
+
+  const connectedNodes = graph.edges
+    .filter((edge) => edge.from === nodeId || edge.to === nodeId)
+    .flatMap((edge) => {
+      const connectedNodeId = edge.from === nodeId ? edge.to : edge.from;
+      const connectedNode = graph.nodes.find((candidate) => candidate.id === connectedNodeId);
+      if (!connectedNode) {
+        return [];
+      }
+
+      const direction: ResearchGraphNodeConnection["direction"] =
+        edge.from === nodeId ? "outgoing" : "incoming";
+
+      return [{
+        node: connectedNode,
+        relation: edge.relation,
+        direction,
+        evidenceItemIds: edge.evidenceItemIds
+      }];
+    });
+
+  const sourceItemsById = new Map(allSourceItems(sourceScan).map((item) => [item.id, item]));
+  const sourceItemIds = uniqueStrings([
+    ...node.sourceItemIds,
+    ...connectedNodes.flatMap((connection) => connection.node.sourceItemIds),
+    ...connectedNodes.flatMap((connection) => connection.evidenceItemIds)
+  ]);
+
+  return {
+    node,
+    connectedNodes,
+    sourceItemIds,
+    sourceItems: sourceItemIds
+      .map((sourceItemId) => sourceItemsById.get(sourceItemId))
+      .filter((sourceItem): sourceItem is ResearchSourceItem => Boolean(sourceItem)),
+    caveats: graph.caveats,
+    suggestedNextAction: suggestedNextActionFor(node)
+  };
 }
 
 function buildSourceDerivedGraph(input: BuildResearchGraphInput): ResearchGraph {
   const topicNode = topicGraphNode(input.topic);
-  const sourceItems = input.sourceScan?.sources.flatMap((source) => source.items) ?? [];
+  const sourceItems = allSourceItems(input.sourceScan);
   const caveats = sourceGraphCaveats(input.sourceScan);
   const hotspots = buildHotspotNodes(input.topic, sourceItems);
   const evidenceNodes = sourceItems.map(sourceItemToNode);
@@ -113,8 +179,79 @@ function sourceGraphCaveats(sourceScan?: ResearchSourceScanResp | null) {
   ]);
 }
 
+function allSourceItems(sourceScan?: ResearchSourceScanResp | null) {
+  const items = [...(sourceScan?.items ?? []), ...(sourceScan?.sources.flatMap((source) => source.items) ?? [])];
+  const itemsById = new Map<string, ResearchSourceItem>();
+
+  items.forEach((item) => {
+    if (!itemsById.has(item.id)) {
+      itemsById.set(item.id, item);
+    }
+  });
+
+  return [...itemsById.values()];
+}
+
 function hasUsableGraphNodes(graph: ResearchGraph) {
   return graph.nodes.some((node) => node.kind !== "topic");
+}
+
+function repairParsedGraph(parsed: ResearchGraph, sourceDerivedGraph: ResearchGraph): ResearchGraph | null {
+  const sourceTopicNode = sourceDerivedGraph.nodes.find((node) => node.kind === "topic");
+  const nodesById = new Map(parsed.nodes.map((node) => [node.id, node]));
+
+  if (!parsed.nodes.some((node) => node.kind === "topic")) {
+    if (!sourceTopicNode) {
+      return null;
+    }
+    nodesById.set(sourceTopicNode.id, sourceTopicNode);
+  }
+
+  const topicNode = [...nodesById.values()].find((node) => node.kind === "topic");
+  if (!topicNode) {
+    return null;
+  }
+
+  const repairedEdges: ResearchGraphEdge[] = [];
+  for (const edge of parsed.edges) {
+    const from = repairEdgeEndpoint(edge.from, nodesById, topicNode.id);
+    const to = repairEdgeEndpoint(edge.to, nodesById, topicNode.id);
+    if (!from || !to) {
+      return null;
+    }
+
+    repairedEdges.push({
+      ...edge,
+      id: `${from}->${to}:${edge.relation}`,
+      from,
+      to,
+      evidenceItemIds: uniqueStrings(edge.evidenceItemIds)
+    });
+  }
+
+  if (!repairedEdges.some((edge) => edge.from === topicNode.id || edge.to === topicNode.id)) {
+    const rootNodes = [...nodesById.values()].filter((node) => {
+      if (node.id === topicNode.id) {
+        return false;
+      }
+
+      return !repairedEdges.some((edge) => edge.to === node.id);
+    });
+    const targets = rootNodes.length > 0
+      ? rootNodes
+      : [...nodesById.values()].filter((node) => node.id !== topicNode.id);
+
+    targets.forEach((node) => {
+      repairedEdges.push(edgeFor(topicNode.id, node.id, relationFromTopic(node), node.sourceItemIds));
+    });
+  }
+
+  return {
+    topic: parsed.topic,
+    nodes: [...nodesById.values()],
+    edges: uniqueEdges(repairedEdges),
+    caveats: parsed.caveats
+  };
 }
 
 function normalizeGraph(value: unknown): ResearchGraph | null {
@@ -284,6 +421,20 @@ function relationForNode(node: ResearchGraphNode): ResearchGraphRelation {
   return "supports";
 }
 
+function relationFromTopic(node: ResearchGraphNode): ResearchGraphRelation {
+  if (node.kind === "hotspot" || node.kind === "topic" || node.kind === "author" || node.kind === "institution") {
+    return "mentions";
+  }
+  if (node.kind === "open_question") {
+    return "reveals_gap";
+  }
+  if (node.kind === "experiment") {
+    return "leads_to";
+  }
+
+  return relationForNode(node);
+}
+
 function edgeFor(from: string, to: string, relation: ResearchGraphRelation, evidenceItemIds: string[]): ResearchGraphEdge {
   return {
     id: `${from}->${to}:${relation}`,
@@ -308,6 +459,18 @@ function nodeKindForSourceItem(item: ResearchSourceItem): ResearchGraphNodeKind 
     return "benchmark";
   }
   return "paper";
+}
+
+function repairEdgeEndpoint(endpoint: string, nodesById: Map<string, ResearchGraphNode>, topicNodeId: string) {
+  if (nodesById.has(endpoint)) {
+    return endpoint;
+  }
+
+  if (endpoint.startsWith("topic:")) {
+    return topicNodeId;
+  }
+
+  return null;
 }
 
 function importanceFromMetrics(item: ResearchSourceItem) {
@@ -349,4 +512,41 @@ function isResearchGraphRelation(value: unknown): value is ResearchGraphRelation
 
 function uniqueStrings(values: string[]) {
   return values.map((value) => value.trim()).filter((value, index, all) => value.length > 0 && all.indexOf(value) === index);
+}
+
+function uniqueEdges(edges: ResearchGraphEdge[]) {
+  const edgesById = new Map<string, ResearchGraphEdge>();
+  edges.forEach((edge) => {
+    if (!edgesById.has(edge.id)) {
+      edgesById.set(edge.id, edge);
+    }
+  });
+
+  return [...edgesById.values()];
+}
+
+function suggestedNextActionFor(node: ResearchGraphNode) {
+  switch (node.kind) {
+    case "topic":
+      return "Open the strongest hotspot first, then trace the evidence nodes attached to it.";
+    case "hotspot":
+      return "Open the linked evidence and compare the strongest papers, projects, or benchmarks behind this theme.";
+    case "paper":
+      return "Read the abstract and method summary first, then trace any connected implementations or benchmarks.";
+    case "project":
+    case "model":
+      return "Open the source and inspect the implementation surface before adding it to the reading route.";
+    case "dataset":
+    case "benchmark":
+      return "Check the task setup, metrics, and coverage before using this as an evaluation anchor.";
+    case "open_question":
+      return "Collect the conflicting evidence around this gap and define one validation criterion.";
+    case "experiment":
+      return "Turn this into a scoped run plan with one dataset, one metric, and one comparison target.";
+    case "author":
+    case "institution":
+      return "Trace the connected work to see where this person or lab is shaping the landscape.";
+    default:
+      return "Follow the connected evidence to refine the next reading or evaluation step.";
+  }
 }
