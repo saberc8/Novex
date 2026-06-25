@@ -76,6 +76,23 @@ describe("research radar agent command", () => {
     expect(command.input).toContain("Use the provided backend source evidence first");
   });
 
+  it("asks the Agent for graph JSON before the markdown report", () => {
+    const command = buildResearchRadarAgentRunCommand({
+      topic: "agent workflow",
+      filters: ["papers", "projects"],
+      ranking: "balanced",
+      routeId: "runtime.llm"
+    });
+
+    expect(command.input).toContain("```research-graph-json");
+    expect(command.input).toContain('"nodes"');
+    expect(command.input).toContain('"edges"');
+    expect(command.input.indexOf("```research-graph-json")).toBeLessThan(
+      command.input.indexOf("## Research Overview")
+    );
+    expect(command.input.length).toBeLessThanOrEqual(4000);
+  });
+
   it("keeps Agent input within the backend character limit when source evidence is long", () => {
     const longEvidence = [
       "Research Radar Evidence",

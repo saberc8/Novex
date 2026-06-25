@@ -40,6 +40,16 @@ const REPORT_HEADINGS = [
   "## Sources And Caveats"
 ];
 
+const GRAPH_JSON_INSTRUCTION = [
+  "Before the markdown report, return one compact fenced graph block:",
+  "```research-graph-json",
+  '{ "topic": "...", "nodes": [], "edges": [], "caveats": [] }',
+  "```",
+  "Graph node kinds: topic, hotspot, paper, project, model, dataset, benchmark, author, institution, open_question, experiment.",
+  "Graph edge relations: supports, implements, evaluates, extends, reveals_gap, leads_to, mentions.",
+  "Keep graph JSON compact: at most 18 nodes and 28 edges."
+];
+
 export function buildResearchRadarAgentRunCommand(input: ResearchScanInput): AgentRunCommand {
   const routeId = input.routeId?.trim() || configuredAgentModelRouteId();
 
@@ -113,6 +123,7 @@ function buildResearchRadarPrompt(input: ResearchScanInput) {
   const afterEvidence = [
     "Use web search when useful. Prefer recent, source-grounded information, but clearly mark uncertainty, stale information, and missing coverage.",
     "Use at most 3 web search calls total. After those searches, synthesize the report with caveats instead of searching again.",
+    ...GRAPH_JSON_INSTRUCTION,
     "Return a concise markdown report with exactly these headings:",
     ...REPORT_HEADINGS,
     "For each section, include practical details that help a newcomer decide what to read, who to follow, what work matters, and which experiments are worth trying."
