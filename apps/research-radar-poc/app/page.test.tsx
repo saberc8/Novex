@@ -1,6 +1,7 @@
 import { fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import Page from "./page";
+import { EvidenceRail, SourceResults } from "@/app-client";
 import { researchRadarCopy } from "@/lib/i18n";
 
 describe("Research Radar POC page", () => {
@@ -691,9 +692,7 @@ describe("Research Radar POC page", () => {
     expect(await screen.findByText("建议下一步")).toBeTruthy();
   });
 
-  it("localizes inspector node-kind labels in Chinese", async () => {
-    const appClient = await import("@/app-client");
-    const EvidenceRail = (appClient as any).EvidenceRail;
+  it("localizes inspector node-kind labels in Chinese", () => {
     const copy = researchRadarCopy("zh-CN");
 
     render(
@@ -747,9 +746,7 @@ describe("Research Radar POC page", () => {
     expect(screen.queryByText("implements")).toBeNull();
   });
 
-  it("localizes inspector fallback copy in Chinese", async () => {
-    const appClient = await import("@/app-client");
-    const EvidenceRail = (appClient as any).EvidenceRail;
+  it("localizes inspector fallback copy in Chinese", () => {
     const copy = researchRadarCopy("zh-CN");
 
     render(
@@ -786,9 +783,7 @@ describe("Research Radar POC page", () => {
     expect(screen.getByText("暂无来源链接。")).toBeTruthy();
   });
 
-  it("localizes source result status badges in Chinese", async () => {
-    const appClient = await import("@/app-client");
-    const SourceResults = (appClient as any).SourceResults;
+  it("localizes source result status badges in Chinese", () => {
     const copy = researchRadarCopy("zh-CN");
 
     render(
@@ -823,9 +818,7 @@ describe("Research Radar POC page", () => {
     expect(screen.getByText("失败")).toBeTruthy();
   });
 
-  it("localizes source result item-kind chips in Chinese", async () => {
-    const appClient = await import("@/app-client");
-    const SourceResults = (appClient as any).SourceResults;
+  it("localizes source result item-kind chips in Chinese", () => {
     const copy = researchRadarCopy("zh-CN");
 
     render(
