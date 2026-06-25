@@ -3,6 +3,8 @@ import type { AgentRunCommand, AgentRunResp } from "@/types/agent";
 import type { ModelRouteOption, ResearchFilter, ResearchRanking, ResearchScanInput } from "@/types/research";
 
 const DEFAULT_MODEL_ROUTE_ID = "runtime.llm";
+const AGENT_INPUT_MAX_CHARS = 4000;
+const SOURCE_EVIDENCE_TRUNCATION_NOTICE = "Source evidence truncated to fit Agent input limit.";
 
 const RESEARCH_RADAR_BUDGET = {
   maxSteps: 10,
@@ -102,31 +104,62 @@ function buildResearchRadarPrompt(input: ResearchScanInput) {
     ? input.filters.map((filter) => FILTER_LABELS[filter]).join(", ")
     : "Papers, Open source projects, Datasets, Benchmarks, News, Community discussion";
   const ranking = RANKING_LABELS[input.ranking];
-
-  return [
+  const beforeEvidence = [
     "You are an AI research radar for scientists entering a new research direction.",
     `Research topic: ${input.topic.trim()}`,
     `Focus sources: ${filters}`,
-    `Ranking priority: ${ranking}`,
-    sourceEvidencePrompt(input),
+    `Ranking priority: ${ranking}`
+  ];
+  const afterEvidence = [
     "Use web search when useful. Prefer recent, source-grounded information, but clearly mark uncertainty, stale information, and missing coverage.",
     "Use at most 3 web search calls total. After those searches, synthesize the report with caveats instead of searching again.",
     "Return a concise markdown report with exactly these headings:",
     ...REPORT_HEADINGS,
     "For each section, include practical details that help a newcomer decide what to read, who to follow, what work matters, and which experiments are worth trying."
+  ];
+  const evidenceBudget = AGENT_INPUT_MAX_CHARS
+    - beforeEvidence.join("\n").length
+    - afterEvidence.join("\n").length
+    - 2;
+
+  return [
+    ...beforeEvidence,
+    sourceEvidencePrompt(input, evidenceBudget),
+    ...afterEvidence
   ].join("\n");
 }
 
-function sourceEvidencePrompt(input: ResearchScanInput) {
+function sourceEvidencePrompt(input: ResearchScanInput, maxChars: number) {
   const evidence = input.sourceScan?.promptContext?.trim();
   if (!evidence) {
-    return "No backend source evidence was provided. Use web search when useful.";
+    return fitTextToBudget(
+      "No backend source evidence was provided. Use web search when useful.",
+      maxChars
+    );
   }
+  const intro = "Use the provided backend source evidence first. Use web search only to fill gaps or verify stale coverage.";
+  const bodyBudget = maxChars - intro.length - 1;
 
   return [
-    "Use the provided backend source evidence first. Use web search only to fill gaps or verify stale coverage.",
-    evidence
+    intro,
+    fitTextToBudget(evidence, bodyBudget)
   ].join("\n");
+}
+
+function fitTextToBudget(text: string, maxChars: number) {
+  if (maxChars <= 0) {
+    return "";
+  }
+  if (text.length <= maxChars) {
+    return text;
+  }
+
+  const suffix = `\n${SOURCE_EVIDENCE_TRUNCATION_NOTICE}`;
+  if (maxChars <= suffix.length) {
+    return SOURCE_EVIDENCE_TRUNCATION_NOTICE.slice(0, maxChars);
+  }
+
+  return `${text.slice(0, maxChars - suffix.length).trimEnd()}${suffix}`;
 }
 
 function configuredAgentModelRouteId() {

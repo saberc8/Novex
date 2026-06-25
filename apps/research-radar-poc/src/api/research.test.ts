@@ -76,6 +76,35 @@ describe("research radar agent command", () => {
     expect(command.input).toContain("Use the provided backend source evidence first");
   });
 
+  it("keeps Agent input within the backend character limit when source evidence is long", () => {
+    const longEvidence = [
+      "Research Radar Evidence",
+      ...Array.from({ length: 80 }, (_, index) =>
+        `[github] Project: agent-${index}\nSummary: ${"long source summary ".repeat(8)}`
+      )
+    ].join("\n");
+
+    const command = buildResearchRadarAgentRunCommand({
+      topic: "agent workflow",
+      filters: ["papers", "projects", "datasets", "benchmarks"],
+      ranking: "balanced",
+      routeId: "runtime.llm",
+      sourceScan: {
+        topic: "agent workflow",
+        ranking: "balanced",
+        status: "partial",
+        warnings: [],
+        promptContext: longEvidence,
+        sources: [],
+        items: []
+      }
+    });
+
+    expect(command.input.length).toBeLessThanOrEqual(4000);
+    expect(command.input).toContain("Source evidence truncated to fit Agent input limit");
+    expect(command.input).toContain("## Sources And Caveats");
+  });
+
   it("posts a research scan to the Agent run endpoint", async () => {
     const fetchMock = vi.fn(async () => ({
       ok: true,
