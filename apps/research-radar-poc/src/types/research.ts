@@ -29,3 +29,14 @@ export type ModelRouteOption = {
   routeId: string;
   label: string;
 };
+
+export type ResearchReportSection = {
+  id: string;
+  title: string;
+  content: string;
+};
+
+export type ParsedResearchReport = {
+  structured: boolean;
+  sections: ResearchReportSection[];
+};
