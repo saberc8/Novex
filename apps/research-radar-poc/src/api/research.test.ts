@@ -18,9 +18,9 @@ describe("research radar agent command", () => {
     expect(command.autoApprove).toBe(false);
     expect(command.modelRouteId).toBe("runtime.llm.code_agent");
     expect(command.budget).toEqual({
-      maxSteps: 8,
-      maxToolCalls: 4,
-      maxSeconds: 120,
+      maxSteps: 10,
+      maxToolCalls: 6,
+      maxSeconds: 180,
       maxCostCents: 0
     });
     expect(command.workbenchContext).toEqual({
@@ -35,6 +35,8 @@ describe("research radar agent command", () => {
     expect(command.input).toContain("LLM agent memory");
     expect(command.input).toContain("Papers, Open source projects, Benchmarks");
     expect(command.input).toContain("Recency");
+    expect(command.input).toContain("Use at most 3 web search calls total");
+    expect(command.input).toContain("synthesize the report with caveats instead of searching again");
     expect(command.input).toContain("## Research Overview");
     expect(command.input).toContain("## Sources And Caveats");
   });

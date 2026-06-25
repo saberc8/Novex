@@ -7,7 +7,8 @@ const DEFAULT_CORS_ALLOWED_ORIGINS: &str = concat!(
     "http://localhost:62603,http://127.0.0.1:62603,",
     "http://localhost:62604,http://127.0.0.1:62604,",
     "http://localhost:62605,http://127.0.0.1:62605,",
-    "http://localhost:62606,http://127.0.0.1:62606"
+    "http://localhost:62606,http://127.0.0.1:62606,",
+    "http://localhost:62607,http://127.0.0.1:62607"
 );
 const JWT_SECRET_PLACEHOLDER: &str = "dev-only-change-me";
 const JWT_SECRET_MIN_LEN: usize = 32;
@@ -451,7 +452,7 @@ mod tests {
     fn default_cors_allowed_origins_include_poc_frontend_ports() {
         let origins = parse_cors_allowed_origins(DEFAULT_CORS_ALLOWED_ORIGINS);
 
-        for port in [62602, 62603, 62604, 62605, 62606] {
+        for port in [62602, 62603, 62604, 62605, 62606, 62607] {
             assert!(origins.contains(&format!("http://localhost:{port}")));
             assert!(origins.contains(&format!("http://127.0.0.1:{port}")));
         }
@@ -465,6 +466,8 @@ mod tests {
         assert!(env.contains("CORS_ALLOWED_ORIGINS="));
         assert!(env.contains("http://localhost:62606"));
         assert!(env.contains("http://127.0.0.1:62606"));
+        assert!(env.contains("http://localhost:62607"));
+        assert!(env.contains("http://127.0.0.1:62607"));
     }
 
     #[test]

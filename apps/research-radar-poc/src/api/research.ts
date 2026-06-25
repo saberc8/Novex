@@ -5,9 +5,9 @@ import type { ModelRouteOption, ResearchFilter, ResearchRanking, ResearchScanInp
 const DEFAULT_MODEL_ROUTE_ID = "runtime.llm";
 
 const RESEARCH_RADAR_BUDGET = {
-  maxSteps: 8,
-  maxToolCalls: 4,
-  maxSeconds: 120,
+  maxSteps: 10,
+  maxToolCalls: 6,
+  maxSeconds: 180,
   maxCostCents: 0
 };
 
@@ -109,6 +109,7 @@ function buildResearchRadarPrompt(input: ResearchScanInput) {
     `Focus sources: ${filters}`,
     `Ranking priority: ${ranking}`,
     "Use web search when useful. Prefer recent, source-grounded information, but clearly mark uncertainty, stale information, and missing coverage.",
+    "Use at most 3 web search calls total. After those searches, synthesize the report with caveats instead of searching again.",
     "Return a concise markdown report with exactly these headings:",
     ...REPORT_HEADINGS,
     "For each section, include practical details that help a newcomer decide what to read, who to follow, what work matters, and which experiments are worth trying."

@@ -7,6 +7,7 @@ const TRAINING_WEB_PORT: &str = "62603";
 const NOTEBOOKLM_PORT: &str = "62604";
 const AGENT_WORKSPACE_PORT: &str = "62605";
 const CODEX_APP_POC_PORT: &str = "62606";
+const RESEARCH_RADAR_POC_PORT: &str = "62607";
 
 #[test]
 fn poc_env_examples_define_the_626xx_port_contract() {
@@ -21,6 +22,9 @@ fn poc_env_examples_define_the_626xx_port_contract() {
     assert!(root_env.contains(&format!("AGENT_WORKSPACE_PORT={AGENT_WORKSPACE_PORT}")));
     assert!(root_env.contains(&format!("CODEX_APP_POC_PORT={CODEX_APP_POC_PORT}")));
     assert!(root_env.contains(&format!(
+        "RESEARCH_RADAR_POC_PORT={RESEARCH_RADAR_POC_PORT}"
+    )));
+    assert!(root_env.contains(&format!(
         "NEXT_PUBLIC_API_BASE_URL=http://localhost:{BACKEND_PORT}"
     )));
     assert!(root_env.contains(&format!(
@@ -30,6 +34,12 @@ fn poc_env_examples_define_the_626xx_port_contract() {
     assert!(backend_env.contains(&format!("HTTP_PORT={BACKEND_PORT}")));
     assert!(backend_env.contains(&format!("http://localhost:{CODEX_APP_POC_PORT}")));
     assert!(backend_env.contains(&format!("http://127.0.0.1:{CODEX_APP_POC_PORT}")));
+    assert!(backend_env.contains(&format!(
+        "http://localhost:{RESEARCH_RADAR_POC_PORT}"
+    )));
+    assert!(backend_env.contains(&format!(
+        "http://127.0.0.1:{RESEARCH_RADAR_POC_PORT}"
+    )));
 }
 
 #[test]
@@ -57,6 +67,11 @@ fn frontend_dev_scripts_use_the_same_626xx_port_contract() {
         "CODEX_APP_POC_PORT",
         CODEX_APP_POC_PORT,
     );
+    assert_package_dev_script(
+        root.join("apps/research-radar-poc/package.json"),
+        "RESEARCH_RADAR_POC_PORT",
+        RESEARCH_RADAR_POC_PORT,
+    );
 }
 
 #[test]
@@ -69,6 +84,9 @@ fn run_poc_prints_commands_from_the_626xx_port_contract() {
     assert!(script.contains(&format!("NOTEBOOKLM_PORT:-{NOTEBOOKLM_PORT}")));
     assert!(script.contains(&format!("AGENT_WORKSPACE_PORT:-{AGENT_WORKSPACE_PORT}")));
     assert!(script.contains(&format!("CODEX_APP_POC_PORT:-{CODEX_APP_POC_PORT}")));
+    assert!(script.contains(&format!(
+        "RESEARCH_RADAR_POC_PORT:-{RESEARCH_RADAR_POC_PORT}"
+    )));
 }
 
 fn assert_package_dev_script(path: impl AsRef<Path>, env_var: &str, port: &str) {

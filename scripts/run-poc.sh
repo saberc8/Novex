@@ -278,6 +278,9 @@ Run each command in a separate terminal from the repo root:
   (set -a; . .env; set +a; cd apps/codex-app-poc && pnpm install && NEXT_PUBLIC_API_BASE_URL=http://localhost:${backend_port} pnpm dev)
       # Codex App POC: http://localhost:${CODEX_APP_POC_PORT:-62606}
 
+  (set -a; . .env; set +a; cd apps/research-radar-poc && pnpm install && NEXT_PUBLIC_API_BASE_URL=http://localhost:${backend_port} pnpm dev)
+      # Research Radar POC: http://localhost:${RESEARCH_RADAR_POC_PORT:-62607}
+
 Shared service URLs:
   RabbitMQ UI:   ${RABBITMQ_MANAGEMENT_URL:-http://localhost:15673}
   MinIO Console: ${MINIO_CONSOLE_URL:-http://localhost:19011}
@@ -304,6 +307,7 @@ print_local_status_hint() {
   local notebooklm_port="${NOTEBOOKLM_PORT:-62604}"
   local agent_port="${AGENT_WORKSPACE_PORT:-62605}"
   local codex_port="${CODEX_APP_POC_PORT:-62606}"
+  local research_radar_port="${RESEARCH_RADAR_POC_PORT:-62607}"
   cat <<EOF
 Novex project services are local processes now.
 Check the terminals where you started cargo/uv/venv/pnpm, or inspect ports:
@@ -313,6 +317,7 @@ Check the terminals where you started cargo/uv/venv/pnpm, or inspect ports:
   lsof -nP -iTCP:${notebooklm_port} -sTCP:LISTEN
   lsof -nP -iTCP:${agent_port} -sTCP:LISTEN
   lsof -nP -iTCP:${codex_port} -sTCP:LISTEN
+  lsof -nP -iTCP:${research_radar_port} -sTCP:LISTEN
 EOF
 }
 
@@ -347,6 +352,7 @@ Default local URLs:
   NotebookLM       http://localhost:62604
   Agent Workspace  http://localhost:62605
   Codex App POC    http://localhost:62606
+  Research Radar   http://localhost:62607
 EOF
 }
 
