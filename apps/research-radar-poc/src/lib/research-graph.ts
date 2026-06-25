@@ -198,24 +198,22 @@ function hasUsableGraphNodes(graph: ResearchGraph) {
 
 function repairParsedGraph(parsed: ResearchGraph, sourceDerivedGraph: ResearchGraph): ResearchGraph | null {
   const sourceTopicNode = sourceDerivedGraph.nodes.find((node) => node.kind === "topic");
-  const nodesById = new Map(parsed.nodes.map((node) => [node.id, node]));
-
-  if (!parsed.nodes.some((node) => node.kind === "topic")) {
-    if (!sourceTopicNode) {
-      return null;
-    }
-    nodesById.set(sourceTopicNode.id, sourceTopicNode);
-  }
-
-  const topicNode = [...nodesById.values()].find((node) => node.kind === "topic");
-  if (!topicNode) {
+  if (!sourceTopicNode) {
     return null;
   }
 
+  const nodesById = new Map(parsed.nodes.map((node) => [node.id, node]));
+  const parsedTopicNodes = parsed.nodes.filter((node) => node.kind === "topic");
+
+  parsedTopicNodes.forEach((node) => {
+    nodesById.delete(node.id);
+  });
+  nodesById.set(sourceTopicNode.id, sourceTopicNode);
+
   const repairedEdges: ResearchGraphEdge[] = [];
   for (const edge of parsed.edges) {
-    const from = repairEdgeEndpoint(edge.from, nodesById, topicNode.id);
-    const to = repairEdgeEndpoint(edge.to, nodesById, topicNode.id);
+    const from = repairEdgeEndpoint(edge.from, nodesById, sourceTopicNode.id);
+    const to = repairEdgeEndpoint(edge.to, nodesById, sourceTopicNode.id);
     if (!from || !to) {
       return null;
     }
@@ -229,9 +227,9 @@ function repairParsedGraph(parsed: ResearchGraph, sourceDerivedGraph: ResearchGr
     });
   }
 
-  if (!repairedEdges.some((edge) => edge.from === topicNode.id || edge.to === topicNode.id)) {
+  if (!repairedEdges.some((edge) => edge.from === sourceTopicNode.id || edge.to === sourceTopicNode.id)) {
     const rootNodes = [...nodesById.values()].filter((node) => {
-      if (node.id === topicNode.id) {
+      if (node.id === sourceTopicNode.id) {
         return false;
       }
 
@@ -239,15 +237,15 @@ function repairParsedGraph(parsed: ResearchGraph, sourceDerivedGraph: ResearchGr
     });
     const targets = rootNodes.length > 0
       ? rootNodes
-      : [...nodesById.values()].filter((node) => node.id !== topicNode.id);
+      : [...nodesById.values()].filter((node) => node.id !== sourceTopicNode.id);
 
     targets.forEach((node) => {
-      repairedEdges.push(edgeFor(topicNode.id, node.id, relationFromTopic(node), node.sourceItemIds));
+      repairedEdges.push(edgeFor(sourceTopicNode.id, node.id, relationFromTopic(node), node.sourceItemIds));
     });
   }
 
   return {
-    topic: parsed.topic,
+    topic: sourceTopicNode.title,
     nodes: [...nodesById.values()],
     edges: uniqueEdges(repairedEdges),
     caveats: parsed.caveats

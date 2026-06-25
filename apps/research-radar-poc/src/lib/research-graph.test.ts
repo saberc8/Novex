@@ -425,6 +425,89 @@ describe("research graph", () => {
     expect(graph.edges.some((edge) => edge.from === "topic:agent-workflow" && edge.to === "hotspot:workflow")).toBe(true);
   });
 
+  it("normalizes an off-topic parsed graph back to the scan topic", () => {
+    const sourceScan: ResearchSourceScanResp = {
+      topic: "agent workflow",
+      ranking: "balanced",
+      status: "succeeded",
+      promptContext: "",
+      warnings: [],
+      sources: [
+        {
+          source: "github",
+          status: "succeeded",
+          warning: null,
+          items: [
+            {
+              id: "github:agent",
+              source: "github",
+              kind: "project",
+              title: "acme/agent-workflow",
+              url: "https://github.com/acme/agent-workflow",
+              summary: "Open source workflow runtime for agents.",
+              authors: [],
+              organization: "acme",
+              publishedAt: null,
+              updatedAt: "2026-02-01",
+              metrics: [{ label: "stars", value: 1200 }],
+              tags: ["workflow"],
+              metadata: {}
+            }
+          ]
+        }
+      ],
+      items: []
+    };
+
+    const graph = buildResearchGraph({
+      topic: "agent workflow",
+      sourceScan,
+      parsedReport: { structured: false, sections: [] },
+      finalOutput: [
+        "```research-graph-json",
+        JSON.stringify({
+          topic: "protein folding",
+          nodes: [
+            {
+              id: "topic:protein-folding",
+              kind: "topic",
+              title: "protein folding",
+              summary: "Wrong model topic",
+              importance: 1,
+              sourceItemIds: [],
+              tags: []
+            },
+            {
+              id: "source:github:agent",
+              kind: "project",
+              title: "acme/agent-workflow",
+              summary: "Open source workflow runtime for agents.",
+              importance: 0.8,
+              sourceItemIds: ["github:agent"],
+              tags: ["workflow"]
+            }
+          ],
+          edges: [
+            {
+              id: "topic:protein-folding->source:github:agent:implements",
+              from: "topic:protein-folding",
+              to: "source:github:agent",
+              relation: "implements",
+              evidenceItemIds: ["github:agent"]
+            }
+          ],
+          caveats: []
+        }),
+        "```"
+      ].join("\n")
+    });
+
+    expect(graph.topic).toBe("agent workflow");
+    expect(graph.nodes.some((node) => node.id === "topic:protein-folding")).toBe(false);
+    expect(graph.nodes.some((node) => node.id === "topic:agent-workflow" && node.title === "agent workflow")).toBe(true);
+    expect(graph.edges.some((edge) => edge.from === "topic:agent-workflow" && edge.to === "source:github:agent")).toBe(true);
+  });
+
   it("falls back when parsed graph edge endpoints cannot be repaired", () => {
     const sourceScan: ResearchSourceScanResp = {
       topic: "agent workflow",
