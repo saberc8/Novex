@@ -54,6 +54,28 @@ describe("research radar agent command", () => {
     ]);
   });
 
+  it("includes backend source evidence in the Agent prompt", () => {
+    const command = buildResearchRadarAgentRunCommand({
+      topic: "agent workflow",
+      filters: ["papers", "projects"],
+      ranking: "balanced",
+      routeId: "runtime.llm",
+      sourceScan: {
+        topic: "agent workflow",
+        ranking: "balanced",
+        status: "partial",
+        warnings: ["leaderboards unavailable"],
+        promptContext: "Research Radar Evidence\n[arxiv] Paper: Agent Workflow Planning",
+        sources: [],
+        items: []
+      }
+    });
+
+    expect(command.input).toContain("Research Radar Evidence");
+    expect(command.input).toContain("[arxiv] Paper: Agent Workflow Planning");
+    expect(command.input).toContain("Use the provided backend source evidence first");
+  });
+
   it("posts a research scan to the Agent run endpoint", async () => {
     const fetchMock = vi.fn(async () => ({
       ok: true,

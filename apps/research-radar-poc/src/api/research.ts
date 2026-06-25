@@ -108,11 +108,24 @@ function buildResearchRadarPrompt(input: ResearchScanInput) {
     `Research topic: ${input.topic.trim()}`,
     `Focus sources: ${filters}`,
     `Ranking priority: ${ranking}`,
+    sourceEvidencePrompt(input),
     "Use web search when useful. Prefer recent, source-grounded information, but clearly mark uncertainty, stale information, and missing coverage.",
     "Use at most 3 web search calls total. After those searches, synthesize the report with caveats instead of searching again.",
     "Return a concise markdown report with exactly these headings:",
     ...REPORT_HEADINGS,
     "For each section, include practical details that help a newcomer decide what to read, who to follow, what work matters, and which experiments are worth trying."
+  ].join("\n");
+}
+
+function sourceEvidencePrompt(input: ResearchScanInput) {
+  const evidence = input.sourceScan?.promptContext?.trim();
+  if (!evidence) {
+    return "No backend source evidence was provided. Use web search when useful.";
+  }
+
+  return [
+    "Use the provided backend source evidence first. Use web search only to fill gaps or verify stale coverage.",
+    evidence
   ].join("\n");
 }
 
