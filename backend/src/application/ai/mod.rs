@@ -18,6 +18,7 @@ pub mod model_provider_transport;
 pub mod model_service;
 pub mod notebook_service;
 pub mod parser_queue_runtime;
+pub mod research_radar_service;
 pub mod studio_service;
 pub mod training_service;
 pub mod trigger_service;
