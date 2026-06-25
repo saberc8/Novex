@@ -771,7 +771,7 @@ function SourceResultRow({
                 <div className="min-w-0">
                   <div className="flex min-w-0 flex-wrap items-center gap-2">
                     <span className="rounded-[7px] bg-[#EDF7F4] px-2 py-0.5 text-[11px] font-medium text-[#0B5D53]">
-                      {item.kind}
+                      {copy.sourceItemKinds[item.kind]}
                     </span>
                     <h5 className="min-w-0 break-words text-[13px] font-semibold leading-5 text-[#17251F]">
                       {item.title}
@@ -905,7 +905,7 @@ export function EvidenceRail({
                           {connection.node.title}
                         </span>
                         <span className="shrink-0 rounded-[7px] bg-[#EEF4FB] px-2 py-0.5 text-[10px] uppercase tracking-[0.08em] text-[#53687F]">
-                          {formatRelationLabel(connection.relation)}
+                          {formatRelationLabel(connection.relation, mapCopy.relationLabels)}
                         </span>
                       </div>
                       <p className="mt-1 text-[11px] leading-5 text-[#5B675F]">
@@ -1025,8 +1025,11 @@ function InspectorSection({
   );
 }
 
-function formatRelationLabel(relation: string) {
-  return relation.replaceAll("_", " ");
+function formatRelationLabel(
+  relation: keyof ResearchRadarCopy["map"]["relationLabels"],
+  labels: ResearchRadarCopy["map"]["relationLabels"]
+) {
+  return labels[relation];
 }
 
 function LanguageSelector({

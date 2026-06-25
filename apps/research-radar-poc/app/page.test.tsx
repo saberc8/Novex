@@ -743,6 +743,8 @@ describe("Research Radar POC page", () => {
     expect(screen.getByText("类型 开放问题")).toBeTruthy();
     expect(screen.getByText("证据 1")).toBeTruthy();
     expect(screen.getByText("项目")).toBeTruthy();
+    expect(screen.getByText("实现")).toBeTruthy();
+    expect(screen.queryByText("implements")).toBeNull();
   });
 
   it("localizes inspector fallback copy in Chinese", async () => {
@@ -819,6 +821,63 @@ describe("Research Radar POC page", () => {
     expect(screen.getByText("就绪")).toBeTruthy();
     expect(screen.getByText("受限")).toBeTruthy();
     expect(screen.getByText("失败")).toBeTruthy();
+  });
+
+  it("localizes source result item-kind chips in Chinese", async () => {
+    const appClient = await import("@/app-client");
+    const SourceResults = (appClient as any).SourceResults;
+    const copy = researchRadarCopy("zh-CN");
+
+    render(
+      <SourceResults
+        copy={copy.drawer}
+        sources={[
+          {
+            source: "github",
+            status: "succeeded",
+            warning: null,
+            items: [
+              {
+                id: "github:acme/agent",
+                source: "github",
+                kind: "project",
+                title: "acme/agent",
+                url: "https://github.com/acme/agent",
+                summary: "Agent workflow runtime",
+                authors: [],
+                organization: "Acme",
+                publishedAt: null,
+                updatedAt: "2026-06-01T00:00:00Z",
+                metrics: [],
+                tags: ["workflow"],
+                metadata: {}
+              },
+              {
+                id: "arxiv:1234.5678",
+                source: "github",
+                kind: "paper",
+                title: "Planning for Agents",
+                url: "https://arxiv.org/abs/1234.5678",
+                summary: "Paper summary",
+                authors: ["Ada Lovelace"],
+                organization: null,
+                publishedAt: "2026-05-01T00:00:00Z",
+                updatedAt: null,
+                metrics: [],
+                tags: ["planning"],
+                metadata: {}
+              }
+            ]
+          }
+        ]}
+        statusCopy={copy.status}
+      />
+    );
+
+    expect(screen.getByText("项目")).toBeTruthy();
+    expect(screen.getByText("论文")).toBeTruthy();
+    expect(screen.queryByText("project")).toBeNull();
+    expect(screen.queryByText("paper")).toBeNull();
   });
 
   it("keeps the source-derived graph and shows a model degradation fallback when the Agent run fails", async () => {

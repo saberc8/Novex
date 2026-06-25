@@ -65,6 +65,24 @@ type ResearchMapNodeKind =
   | "open_question"
   | "experiment";
 
+type ResearchMapRelation =
+  | "supports"
+  | "implements"
+  | "evaluates"
+  | "extends"
+  | "reveals_gap"
+  | "leads_to"
+  | "mentions";
+
+type ResearchSourceItemKindLabel =
+  | "paper"
+  | "project"
+  | "model"
+  | "dataset"
+  | "benchmark"
+  | "news"
+  | "community";
+
 export type ResearchMapCopy = {
   title: string;
   description: string;
@@ -78,6 +96,7 @@ export type ResearchMapCopy = {
     string
   >;
   nodeKinds: Record<ResearchMapNodeKind, string>;
+  relationLabels: Record<ResearchMapRelation, string>;
 };
 
 export type ResearchRadarCopy = {
@@ -130,6 +149,7 @@ export type ResearchRadarCopy = {
     items: (count: number) => string;
     noItems: string;
     noSummary: string;
+    sourceItemKinds: Record<ResearchSourceItemKindLabel, string>;
   };
   evidence: {
     title: string;
@@ -239,6 +259,15 @@ export const RESEARCH_RADAR_COPY: Record<ResearchLocale, ResearchRadarCopy> = {
         institution: "机构",
         open_question: "开放问题",
         experiment: "实验"
+      },
+      relationLabels: {
+        supports: "支撑",
+        implements: "实现",
+        evaluates: "评测",
+        extends: "扩展",
+        reveals_gap: "揭示空白",
+        leads_to: "导向",
+        mentions: "提及"
       }
     },
     drawer: {
@@ -249,7 +278,16 @@ export const RESEARCH_RADAR_COPY: Record<ResearchLocale, ResearchRadarCopy> = {
       waiting: "等待来源证据",
       items: (count) => `${count} 条`,
       noItems: "没有返回条目",
-      noSummary: "暂无摘要"
+      noSummary: "暂无摘要",
+      sourceItemKinds: {
+        paper: "论文",
+        project: "项目",
+        model: "模型",
+        dataset: "数据集",
+        benchmark: "基准",
+        news: "新闻",
+        community: "社区"
+      }
     },
     evidence: {
       title: "证据",
@@ -357,6 +395,15 @@ export const RESEARCH_RADAR_COPY: Record<ResearchLocale, ResearchRadarCopy> = {
         institution: "institution",
         open_question: "open question",
         experiment: "experiment"
+      },
+      relationLabels: {
+        supports: "supports",
+        implements: "implements",
+        evaluates: "evaluates",
+        extends: "extends",
+        reveals_gap: "reveals gap",
+        leads_to: "leads to",
+        mentions: "mentions"
       }
     },
     drawer: {
@@ -367,7 +414,16 @@ export const RESEARCH_RADAR_COPY: Record<ResearchLocale, ResearchRadarCopy> = {
       waiting: "Waiting for source evidence",
       items: (count) => `${count} items`,
       noItems: "No items returned",
-      noSummary: "No summary"
+      noSummary: "No summary",
+      sourceItemKinds: {
+        paper: "Paper",
+        project: "Project",
+        model: "Model",
+        dataset: "Dataset",
+        benchmark: "Benchmark",
+        news: "News",
+        community: "Community"
+      }
     },
     evidence: {
       title: "Evidence",

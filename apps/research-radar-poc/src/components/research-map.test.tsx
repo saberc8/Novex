@@ -133,6 +133,15 @@ describe("ResearchMap", () => {
             institution: "机构",
             open_question: "开放问题",
             experiment: "实验"
+          },
+          relationLabels: {
+            supports: "支撑",
+            implements: "实现",
+            evaluates: "评测",
+            extends: "扩展",
+            reveals_gap: "揭示空白",
+            leads_to: "导向",
+            mentions: "提及"
           }
         }}
       />
@@ -141,6 +150,8 @@ describe("ResearchMap", () => {
     expect(screen.getByText("研究图谱")).toBeTruthy();
     expect(screen.getByRole("button", { name: "论文" })).toBeTruthy();
     expect(screen.getByLabelText("研究关系图")).toBeTruthy();
+    expect(screen.getByText("支撑")).toBeTruthy();
+    expect(screen.queryByText("supports")).toBeNull();
   });
 
   it("selects a node when clicked", () => {

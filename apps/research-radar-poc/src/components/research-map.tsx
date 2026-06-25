@@ -98,6 +98,15 @@ const DEFAULT_MAP_COPY: ResearchMapCopy = {
     institution: "institution",
     open_question: "open question",
     experiment: "experiment"
+  },
+  relationLabels: {
+    supports: "supports",
+    implements: "implements",
+    evaluates: "evaluates",
+    extends: "extends",
+    reveals_gap: "reveals gap",
+    leads_to: "leads to",
+    mentions: "mentions"
   }
 };
 
@@ -237,7 +246,7 @@ export function ResearchMap({
                       top: `${(from.y + to.y) / 2 / 6.25}%`
                     }}
                   >
-                    {edge.relation}
+                    {copy.relationLabels[edge.relation]}
                   </span>
                 );
               })}
