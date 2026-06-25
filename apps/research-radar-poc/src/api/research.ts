@@ -1,5 +1,5 @@
 import { createAgentRun } from "./agent";
-import { normalizeResearchLocale, researchReportLanguageInstruction } from "@/lib/i18n";
+import { normalizeResearchLocale, researchReportHeadings, researchReportLanguageInstruction } from "@/lib/i18n";
 import type { AgentRunCommand, AgentRunResp } from "@/types/agent";
 import type { ModelRouteOption, ResearchFilter, ResearchRanking, ResearchScanInput } from "@/types/research";
 
@@ -29,17 +29,6 @@ const RANKING_LABELS: Record<ResearchRanking, string> = {
   recency: "Recency",
   beginner: "Beginner friendly"
 };
-
-const REPORT_HEADINGS = [
-  "## Research Overview",
-  "## Active Topics",
-  "## Key Authors And Institutions",
-  "## Representative Work",
-  "## Reading Route",
-  "## Research Openings",
-  "## Experiment Plans",
-  "## Sources And Caveats"
-];
 
 const GRAPH_JSON_INSTRUCTION = [
   "Before the markdown report, return one compact fenced graph block:",
@@ -112,6 +101,7 @@ export async function createResearchRadarRun(input: ResearchScanInput): Promise<
 
 function buildResearchRadarPrompt(input: ResearchScanInput) {
   const locale = normalizeResearchLocale(input.locale);
+  const reportHeadings = researchReportHeadings(locale);
   const filters = input.filters.length > 0
     ? input.filters.map((filter) => FILTER_LABELS[filter]).join(", ")
     : "Papers, Open source projects, Datasets, Benchmarks, News, Community discussion";
@@ -128,7 +118,7 @@ function buildResearchRadarPrompt(input: ResearchScanInput) {
     "Use at most 3 web search calls total. After those searches, synthesize the report with caveats instead of searching again.",
     ...GRAPH_JSON_INSTRUCTION,
     "Return a concise markdown report with exactly these headings:",
-    ...REPORT_HEADINGS,
+    ...reportHeadings,
     "For each section, include practical details that help a newcomer decide what to read, who to follow, what work matters, and which experiments are worth trying."
   ];
   const evidenceBudget = AGENT_INPUT_MAX_CHARS

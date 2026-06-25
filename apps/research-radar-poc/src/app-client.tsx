@@ -31,6 +31,8 @@ import {
   RESEARCH_LOCALE_OPTIONS,
   readSavedResearchLocale,
   researchRadarCopy,
+  researchModelSelectorButtonLabel,
+  researchModelSelectorListLabel,
   saveResearchLocale
 } from "@/lib/i18n";
 import {
@@ -341,6 +343,7 @@ function Header({
       <div className="flex shrink-0 items-center gap-2">
         <LanguageSelector locale={locale} onSelect={onLocaleSelect} />
         <ModelSelector
+          locale={locale}
           onSelect={onRouteSelect}
           options={modelOptions}
           selectedRouteId={selectedRouteId}
@@ -1062,10 +1065,12 @@ function LanguageSelector({
 }
 
 function ModelSelector({
+  locale,
   onSelect,
   options,
   selectedRouteId
 }: {
+  locale: ResearchLocale;
   onSelect: (routeId: string) => void;
   options: ModelRouteOption[];
   selectedRouteId: string;
@@ -1081,7 +1086,7 @@ function ModelSelector({
       <button
         aria-expanded={open}
         aria-haspopup="listbox"
-        aria-label={`选择模型 ${selected.label}`}
+        aria-label={researchModelSelectorButtonLabel(locale, selected.label)}
         className="inline-flex h-9 max-w-[260px] items-center gap-2 rounded-[8px] border border-[#D7E0D7] bg-white px-3 text-[13px] font-medium text-[#233029] hover:bg-[#F5F8F5]"
         onClick={() => setOpen((value) => !value)}
         type="button"
@@ -1091,7 +1096,7 @@ function ModelSelector({
       </button>
       {open ? (
         <div
-          aria-label="模型列表"
+          aria-label={researchModelSelectorListLabel(locale)}
           className="absolute right-0 z-30 mt-2 min-w-[260px] rounded-[8px] border border-[#D7E0D7] bg-white p-1 shadow-[0_18px_42px_rgba(34,45,38,0.15)]"
           role="listbox"
         >

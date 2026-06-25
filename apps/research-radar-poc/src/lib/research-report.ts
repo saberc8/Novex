@@ -1,30 +1,55 @@
 import type { ParsedResearchReport } from "@/types/research";
 
-const EXPECTED_HEADINGS = [
-  "Research Overview",
-  "Active Topics",
-  "Key Authors And Institutions",
-  "Representative Work",
-  "Reading Route",
-  "Research Openings",
-  "Experiment Plans",
-  "Sources And Caveats"
-];
+const RESEARCH_REPORT_SECTIONS = [
+  {
+    id: "research-overview",
+    headings: ["Research Overview", "研究概览"]
+  },
+  {
+    id: "active-topics",
+    headings: ["Active Topics", "活跃议题"]
+  },
+  {
+    id: "key-authors-and-institutions",
+    headings: ["Key Authors And Institutions", "关键作者与机构"]
+  },
+  {
+    id: "representative-work",
+    headings: ["Representative Work", "代表性工作"]
+  },
+  {
+    id: "reading-route",
+    headings: ["Reading Route", "阅读路线"]
+  },
+  {
+    id: "research-openings",
+    headings: ["Research Openings", "研究切入点"]
+  },
+  {
+    id: "experiment-plans",
+    headings: ["Experiment Plans", "实验方案"]
+  },
+  {
+    id: "sources-and-caveats",
+    headings: ["Sources And Caveats", "来源与限制"]
+  }
+] as const;
 
 export function parseResearchReport(markdown: string): ParsedResearchReport {
   const trimmed = markdown.trim();
   const sections = extractHeadingSections(trimmed);
-  const knownSections = EXPECTED_HEADINGS.flatMap((heading) =>
-    sections.get(heading)
+  const knownSections = RESEARCH_REPORT_SECTIONS.flatMap((section) => {
+    const matchedHeading = section.headings.find((heading) => sections.has(heading));
+    return matchedHeading
       ? [
           {
-            id: slugifyHeading(heading),
-            title: heading,
-            content: sections.get(heading) ?? ""
+            id: section.id,
+            title: matchedHeading,
+            content: sections.get(matchedHeading) ?? ""
           }
         ]
-      : []
-  );
+      : [];
+  });
 
   if (knownSections.length >= 4) {
     return {
@@ -61,8 +86,4 @@ function extractHeadingSections(markdown: string) {
   });
 
   return result;
-}
-
-function slugifyHeading(heading: string) {
-  return heading.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
 }

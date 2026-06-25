@@ -37,8 +37,8 @@ describe("research radar agent command", () => {
     expect(command.input).toContain("Recency");
     expect(command.input).toContain("Use at most 3 web search calls total");
     expect(command.input).toContain("synthesize the report with caveats instead of searching again");
-    expect(command.input).toContain("## Research Overview");
-    expect(command.input).toContain("## Sources And Caveats");
+    expect(command.input).toContain("## 研究概览");
+    expect(command.input).toContain("## 来源与限制");
   });
 
   it("uses configured route options from environment", () => {
@@ -88,7 +88,7 @@ describe("research radar agent command", () => {
     expect(command.input).toContain('"nodes"');
     expect(command.input).toContain('"edges"');
     expect(command.input.indexOf("```research-graph-json")).toBeLessThan(
-      command.input.indexOf("## Research Overview")
+      command.input.indexOf("## 研究概览")
     );
     expect(command.input.length).toBeLessThanOrEqual(4000);
   });
@@ -102,6 +102,9 @@ describe("research radar agent command", () => {
     });
 
     expect(command.input).toContain("请用中文撰写 markdown 报告");
+    expect(command.input).toContain("## 研究概览");
+    expect(command.input).toContain("## 来源与限制");
+    expect(command.input).not.toContain("## Research Overview");
   });
 
   it("asks for an English markdown report when English is selected", () => {
@@ -114,6 +117,9 @@ describe("research radar agent command", () => {
     });
 
     expect(command.input).toContain("Write the markdown report in English");
+    expect(command.input).toContain("## Research Overview");
+    expect(command.input).toContain("## Sources And Caveats");
+    expect(command.input).not.toContain("## 研究概览");
   });
 
   it("keeps Agent input within the backend character limit when source evidence is long", () => {
@@ -142,7 +148,7 @@ describe("research radar agent command", () => {
 
     expect(command.input.length).toBeLessThanOrEqual(4000);
     expect(command.input).toContain("Source evidence truncated to fit Agent input limit");
-    expect(command.input).toContain("## Sources And Caveats");
+    expect(command.input).toContain("## 来源与限制");
   });
 
   it("posts a research scan to the Agent run endpoint", async () => {

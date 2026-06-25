@@ -52,6 +52,40 @@ export function researchReportLanguageInstruction(locale: ResearchLocale) {
   return "请用中文撰写 markdown 报告。论文标题、项目名、数据集名、URL 和作者名保留原始语言";
 }
 
+export function researchReportHeadings(locale: ResearchLocale): string[] {
+  if (locale === "en-US") {
+    return [
+      "## Research Overview",
+      "## Active Topics",
+      "## Key Authors And Institutions",
+      "## Representative Work",
+      "## Reading Route",
+      "## Research Openings",
+      "## Experiment Plans",
+      "## Sources And Caveats"
+    ];
+  }
+
+  return [
+    "## 研究概览",
+    "## 活跃议题",
+    "## 关键作者与机构",
+    "## 代表性工作",
+    "## 阅读路线",
+    "## 研究切入点",
+    "## 实验方案",
+    "## 来源与限制"
+  ];
+}
+
+export function researchModelSelectorButtonLabel(locale: ResearchLocale, modelLabel: string) {
+  return locale === "en-US" ? `Choose model ${modelLabel}` : `选择模型 ${modelLabel}`;
+}
+
+export function researchModelSelectorListLabel(locale: ResearchLocale) {
+  return locale === "en-US" ? "Model list" : "模型列表";
+}
+
 type ResearchMapNodeKind =
   | "topic"
   | "hotspot"

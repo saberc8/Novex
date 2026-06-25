@@ -49,6 +49,23 @@ describe("Research Radar POC page", () => {
     expect(window.localStorage.getItem("novex.researchRadar.locale")).toBe("en-US");
   });
 
+  it("localizes model selector accessibility labels with the active locale", () => {
+    vi.stubGlobal("fetch", vi.fn(async () => ({ ok: true, json: async () => ({ code: "200", data: {} }) })));
+
+    render(<Page />);
+
+    expect(screen.getByRole("button", { name: "选择模型 runtime.llm" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "选择模型 runtime.llm" }));
+    expect(screen.getByRole("listbox", { name: "模型列表" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "选择模型 runtime.llm" }));
+
+    fireEvent.click(screen.getByRole("button", { name: "English" }));
+
+    expect(screen.getByRole("button", { name: "Choose model runtime.llm" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Choose model runtime.llm" }));
+    expect(screen.getByRole("listbox", { name: "Model list" })).toBeTruthy();
+  });
+
   it("restores saved English locale and ignores invalid saved locale", () => {
     vi.stubGlobal("fetch", vi.fn(async () => ({ ok: true, json: async () => ({ code: "200", data: {} }) })));
     window.localStorage.setItem("novex.researchRadar.locale", "en-US");
