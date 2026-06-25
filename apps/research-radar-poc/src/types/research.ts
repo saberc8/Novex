@@ -42,6 +42,63 @@ export type ParsedResearchReport = {
   sections: ResearchReportSection[];
 };
 
+export type ResearchGraphNodeKind =
+  | "topic"
+  | "hotspot"
+  | "paper"
+  | "project"
+  | "model"
+  | "dataset"
+  | "benchmark"
+  | "author"
+  | "institution"
+  | "open_question"
+  | "experiment";
+
+export type ResearchGraphRelation =
+  | "supports"
+  | "implements"
+  | "evaluates"
+  | "extends"
+  | "reveals_gap"
+  | "leads_to"
+  | "mentions";
+
+export type ResearchGraphLayer =
+  | "papers"
+  | "projects"
+  | "models"
+  | "datasets"
+  | "benchmarks"
+  | "questions"
+  | "experiments";
+
+export type ResearchGraphNode = {
+  id: string;
+  kind: ResearchGraphNodeKind;
+  title: string;
+  summary: string;
+  importance: number;
+  recency?: string | null;
+  sourceItemIds: string[];
+  tags: string[];
+};
+
+export type ResearchGraphEdge = {
+  id: string;
+  from: string;
+  to: string;
+  relation: ResearchGraphRelation;
+  evidenceItemIds: string[];
+};
+
+export type ResearchGraph = {
+  topic: string;
+  nodes: ResearchGraphNode[];
+  edges: ResearchGraphEdge[];
+  caveats: string[];
+};
+
 export type ResearchSource =
   | "arxiv"
   | "github"
