@@ -28,12 +28,19 @@ import { configuredModelRouteOptions, createResearchRadarRun } from "@/api/resea
 import { createResearchRadarSourceScan } from "@/api/source-scan";
 import { summarizeModelDeltas, summarizeResearchEvent } from "@/lib/agent-events";
 import {
+  RESEARCH_LOCALE_OPTIONS,
+  readSavedResearchLocale,
+  researchRadarCopy,
+  saveResearchLocale
+} from "@/lib/i18n";
+import {
   buildResearchGraph,
   nodeDetailsFor
 } from "@/lib/research-graph";
 import { parseResearchReport } from "@/lib/research-report";
 import { ResearchMap } from "@/components/research-map";
 import type { ModelDeltaSummary, ResearchEventEvidence } from "@/lib/agent-events";
+import type { ResearchLocale, ResearchRadarCopy } from "@/lib/i18n";
 import type { ResearchGraphNodeDetails } from "@/lib/research-graph";
 import type { AgentRunEventResp } from "@/types/agent";
 import type {
@@ -100,6 +107,8 @@ const SOURCE_STATUS_LABELS: Record<ResearchSourceStatus, string> = {
 
 export function ResearchRadarApp() {
   const modelOptions = useMemo(() => configuredModelRouteOptions(), []);
+  const [locale, setLocale] = useState<ResearchLocale>(() => readSavedResearchLocale());
+  const copy = researchRadarCopy(locale);
   const [topic, setTopic] = useState("");
   const [filters, setFilters] = useState<ResearchFilter[]>(DEFAULT_FILTERS);
   const [ranking, setRanking] = useState<ResearchRanking>("balanced");
@@ -148,7 +157,7 @@ export function ResearchRadarApp() {
   async function handleSubmit() {
     const normalizedTopic = topic.trim();
     if (!normalizedTopic || isSubmitting) {
-      setComposerError("请输入研究主题");
+      setComposerError(copy.composer.emptyError);
       return;
     }
 
@@ -184,7 +193,7 @@ export function ResearchRadarApp() {
 
       if (sourceScan.status === "failed") {
         updateScan(scanId, {
-          runError: sourceScan.warnings.join("\n") || "研究来源扫描失败"
+          runError: sourceScan.warnings.join("\n") || copy.composer.sourceScanFailed
         });
         return;
       }
@@ -194,6 +203,7 @@ export function ResearchRadarApp() {
         filters,
         ranking,
         routeId: selectedRouteId,
+        locale,
         sourceScan
       });
       let runEvents: AgentRunEventResp[] = [];
@@ -207,7 +217,7 @@ export function ResearchRadarApp() {
     } catch (error) {
       updateScan(scanId, {
         runError: hasUsableSourceScan
-          ? "model analysis unavailable"
+          ? copy.composer.modelUnavailable
           : error instanceof Error
             ? error.message
             : "雷达扫描失败"
@@ -227,24 +237,34 @@ export function ResearchRadarApp() {
     );
   }
 
+  function handleLocaleSelect(nextLocale: ResearchLocale) {
+    setLocale(nextLocale);
+    saveResearchLocale(nextLocale);
+  }
+
   return (
     <main className="min-h-screen bg-[#F6F8F5] text-[#171717]">
       <div className="grid min-h-screen grid-cols-1 xl:grid-cols-[286px_minmax(0,1fr)_382px]">
         <ScanSidebar
           activeScanId={activeScan?.id ?? null}
+          copy={copy}
           onScanSelect={setActiveScanId}
           scans={scans}
         />
         <section className="min-w-0 border-x border-[#DFE5DF] bg-white">
           <Header
+            copy={copy}
             isSubmitting={isSubmitting}
+            locale={locale}
             modelOptions={modelOptions}
+            onLocaleSelect={handleLocaleSelect}
             onRouteSelect={setSelectedRouteId}
             selectedRouteId={selectedRouteId}
           />
           <div className="mx-auto flex w-full max-w-[1120px] flex-col gap-5 px-5 py-5 lg:px-7">
             <TopicComposer
               composerError={composerError}
+              copy={copy}
               filters={filters}
               isSubmitting={isSubmitting}
               onFilterToggle={toggleFilter}
@@ -256,6 +276,7 @@ export function ResearchRadarApp() {
             />
             <ReportWorkspace
               activeScan={activeScan}
+              copy={copy}
               isSubmitting={isSubmitting}
               onGraphNodeSelect={setSelectedGraphNodeId}
               parsedReport={parsedReport}
@@ -266,6 +287,7 @@ export function ResearchRadarApp() {
         </section>
         <EvidenceRail
           activeScan={activeScan}
+          copy={copy}
           eventEvidence={eventEvidence}
           modelDeltaSummary={modelDeltaSummary}
           researchGraph={researchGraph}
@@ -277,13 +299,19 @@ export function ResearchRadarApp() {
 }
 
 function Header({
+  copy,
   isSubmitting,
+  locale,
   modelOptions,
+  onLocaleSelect,
   onRouteSelect,
   selectedRouteId
 }: {
+  copy: ResearchRadarCopy;
   isSubmitting: boolean;
+  locale: ResearchLocale;
   modelOptions: ModelRouteOption[];
+  onLocaleSelect: (locale: ResearchLocale) => void;
   onRouteSelect: (routeId: string) => void;
   selectedRouteId: string;
 }) {
@@ -299,25 +327,30 @@ function Header({
           </h1>
           <div className="flex min-w-0 items-center gap-2 text-[12px] text-[#64706A]">
             <span className={["h-2 w-2 rounded-full", isSubmitting ? "bg-[#D97706]" : "bg-[#0E9F6E]"].join(" ")} />
-            <span className="truncate">{isSubmitting ? "scanning" : "ready"}</span>
+            <span className="truncate">{isSubmitting ? copy.status.scanning : copy.status.ready}</span>
           </div>
         </div>
       </div>
-      <ModelSelector
-        onSelect={onRouteSelect}
-        options={modelOptions}
-        selectedRouteId={selectedRouteId}
-      />
+      <div className="flex shrink-0 items-center gap-2">
+        <LanguageSelector locale={locale} onSelect={onLocaleSelect} />
+        <ModelSelector
+          onSelect={onRouteSelect}
+          options={modelOptions}
+          selectedRouteId={selectedRouteId}
+        />
+      </div>
     </header>
   );
 }
 
 function ScanSidebar({
   activeScanId,
+  copy,
   onScanSelect,
   scans
 }: {
   activeScanId: string | null;
+  copy: ResearchRadarCopy;
   onScanSelect: (scanId: string) => void;
   scans: ResearchScan[];
 }) {
@@ -325,12 +358,12 @@ function ScanSidebar({
     <aside className="hidden min-h-screen bg-[#EEF3ED] px-4 py-5 xl:block">
       <div className="mb-4 flex items-center gap-2 text-[13px] font-medium text-[#66736B]">
         <History aria-hidden="true" className="h-4 w-4" strokeWidth={1.9} />
-        Scans
+        {copy.sidebar.title}
       </div>
       <div className="space-y-2">
         {scans.length === 0 ? (
           <div className="rounded-[8px] border border-dashed border-[#D3DDD4] bg-white/60 px-3 py-3 text-[13px] text-[#7A857E]">
-            No scans
+            {copy.sidebar.empty}
           </div>
         ) : (
           scans.map((scan) => (
@@ -347,7 +380,7 @@ function ScanSidebar({
             >
               <span className="block truncate text-[14px] font-medium">{scan.topic}</span>
               <span className="mt-1 block truncate text-[12px] text-[#7A857E]">
-                {scan.runResult ? `#${scan.runResult.runId}` : scan.runError ? "failed" : "pending"}
+                {scan.runResult ? `#${scan.runResult.runId}` : scan.runError ? copy.status.failed : copy.status.pending}
               </span>
             </button>
           ))
@@ -359,6 +392,7 @@ function ScanSidebar({
 
 function TopicComposer({
   composerError,
+  copy,
   filters,
   isSubmitting,
   onFilterToggle,
@@ -369,6 +403,7 @@ function TopicComposer({
   topic
 }: {
   composerError: string | null;
+  copy: ResearchRadarCopy;
   filters: ResearchFilter[];
   isSubmitting: boolean;
   onFilterToggle: (code: ResearchFilter) => void;
@@ -381,7 +416,7 @@ function TopicComposer({
   return (
     <section className="rounded-[8px] border border-[#DEE6DE] bg-[#FBFCFA] p-4 shadow-[0_12px_28px_rgba(34,45,38,0.06)]">
       <label className="block text-[13px] font-medium text-[#59665F]" htmlFor="research-topic">
-        研究主题
+        {copy.composer.label}
       </label>
       <div className="mt-2 flex flex-col gap-3 lg:flex-row">
         <div className="relative min-w-0 flex-1">
@@ -390,7 +425,7 @@ function TopicComposer({
             className="min-h-[54px] w-full resize-none rounded-[8px] border border-[#D7E0D7] bg-white py-3 pl-10 pr-3 text-[16px] leading-6 text-[#111111] outline-none transition focus:border-[#0E6B5F] focus:ring-2 focus:ring-[#BFE5DC]"
             id="research-topic"
             onChange={(event) => onTopicChange(event.target.value)}
-            placeholder="例如：AI coding agents"
+            placeholder={copy.composer.placeholder}
             value={topic}
           />
         </div>
@@ -401,7 +436,7 @@ function TopicComposer({
           type="button"
         >
           <Radar aria-hidden="true" className="h-4 w-4" strokeWidth={2} />
-          启动雷达扫描
+          {copy.composer.submit}
         </button>
       </div>
       {composerError ? (
@@ -410,17 +445,19 @@ function TopicComposer({
         </p>
       ) : null}
       <div className="mt-4 flex flex-col gap-3 2xl:flex-row 2xl:items-center 2xl:justify-between">
-        <FilterDock filters={filters} onToggle={onFilterToggle} />
-        <RankingControl onSelect={onRankingSelect} ranking={ranking} />
+        <FilterDock copy={copy} filters={filters} onToggle={onFilterToggle} />
+        <RankingControl copy={copy} onSelect={onRankingSelect} ranking={ranking} />
       </div>
     </section>
   );
 }
 
 function FilterDock({
+  copy,
   filters,
   onToggle
 }: {
+  copy: ResearchRadarCopy;
   filters: ResearchFilter[];
   onToggle: (code: ResearchFilter) => void;
 }) {
@@ -443,7 +480,7 @@ function FilterDock({
             type="button"
           >
             <Icon aria-hidden={true} className="h-3.5 w-3.5" strokeWidth={1.9} />
-            {filter.label}
+            {copy.composer.filters[filter.code]}
           </button>
         );
       })}
@@ -452,9 +489,11 @@ function FilterDock({
 }
 
 function RankingControl({
+  copy,
   onSelect,
   ranking
 }: {
+  copy: ResearchRadarCopy;
   onSelect: (ranking: ResearchRanking) => void;
   ranking: ResearchRanking;
 }) {
@@ -473,7 +512,7 @@ function RankingControl({
           onClick={() => onSelect(option.code)}
           type="button"
         >
-          {option.label}
+          {copy.composer.rankings[option.code]}
         </button>
       ))}
     </div>
@@ -482,6 +521,7 @@ function RankingControl({
 
 function ReportWorkspace({
   activeScan,
+  copy,
   isSubmitting,
   onGraphNodeSelect,
   parsedReport,
@@ -489,6 +529,7 @@ function ReportWorkspace({
   selectedGraphNodeId
 }: {
   activeScan: ResearchScan | null;
+  copy: ResearchRadarCopy;
   isSubmitting: boolean;
   onGraphNodeSelect: (nodeId: string) => void;
   parsedReport: ParsedResearchReport;
@@ -499,9 +540,9 @@ function ReportWorkspace({
     return (
       <section className="grid gap-4 lg:grid-cols-3">
         {[
-          ["Signal", "topic velocity", "#0E6B5F"],
-          ["People", "authors and labs", "#2563EB"],
-          ["Experiments", "next probes", "#B45309"]
+          [copy.preview.signal, copy.preview.signalValue, "#0E6B5F"],
+          [copy.preview.people, copy.preview.peopleValue, "#2563EB"],
+          [copy.preview.experiments, copy.preview.experimentsValue, "#B45309"]
         ].map(([title, value, color]) => (
           <div className="rounded-[8px] border border-[#E0E7E0] bg-white p-5" key={title}>
             <div className="mb-5 h-1.5 w-12 rounded-full" style={{ backgroundColor: color }} />
@@ -522,22 +563,28 @@ function ReportWorkspace({
               {activeScan.topic}
             </h2>
             <div className="mt-2 flex flex-wrap items-center gap-2 text-[12px] text-[#6B776F]">
-              <span className="rounded-[7px] bg-[#EEF3ED] px-2 py-1">{rankingLabel(activeScan.ranking)}</span>
+              <span className="rounded-[7px] bg-[#EEF3ED] px-2 py-1">{rankingLabel(activeScan.ranking, copy)}</span>
               {activeScan.runResult ? (
                 <span className="rounded-[7px] bg-[#EEF3ED] px-2 py-1">Run #{activeScan.runResult.runId}</span>
               ) : null}
               <span className="rounded-[7px] bg-[#EEF3ED] px-2 py-1">
-                {activeScan.runResult?.status ?? (activeScan.runError ? "failed" : isSubmitting ? "running" : "pending")}
+                {activeScan.runResult
+                  ? statusLabel(copy, activeScan.runResult.status)
+                  : activeScan.runError
+                    ? copy.status.failed
+                    : isSubmitting
+                      ? copy.status.running
+                      : copy.status.pending}
               </span>
             </div>
           </div>
           <div className="grid grid-cols-3 gap-2 text-center">
             <Metric
               value={String(activeScan.sourceScan?.sources.length ?? activeScan.filters.length)}
-              label="sources"
+              label={copy.workspace.sources}
             />
-            <Metric value={(activeScan.runEvents ?? []).length.toString()} label="events" />
-            <Metric value={parsedReport.structured ? "8" : "1"} label="sections" />
+            <Metric value={(activeScan.runEvents ?? []).length.toString()} label={copy.workspace.events} />
+            <Metric value={parsedReport.structured ? "8" : "1"} label={copy.workspace.sections} />
           </div>
         </div>
       </div>
@@ -758,12 +805,14 @@ function sourceStatusTone(status: ResearchSourceStatus) {
 
 function EvidenceRail({
   activeScan,
+  copy,
   eventEvidence,
   modelDeltaSummary,
   researchGraph,
   selectedGraphNode
 }: {
   activeScan: ResearchScan | null;
+  copy: ResearchRadarCopy;
   eventEvidence: ResearchEventEvidence[];
   modelDeltaSummary: ModelDeltaSummary | null;
   researchGraph: ResearchGraph | null;
@@ -774,7 +823,7 @@ function EvidenceRail({
       <div className="rounded-[8px] border border-[#E0E7E0] bg-white p-4 shadow-[0_10px_26px_rgba(34,45,38,0.06)]">
         <h2 className="mb-4 flex items-center gap-2 text-[14px] font-semibold text-[#59665F]">
           <Globe2 aria-hidden="true" className="h-4 w-4" strokeWidth={1.9} />
-          Evidence
+          {copy.evidence.title}
         </h2>
         {selectedGraphNode ? (
           <section className="mb-4 rounded-[8px] border border-[#D7E7FF] bg-[#F8FBFF] p-3">
@@ -879,21 +928,21 @@ function EvidenceRail({
           </p>
         ) : activeScan?.runResult ? (
           <div className="mb-4 grid grid-cols-2 gap-2">
-            <EvidenceMeta label="run" value={`#${activeScan.runResult.runId}`} />
-            <EvidenceMeta label="status" value={activeScan.runResult.status} />
-            <EvidenceMeta className="col-span-2" label="trace" value={activeScan.runResult.traceId} />
+            <EvidenceMeta label={copy.evidence.run} value={`#${activeScan.runResult.runId}`} />
+            <EvidenceMeta label={copy.evidence.status} value={statusLabel(copy, activeScan.runResult.status)} />
+            <EvidenceMeta className="col-span-2" label={copy.evidence.trace} value={activeScan.runResult.traceId} />
           </div>
         ) : (
           <p className="rounded-[8px] border border-dashed border-[#D7E0D7] bg-[#FBFCFA] px-3 py-3 text-[13px] text-[#7A857E]">
-            Waiting for scan
+            {copy.evidence.waiting}
           </p>
         )}
 
         {modelDeltaSummary ? (
           <section className="mb-4 rounded-[8px] border border-[#D7E7FF] bg-[#F8FBFF] p-3">
             <div className="mb-2 flex items-center justify-between gap-2 text-[12px] text-[#53687F]">
-              <span className="font-semibold text-[#1D2B39]">Live model output</span>
-              <span>{modelDeltaSummary.chunkCount} chunks</span>
+              <span className="font-semibold text-[#1D2B39]">{copy.evidence.liveModelOutput}</span>
+              <span>{modelDeltaSummary.chunkCount} {copy.evidence.chunks}</span>
             </div>
             <p className="whitespace-pre-wrap text-[13px] leading-5 text-[#263747]">
               {modelDeltaSummary.text}
@@ -940,6 +989,35 @@ function InspectorSection({
 
 function formatRelationLabel(relation: string) {
   return relation.replaceAll("_", " ");
+}
+
+function LanguageSelector({
+  locale,
+  onSelect
+}: {
+  locale: ResearchLocale;
+  onSelect: (locale: ResearchLocale) => void;
+}) {
+  return (
+    <div className="flex rounded-[8px] border border-[#DDE5DD] bg-white p-1">
+      {RESEARCH_LOCALE_OPTIONS.map((option) => (
+        <button
+          aria-pressed={locale === option.locale}
+          className={[
+            "h-8 rounded-[7px] px-3 text-[13px] font-medium transition",
+            locale === option.locale
+              ? "bg-[#17251F] text-white"
+              : "text-[#66736B] hover:bg-[#F0F4F0] hover:text-[#1F2923]"
+          ].join(" ")}
+          key={option.locale}
+          onClick={() => onSelect(option.locale)}
+          type="button"
+        >
+          {option.label}
+        </button>
+      ))}
+    </div>
+  );
 }
 
 function ModelSelector({
@@ -1033,6 +1111,31 @@ function EvidenceMeta({
   );
 }
 
-function rankingLabel(ranking: ResearchRanking) {
-  return RANKINGS.find((option) => option.code === ranking)?.label ?? ranking;
+function rankingLabel(ranking: ResearchRanking, copy: ResearchRadarCopy) {
+  return copy.composer.rankings[ranking];
+}
+
+function statusLabel(copy: ResearchRadarCopy, status: string) {
+  if (status === "ready") {
+    return copy.status.ready;
+  }
+  if (status === "scanning") {
+    return copy.status.scanning;
+  }
+  if (status === "failed") {
+    return copy.status.failed;
+  }
+  if (status === "pending") {
+    return copy.status.pending;
+  }
+  if (status === "running") {
+    return copy.status.running;
+  }
+  if (status === "succeeded") {
+    return copy.status.succeeded;
+  }
+  if (status === "limited") {
+    return copy.status.limited;
+  }
+  return status;
 }

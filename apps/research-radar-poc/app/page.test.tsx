@@ -9,7 +9,7 @@ describe("Research Radar POC page", () => {
     vi.unstubAllEnvs();
   });
 
-  it("renders the research radar workbench", () => {
+  it("renders the workbench in Chinese by default", () => {
     vi.stubGlobal(
       "fetch",
       vi.fn(async () => ({
@@ -22,14 +22,42 @@ describe("Research Radar POC page", () => {
 
     expect(screen.getByRole("heading", { name: "Research Radar" })).toBeTruthy();
     expect(screen.getByLabelText("研究主题")).toBeTruthy();
-    expect(screen.getByText("Papers")).toBeTruthy();
-    expect(screen.getByText("Projects")).toBeTruthy();
-    expect(screen.getByText("Datasets")).toBeTruthy();
-    expect(screen.getByText("Benchmarks")).toBeTruthy();
-    expect(screen.getByText("News")).toBeTruthy();
-    expect(screen.getByText("Community")).toBeTruthy();
-    expect(screen.getByRole("button", { name: "Balanced" })).toBeTruthy();
+    expect(screen.getByText("论文")).toBeTruthy();
+    expect(screen.getByText("开源项目")).toBeTruthy();
+    expect(screen.getByText("数据集")).toBeTruthy();
+    expect(screen.getByText("基准")).toBeTruthy();
+    expect(screen.getByText("新闻")).toBeTruthy();
+    expect(screen.getByText("社区")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "均衡" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "启动雷达扫描" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "中文" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "English" })).toBeTruthy();
+  });
+
+  it("switches visible workbench copy to English", () => {
+    vi.stubGlobal("fetch", vi.fn(async () => ({ ok: true, json: async () => ({ code: "200", data: {} }) })));
+
+    render(<Page />);
+
+    fireEvent.click(screen.getByRole("button", { name: "English" }));
+
+    expect(screen.getByLabelText("Research topic")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Balanced" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Start radar scan" })).toBeTruthy();
+    expect(window.localStorage.getItem("novex.researchRadar.locale")).toBe("en-US");
+  });
+
+  it("restores saved English locale and ignores invalid saved locale", () => {
+    vi.stubGlobal("fetch", vi.fn(async () => ({ ok: true, json: async () => ({ code: "200", data: {} }) })));
+    window.localStorage.setItem("novex.researchRadar.locale", "en-US");
+
+    const { unmount } = render(<Page />);
+    expect(screen.getByLabelText("Research topic")).toBeTruthy();
+    unmount();
+
+    window.localStorage.setItem("novex.researchRadar.locale", "bad");
+    render(<Page />);
+    expect(screen.getByLabelText("研究主题")).toBeTruthy();
   });
 
   it("submits a topic and renders structured research output with evidence", async () => {
@@ -500,7 +528,7 @@ describe("Research Radar POC page", () => {
 
     expect(await screen.findByText("Research Map")).toBeTruthy();
     expect(await screen.findByRole("button", { name: /acme\/agent/ })).toBeTruthy();
-    expect((await screen.findByRole("alert")).textContent).toContain("model analysis unavailable");
+    expect((await screen.findByRole("alert")).textContent).toContain("模型分析暂不可用");
   });
 
   it("shows a clear empty graph state with source warnings when the model graph has no usable nodes", async () => {
