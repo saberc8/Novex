@@ -129,7 +129,8 @@ mod tests {
 
     #[test]
     fn research_radar_permission_seed_contains_scan_permission() {
-        let seed = include_str!("../../../../migrations/202606250001_seed_research_radar_permission.sql");
+        let seed =
+            include_str!("../../../../migrations/202606250001_seed_research_radar_permission.sql");
 
         assert!(seed.contains("ai:research-radar:scan"));
         assert!(seed.contains("Research Radar"));

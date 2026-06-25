@@ -297,8 +297,11 @@ async fn fetch_github_repositories(
     let base = env_string("GITHUB_API_BASE_URL")
         .or_else(|| env_string("NOVEX_GITHUB_API_BASE_URL"))
         .unwrap_or_else(|| "https://api.github.com".to_owned());
-    let mut url = Url::parse(&format!("{}/search/repositories", base.trim_end_matches('/')))
-        .map_err(|err| format!("GitHub endpoint invalid: {err}"))?;
+    let mut url = Url::parse(&format!(
+        "{}/search/repositories",
+        base.trim_end_matches('/')
+    ))
+    .map_err(|err| format!("GitHub endpoint invalid: {err}"))?;
     url.query_pairs_mut()
         .append_pair("q", topic)
         .append_pair("sort", "stars")
@@ -515,7 +518,11 @@ fn parse_github_repository_items(payload: &Value, limit: usize) -> Vec<ResearchR
             let updated_at = json_str(item, "updated_at");
             let language = json_str(item, "language");
             let mut metrics = Vec::new();
-            push_metric(&mut metrics, "stars", json_f64(item.get("stargazers_count")));
+            push_metric(
+                &mut metrics,
+                "stars",
+                json_f64(item.get("stargazers_count")),
+            );
             push_metric(&mut metrics, "forks", json_f64(item.get("forks_count")));
             let tags = item
                 .get("topics")
@@ -653,7 +660,8 @@ fn parse_generic_source_items(
                 summary,
                 authors: string_array(item.get("authors")),
                 organization: json_str(item, "organization"),
-                published_at: json_str(item, "publishedAt").or_else(|| json_str(item, "published_at")),
+                published_at: json_str(item, "publishedAt")
+                    .or_else(|| json_str(item, "published_at")),
                 updated_at: json_str(item, "updatedAt").or_else(|| json_str(item, "updated_at")),
                 metrics,
                 tags: string_array(item.get("tags")),
@@ -701,11 +709,7 @@ fn build_prompt_context(
             if !item.authors.is_empty() {
                 lines.push(format!("Authors: {}", item.authors.join(", ")));
             }
-            if let Some(date) = item
-                .published_at
-                .as_deref()
-                .or(item.updated_at.as_deref())
-            {
+            if let Some(date) = item.published_at.as_deref().or(item.updated_at.as_deref()) {
                 lines.push(format!("Date: {date}"));
             }
             if !item.metrics.is_empty() {
@@ -787,7 +791,10 @@ fn ranking_score(item: &ResearchRadarItem, ranking: ResearchRadarRanking) -> f64
 }
 
 fn metric_total(item: &ResearchRadarItem) -> f64 {
-    item.metrics.iter().map(|metric| metric.value.max(0.0)).sum()
+    item.metrics
+        .iter()
+        .map(|metric| metric.value.max(0.0))
+        .sum()
 }
 
 fn date_score(item: &ResearchRadarItem) -> f64 {
@@ -1054,8 +1061,14 @@ mod tests {
         assert_eq!(items[0].kind, ResearchRadarItemKind::Paper);
         assert_eq!(items[0].title, "Agent Workflow Planning");
         assert_eq!(items[0].authors, vec!["Ada Lovelace", "Grace Hopper"]);
-        assert_eq!(items[0].published_at.as_deref(), Some("2024-01-02T00:00:00Z"));
-        assert_eq!(items[0].url.as_deref(), Some("http://arxiv.org/abs/2401.12345v1"));
+        assert_eq!(
+            items[0].published_at.as_deref(),
+            Some("2024-01-02T00:00:00Z")
+        );
+        assert_eq!(
+            items[0].url.as_deref(),
+            Some("http://arxiv.org/abs/2401.12345v1")
+        );
     }
 
     #[test]
@@ -1114,7 +1127,9 @@ mod tests {
     async fn source_aggregation_returns_partial_when_one_provider_fails() {
         let service = ResearchRadarService::with_dispatcher(|source, _topic, _limit| async move {
             match source {
-                ResearchRadarSource::Arxiv => Ok(vec![test_item("arxiv-paper", ResearchRadarSource::Arxiv)]),
+                ResearchRadarSource::Arxiv => {
+                    Ok(vec![test_item("arxiv-paper", ResearchRadarSource::Arxiv)])
+                }
                 ResearchRadarSource::Github => Err("GitHub rate limited".to_owned()),
                 _ => Ok(vec![]),
             }
@@ -1132,7 +1147,10 @@ mod tests {
 
         assert_eq!(resp.status, ResearchRadarScanStatus::Partial);
         assert_eq!(resp.items.len(), 1);
-        assert!(resp.warnings.iter().any(|warning| warning.contains("GitHub rate limited")));
+        assert!(resp
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("GitHub rate limited")));
         assert!(resp.prompt_context.contains("[arxiv]"));
         assert!(!resp.prompt_context.contains("TOKEN"));
     }

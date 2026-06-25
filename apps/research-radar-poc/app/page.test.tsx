@@ -35,6 +35,23 @@ describe("Research Radar POC page", () => {
   it("submits a topic and renders structured research output with evidence", async () => {
     const fetchMock = vi.fn(async (url: string) => {
       const href = String(url);
+      if (href.includes("/ai/research-radar/scans")) {
+        return {
+          ok: true,
+          json: async () => ({
+            code: "200",
+            data: {
+              topic: "AI coding agents",
+              ranking: "balanced",
+              status: "succeeded",
+              warnings: [],
+              promptContext: "Research Radar Evidence\n[arxiv] Paper: AI coding agents",
+              sources: [],
+              items: []
+            }
+          })
+        };
+      }
       if (href.includes("/ai/agents/runs") && !href.includes("/events")) {
         return {
           ok: true,
@@ -126,5 +143,135 @@ describe("Research Radar POC page", () => {
       String(url).includes("/ai/agents/runs") && !String(url).includes("/events")
     ) as unknown as [string, RequestInit];
     expect(String(runCall[1].body)).toContain('"webSearchEnabled":true');
+  });
+
+  it("runs backend source scan before creating the Agent run", async () => {
+    const calls: string[] = [];
+    const fetchMock = vi.fn(async (url: string) => {
+      const href = String(url);
+      calls.push(href);
+      if (href.includes("/ai/research-radar/scans")) {
+        return {
+          ok: true,
+          json: async () => ({
+            code: "200",
+            data: {
+              topic: "AI coding agents",
+              ranking: "balanced",
+              status: "partial",
+              warnings: ["leaderboards unavailable"],
+              promptContext: "Research Radar Evidence\n[github] Project: acme/agent",
+              sources: [
+                {
+                  source: "github",
+                  status: "succeeded",
+                  warning: null,
+                  items: [
+                    {
+                      id: "github:acme/agent",
+                      source: "github",
+                      kind: "project",
+                      title: "acme/agent",
+                      url: "https://github.com/acme/agent",
+                      summary: "Agent workflows",
+                      authors: [],
+                      organization: null,
+                      publishedAt: null,
+                      updatedAt: "2026-06-01T00:00:00Z",
+                      metrics: [{ label: "stars", value: 1200 }],
+                      tags: ["agents"],
+                      metadata: {}
+                    }
+                  ]
+                },
+                {
+                  source: "leaderboards",
+                  status: "failed",
+                  warning: "leaderboards unavailable",
+                  items: []
+                }
+              ],
+              items: []
+            }
+          })
+        };
+      }
+      if (href.includes("/ai/agents/runs") && !href.includes("/events")) {
+        return {
+          ok: true,
+          json: async () => ({
+            code: "200",
+            data: {
+              runId: 91,
+              traceId: "agent-91",
+              status: "succeeded",
+              finalOutput: "## Research Overview\nReport"
+            }
+          })
+        };
+      }
+      if (href.includes("/events")) {
+        return {
+          ok: true,
+          json: async () => ({ code: "200", data: { list: [], total: 0 } })
+        };
+      }
+      return { ok: true, json: async () => ({ code: "200", data: {} }) };
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<Page />);
+
+    fireEvent.change(screen.getByLabelText("研究主题"), {
+      target: { value: "AI coding agents" }
+    });
+    fireEvent.click(screen.getByRole("button", { name: "启动雷达扫描" }));
+
+    expect(await screen.findByText("Source Results")).toBeTruthy();
+    expect(await screen.findByText("acme/agent")).toBeTruthy();
+    expect(await screen.findByText("leaderboards unavailable")).toBeTruthy();
+    expect(calls.findIndex((url) => url.includes("/ai/research-radar/scans"))).toBeLessThan(
+      calls.findIndex((url) => url.includes("/ai/agents/runs"))
+    );
+
+    const runCall = fetchMock.mock.calls.find(([url]) =>
+      String(url).includes("/ai/agents/runs") && !String(url).includes("/events")
+    ) as unknown as [string, RequestInit];
+    expect(String(runCall[1].body)).toContain("Research Radar Evidence");
+  });
+
+  it("does not create an Agent run when all source scans fail", async () => {
+    const fetchMock = vi.fn(async (url: string) => {
+      const href = String(url);
+      if (href.includes("/ai/research-radar/scans")) {
+        return {
+          ok: true,
+          json: async () => ({
+            code: "200",
+            data: {
+              topic: "AI coding agents",
+              ranking: "balanced",
+              status: "failed",
+              warnings: ["all sources failed"],
+              promptContext: "",
+              sources: [],
+              items: []
+            }
+          })
+        };
+      }
+      return { ok: true, json: async () => ({ code: "200", data: {} }) };
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<Page />);
+
+    fireEvent.change(screen.getByLabelText("研究主题"), {
+      target: { value: "AI coding agents" }
+    });
+    fireEvent.click(screen.getByRole("button", { name: "启动雷达扫描" }));
+
+    expect(await screen.findByText("all sources failed")).toBeTruthy();
+    expect(fetchMock.mock.calls.some(([url]) => String(url).includes("/ai/agents/runs"))).toBe(false);
   });
 });

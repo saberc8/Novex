@@ -24,6 +24,7 @@ import {
 import type { LucideIcon } from "lucide-react";
 import { listAgentRunEvents } from "@/api/agent";
 import { configuredModelRouteOptions, createResearchRadarRun } from "@/api/research";
+import { createResearchRadarSourceScan } from "@/api/source-scan";
 import { summarizeModelDeltas, summarizeResearchEvent } from "@/lib/agent-events";
 import { parseResearchReport } from "@/lib/research-report";
 import type { ModelDeltaSummary, ResearchEventEvidence } from "@/lib/agent-events";
@@ -33,7 +34,11 @@ import type {
   ParsedResearchReport,
   ResearchFilter,
   ResearchRanking,
-  ResearchScan
+  ResearchScan,
+  ResearchSource,
+  ResearchSourceMetric,
+  ResearchSourceResult,
+  ResearchSourceStatus
 } from "@/types/research";
 
 const DEFAULT_FILTERS: ResearchFilter[] = ["papers", "projects", "datasets", "benchmarks"];
@@ -68,6 +73,21 @@ const SECTION_ICONS: Record<string, LucideIcon> = {
   "experiment-plans": FlaskConical,
   "sources-and-caveats": Globe2,
   raw: FileText
+};
+
+const SOURCE_LABELS: Record<ResearchSource, string> = {
+  arxiv: "arXiv",
+  github: "GitHub",
+  huggingface_models: "HuggingFace Models",
+  huggingface_datasets: "HuggingFace Datasets",
+  paperswithcode: "PapersWithCode",
+  leaderboards: "Leaderboards"
+};
+
+const SOURCE_STATUS_LABELS: Record<ResearchSourceStatus, string> = {
+  succeeded: "ready",
+  degraded: "limited",
+  failed: "failed"
 };
 
 export function ResearchRadarApp() {
@@ -114,6 +134,7 @@ export function ResearchRadarApp() {
       runResult: null,
       runEvents: [],
       runError: null,
+      sourceScan: null,
       createdAt: Date.now()
     };
 
@@ -123,11 +144,26 @@ export function ResearchRadarApp() {
     setIsSubmitting(true);
 
     try {
+      const sourceScan = await createResearchRadarSourceScan({
+        topic: normalizedTopic,
+        filters,
+        ranking
+      });
+      updateScan(scanId, { sourceScan });
+
+      if (sourceScan.status === "failed") {
+        updateScan(scanId, {
+          runError: sourceScan.warnings.join("\n") || "研究来源扫描失败"
+        });
+        return;
+      }
+
       const runResult = await createResearchRadarRun({
         topic: normalizedTopic,
         filters,
         ranking,
-        routeId: selectedRouteId
+        routeId: selectedRouteId,
+        sourceScan
       });
       let runEvents: AgentRunEventResp[] = [];
       try {
@@ -450,12 +486,17 @@ function ReportWorkspace({
             </div>
           </div>
           <div className="grid grid-cols-3 gap-2 text-center">
-            <Metric value={String(activeScan.filters.length)} label="sources" />
-            <Metric value={activeScan.runEvents.length.toString()} label="events" />
+            <Metric
+              value={String(activeScan.sourceScan?.sources.length ?? activeScan.filters.length)}
+              label="sources"
+            />
+            <Metric value={(activeScan.runEvents ?? []).length.toString()} label="events" />
             <Metric value={parsedReport.structured ? "8" : "1"} label="sections" />
           </div>
         </div>
       </div>
+
+      {activeScan.sourceScan ? <SourceResults sources={activeScan.sourceScan.sources} /> : null}
 
       {activeScan.runError ? (
         <p className="rounded-[8px] border border-[#F4C7C3] bg-[#FFF7F5] px-4 py-3 text-[14px] text-[#A33A2D]" role="alert">
@@ -486,6 +527,146 @@ function ReportWorkspace({
       </div>
     </section>
   );
+}
+
+function SourceResults({ sources }: { sources: ResearchSourceResult[] }) {
+  if (sources.length === 0) {
+    return (
+      <section className="rounded-[8px] border border-[#DEE6DE] bg-white p-5">
+        <h3 className="text-[15px] font-semibold text-[#17251F]">Source Results</h3>
+        <p className="mt-3 rounded-[8px] border border-dashed border-[#D7E0D7] bg-[#FBFCFA] px-3 py-3 text-[13px] text-[#7A857E]">
+          Waiting for source evidence
+        </p>
+      </section>
+    );
+  }
+
+  return (
+    <section className="rounded-[8px] border border-[#DEE6DE] bg-white p-5">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <h3 className="text-[15px] font-semibold text-[#17251F]">Source Results</h3>
+          <p className="mt-1 text-[12px] text-[#6B776F]">
+            API evidence collected before the model report
+          </p>
+        </div>
+        <span className="rounded-[7px] bg-[#EEF3ED] px-2 py-1 text-[12px] text-[#66736B]">
+          {sources.reduce((total, source) => total + source.items.length, 0)} items
+        </span>
+      </div>
+
+      <div className="mt-4 divide-y divide-[#E8EEE8]">
+        {sources.map((source) => (
+          <SourceResultRow key={source.source} source={source} />
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function SourceResultRow({ source }: { source: ResearchSourceResult }) {
+  const statusTone = sourceStatusTone(source.status);
+
+  return (
+    <article className="py-4 first:pt-0 last:pb-0">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div className="min-w-0">
+          <div className="flex min-w-0 items-center gap-2">
+            <span className={["h-2 w-2 shrink-0 rounded-full", statusTone.dot].join(" ")} />
+            <h4 className="truncate text-[14px] font-semibold text-[#17251F]">
+              {SOURCE_LABELS[source.source] ?? source.source}
+            </h4>
+          </div>
+          {source.warning ? (
+            <p className="mt-1 text-[12px] leading-5 text-[#A16016]">{source.warning}</p>
+          ) : null}
+        </div>
+        <div className="flex items-center gap-2 text-[12px]">
+          <span className={["rounded-[7px] px-2 py-1", statusTone.badge].join(" ")}>
+            {SOURCE_STATUS_LABELS[source.status] ?? source.status}
+          </span>
+          <span className="rounded-[7px] bg-[#EEF3ED] px-2 py-1 text-[#66736B]">
+            {source.items.length} items
+          </span>
+        </div>
+      </div>
+
+      {source.items.length > 0 ? (
+        <div className="mt-3 grid gap-2">
+          {source.items.slice(0, 3).map((item) => (
+            <a
+              className="group block rounded-[8px] border border-[#E5ECE5] bg-[#FBFCFA] px-3 py-3 transition hover:border-[#B8CCC4] hover:bg-white"
+              href={item.url ?? undefined}
+              key={item.id}
+              rel="noreferrer"
+              target="_blank"
+            >
+              <div className="flex min-w-0 items-start justify-between gap-3">
+                <div className="min-w-0">
+                  <div className="flex min-w-0 flex-wrap items-center gap-2">
+                    <span className="rounded-[7px] bg-[#EDF7F4] px-2 py-0.5 text-[11px] font-medium text-[#0B5D53]">
+                      {item.kind}
+                    </span>
+                    <h5 className="min-w-0 break-words text-[13px] font-semibold leading-5 text-[#17251F]">
+                      {item.title}
+                    </h5>
+                  </div>
+                  <p className="mt-1 line-clamp-2 text-[12px] leading-5 text-[#5B675F]">
+                    {item.summary || item.authors.slice(0, 3).join(", ") || item.organization || "No summary"}
+                  </p>
+                </div>
+                {item.url ? (
+                  <ArrowUpRight
+                    aria-hidden="true"
+                    className="mt-0.5 h-4 w-4 shrink-0 text-[#8A968F] transition group-hover:text-[#0E6B5F]"
+                    strokeWidth={1.9}
+                  />
+                ) : null}
+              </div>
+              {item.metrics.length > 0 ? (
+                <div className="mt-2 flex flex-wrap gap-1.5">
+                  {item.metrics.slice(0, 3).map((metric) => (
+                    <SourceMetric key={`${item.id}-${metric.label}`} metric={metric} />
+                  ))}
+                </div>
+              ) : null}
+            </a>
+          ))}
+        </div>
+      ) : (
+        <p className="mt-3 rounded-[8px] border border-dashed border-[#D7E0D7] bg-[#FBFCFA] px-3 py-2 text-[12px] text-[#7A857E]">
+          No items returned
+        </p>
+      )}
+    </article>
+  );
+}
+
+function SourceMetric({ metric }: { metric: ResearchSourceMetric }) {
+  return (
+    <span className="rounded-[7px] bg-[#EEF3ED] px-2 py-0.5 text-[11px] text-[#66736B]">
+      {metric.label} {metric.value}
+    </span>
+  );
+}
+
+function sourceStatusTone(status: ResearchSourceStatus) {
+  if (status === "succeeded") {
+    return {
+      dot: "bg-[#0E9F6E]",
+      badge: "bg-[#E9F7F3] text-[#0B5D53]"
+    };
+  }
+  if (status === "degraded") {
+    return {
+      dot: "bg-[#D97706]",
+      badge: "bg-[#FFF5E6] text-[#A16016]"
+    };
+  }
+  return {
+    dot: "bg-[#D64B3C]",
+    badge: "bg-[#FFF0EE] text-[#A33A2D]"
+  };
 }
 
 function EvidenceRail({
