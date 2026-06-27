@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { parseResearchReport } from "./research-report";
+import { parseResearchReport, evaluateResearchReportQuality } from "./research-report";
 
 describe("parseResearchReport", () => {
   it("parses expected markdown headings into ordered sections", () => {
@@ -60,6 +60,30 @@ Search coverage may miss workshop papers.
     });
   });
 
+  it("marks raw tool-call JSON as unfinished analysis", () => {
+    const quality = evaluateResearchReportQuality(`
+The next useful step is another search.
+
+\`\`\`json
+{"type":"tool_call","callId":"call-3","toolCode":"web.search","arguments":{"query":"量化因子 benchmark"}}
+\`\`\`
+`);
+
+    expect(quality).toEqual({
+      ok: false,
+      reason: "unfinished_tool_call"
+    });
+  });
+
+  it("marks unstructured markdown as incomplete", () => {
+    const quality = evaluateResearchReportQuality("A loose answer without the agreed heading contract.");
+
+    expect(quality).toEqual({
+      ok: false,
+      reason: "missing_sections"
+    });
+  });
+
   it("parses Chinese headings into structured sections with stable ids", () => {
     const report = parseResearchReport(`
 ## 研究概览
@@ -110,5 +134,8 @@ Representative paper
     ]);
     expect(report.sections[0].content).toContain("中文总览");
     expect(report.sections[7].content).toContain("来源覆盖有限");
+    expect(evaluateResearchReportQuality(report.sections.map((section) => `## ${section.title}\n${section.content}`).join("\n\n"))).toEqual({
+      ok: true
+    });
   });
 });

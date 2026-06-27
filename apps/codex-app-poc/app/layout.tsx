@@ -2,8 +2,8 @@ import type { Metadata } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "Developer Agent Workbench",
-  description: "A Codex-like developer agent workbench web POC"
+  title: "Codexlike POC",
+  description: "Codexlike agent workbench proof of concept"
 };
 
 export default function RootLayout({

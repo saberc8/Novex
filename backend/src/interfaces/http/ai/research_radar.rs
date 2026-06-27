@@ -74,6 +74,8 @@ mod tests {
                 sources: vec![ResearchRadarSource::Arxiv],
                 ranking: ResearchRadarRanking::Balanced,
                 limit_per_source: Some(1),
+                search_queries: vec![],
+                relevance_keywords: vec![],
             }),
         )
         .await
@@ -91,6 +93,8 @@ mod tests {
                 sources: vec![ResearchRadarSource::Paperswithcode],
                 ranking: ResearchRadarRanking::Balanced,
                 limit_per_source: Some(1),
+                search_queries: vec![],
+                relevance_keywords: vec![],
             }),
         )
         .await

@@ -1,6 +1,18 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { memo, useMemo, useState, type CSSProperties } from "react";
+import {
+  Background,
+  Controls,
+  Handle,
+  MiniMap,
+  Position,
+  ReactFlow,
+  ReactFlowProvider,
+  type Edge,
+  type Node,
+  type NodeProps
+} from "@xyflow/react";
 import {
   Beaker,
   BookOpen,
@@ -30,12 +42,24 @@ export type ResearchMapProps = {
 
 type MapLayer = keyof ResearchMapCopy["layers"];
 
+type GraphLane = "center" | "questions" | "evidence" | "artifacts" | "experiments";
+
 type PositionedNode = ResearchGraphNode & {
   x: number;
   y: number;
-  radius: number;
   category: "topic" | "hotspot" | "other";
+  lane: GraphLane;
 };
+
+type ResearchFlowNodeData = {
+  node: PositionedNode;
+  copy: ResearchMapCopy;
+  selected: boolean;
+  accent: string;
+  onSelect: (nodeId: string) => void;
+};
+
+type ResearchFlowNode = Node<ResearchFlowNodeData, "researchNode">;
 
 const LAYERS: Array<{ layer: MapLayer; kinds: ResearchGraphNodeKind[] }> = [
   { layer: "papers", kinds: ["paper"] },
@@ -62,11 +86,22 @@ const KIND_ICON: Record<ResearchGraphNodeKind, LucideIcon> = {
   experiment: Beaker
 };
 
+const LANE_ORDER: Record<GraphLane, number> = {
+  center: 0,
+  questions: 1,
+  evidence: 2,
+  artifacts: 3,
+  experiments: 4
+};
+
 const CATEGORY_ORDER: Record<PositionedNode["category"], number> = {
   topic: 0,
   hotspot: 1,
   other: 2
 };
+
+const FLOW_WIDTH = 1180;
+const FLOW_HEIGHT = 820;
 
 const DEFAULT_MAP_COPY: ResearchMapCopy = {
   title: "Research Map",
@@ -110,6 +145,18 @@ const DEFAULT_MAP_COPY: ResearchMapCopy = {
   }
 };
 
+const nodeTypes = {
+  researchNode: memo(ResearchFlowNodeView)
+};
+
+const invisibleHandleStyle: CSSProperties = {
+  width: 8,
+  height: 8,
+  border: "none",
+  background: "transparent",
+  opacity: 0
+};
+
 export function ResearchMap({
   graph,
   selectedNodeId,
@@ -121,12 +168,58 @@ export function ResearchMap({
   );
 
   const hasUsableNodes = graph.nodes.some((node) => node.kind !== "topic");
+
   const positionedNodes = useMemo(() => layoutGraph(graph.nodes), [graph.nodes]);
   const visibleNodes = positionedNodes.filter(
     (node) => node.category !== "other" || nodeVisibleForLayers(node, enabledLayers)
   );
   const visibleIds = new Set(visibleNodes.map((node) => node.id));
   const visibleEdges = graph.edges.filter((edge) => visibleIds.has(edge.from) && visibleIds.has(edge.to));
+
+  const flowNodes = useMemo<ResearchFlowNode[]>(
+    () =>
+      visibleNodes.map((node) => ({
+        id: node.id,
+        type: "researchNode",
+        position: { x: node.x, y: node.y },
+        data: {
+          node,
+          copy,
+          selected: node.id === selectedNodeId,
+          accent: accentForNode(node),
+          onSelect: onNodeSelect
+        },
+        draggable: false,
+        focusable: true,
+        sourcePosition: sourcePositionForLane(node.lane),
+        targetPosition: targetPositionForLane(node.lane),
+        zIndex: node.id === selectedNodeId ? 10 : node.category === "topic" ? 8 : 1
+      })),
+    [copy, onNodeSelect, selectedNodeId, visibleNodes]
+  );
+
+  const flowEdges = useMemo<Edge[]>(
+    () =>
+      visibleEdges.map((edge) => ({
+        id: edge.id,
+        source: edge.from,
+        target: edge.to,
+        type: "smoothstep",
+        label: copy.relationLabels[edge.relation],
+        style: { stroke: "#B8CFC4", strokeWidth: 1.7 },
+        labelStyle: {
+          fill: "#5F6B64",
+          fontSize: 10,
+          fontWeight: 650
+        },
+        labelBgStyle: { fill: "#F9FBF8", fillOpacity: 0.94 },
+        labelBgPadding: [6, 3],
+        labelBgBorderRadius: 8,
+        focusable: false,
+        selectable: false
+      })),
+    [copy.relationLabels, visibleEdges]
+  );
 
   return (
     <section className="rounded-[8px] border border-[#DCE5DD] bg-white p-5 text-[#17251F] shadow-[0_10px_24px_rgba(34,45,38,0.05)]">
@@ -179,128 +272,53 @@ export function ResearchMap({
           </div>
 
           <div className="mt-5">
-            <div
-              aria-label={copy.graphLabel}
-              className="relative aspect-[16/10] min-h-[420px] overflow-hidden rounded-[8px] border border-[#E4EBE4] bg-[#F9FBF8]"
-            >
-              <svg
-                aria-hidden="true"
-                className="absolute inset-0 h-full w-full"
-                viewBox="0 0 1000 625"
-                preserveAspectRatio="none"
+            <div className="relative h-[560px] min-h-[460px] overflow-hidden rounded-[8px] border border-[#E4EBE4] bg-[#F9FBF8] md:h-[640px]">
+              <LaneFrame />
+              <ReactFlowProvider
+                initialNodes={flowNodes}
+                initialEdges={flowEdges}
+                fitView
+                initialWidth={FLOW_WIDTH}
+                initialHeight={640}
+                initialFitViewOptions={{ padding: 0.18 }}
+                nodeOrigin={[0.5, 0.5]}
               >
-                <defs>
-                  <linearGradient id="research-map-edge" x1="0%" x2="100%" y1="0%" y2="0%">
-                    <stop offset="0%" stopColor="#BFD4CB" />
-                    <stop offset="100%" stopColor="#D9E3DA" />
-                  </linearGradient>
-                </defs>
-                {visibleEdges.map((edge) => {
-                  const from = positionedNodes.find((node) => node.id === edge.from);
-                  const to = positionedNodes.find((node) => node.id === edge.to);
-                  if (!from || !to) {
-                    return null;
-                  }
-
-                  const midX = (from.x + to.x) / 2;
-                  const midY = (from.y + to.y) / 2;
-                  const angle = Math.atan2(to.y - from.y, to.x - from.x);
-
-                  return (
-                    <g key={edge.id}>
-                      <line
-                        x1={from.x}
-                        y1={from.y}
-                        x2={to.x}
-                        y2={to.y}
-                        stroke="url(#research-map-edge)"
-                        strokeWidth="2"
-                        strokeLinecap="round"
-                      />
-                      <circle
-                        cx={midX}
-                        cy={midY}
-                        r="12"
-                        fill="#F9FBF8"
-                        opacity="0.92"
-                        transform={`rotate(${(angle * 180) / Math.PI} ${midX} ${midY})`}
-                      />
-                    </g>
-                  );
-                })}
-              </svg>
-
-              {visibleEdges.map((edge) => {
-                const from = positionedNodes.find((node) => node.id === edge.from);
-                const to = positionedNodes.find((node) => node.id === edge.to);
-                if (!from || !to) {
-                  return null;
-                }
-
-                return (
-                  <span
-                    key={`${edge.id}:label`}
-                    className="pointer-events-none absolute -translate-x-1/2 -translate-y-1/2 rounded-full border border-[#DCE5DD] bg-white px-2 py-[2px] text-[10px] font-medium uppercase tracking-[0.08em] text-[#627068] shadow-[0_4px_10px_rgba(34,45,38,0.06)]"
-                    style={{
-                      left: `${(from.x + to.x) / 2 / 10}%`,
-                      top: `${(from.y + to.y) / 2 / 6.25}%`
-                    }}
-                  >
-                    {copy.relationLabels[edge.relation]}
-                  </span>
-                );
-              })}
-
-              {visibleNodes.map((node) => {
-                const Icon = KIND_ICON[node.kind];
-                const selected = node.id === selectedNodeId;
-                const accent = node.category === "topic"
-                  ? "#0E6B5F"
-                  : node.category === "hotspot"
-                    ? "#1F7C6D"
-                    : "#4E6A85";
-                const nodeKind = copy.nodeKinds[node.kind];
-                const title = `${node.title} - ${nodeKind} - ${node.summary}`;
-
-                return (
-                  <button
-                    key={node.id}
-                    type="button"
-                    aria-pressed={selected}
-                    aria-label={node.title}
-                    title={title}
-                    className={[
-                      "absolute flex -translate-x-1/2 -translate-y-1/2 items-center gap-2 rounded-[8px] border px-3 py-2 text-left shadow-[0_8px_18px_rgba(34,45,38,0.08)] transition",
-                      selected
-                        ? "border-[#0E6B5F] bg-white ring-2 ring-[#BFE5DC]"
-                        : "border-[#DCE5DD] bg-white hover:border-[#B6C7BA]"
-                    ].join(" ")}
-                    style={{
-                      left: `${(node.x / 1000) * 100}%`,
-                      top: `${(node.y / 625) * 100}%`,
-                      minWidth: node.category === "topic" ? "186px" : "174px",
-                      zIndex: selected ? 3 : 2
-                    }}
-                    onClick={() => onNodeSelect(node.id)}
-                  >
-                    <span
-                      className="flex h-8 w-8 shrink-0 items-center justify-center rounded-[7px] text-white"
-                      style={{ backgroundColor: accent }}
-                      aria-hidden="true"
-                    >
-                      <Icon className="h-4 w-4" strokeWidth={2} />
-                    </span>
-                    <span className="min-w-0">
-                      <span className="block truncate text-[12px] font-semibold text-[#17251F]">
-                        {node.title}
-                      </span>
-                      <span className="block truncate text-[10px] uppercase tracking-[0.08em] text-[#6B776F]">
-                        {nodeKind}
-                      </span>
-                    </span>
-                  </button>
-                );
-              })}
+                <ReactFlow<ResearchFlowNode, Edge>
+                  aria-label={copy.graphLabel}
+                  className="research-flow"
+                  nodes={flowNodes}
+                  edges={flowEdges}
+                  nodeTypes={nodeTypes}
+                  fitView
+                  fitViewOptions={{ padding: 0.18, duration: 260 }}
+                  minZoom={0.35}
+                  maxZoom={1.8}
+                  nodeOrigin={[0.5, 0.5]}
+                  nodesDraggable={false}
+                  nodesConnectable={false}
+                  edgesFocusable={false}
+                  edgesReconnectable={false}
+                  elementsSelectable={false}
+                  onNodeClick={(_event, node) => onNodeSelect(node.id)}
+                  panOnDrag
+                  panOnScroll
+                  zoomOnScroll
+                  zoomOnPinch
+                  proOptions={{ hideAttribution: true }}
+                >
+                  <Background color="#DCE7DF" gap={28} size={1} />
+                  <MiniMap
+                    pannable
+                    zoomable
+                    ariaLabel={`${copy.graphLabel} overview`}
+                    nodeBorderRadius={8}
+                    nodeColor={(node) => miniMapColorForNode(node as ResearchFlowNode)}
+                    maskColor="rgba(238, 244, 240, 0.66)"
+                    bgColor="#FBFCFA"
+                  />
+                  <Controls position="bottom-left" showInteractive={false} fitViewOptions={{ padding: 0.18 }} />
+                </ReactFlow>
+              </ReactFlowProvider>
             </div>
           </div>
         </>
@@ -319,6 +337,81 @@ export function ResearchMap({
         </div>
       ) : null}
     </section>
+  );
+}
+
+function ResearchFlowNodeView({ data, sourcePosition, targetPosition }: NodeProps<ResearchFlowNode>) {
+  const { node, copy, selected, accent, onSelect } = data;
+  const Icon = KIND_ICON[node.kind];
+  const nodeKind = copy.nodeKinds[node.kind];
+  const title = `${node.title} - ${nodeKind} - ${node.summary}`;
+  const widthClass = node.category === "topic" ? "w-[220px]" : "w-[204px]";
+
+  return (
+    <div className="relative">
+      <Handle
+        type="target"
+        position={targetPosition ?? Position.Left}
+        isConnectable={false}
+        style={invisibleHandleStyle}
+      />
+      <button
+        type="button"
+        aria-pressed={selected}
+        aria-label={node.title}
+        title={title}
+        className={[
+          "nodrag nopan flex min-h-[58px] items-center gap-2 rounded-[8px] border bg-white px-3 py-2 text-left shadow-[0_12px_26px_rgba(34,45,38,0.10)] transition",
+          widthClass,
+          selected
+            ? "border-[#0E6B5F] ring-2 ring-[#BFE5DC]"
+            : "border-[#DCE5DD] hover:border-[#AFC4B8]"
+        ].join(" ")}
+        onClick={(event) => {
+          event.stopPropagation();
+          onSelect(node.id);
+        }}
+      >
+        <span
+          className="flex h-8 w-8 shrink-0 items-center justify-center rounded-[7px] text-white"
+          style={{ backgroundColor: accent }}
+          aria-hidden="true"
+        >
+          <Icon className="h-4 w-4" strokeWidth={2} />
+        </span>
+        <span className="min-w-0">
+          <span className="block truncate text-[12px] font-semibold text-[#17251F]">
+            {node.title}
+          </span>
+          <span className="mt-0.5 block truncate text-[10px] font-medium text-[#6B776F]">
+            {nodeKind}
+          </span>
+        </span>
+      </button>
+      <Handle
+        type="source"
+        position={sourcePosition ?? Position.Right}
+        isConnectable={false}
+        style={invisibleHandleStyle}
+      />
+    </div>
+  );
+}
+
+function LaneFrame() {
+  return (
+    <div aria-hidden="true" className="pointer-events-none absolute inset-0 z-0">
+      {(Object.keys(LANE_ORDER) as GraphLane[]).map((lane) => {
+        const frame = laneFrameForLane(lane);
+        return (
+          <div
+            key={lane}
+            className="absolute rounded-[8px] border border-dashed border-[#E2EAE4] bg-white/20"
+            style={frame}
+          />
+        );
+      })}
+    </div>
   );
 }
 
@@ -341,70 +434,127 @@ function layerForKind(kind: ResearchGraphNodeKind): MapLayer | null {
 
 function layoutGraph(nodes: ResearchGraphNode[]): PositionedNode[] {
   const sorted = [...nodes].sort((left, right) => {
+    const leftLane = laneForKind(left.kind);
+    const rightLane = laneForKind(right.kind);
+    if (LANE_ORDER[leftLane] !== LANE_ORDER[rightLane]) {
+      return LANE_ORDER[leftLane] - LANE_ORDER[rightLane];
+    }
+
     const leftCategory = categoryForKind(left.kind);
     const rightCategory = categoryForKind(right.kind);
     if (CATEGORY_ORDER[leftCategory] !== CATEGORY_ORDER[rightCategory]) {
       return CATEGORY_ORDER[leftCategory] - CATEGORY_ORDER[rightCategory];
     }
 
-    return left.title.localeCompare(right.title) || left.id.localeCompare(right.id);
+    return right.importance - left.importance || left.title.localeCompare(right.title) || left.id.localeCompare(right.id);
   });
 
-  const width = 1000;
-  const height = 625;
-  const centerX = width / 2;
-  const centerY = height / 2;
-  const topicRadius = 58;
-  const hotspotRadius = 48;
-  const otherRadius = 42;
-  const innerRing = 148;
-  const outerRing = 248;
-
-  const topicNodes = sorted.filter((node) => node.kind === "topic");
-  const hotspotNodes = sorted.filter((node) => node.kind === "hotspot");
-  const otherNodes = sorted.filter((node) => node.kind !== "topic" && node.kind !== "hotspot");
-
   const positioned: PositionedNode[] = [];
+  const topicNodes = sorted.filter((node) => node.kind === "topic");
+  const laneNodes = new Map<GraphLane, ResearchGraphNode[]>();
+
+  for (const lane of Object.keys(LANE_ORDER) as GraphLane[]) {
+    laneNodes.set(lane, []);
+  }
+
+  for (const node of sorted) {
+    if (node.kind !== "topic") {
+      laneNodes.get(laneForKind(node.kind))?.push(node);
+    }
+  }
 
   topicNodes.forEach((node, index) => {
     positioned.push({
       ...node,
       category: "topic",
-      radius: topicRadius,
-      x: centerX,
-      y: centerY + index * 92 - ((topicNodes.length - 1) * 92) / 2
+      lane: "center",
+      x: FLOW_WIDTH / 2,
+      y: FLOW_HEIGHT / 2 + index * 92 - ((topicNodes.length - 1) * 92) / 2
     });
   });
 
-  placeRing(hotspotNodes, innerRing, hotspotRadius, "hotspot", positioned, centerX, centerY);
-  placeRing(otherNodes, outerRing, otherRadius, "other", positioned, centerX, centerY);
+  placeLane(laneNodes.get("questions") ?? [], "questions", positioned);
+  placeLane(laneNodes.get("evidence") ?? [], "evidence", positioned);
+  placeLane(laneNodes.get("artifacts") ?? [], "artifacts", positioned);
+  placeLane(laneNodes.get("experiments") ?? [], "experiments", positioned);
 
   return positioned.sort((left, right) => left.id.localeCompare(right.id));
 }
 
-function placeRing(
+function placeLane(
   nodes: ResearchGraphNode[],
-  radius: number,
-  nodeRadius: number,
-  category: PositionedNode["category"],
-  positioned: PositionedNode[],
-  centerX: number,
-  centerY: number
+  lane: GraphLane,
+  positioned: PositionedNode[]
 ) {
   if (nodes.length === 0) {
     return;
   }
 
+  const bounds = boundsForLane(lane);
+  const columns = lane === "evidence" || lane === "artifacts" ? Math.min(2, nodes.length) : Math.min(4, nodes.length);
+  const rows = Math.ceil(nodes.length / columns);
+  const xGap = columns > 1 ? bounds.width / (columns - 1) : 0;
+  const yGap = rows > 1 ? bounds.height / (rows - 1) : 0;
+
   nodes.forEach((node, index) => {
-    const angle = (Math.PI * 2 * index) / nodes.length - Math.PI / 2;
+    const column = index % columns;
+    const row = Math.floor(index / columns);
+    const columnOffset = rows > 1 && row % 2 === 1 ? Math.min(46, xGap / 3) : 0;
+
     positioned.push({
       ...node,
-      category,
-      radius: nodeRadius,
-      x: clamp(centerX + Math.cos(angle) * radius, 76, 924),
-      y: clamp(centerY + Math.sin(angle) * radius, 72, 553)
+      category: categoryForKind(node.kind),
+      lane,
+      x: clamp(bounds.x + column * xGap + columnOffset, bounds.x, bounds.x + bounds.width),
+      y: clamp(bounds.y + row * yGap, bounds.y, bounds.y + bounds.height)
     });
   });
+}
+
+function laneForKind(kind: ResearchGraphNodeKind): GraphLane {
+  if (kind === "topic") {
+    return "center";
+  }
+
+  if (kind === "hotspot" || kind === "open_question") {
+    return "questions";
+  }
+
+  if (kind === "paper" || kind === "author" || kind === "institution") {
+    return "evidence";
+  }
+
+  if (kind === "experiment" || kind === "benchmark") {
+    return "experiments";
+  }
+
+  return "artifacts";
+}
+
+function boundsForLane(lane: GraphLane) {
+  switch (lane) {
+    case "questions":
+      return { x: 270, y: 92, width: 640, height: 122 };
+    case "evidence":
+      return { x: 122, y: 268, width: 300, height: 322 };
+    case "artifacts":
+      return { x: 760, y: 268, width: 300, height: 322 };
+    case "experiments":
+      return { x: 270, y: 646, width: 640, height: 96 };
+    case "center":
+    default:
+      return { x: 470, y: 322, width: 240, height: 170 };
+  }
+}
+
+function laneFrameForLane(lane: GraphLane): CSSProperties {
+  const bounds = boundsForLane(lane);
+  return {
+    left: `${(bounds.x - 118) / FLOW_WIDTH * 100}%`,
+    top: `${(bounds.y - 54) / FLOW_HEIGHT * 100}%`,
+    width: `${(bounds.width + 236) / FLOW_WIDTH * 100}%`,
+    height: `${(bounds.height + 108) / FLOW_HEIGHT * 100}%`
+  };
 }
 
 function categoryForKind(kind: ResearchGraphNodeKind): PositionedNode["category"] {
@@ -417,6 +567,70 @@ function categoryForKind(kind: ResearchGraphNodeKind): PositionedNode["category"
   }
 
   return "other";
+}
+
+function sourcePositionForLane(lane: GraphLane): Position {
+  if (lane === "evidence") {
+    return Position.Right;
+  }
+
+  if (lane === "artifacts") {
+    return Position.Left;
+  }
+
+  if (lane === "questions") {
+    return Position.Bottom;
+  }
+
+  if (lane === "experiments") {
+    return Position.Top;
+  }
+
+  return Position.Right;
+}
+
+function targetPositionForLane(lane: GraphLane): Position {
+  if (lane === "evidence") {
+    return Position.Right;
+  }
+
+  if (lane === "artifacts") {
+    return Position.Left;
+  }
+
+  if (lane === "questions") {
+    return Position.Bottom;
+  }
+
+  if (lane === "experiments") {
+    return Position.Top;
+  }
+
+  return Position.Left;
+}
+
+function accentForNode(node: PositionedNode): string {
+  if (node.category === "topic") {
+    return "#0E6B5F";
+  }
+
+  if (node.category === "hotspot") {
+    return "#1F7C6D";
+  }
+
+  if (node.kind === "paper" || node.kind === "author" || node.kind === "institution") {
+    return "#496E8D";
+  }
+
+  if (node.kind === "experiment" || node.kind === "benchmark") {
+    return "#9A650F";
+  }
+
+  return "#536A86";
+}
+
+function miniMapColorForNode(node: ResearchFlowNode): string {
+  return accentForNode(node.data.node);
 }
 
 function clamp(value: number, min: number, max: number): number {

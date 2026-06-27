@@ -1,3 +1,5 @@
+@import "@xyflow/react/dist/style.css";
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
@@ -44,4 +46,45 @@ textarea {
 
 ::selection {
   background: #d8eee8;
+}
+
+.research-flow {
+  --xy-node-border-default: transparent;
+  --xy-edge-stroke-default: #b8cfc4;
+  --xy-edge-stroke-selected-default: #0e6b5f;
+  --xy-controls-button-background-color-default: #ffffff;
+  --xy-controls-button-background-color-hover-default: #eef7f3;
+  --xy-controls-button-color-default: #384740;
+  --xy-controls-button-color-hover-default: #0e6b5f;
+  --xy-controls-button-border-color-default: #dce5dd;
+  --xy-minimap-background-color-default: #fbfcfa;
+}
+
+.research-flow .react-flow__renderer {
+  z-index: 1;
+}
+
+.research-flow .react-flow__controls {
+  overflow: hidden;
+  border: 1px solid #dce5dd;
+  border-radius: 8px;
+  box-shadow: 0 12px 28px rgba(34, 45, 38, 0.12);
+}
+
+.research-flow .react-flow__controls-button {
+  width: 30px;
+  height: 30px;
+  border-bottom-color: #dce5dd;
+}
+
+.research-flow .react-flow__minimap {
+  overflow: hidden;
+  border: 1px solid #dce5dd;
+  border-radius: 8px;
+  box-shadow: 0 12px 28px rgba(34, 45, 38, 0.10);
+}
+
+.research-flow .react-flow__edge-textbg {
+  stroke: #dce5dd;
+  stroke-width: 1;
 }

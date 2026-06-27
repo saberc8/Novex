@@ -24,7 +24,14 @@ import {
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import { listAgentRunEvents } from "@/api/agent";
-import { configuredModelRouteOptions, createResearchRadarRun } from "@/api/research";
+import {
+  buildFallbackResearchTopicPlan,
+  buildResearchRadarFallbackReport,
+  configuredModelRouteOptions,
+  createResearchRadarRepairRun,
+  createResearchRadarRun,
+  createResearchTopicPlan
+} from "@/api/research";
 import { createResearchRadarSourceScan } from "@/api/source-scan";
 import { summarizeModelDeltas, summarizeResearchEvent } from "@/lib/agent-events";
 import {
@@ -39,12 +46,12 @@ import {
   buildResearchGraph,
   nodeDetailsFor
 } from "@/lib/research-graph";
-import { parseResearchReport } from "@/lib/research-report";
+import { evaluateResearchReportQuality, parseResearchReport } from "@/lib/research-report";
 import { ResearchMap } from "@/components/research-map";
 import type { ModelDeltaSummary, ResearchEventEvidence } from "@/lib/agent-events";
 import type { ResearchLocale, ResearchRadarCopy } from "@/lib/i18n";
 import type { ResearchGraphNodeDetails } from "@/lib/research-graph";
-import type { AgentRunEventResp } from "@/types/agent";
+import type { AgentRunEventResp, AgentRunResp } from "@/types/agent";
 import type {
   ModelRouteOption,
   ParsedResearchReport,
@@ -53,6 +60,7 @@ import type {
   ResearchUiError,
   ResearchRanking,
   ResearchScan,
+  ResearchTopicPlan,
   ResearchGraph,
   ResearchSource,
   ResearchSourceMetric,
@@ -172,6 +180,8 @@ export function ResearchRadarApp() {
       filters,
       ranking,
       routeId: selectedRouteId,
+      locale,
+      topicPlan: null,
       runResult: null,
       runEvents: [],
       runError: null,
@@ -185,12 +195,28 @@ export function ResearchRadarApp() {
     setComposerError(null);
     setIsSubmitting(true);
     let hasUsableSourceScan = false;
+    let topicPlan: ResearchTopicPlan | null = null;
 
     try {
+      try {
+        const topicPlanResult = await createResearchTopicPlan({
+          topic: normalizedTopic,
+          filters,
+          ranking,
+          routeId: selectedRouteId,
+          locale
+        });
+        topicPlan = topicPlanResult.plan;
+      } catch {
+        topicPlan = buildFallbackResearchTopicPlan(normalizedTopic, filters);
+      }
+      updateScan(scanId, { topicPlan });
+
       const sourceScan = await createResearchRadarSourceScan({
         topic: normalizedTopic,
         filters,
-        ranking
+        ranking,
+        topicPlan
       });
       updateScan(scanId, { sourceScan });
       hasUsableSourceScan = sourceScan.status !== "failed";
@@ -210,16 +236,66 @@ export function ResearchRadarApp() {
         ranking,
         routeId: selectedRouteId,
         locale,
+        topicPlan,
         sourceScan
       });
-      let runEvents: AgentRunEventResp[] = [];
-      try {
-        const eventPage = await listAgentRunEvents(runResult.runId, { page: 1, size: 100 });
-        runEvents = eventPage.list;
-      } catch {
-        runEvents = [];
+      let finalRunResult = runResult;
+      let finalRunEvents = await fetchRunEvents(runResult.runId);
+      let reportQuality = evaluateResearchReportQuality(
+        runResult.finalOutput ?? "",
+        parseResearchReport(runResult.finalOutput ?? "")
+      );
+
+      if (!reportQuality.ok) {
+        try {
+          const repairRunResult = await createResearchRadarRepairRun({
+            topic: normalizedTopic,
+            filters,
+            ranking,
+            routeId: selectedRouteId,
+            locale,
+            topicPlan,
+            sourceScan,
+            previousOutput: runResult.finalOutput ?? ""
+          });
+          const repairQuality = evaluateResearchReportQuality(
+            repairRunResult.finalOutput ?? "",
+            parseResearchReport(repairRunResult.finalOutput ?? "")
+          );
+          finalRunResult = repairRunResult;
+          finalRunEvents = await fetchRunEvents(repairRunResult.runId);
+          reportQuality = repairQuality;
+        } catch {
+          // Keep the original incomplete result visible when the repair pass is unavailable.
+        }
       }
-      updateScan(scanId, { runResult, runEvents });
+
+      if (!reportQuality.ok && hasModelOutput(finalRunResult) && hasSourceEvidenceItems(sourceScan)) {
+        const fallbackOutput = buildResearchRadarFallbackReport({
+          topic: normalizedTopic,
+          filters,
+          ranking,
+          routeId: selectedRouteId,
+          locale,
+          topicPlan,
+          sourceScan
+        });
+        finalRunResult = {
+          ...finalRunResult,
+          status: "succeeded",
+          finalOutput: fallbackOutput
+        };
+        reportQuality = evaluateResearchReportQuality(
+          fallbackOutput,
+          parseResearchReport(fallbackOutput)
+        );
+      }
+
+      updateScan(scanId, {
+        runResult: finalRunResult,
+        runEvents: finalRunEvents,
+        runError: reportQuality.ok ? null : appResearchError("analysis_incomplete")
+      });
     } catch (error) {
       updateScan(scanId, {
         runError: hasUsableSourceScan
@@ -235,6 +311,23 @@ export function ResearchRadarApp() {
 
   function updateScan(scanId: string, patch: Partial<ResearchScan>) {
     setScans((items) => items.map((scan) => (scan.id === scanId ? { ...scan, ...patch } : scan)));
+  }
+
+  async function fetchRunEvents(runId: number): Promise<AgentRunEventResp[]> {
+    try {
+      const eventPage = await listAgentRunEvents(runId, { page: 1, size: 100 });
+      return eventPage.list;
+    } catch {
+      return [];
+    }
+  }
+
+  function hasModelOutput(runResult: AgentRunResp) {
+    return Boolean(runResult.finalOutput?.trim());
+  }
+
+  function hasSourceEvidenceItems(sourceScan: ResearchScan["sourceScan"]) {
+    return Boolean(sourceScan?.items.length || sourceScan?.sources.some((source) => source.items.length > 0));
   }
 
   function toggleFilter(code: ResearchFilter) {
@@ -390,7 +483,7 @@ function ScanSidebar({
             >
               <span className="block truncate text-[14px] font-medium">{scan.topic}</span>
               <span className="mt-1 block truncate text-[12px] text-[#7A857E]">
-                {scan.runResult ? `#${scan.runResult.runId}` : scan.runError ? copy.status.failed : copy.status.pending}
+                {scan.runError ? copy.status.failed : scan.runResult ? `#${scan.runResult.runId}` : copy.status.pending}
               </span>
             </button>
           ))
@@ -580,13 +673,13 @@ function ReportWorkspace({
                 </span>
               ) : null}
               <span className="rounded-[7px] bg-[#EEF3ED] px-2 py-1">
-                {activeScan.runResult
-                  ? statusLabel(copy, activeScan.runResult.status)
-                  : activeScan.runError
+                {activeScan.runError
                     ? copy.status.failed
-                    : isSubmitting
-                      ? copy.status.running
-                      : copy.status.pending}
+                    : activeScan.runResult
+                      ? statusLabel(copy, activeScan.runResult.status)
+                      : isSubmitting
+                        ? copy.status.running
+                        : copy.status.pending}
               </span>
             </div>
           </div>
@@ -600,6 +693,8 @@ function ReportWorkspace({
           </div>
         </div>
       </div>
+
+      {activeScan.topicPlan ? <TopicPlanPanel copy={copy.planner} topicPlan={activeScan.topicPlan} /> : null}
 
       {researchGraph ? (
         <ResearchMap
@@ -641,6 +736,58 @@ function ReportWorkspace({
       {activeScan.sourceScan ? (
         <EvidenceDrawer copy={copy.drawer} sources={activeScan.sourceScan.sources} statusCopy={copy.status} />
       ) : null}
+    </section>
+  );
+}
+
+function TopicPlanPanel({
+  copy,
+  topicPlan
+}: {
+  copy: ResearchRadarCopy["planner"];
+  topicPlan: ResearchTopicPlan;
+}) {
+  const groups = [
+    { label: copy.domains, items: topicPlan.domains },
+    { label: copy.learningGoals, items: topicPlan.learningGoals },
+    { label: copy.keyConcepts, items: topicPlan.keyConcepts },
+    { label: copy.searchQueries, items: topicPlan.searchQueries },
+    { label: copy.relevanceKeywords, items: topicPlan.relevanceKeywords }
+  ];
+
+  return (
+    <section className="rounded-[8px] border border-[#DEE6DE] bg-white p-5">
+      <div className="flex min-w-0 items-start gap-3">
+        <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-[8px] bg-[#EDF7F4] text-[#0E6B5F]">
+          <Sparkles aria-hidden={true} className="h-4 w-4" strokeWidth={1.9} />
+        </span>
+        <div className="min-w-0">
+          <h3 className="text-[15px] font-semibold text-[#17251F]">{copy.title}</h3>
+          <p className="mt-1 text-[13px] leading-5 text-[#4B5A52]">
+            <span className="font-medium text-[#17251F]">{copy.summary}: </span>
+            {topicPlan.summary}
+          </p>
+        </div>
+      </div>
+      <div className="mt-4 grid gap-3 lg:grid-cols-2">
+        {groups.map((group) => (
+          <div className="border-l border-[#CFE1D9] pl-3" key={group.label}>
+            <div className="text-[12px] font-semibold uppercase tracking-[0.04em] text-[#64706A]">
+              {group.label}
+            </div>
+            <div className="mt-2 flex flex-wrap gap-1.5">
+              {group.items.slice(0, 10).map((item) => (
+                <span
+                  className="max-w-full break-words rounded-[7px] bg-[#EEF3ED] px-2 py-1 text-[12px] leading-5 text-[#314139]"
+                  key={item}
+                >
+                  {item}
+                </span>
+              ))}
+            </div>
+          </div>
+        ))}
+      </div>
     </section>
   );
 }
@@ -1185,6 +1332,8 @@ function researchErrorMessage(copy: ResearchRadarCopy, error: ResearchUiError) {
       return copy.composer.emptyError;
     case "source_scan_failed":
       return copy.composer.sourceScanFailed;
+    case "analysis_incomplete":
+      return copy.composer.analysisIncomplete;
     case "model_unavailable":
       return copy.composer.modelUnavailable;
     case "scan_failed":

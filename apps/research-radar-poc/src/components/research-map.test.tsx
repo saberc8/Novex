@@ -88,16 +88,25 @@ const graph: ResearchGraph = {
 };
 
 describe("ResearchMap", () => {
-  it("renders a research map with nodes and relations", () => {
+  it("renders a research map with nodes and relations", async () => {
     render(<ResearchMap graph={graph} selectedNodeId={null} onNodeSelect={() => {}} />);
 
     expect(screen.getByText("Research Map")).toBeTruthy();
-    expect(screen.getByRole("button", { name: /agent workflow/ })).toBeTruthy();
-    expect(screen.getByRole("button", { name: /planning/ })).toBeTruthy();
-    expect(screen.getByText("supports")).toBeTruthy();
+    expect(await screen.findByRole("button", { name: /agent workflow/ })).toBeTruthy();
+    expect(await screen.findByRole("button", { name: /planning/ })).toBeTruthy();
+    expect(await screen.findByText("supports")).toBeTruthy();
   });
 
-  it("uses supplied Chinese map copy", () => {
+  it("renders a zoomable graph canvas with controls and overview", () => {
+    const { container } = render(<ResearchMap graph={graph} selectedNodeId={null} onNodeSelect={() => {}} />);
+
+    expect(screen.getByLabelText("Research graph")).toBeTruthy();
+    expect(container.querySelector(".react-flow")).toBeTruthy();
+    expect(container.querySelector(".react-flow__controls")).toBeTruthy();
+    expect(container.querySelector(".react-flow__minimap")).toBeTruthy();
+  });
+
+  it("uses supplied Chinese map copy", async () => {
     render(
       <ResearchMap
         graph={graph}
@@ -149,50 +158,67 @@ describe("ResearchMap", () => {
 
     expect(screen.getByText("研究图谱")).toBeTruthy();
     expect(screen.getByRole("button", { name: "论文" })).toBeTruthy();
+    expect(screen.queryByText("证据基础")).toBeNull();
+    expect(screen.queryByText("信号与空白")).toBeNull();
     expect(screen.getByLabelText("研究关系图")).toBeTruthy();
-    expect(screen.getByText("支撑")).toBeTruthy();
+    expect(await screen.findByText("支撑")).toBeTruthy();
     expect(screen.queryByText("supports")).toBeNull();
   });
 
-  it("selects a node when clicked", () => {
+  it("selects a node when clicked", async () => {
     const onNodeSelect = vi.fn();
     render(<ResearchMap graph={graph} selectedNodeId={null} onNodeSelect={onNodeSelect} />);
 
-    fireEvent.click(screen.getByRole("button", { name: /Workflow Planning for AI Agents/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /Workflow Planning for AI Agents/ }));
 
     expect(onNodeSelect).toHaveBeenCalledWith("source:arxiv:1");
   });
 
-  it("exposes useful hover metadata and selected state for nodes", () => {
+  it("selects a node when the React Flow node shell is clicked", async () => {
+    const onNodeSelect = vi.fn();
+    const { container } = render(<ResearchMap graph={graph} selectedNodeId={null} onNodeSelect={onNodeSelect} />);
+
+    await screen.findByRole("button", { name: /Workflow Planning for AI Agents/ });
+    const flowNode = container.querySelector('[data-id="source:arxiv:1"]');
+    expect(flowNode).toBeTruthy();
+
+    fireEvent.click(flowNode as Element);
+
+    expect(onNodeSelect).toHaveBeenCalledWith("source:arxiv:1");
+  });
+
+  it("exposes useful hover metadata and selected state for nodes", async () => {
     render(
       <ResearchMap graph={graph} selectedNodeId="source:arxiv:1" onNodeSelect={() => {}} />
     );
 
-    const paperNode = screen.getByRole("button", { name: /Workflow Planning for AI Agents/ });
+    const paperNode = await screen.findByRole("button", { name: /Workflow Planning for AI Agents/ });
 
     expect(paperNode.getAttribute("title")).toBe("Workflow Planning for AI Agents - paper - paper summary");
     expect(paperNode.getAttribute("aria-pressed")).toBe("true");
     expect(paperNode.className).toContain("ring-2");
   });
 
-  it("hides paper nodes when the Papers layer is disabled", () => {
+  it("hides paper nodes when the Papers layer is disabled", async () => {
     render(<ResearchMap graph={graph} selectedNodeId={null} onNodeSelect={() => {}} />);
 
+    expect(await screen.findByRole("button", { name: /Workflow Planning for AI Agents/ })).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Papers" }));
 
     expect(screen.queryByRole("button", { name: /Workflow Planning for AI Agents/ })).toBeNull();
-    expect(screen.getByRole("button", { name: /agent workflow/ })).toBeTruthy();
+    expect(await screen.findByRole("button", { name: /agent workflow/ })).toBeTruthy();
   });
 
-  it("hides author and institution nodes when the People layer is disabled", () => {
+  it("hides author and institution nodes when the People layer is disabled", async () => {
     render(<ResearchMap graph={graph} selectedNodeId={null} onNodeSelect={() => {}} />);
 
+    expect(await screen.findByRole("button", { name: /Ada Lovelace/ })).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "People" }));
 
     expect(screen.queryByRole("button", { name: /Ada Lovelace/ })).toBeNull();
     expect(screen.queryByRole("button", { name: /OpenAI/ })).toBeNull();
-    expect(screen.getByRole("button", { name: /agent workflow/ })).toBeTruthy();
-    expect(screen.getByRole("button", { name: /planning/ })).toBeTruthy();
+    expect(await screen.findByRole("button", { name: /agent workflow/ })).toBeTruthy();
+    expect(await screen.findByRole("button", { name: /planning/ })).toBeTruthy();
   });
 
   it("shows an empty state instead of a blank map when there are no usable nodes", () => {

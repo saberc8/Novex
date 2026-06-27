@@ -70,6 +70,42 @@ export function parseResearchReport(markdown: string): ParsedResearchReport {
   };
 }
 
+export type ResearchReportQuality =
+  | {
+      ok: true;
+    }
+  | {
+      ok: false;
+      reason: "unfinished_tool_call" | "missing_sections";
+    };
+
+export function evaluateResearchReportQuality(
+  markdown: string,
+  parsedReport: ParsedResearchReport = parseResearchReport(markdown)
+): ResearchReportQuality {
+  if (containsRawToolCall(markdown)) {
+    return {
+      ok: false,
+      reason: "unfinished_tool_call"
+    };
+  }
+
+  if (!parsedReport.structured) {
+    return {
+      ok: false,
+      reason: "missing_sections"
+    };
+  }
+
+  return {
+    ok: true
+  };
+}
+
+function containsRawToolCall(markdown: string) {
+  return /"type"\s*:\s*"tool_calls?"[\s\S]{0,800}"(?:callId|toolCode|calls)"/i.test(markdown);
+}
+
 function extractHeadingSections(markdown: string) {
   const result = new Map<string, string>();
   const headingPattern = /^##\s+(.+)$/gm;

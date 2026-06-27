@@ -9,13 +9,18 @@ import type {
 const DEFAULT_LIMIT_PER_SOURCE = 5;
 
 export function createResearchRadarSourceScan(input: ResearchSourceScanInput) {
+  const searchQueries = input.topicPlan?.searchQueries.slice(0, 10) ?? [];
+  const relevanceKeywords = input.topicPlan?.relevanceKeywords.slice(0, 20) ?? [];
+
   return apiRequest<ResearchSourceScanResp>("/ai/research-radar/scans", {
     method: "POST",
     body: JSON.stringify({
       topic: input.topic,
       ranking: input.ranking,
       limitPerSource: DEFAULT_LIMIT_PER_SOURCE,
-      sources: researchSourcesForFilters(input.filters)
+      sources: researchSourcesForFilters(input.filters),
+      ...(searchQueries.length > 0 ? { searchQueries } : {}),
+      ...(relevanceKeywords.length > 0 ? { relevanceKeywords } : {})
     })
   });
 }

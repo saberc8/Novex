@@ -279,8 +279,10 @@ describe("Research Radar POC page", () => {
 
     await screen.findByText("Research Report");
 
-    const runCall = fetchMock.mock.calls.find(([url]) =>
-      String(url).includes("/ai/agents/runs") && !String(url).includes("/events")
+    const runCall = (fetchMock.mock.calls as unknown as Array<[string, RequestInit | undefined]>).find(([url, init]) =>
+      String(url).includes("/ai/agents/runs") &&
+      !String(url).includes("/events") &&
+      String((init as RequestInit | undefined)?.body).includes('"webSearchEnabled":true')
     ) as unknown as [string, RequestInit];
     expect(String(runCall[1].body)).toContain("Write the markdown report in English");
   });
@@ -418,8 +420,10 @@ describe("Research Radar POC page", () => {
     expect(await screen.findByText("Live radar")).toBeTruthy();
     expect(await screen.findByText("dry-run: web.search returned no live provider result")).toBeTruthy();
 
-    const runCall = fetchMock.mock.calls.find(([url]) =>
-      String(url).includes("/ai/agents/runs") && !String(url).includes("/events")
+    const runCall = (fetchMock.mock.calls as unknown as Array<[string, RequestInit | undefined]>).find(([url, init]) =>
+      String(url).includes("/ai/agents/runs") &&
+      !String(url).includes("/events") &&
+      String((init as RequestInit | undefined)?.body).includes('"webSearchEnabled":true')
     ) as unknown as [string, RequestInit];
     expect(String(runCall[1].body)).toContain('"webSearchEnabled":true');
   });
@@ -510,13 +514,14 @@ describe("Research Radar POC page", () => {
     expect(await screen.findByRole("button", { name: /acme\/agent/ })).toBeTruthy();
     expect(screen.getByRole("button", { name: "证据抽屉" })).toBeTruthy();
     expect(await screen.findByText("leaderboards unavailable")).toBeTruthy();
-    expect(calls.findIndex((url) => url.includes("/ai/research-radar/scans"))).toBeLessThan(
-      calls.findIndex((url) => url.includes("/ai/agents/runs"))
+    const reportRunIndex = (fetchMock.mock.calls as unknown as Array<[string, RequestInit | undefined]>).findIndex(([url, init]) =>
+      String(url).includes("/ai/agents/runs") &&
+      !String(url).includes("/events") &&
+      String((init as RequestInit | undefined)?.body).includes('"webSearchEnabled":true')
     );
+    expect(calls.findIndex((url) => url.includes("/ai/research-radar/scans"))).toBeLessThan(reportRunIndex);
 
-    const runCall = fetchMock.mock.calls.find(([url]) =>
-      String(url).includes("/ai/agents/runs") && !String(url).includes("/events")
-    ) as unknown as [string, RequestInit];
+    const runCall = fetchMock.mock.calls[reportRunIndex] as unknown as [string, RequestInit];
     expect(String(runCall[1].body)).toContain("Research Radar Evidence");
   });
 
@@ -552,7 +557,250 @@ describe("Research Radar POC page", () => {
     fireEvent.click(screen.getByRole("button", { name: "启动雷达扫描" }));
 
     expect(await screen.findByText("all sources failed")).toBeTruthy();
-    expect(fetchMock.mock.calls.some(([url]) => String(url).includes("/ai/agents/runs"))).toBe(false);
+    expect((fetchMock.mock.calls as unknown as Array<[string, RequestInit | undefined]>).some(([url, init]) =>
+      String(url).includes("/ai/agents/runs") &&
+      String((init as RequestInit | undefined)?.body).includes('"webSearchEnabled":true')
+    )).toBe(false);
+  });
+
+  it("repairs raw tool-call final output with a no-tool report run", async () => {
+    const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
+      const href = String(url);
+      const body = String(init?.body ?? "");
+      if (href.includes("/ai/research-radar/scans")) {
+        return {
+          ok: true,
+          json: async () => ({
+            code: "200",
+            data: {
+              topic: "量化因子",
+              ranking: "balanced",
+              status: "succeeded",
+              warnings: [],
+              promptContext: "Research Radar Evidence\n[github] Project: microsoft/qlib",
+              sources: [],
+              items: []
+            }
+          })
+        };
+      }
+      if (
+        href.includes("/ai/agents/runs") &&
+        body.includes('"webSearchEnabled":false') &&
+        body.includes("Repair invalid Research Radar report")
+      ) {
+        return {
+          ok: true,
+          json: async () => ({
+            code: "200",
+            data: {
+              runId: 92,
+              traceId: "agent-92",
+              status: "succeeded",
+              finalOutput: [
+                "## 研究概览",
+                "量化因子研究应从因子假设、数据清洗、横截面检验和组合回测一起理解。",
+                "## 活跃议题",
+                "- 因子拥挤、非平稳性和交易成本鲁棒性",
+                "## 关键作者与机构",
+                "金融工程团队、开源量化社区和机器学习研究者。",
+                "## 代表性工作",
+                "microsoft/qlib 可作为工程化实验入口。",
+                "## 阅读路线",
+                "先读因子定义与 IC，再读回测和组合构建。",
+                "## 研究切入点",
+                "比较公开因子在不同市场 regime 下的稳定性。",
+                "## 实验方案",
+                "复现一个 alpha 因子，做中性化、分组收益和换手率分析。",
+                "## 来源与限制",
+                "Papers With Code 与榜单覆盖受限，应标记为缺口。"
+              ].join("\n")
+            }
+          })
+        };
+      }
+      if (href.includes("/ai/agents/runs") && body.includes('"webSearchEnabled":false')) {
+        return {
+          ok: true,
+          json: async () => ({
+            code: "200",
+            data: {
+              runId: 90,
+              traceId: "agent-90",
+              status: "succeeded",
+              finalOutput: [
+                "```research-topic-plan-json",
+                JSON.stringify({
+                  topic: "量化因子",
+                  summary: "研究 alpha 因子的定义、验证和回测。",
+                  domains: ["金融工程"],
+                  learningGoals: ["理解 IC"],
+                  keyConcepts: ["IC", "alpha factor"],
+                  searchQueries: ["quant factor investing"],
+                  relevanceKeywords: ["factor", "alpha", "IC"],
+                  sourcePriorities: ["papers", "projects"]
+                }),
+                "```"
+              ].join("\n")
+            }
+          })
+        };
+      }
+      if (href.includes("/ai/agents/runs") && body.includes('"webSearchEnabled":true')) {
+        return {
+          ok: true,
+          json: async () => ({
+            code: "200",
+            data: {
+              runId: 91,
+              traceId: "agent-91",
+              status: "succeeded",
+              finalOutput: [
+                "还需要再搜索一次。",
+                "```json",
+                JSON.stringify({
+                  type: "tool_call",
+                  callId: "call-3",
+                  toolCode: "web.search",
+                  arguments: { query: "量化因子 benchmark" }
+                }),
+                "```"
+              ].join("\n")
+            }
+          })
+        };
+      }
+      if (href.includes("/events")) {
+        return { ok: true, json: async () => ({ code: "200", data: { list: [], total: 0 } }) };
+      }
+      return { ok: true, json: async () => ({ code: "200", data: {} }) };
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<Page />);
+
+    fireEvent.change(screen.getByLabelText("研究主题"), {
+      target: { value: "量化因子" }
+    });
+    fireEvent.click(screen.getByRole("button", { name: "启动雷达扫描" }));
+
+    expect(await screen.findByText("量化因子研究应从因子假设、数据清洗、横截面检验和组合回测一起理解。")).toBeTruthy();
+    expect(await screen.findByText("运行 #92")).toBeTruthy();
+    expect(screen.queryByRole("alert")?.textContent ?? "").not.toContain("模型分析未完成");
+
+    const repairCall = (fetchMock.mock.calls as unknown as Array<[string, RequestInit | undefined]>).find(([url, init]) =>
+      String(url).includes("/ai/agents/runs") &&
+      String((init as RequestInit | undefined)?.body).includes("Repair invalid Research Radar report")
+    ) as unknown as [string, RequestInit];
+    expect(String(repairCall[1].body)).toContain('"webSearchEnabled":false');
+    expect(String(repairCall[1].body)).toContain("tool_call");
+  });
+
+  it("shows a deterministic fallback report when the repair run cannot be created", async () => {
+    const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
+      const href = String(url);
+      const body = String(init?.body ?? "");
+      if (href.includes("/ai/research-radar/scans")) {
+        return {
+          ok: true,
+          json: async () => ({
+            code: "200",
+            data: {
+              topic: "量化因子",
+              ranking: "balanced",
+              status: "partial",
+              warnings: [
+                "Papers With Code: Papers With Code-compatible endpoint is not configured",
+                "Leaderboards: leaderboard endpoints are not configured"
+              ],
+              promptContext: "Research Radar Evidence\n[github] Project: microsoft/qlib",
+              sources: [
+                {
+                  source: "github",
+                  status: "succeeded",
+                  warning: null,
+                  items: [
+                    {
+                      id: "github:microsoft/qlib",
+                      source: "github",
+                      kind: "project",
+                      title: "microsoft/qlib",
+                      url: "https://github.com/microsoft/qlib",
+                      summary: "AI-oriented quantitative investment platform.",
+                      authors: [],
+                      organization: "Microsoft",
+                      publishedAt: null,
+                      updatedAt: "2026-06-01T00:00:00Z",
+                      metrics: [{ label: "stars", value: 18000 }],
+                      tags: ["finance", "factor"],
+                      metadata: {}
+                    }
+                  ]
+                }
+              ],
+              items: []
+            }
+          })
+        };
+      }
+      if (
+        href.includes("/ai/agents/runs") &&
+        body.includes('"webSearchEnabled":false') &&
+        body.includes("Repair invalid Research Radar report")
+      ) {
+        return {
+          ok: false,
+          json: async () => ({
+            code: "400",
+            msg: "工具调用预算不足"
+          })
+        };
+      }
+      if (href.includes("/ai/agents/runs") && body.includes('"webSearchEnabled":false')) {
+        return {
+          ok: true,
+          json: async () => ({
+            code: "200",
+            data: {
+              runId: 90,
+              traceId: "agent-90",
+              status: "succeeded",
+              finalOutput: "not json"
+            }
+          })
+        };
+      }
+      if (href.includes("/ai/agents/runs") && body.includes('"webSearchEnabled":true')) {
+        return {
+          ok: true,
+          json: async () => ({
+            code: "200",
+            data: {
+              runId: 91,
+              traceId: "agent-91",
+              status: "succeeded",
+              finalOutput: "```research-graph-json\n{\"topic\":\"量化因子\",\"nodes\":["
+            }
+          })
+        };
+      }
+      if (href.includes("/events")) {
+        return { ok: true, json: async () => ({ code: "200", data: { list: [], total: 0 } }) };
+      }
+      return { ok: true, json: async () => ({ code: "200", data: {} }) };
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<Page />);
+
+    fireEvent.change(screen.getByLabelText("研究主题"), {
+      target: { value: "量化因子" }
+    });
+    fireEvent.click(screen.getByRole("button", { name: "启动雷达扫描" }));
+
+    expect(await screen.findByText(/基于已收集证据生成的兜底分析/)).toBeTruthy();
+    expect(await screen.findByText("microsoft/qlib")).toBeTruthy();
+    expect(screen.queryByRole("alert")?.textContent ?? "").not.toContain("模型分析未完成");
   });
 
   it("updates the right rail with connected evidence, source links, caveats, and next action when a graph node is selected", async () => {

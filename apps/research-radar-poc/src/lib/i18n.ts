@@ -153,6 +153,7 @@ export type ResearchRadarCopy = {
     submit: string;
     emptyError: string;
     sourceScanFailed: string;
+    analysisIncomplete: string;
     modelUnavailable: string;
     scanFailed: string;
     filters: Record<"papers" | "projects" | "datasets" | "benchmarks" | "news" | "community", string>;
@@ -172,6 +173,15 @@ export type ResearchRadarCopy = {
     sections: string;
     run: string;
     pendingModelOutput: string;
+  };
+  planner: {
+    title: string;
+    summary: string;
+    domains: string;
+    learningGoals: string;
+    keyConcepts: string;
+    searchQueries: string;
+    relevanceKeywords: string;
   };
   map: ResearchMapCopy;
   drawer: {
@@ -231,6 +241,7 @@ export const RESEARCH_RADAR_COPY: Record<ResearchLocale, ResearchRadarCopy> = {
       submit: "启动雷达扫描",
       emptyError: "请输入研究主题",
       sourceScanFailed: "研究来源扫描失败",
+      analysisIncomplete: "模型分析未完成：返回了工具调用或缺少报告章节，请重试、缩小主题或切换更强模型。",
       modelUnavailable: "模型分析暂不可用",
       scanFailed: "雷达扫描失败",
       filters: {
@@ -262,6 +273,15 @@ export const RESEARCH_RADAR_COPY: Record<ResearchLocale, ResearchRadarCopy> = {
       sections: "章节",
       run: "运行",
       pendingModelOutput: "等待模型输出"
+    },
+    planner: {
+      title: "学习规划",
+      summary: "主题判断",
+      domains: "相关领域",
+      learningGoals: "先学什么",
+      keyConcepts: "关键概念",
+      searchQueries: "检索词",
+      relevanceKeywords: "过滤关键词"
     },
     map: {
       title: "研究图谱",
@@ -367,6 +387,7 @@ export const RESEARCH_RADAR_COPY: Record<ResearchLocale, ResearchRadarCopy> = {
       submit: "Start radar scan",
       emptyError: "Enter a research topic",
       sourceScanFailed: "Research source scan failed",
+      analysisIncomplete: "Model analysis did not finish: it returned tool-call JSON or missed the required report sections. Try again, narrow the topic, or switch to a stronger model.",
       modelUnavailable: "model analysis unavailable",
       scanFailed: "Radar scan failed",
       filters: {
@@ -398,6 +419,15 @@ export const RESEARCH_RADAR_COPY: Record<ResearchLocale, ResearchRadarCopy> = {
       sections: "sections",
       run: "Run",
       pendingModelOutput: "Pending model output"
+    },
+    planner: {
+      title: "Learning Plan",
+      summary: "Topic read",
+      domains: "Domains",
+      learningGoals: "What to learn",
+      keyConcepts: "Key concepts",
+      searchQueries: "Search queries",
+      relevanceKeywords: "Filter keywords"
     },
     map: {
       title: "Research Map",

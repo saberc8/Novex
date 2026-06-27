@@ -8,6 +8,9 @@ use crate::shared::error::AppError;
 
 pub const DEFAULT_RESEARCH_RADAR_LIMIT: u8 = 5;
 const MAX_RESEARCH_RADAR_LIMIT: u8 = 10;
+const MAX_RESEARCH_RADAR_SEARCH_QUERIES: usize = 6;
+const MAX_RESEARCH_RADAR_RELEVANCE_KEYWORDS: usize = 24;
+const SOURCE_ITEM_SUMMARY_LIMIT: usize = 420;
 const RESEARCH_RADAR_TIMEOUT: Duration = Duration::from_secs(12);
 const RESEARCH_RADAR_USER_AGENT: &str = "novex-research-radar-poc";
 
@@ -25,6 +28,10 @@ pub struct ResearchRadarScanCommand {
     #[serde(default = "default_research_radar_ranking")]
     pub ranking: ResearchRadarRanking,
     pub limit_per_source: Option<u8>,
+    #[serde(default)]
+    pub search_queries: Vec<String>,
+    #[serde(default)]
+    pub relevance_keywords: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -127,6 +134,14 @@ struct NormalizedResearchRadarCommand {
     sources: Vec<ResearchRadarSource>,
     ranking: ResearchRadarRanking,
     limit_per_source: u8,
+    search_queries: Vec<String>,
+    relevance_keywords: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct SourceFetchOutcome {
+    items: Vec<ResearchRadarItem>,
+    warning: Option<String>,
 }
 
 #[derive(Clone)]
@@ -163,15 +178,24 @@ impl ResearchRadarService {
         let mut warnings = Vec::new();
 
         for source in command.sources.iter().copied() {
-            match (self.dispatcher)(source, command.topic.clone(), command.limit_per_source).await {
-                Ok(mut source_items) => {
-                    sort_items(&mut source_items, command.ranking);
-                    items.extend(source_items.clone());
+            match self.fetch_source_with_plan(source, &command).await {
+                Ok(mut outcome) => {
+                    sort_items(&mut outcome.items, command.ranking);
+                    outcome.items.truncate(command.limit_per_source as usize);
+                    items.extend(outcome.items.clone());
+                    let status = if outcome.warning.is_some() {
+                        ResearchRadarSourceStatus::Degraded
+                    } else {
+                        ResearchRadarSourceStatus::Succeeded
+                    };
+                    if let Some(warning) = outcome.warning.as_ref() {
+                        warnings.push(format!("{}: {warning}", source.label()));
+                    }
                     source_results.push(ResearchRadarSourceResult {
                         source,
-                        status: ResearchRadarSourceStatus::Succeeded,
-                        items: source_items,
-                        warning: None,
+                        status,
+                        items: outcome.items,
+                        warning: outcome.warning,
                     });
                 }
                 Err(error) => {
@@ -189,7 +213,13 @@ impl ResearchRadarService {
 
         sort_items(&mut items, command.ranking);
         let status = scan_status(&source_results, &items);
-        let prompt_context = build_prompt_context(&command.topic, command.ranking, &source_results);
+        let prompt_context = build_prompt_context(
+            &command.topic,
+            command.ranking,
+            &source_results,
+            &command.search_queries,
+            &command.relevance_keywords,
+        );
 
         Ok(ResearchRadarScanResp {
             topic: command.topic,
@@ -200,6 +230,54 @@ impl ResearchRadarService {
             prompt_context,
             warnings,
         })
+    }
+
+    async fn fetch_source_with_plan(
+        &self,
+        source: ResearchRadarSource,
+        command: &NormalizedResearchRadarCommand,
+    ) -> Result<SourceFetchOutcome, String> {
+        let mut items = Vec::new();
+        let mut errors = Vec::new();
+
+        for query in command.search_queries.iter() {
+            match (self.dispatcher)(source, query.clone(), command.limit_per_source).await {
+                Ok(source_items) => items.extend(source_items),
+                Err(error) => {
+                    let should_stop =
+                        source_status_from_error(&error) == ResearchRadarSourceStatus::Degraded;
+                    push_unique_error(&mut errors, error);
+                    if should_stop {
+                        break;
+                    }
+                }
+            }
+        }
+
+        let raw_items = dedupe_items(items);
+        let mut warning = None;
+        let mut items = if command.relevance_keywords.is_empty() {
+            raw_items
+        } else {
+            let filtered = raw_items
+                .iter()
+                .filter(|item| item_matches_relevance(item, &command.relevance_keywords))
+                .cloned()
+                .collect::<Vec<_>>();
+            if filtered.is_empty() && !raw_items.is_empty() {
+                warning = Some("relevance filters removed every candidate; showing low-confidence source results".to_owned());
+                raw_items
+            } else {
+                filtered
+            }
+        };
+        items.truncate(command.limit_per_source as usize);
+
+        if items.is_empty() && !errors.is_empty() {
+            Err(errors.join("; "))
+        } else {
+            Ok(SourceFetchOutcome { items, warning })
+        }
     }
 }
 
@@ -230,12 +308,16 @@ fn normalize_scan_command(
         .limit_per_source
         .unwrap_or(DEFAULT_RESEARCH_RADAR_LIMIT)
         .clamp(1, MAX_RESEARCH_RADAR_LIMIT);
+    let search_queries = normalize_search_queries(&topic, command.search_queries);
+    let relevance_keywords = normalize_relevance_keywords(command.relevance_keywords);
 
     Ok(NormalizedResearchRadarCommand {
         topic,
         sources,
         ranking: command.ranking,
         limit_per_source,
+        search_queries,
+        relevance_keywords,
     })
 }
 
@@ -258,6 +340,89 @@ fn dedupe_sources(sources: Vec<ResearchRadarSource>) -> Vec<ResearchRadarSource>
         }
     }
     deduped
+}
+
+fn normalize_search_queries(topic: &str, search_queries: Vec<String>) -> Vec<String> {
+    let mut normalized = vec![topic.to_owned()];
+    for query in search_queries {
+        let query = normalize_ws(&query);
+        if query.is_empty() {
+            continue;
+        }
+        if normalized
+            .iter()
+            .any(|existing| existing.eq_ignore_ascii_case(&query))
+        {
+            continue;
+        }
+        normalized.push(query);
+        if normalized.len() >= MAX_RESEARCH_RADAR_SEARCH_QUERIES {
+            break;
+        }
+    }
+    normalized
+}
+
+fn normalize_relevance_keywords(relevance_keywords: Vec<String>) -> Vec<String> {
+    let mut normalized = Vec::new();
+    for keyword in relevance_keywords {
+        let keyword = normalize_ws(&keyword);
+        if keyword.chars().count() < 2
+            || normalized
+                .iter()
+                .any(|existing: &String| existing.eq_ignore_ascii_case(&keyword))
+        {
+            continue;
+        }
+        normalized.push(keyword);
+        if normalized.len() >= MAX_RESEARCH_RADAR_RELEVANCE_KEYWORDS {
+            break;
+        }
+    }
+    normalized
+}
+
+fn dedupe_items(items: Vec<ResearchRadarItem>) -> Vec<ResearchRadarItem> {
+    let mut deduped: Vec<ResearchRadarItem> = Vec::new();
+    for item in items {
+        let duplicate = deduped.iter().any(|existing| {
+            existing.id == item.id
+                || item
+                    .url
+                    .as_deref()
+                    .zip(existing.url.as_deref())
+                    .is_some_and(|(left, right)| left == right)
+        });
+        if !duplicate {
+            deduped.push(item);
+        }
+    }
+    deduped
+}
+
+fn item_matches_relevance(item: &ResearchRadarItem, relevance_keywords: &[String]) -> bool {
+    let haystack = [
+        item.title.as_str(),
+        item.summary.as_deref().unwrap_or(""),
+        item.organization.as_deref().unwrap_or(""),
+        &item.authors.join(" "),
+        &item.tags.join(" "),
+    ]
+    .join(" ")
+    .to_lowercase();
+
+    relevance_keywords
+        .iter()
+        .any(|keyword| keyword_matches_haystack(&keyword.to_lowercase(), &haystack))
+}
+
+fn keyword_matches_haystack(keyword: &str, haystack: &str) -> bool {
+    if keyword.len() <= 2 && keyword.chars().all(|ch| ch.is_ascii_alphanumeric()) {
+        return haystack
+            .split(|ch: char| !ch.is_ascii_alphanumeric())
+            .any(|token| token == keyword);
+    }
+    haystack.contains(keyword)
 }
 
 async fn fetch_research_source(
@@ -471,7 +636,7 @@ fn parse_arxiv_atom_items(body: &str, limit: usize) -> Result<Vec<ResearchRadarI
             if title.is_empty() {
                 return None;
             }
-            let summary = xml_text(entry, "summary").map(|value| normalize_ws(&value));
+            let summary = xml_text(entry, "summary").and_then(|value| summary_text(&value));
             let published_at = xml_text(entry, "published").map(|value| value.trim().to_owned());
             let updated_at = xml_text(entry, "updated").map(|value| value.trim().to_owned());
             let authors = xml_blocks(entry, "author")
@@ -513,7 +678,7 @@ fn parse_github_repository_items(payload: &Value, limit: usize) -> Vec<ResearchR
         .take(limit)
         .filter_map(|item| {
             let title = json_str(item, "full_name")?;
-            let summary = json_str(item, "description");
+            let summary = json_str(item, "description").and_then(|value| summary_text(&value));
             let url = json_str(item, "html_url");
             let updated_at = json_str(item, "updated_at");
             let language = json_str(item, "language");
@@ -613,7 +778,7 @@ where
                 kind,
                 title: title.clone(),
                 url: Some(url_for_id(&title)),
-                summary: json_str(item, "description"),
+                summary: json_str(item, "description").and_then(|value| summary_text(&value)),
                 authors: Vec::new(),
                 organization: title.split('/').next().map(ToOwned::to_owned),
                 published_at: None,
@@ -646,7 +811,8 @@ fn parse_generic_source_items(
             let url = json_str(item, "url").or_else(|| json_str(item, "html_url"));
             let summary = json_str(item, "summary")
                 .or_else(|| json_str(item, "description"))
-                .or_else(|| json_str(item, "abstract"));
+                .or_else(|| json_str(item, "abstract"))
+                .and_then(|value| summary_text(&value));
             let mut metrics = Vec::new();
             for label in ["score", "stars", "likes", "downloads", "accuracy", "metric"] {
                 push_metric(&mut metrics, label, json_f64(item.get(label)));
@@ -687,13 +853,25 @@ fn build_prompt_context(
     topic: &str,
     ranking: ResearchRadarRanking,
     source_results: &[ResearchRadarSourceResult],
+    search_queries: &[String],
+    relevance_keywords: &[String],
 ) -> String {
     let mut lines = vec![
         "Research Radar Evidence".to_owned(),
         format!("Topic: {topic}"),
         format!("Ranking: {}", ranking.code()),
-        String::new(),
     ];
+    let planner_queries = search_queries.iter().skip(1).cloned().collect::<Vec<_>>();
+    if !planner_queries.is_empty() {
+        lines.push(format!("Search queries: {}", planner_queries.join(", ")));
+    }
+    if !relevance_keywords.is_empty() {
+        lines.push(format!(
+            "Relevance keywords: {}",
+            relevance_keywords.join(", ")
+        ));
+    }
+    lines.push(String::new());
 
     for result in source_results {
         if let Some(warning) = result.warning.as_deref() {
@@ -739,6 +917,10 @@ fn scan_status(
     sources: &[ResearchRadarSourceResult],
     items: &[ResearchRadarItem],
 ) -> ResearchRadarScanStatus {
+    if items.is_empty() {
+        return ResearchRadarScanStatus::Failed;
+    }
+
     let succeeded = sources
         .iter()
         .any(|source| source.status == ResearchRadarSourceStatus::Succeeded);
@@ -746,9 +928,7 @@ fn scan_status(
         .iter()
         .any(|source| source.status != ResearchRadarSourceStatus::Succeeded);
 
-    if !succeeded || items.is_empty() {
-        ResearchRadarScanStatus::Failed
-    } else if failed_or_degraded {
+    if failed_or_degraded || !succeeded {
         ResearchRadarScanStatus::Partial
     } else {
         ResearchRadarScanStatus::Succeeded
@@ -760,6 +940,12 @@ fn source_status_from_error(error: &str) -> ResearchRadarSourceStatus {
         ResearchRadarSourceStatus::Degraded
     } else {
         ResearchRadarSourceStatus::Failed
+    }
+}
+
+fn push_unique_error(errors: &mut Vec<String>, error: String) {
+    if !errors.iter().any(|existing| existing == &error) {
+        errors.push(error);
     }
 }
 
@@ -918,6 +1104,10 @@ fn preview_text(value: &str, limit: usize) -> String {
     normalized.chars().take(limit).collect::<String>()
 }
 
+fn summary_text(value: &str) -> Option<String> {
+    non_empty(preview_text(value, SOURCE_ITEM_SUMMARY_LIMIT))
+}
+
 fn env_string(key: &str) -> Option<String> {
     env::var(key)
         .ok()
@@ -1018,6 +1208,8 @@ mod tests {
             sources: vec![],
             ranking: ResearchRadarRanking::Balanced,
             limit_per_source: None,
+            search_queries: vec![],
+            relevance_keywords: vec![],
         };
 
         let normalized = normalize_scan_command(command).unwrap();
@@ -1097,6 +1289,27 @@ mod tests {
     }
 
     #[test]
+    fn parse_github_repositories_truncates_oversized_descriptions() {
+        let long_description = "long factor summary ".repeat(120);
+        let payload = json!({
+            "items": [{
+                "full_name": "acme/stock-factor",
+                "html_url": "https://github.com/acme/stock-factor",
+                "description": long_description,
+                "stargazers_count": 1200,
+                "forks_count": 88,
+                "language": "Python",
+                "updated_at": "2026-06-01T00:00:00Z",
+                "topics": ["finance", "factor"]
+            }]
+        });
+
+        let items = parse_github_repository_items(&payload, 5);
+
+        assert!(items[0].summary.as_deref().unwrap().chars().count() <= 420);
+    }
+
+    #[test]
     fn parse_huggingface_models_and_datasets_normalize_hub_payloads() {
         let models = json!([{
             "modelId": "acme/agent-model",
@@ -1141,6 +1354,8 @@ mod tests {
                 sources: vec![ResearchRadarSource::Arxiv, ResearchRadarSource::Github],
                 ranking: ResearchRadarRanking::Balanced,
                 limit_per_source: Some(2),
+                search_queries: vec![],
+                relevance_keywords: vec![],
             })
             .await
             .unwrap();
@@ -1153,5 +1368,155 @@ mod tests {
             .any(|warning| warning.contains("GitHub rate limited")));
         assert!(resp.prompt_context.contains("[arxiv]"));
         assert!(!resp.prompt_context.contains("TOKEN"));
+    }
+
+    #[tokio::test]
+    async fn source_aggregation_uses_planner_queries_and_filters_low_relevance_items() {
+        let service = ResearchRadarService::with_dispatcher(|source, topic, _limit| async move {
+            if source != ResearchRadarSource::Github {
+                return Ok(vec![]);
+            }
+            if topic == "量化因子" {
+                return Ok(vec![ResearchRadarItem {
+                    summary: Some("Popular NLP resources and Chinese dictionaries".to_owned()),
+                    tags: vec!["nlp".to_owned()],
+                    metrics: vec![ResearchRadarMetric {
+                        label: "stars".to_owned(),
+                        value: 80_000.0,
+                    }],
+                    ..test_item("fighting41love/funNLP", ResearchRadarSource::Github)
+                }]);
+            }
+            if topic == "quant factor investing" {
+                return Ok(vec![ResearchRadarItem {
+                    summary: Some(
+                        "Quant factor research toolkit with alpha backtest and IC analysis"
+                            .to_owned(),
+                    ),
+                    tags: vec!["finance".to_owned(), "factor".to_owned()],
+                    metrics: vec![ResearchRadarMetric {
+                        label: "stars".to_owned(),
+                        value: 1_200.0,
+                    }],
+                    ..test_item("microsoft/qlib", ResearchRadarSource::Github)
+                }]);
+            }
+            Ok(vec![])
+        });
+
+        let resp = service
+            .scan(ResearchRadarScanCommand {
+                topic: "量化因子".to_owned(),
+                sources: vec![ResearchRadarSource::Github],
+                ranking: ResearchRadarRanking::Balanced,
+                limit_per_source: Some(5),
+                search_queries: vec!["quant factor investing".to_owned()],
+                relevance_keywords: vec![
+                    "factor".to_owned(),
+                    "alpha".to_owned(),
+                    "backtest".to_owned(),
+                    "IC".to_owned(),
+                ],
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(
+            resp.items
+                .iter()
+                .map(|item| item.title.as_str())
+                .collect::<Vec<_>>(),
+            vec!["microsoft/qlib"]
+        );
+        assert!(resp
+            .prompt_context
+            .contains("Search queries: quant factor investing"));
+        assert!(resp
+            .prompt_context
+            .contains("Relevance keywords: factor, alpha, backtest, IC"));
+    }
+
+    #[tokio::test]
+    async fn source_aggregation_keeps_low_confidence_items_when_filtering_removes_everything() {
+        let service = ResearchRadarService::with_dispatcher(|source, topic, _limit| async move {
+            if source != ResearchRadarSource::Github || topic != "quant factor investing" {
+                return Ok(vec![]);
+            }
+            Ok(vec![ResearchRadarItem {
+                summary: Some(
+                    "Machine learning platform for quantitative investment research".to_owned(),
+                ),
+                tags: vec!["quant".to_owned(), "finance".to_owned()],
+                metrics: vec![ResearchRadarMetric {
+                    label: "stars".to_owned(),
+                    value: 18_000.0,
+                }],
+                ..test_item("microsoft/qlib", ResearchRadarSource::Github)
+            }])
+        });
+
+        let resp = service
+            .scan(ResearchRadarScanCommand {
+                topic: "量化因子".to_owned(),
+                sources: vec![ResearchRadarSource::Github],
+                ranking: ResearchRadarRanking::Balanced,
+                limit_per_source: Some(5),
+                search_queries: vec!["quant factor investing".to_owned()],
+                relevance_keywords: vec!["量化因子".to_owned()],
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status, ResearchRadarScanStatus::Partial);
+        assert_eq!(resp.sources[0].status, ResearchRadarSourceStatus::Degraded);
+        assert_eq!(resp.items[0].title, "microsoft/qlib");
+        assert!(resp.sources[0]
+            .warning
+            .as_deref()
+            .unwrap_or("")
+            .contains("low-confidence"));
+    }
+
+    #[tokio::test]
+    async fn source_aggregation_dedupes_repeated_configuration_warnings() {
+        let service = ResearchRadarService::with_dispatcher(|source, _topic, _limit| async move {
+            match source {
+                ResearchRadarSource::Paperswithcode => Err("Papers With Code-compatible endpoint is not configured; paperswithcode.com currently redirects to Hugging Face Papers".to_owned()),
+                _ => Ok(vec![]),
+            }
+        });
+
+        let resp = service
+            .scan(ResearchRadarScanCommand {
+                topic: "量化因子".to_owned(),
+                sources: vec![ResearchRadarSource::Paperswithcode],
+                ranking: ResearchRadarRanking::Balanced,
+                limit_per_source: Some(5),
+                search_queries: vec![
+                    "量化因子".to_owned(),
+                    "quant factor investing".to_owned(),
+                    "alpha factor model".to_owned(),
+                ],
+                relevance_keywords: vec!["factor".to_owned()],
+            })
+            .await
+            .unwrap();
+
+        let warning = resp.sources[0].warning.as_deref().unwrap_or("");
+        assert_eq!(resp.status, ResearchRadarScanStatus::Failed);
+        assert_eq!(resp.sources[0].status, ResearchRadarSourceStatus::Degraded);
+        assert_eq!(
+            warning
+                .matches("Papers With Code-compatible endpoint")
+                .count(),
+            1
+        );
+        assert_eq!(resp.warnings.len(), 1);
+        assert_eq!(
+            resp.warnings[0]
+                .matches("Papers With Code-compatible endpoint")
+                .count(),
+            1
+        );
     }
 }

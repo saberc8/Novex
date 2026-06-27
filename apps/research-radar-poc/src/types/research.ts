@@ -17,12 +17,14 @@ export type ResearchScanInput = {
   ranking: ResearchRanking;
   routeId?: string;
   locale?: ResearchLocale;
+  topicPlan?: ResearchTopicPlan | null;
   sourceScan?: ResearchSourceScanResp | null;
 };
 
 export type ResearchAppErrorCode =
   | "empty_topic"
   | "source_scan_failed"
+  | "analysis_incomplete"
   | "model_unavailable"
   | "scan_failed";
 
@@ -129,6 +131,18 @@ export type ResearchSourceScanInput = {
   topic: string;
   filters: ResearchFilter[];
   ranking: ResearchRanking;
+  topicPlan?: ResearchTopicPlan | null;
+};
+
+export type ResearchTopicPlan = {
+  topic: string;
+  summary: string;
+  domains: string[];
+  learningGoals: string[];
+  keyConcepts: string[];
+  searchQueries: string[];
+  relevanceKeywords: string[];
+  sourcePriorities: ResearchFilter[];
 };
 
 export type ResearchSourceScanStatus = "succeeded" | "partial" | "failed";

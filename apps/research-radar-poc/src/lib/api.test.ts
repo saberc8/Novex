@@ -19,6 +19,27 @@ describe("research radar api client", () => {
     );
   });
 
+  it("reports an empty backend response without leaking a JSON parser error", async () => {
+    vi.stubEnv("NEXT_PUBLIC_API_BASE_URL", "http://localhost:62601");
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("", { status: 502, statusText: "Bad Gateway" })));
+
+    await expect(apiRequest("/ai/research-radar/scans", { method: "POST" })).rejects.toThrow(
+      "Novex Backend 返回空响应"
+    );
+    await expect(apiRequest("/ai/research-radar/scans", { method: "POST" })).rejects.not.toThrow(
+      "Unexpected end of JSON input"
+    );
+  });
+
+  it("reports a non-json backend response as an API contract error", async () => {
+    vi.stubEnv("NEXT_PUBLIC_API_BASE_URL", "http://localhost:62601");
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("<html>bad gateway</html>", { status: 502 })));
+
+    await expect(apiRequest("/ai/research-radar/scans", { method: "POST" })).rejects.toThrow(
+      "Novex Backend 返回了非 JSON 响应"
+    );
+  });
+
   it("logs in with local dev credentials and retries when the backend rejects an anonymous request", async () => {
     const fetchMock = vi
       .fn()

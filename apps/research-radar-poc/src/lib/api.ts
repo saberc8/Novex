@@ -45,7 +45,7 @@ async function apiRequestWithAuthRetry<T>(
     }
     throw error;
   });
-  const body = (await response.json()) as ApiEnvelope<T>;
+  const body = await readApiEnvelope<T>(response);
 
   if (allowDevAuthRetry && isUnauthorized(response, body)) {
     clearAuthHeader(headers);
@@ -55,11 +55,36 @@ async function apiRequestWithAuthRetry<T>(
     }
   }
 
+  if (!body) {
+    throw new Error(`Novex Backend 返回空响应（HTTP ${response.status} ${response.statusText || "Unknown"}）`);
+  }
+
   if (!response.ok || body.code !== "200") {
     throw new Error(body.msg ?? body.message ?? "Request failed");
   }
 
   return body.data as T;
+}
+
+async function readApiEnvelope<T>(response: Response): Promise<ApiEnvelope<T> | null> {
+  if (typeof response.text === "function") {
+    const raw = await response.text();
+    if (!raw.trim()) {
+      return null;
+    }
+
+    try {
+      return JSON.parse(raw) as ApiEnvelope<T>;
+    } catch {
+      throw new Error(`Novex Backend 返回了非 JSON 响应（HTTP ${response.status} ${response.statusText || "Unknown"}）`);
+    }
+  }
+
+  try {
+    return (await response.json()) as ApiEnvelope<T>;
+  } catch {
+    throw new Error(`Novex Backend 返回了非 JSON 响应（HTTP ${response.status} ${response.statusText || "Unknown"}）`);
+  }
 }
 
 export function apiUrl(path: string, query?: Record<string, unknown>) {
@@ -77,9 +102,9 @@ export function apiBaseUrl() {
   return (process.env.NEXT_PUBLIC_API_BASE_URL ?? DEFAULT_API_BASE_URL).replace(/\/$/, "");
 }
 
-function isUnauthorized<T>(response: Response, body: ApiEnvelope<T>) {
-  const message = body.msg ?? body.message ?? "";
-  return response.status === 401 || body.code === "401" || message.includes("未授权");
+function isUnauthorized<T>(response: Response, body: ApiEnvelope<T> | null) {
+  const message = body?.msg ?? body?.message ?? "";
+  return response.status === 401 || body?.code === "401" || message.includes("未授权");
 }
 
 function clearAuthHeader(headers: Record<string, string>) {

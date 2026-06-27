@@ -153,7 +153,7 @@ async fn maybe_capture_request_body(request: Request<Body>) -> (Request<Body>, S
 
 async fn capture_response_body(response: Response) -> (Response, String) {
     let (parts, body) = response.into_parts();
-    match to_bytes(body, RESPONSE_BODY_LIMIT).await {
+    match to_bytes(body, usize::MAX).await {
         Ok(bytes) => {
             let body_text = String::from_utf8_lossy(&bytes).to_string();
             (Response::from_parts(parts, Body::from(bytes)), body_text)
@@ -295,7 +295,7 @@ fn truncate(value: &str, limit: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use axum::http::HeaderValue;
+    use axum::{body::to_bytes, http::HeaderValue};
 
     use super::*;
 
@@ -316,6 +316,24 @@ mod tests {
             response_status(r#"{"code":"400","msg":"请求参数错误"}"#, 200),
             (2, "请求参数错误".to_owned())
         );
+    }
+
+    #[tokio::test]
+    async fn capture_response_body_preserves_large_response_for_client() {
+        let payload = "x".repeat(RESPONSE_BODY_LIMIT + 1);
+        let response = Response::builder()
+            .status(200)
+            .body(Body::from(payload.clone()))
+            .unwrap();
+
+        let (response, captured) = capture_response_body(response).await;
+
+        let body = to_bytes(response.into_body(), payload.len() + 1)
+            .await
+            .unwrap();
+        assert_eq!(body.len(), payload.len());
+        assert_eq!(String::from_utf8_lossy(&body), payload);
+        assert_eq!(captured.len(), payload.len());
     }
 
     #[test]
